@@ -1,9 +1,10 @@
 # Integer Dispatch/Recovery Backend
 
-`IntegerDispatchRecoveryBackend` 是当前 M1 的后端组合边界。它把双路
+`IntegerDispatchRecoveryBackend` 是当前 M1 的推测执行组合边界。它把双路
 `BackendDispatch`、`IntegerRename`、`IntegerExecutionBackend`、8 项 BDB/recovery
 controller 和 `FirstFaultTracker` 接成一个状态一致域。LongPipe、LSU、commit/CSR
-policy 和 frontend 仍通过显式端口连接，因此本模块尚不是完整 RV32I core。
+policy 和 frontend 仍通过显式端口连接；commit/CSR 已由上层
+[M1 Backend Subsystem](m1-backend-subsystem.md) 接入，但该组合仍不是完整 RV32I core。
 
 ## 组成与数据流
 
@@ -22,9 +23,9 @@ BDB checkpoint、ready allocation 和 dispatch fault candidate 必须原子出�
 容量承诺与 ready 不一致都由下层断言终止仿真。
 
 LongIQ 和 MemIQ 尚未实现，本模块把两组压紧后的 `UopRef` 与容量端口原样暴露；
-E2/M0/M1 completion 和 fault 各保留三个对应输入。当前端到端测试只把 Integer/Branch
-送入已实现的 E0/E1；CSR/System 的 E0 side-effect 执行、M/A/F 和 memory uop 必须在各自
-里程碑完成后才允许进入可运行顶层。
+E2/M0/M1 completion 和 fault 各保留三个对应输入。Integer/Branch/CSR/System 已能在
+M1 集成层完成执行、精确 trap 和提交；M/A/F 和 memory uop 必须在各自里程碑完成后才
+允许进入可运行顶层。
 
 ## 分支恢复事务
 
@@ -56,8 +57,9 @@ branch 同时到达 head，应阻止 lane 1，而不是丢弃第二条训练或�
 ## Fault 与排空
 
 `FirstFaultTracker` 当前接收六个候选：两条 dispatch-time fault、E0 fault，以及预留的
-E2/M0/M1 fault。它以 ROB head 为年龄原点保存最老记录，并在 selective squash 同拍
-过滤年轻 fault。外部 commit controller 消费 head fault 后拉高 `firstFaultClear`；
+E2/M0/M1 fault。它以 ROB head 为年龄原点保存最老记录；selective squash 同拍过滤新候选
+并在边沿删除已保存的年轻 fault，输出保持 register-only。外部 commit controller 消费
+head fault 后拉高 `firstFaultClear`；
 exception、interrupt、MRET 或 `FENCE.I` 产生的 global flush 清 ROB/IQ/BDB/FirstFault，
 并把 speculative rename 状态恢复到包含同周期退休更新的 committed 状态。
 

@@ -1,6 +1,6 @@
 # CSR 与 trap 状态模块
 
-本规格冻结 M1 的 `MachineCSRFile` 和 `CSRInstructionUnit` 契约。它只覆盖单 hart、M-mode、无 MMU/PMP/delegation 的状态与组合语义；ROB 提交仲裁和流水线 redirect 已在 [Commit/CSR Subsystem](commit-csr-subsystem.md) 形成组合边界，E0 side effect、八周期中断响应计数和完整后端连接仍待实现。实现依据为仓库锁定版本对应的 RISC-V Unprivileged ISA 与 Privileged Architecture machine-level 规则。
+本规格冻结 M1 的 `MachineCSRFile` 和 `CSRInstructionUnit` 契约。它只覆盖单 hart、M-mode、无 MMU/PMP/delegation 的状态与组合语义；ROB 提交仲裁和流水线 redirect 已在 [Commit/CSR Subsystem](commit-csr-subsystem.md) 形成组合边界，E0 side effect 与完整整数后端连接已由 [M1 Backend Subsystem](m1-backend-subsystem.md) 实现。八周期中断响应计数和完整前端/访存集成仍待实现。实现依据为仓库锁定版本对应的 RISC-V Unprivileged ISA 与 Privileged Architecture machine-level 规则。
 
 ## 参数与实现集合
 
@@ -54,7 +54,7 @@ MRET 状态转换为 `MIE := MPIE`、`MPIE := 1`，redirect 到 `mepc`。由于�
 
 ## 流水、阻塞和异常规则
 
-CSR 读改写在 E0 执行，但只在 ROB head 且没有更老架构副作用时读取状态。计算出的旧值和写值随 ROB/BDB 保存；真正写 CSR 只发生在提交点。CSR 查询非法时 E0 产生 illegal-instruction fault candidate，不允许 `commitWrite`。
+CSR 读改写在 E0 执行，但只在 ROB head 且没有更老架构副作用时读取状态。旧值经普通 completion 路径写回 GPR，写地址和写值保存在一个带 ROB tag 的提交副作用槽中；真正写 CSR 只发生在提交点。CSR 查询非法时 E0 产生 illegal-instruction fault candidate，不允许 PRF 或 `commitWrite` 写入。
 
 外部 interrupt 输入是电平信号，`mip` 不锁存脉冲。commit controller 在无更老精确异常、无不可撤销 device/AMO 事务且提交边界允许时采样 `interruptEligible`。trap 或 MRET 发出全局 flush；CSR 文件本身没有 replay 状态，也不因普通 pipeline flush 回滚已经提交的 CSR。
 

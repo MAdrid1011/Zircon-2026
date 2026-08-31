@@ -78,10 +78,11 @@ class FirstFaultTrackerSpec extends AnyFunSpec with ChiselSim {
         dut.io.candidates(0).valid.poke(false)
         dut.io.valid.expect(true)
 
-        // Tag 2 is younger than wrapped branch tag 23 and is hidden immediately.
+        // Tag 2 is younger than wrapped branch tag 23. Visibility is kept
+        // register-only during the launch cycle and removed on the squash edge.
         dut.io.squash.valid.poke(true)
         dut.io.squash.bits.poke(23)
-        dut.io.valid.expect(false)
+        dut.io.valid.expect(true)
         dut.clock.step()
         dut.io.squash.valid.poke(false)
         dut.io.valid.expect(false)
