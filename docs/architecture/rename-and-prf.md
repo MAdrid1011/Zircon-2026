@@ -51,4 +51,6 @@ physical destination 恢复 speculative map/free-list，不在每个 BDB 项复�
 - 双 commit 同一 architectural destination 时，最终 committed map 指向 lane 1，
   lane 0 new destination成为 free。
 - flush 恢复 committed map/free-list，所有未提交分配重新可用。
+- branch rollback bundle 必须 newest→older；连续 WAW undo 后 RAT 指向 surviving prefix
+  的最后一个 physical destination，所有被撤销 new physical 均回到 free-list。
 - PRF 覆盖六路同时读、两路写、write-forwarding、x0 和同目标写 assertion。
