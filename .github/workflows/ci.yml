@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rtl-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+      - uses: sbt/setup-sbt@v1
+      - name: Install simulation and RV32 build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm verilator
+      - name: Tool versions
+        run: |
+          java -version
+          sbt --script-version
+      - name: Unit tests
+        run: ./scripts/sbtw test
+      - name: Elaborate synthesizable top
+        run: ./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"
+      - name: Build both software contracts
+        run: make software
+      - name: Deterministic simulator unit and RTL smoke
+        run: |
+          make sim-unit
+          make sim-smoke
+      - name: Preserve failing simulation artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chiselsim-failure-${{ github.run_id }}
+          path: build/chiselsim
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  zircon_java_home="$(/usr/libexec/java_home -v 21)"
+  export JAVA_HOME="${zircon_java_home}"
+fi
+
+java_major="$(${JAVA_HOME:+${JAVA_HOME}/bin/}java -version 2>&1 | awk -F '[\".]' '/version/ {print $2; exit}')"
+if [[ "${java_major}" != "21" ]]; then
+  echo "Zircon-2026 requires JDK 21; detected ${java_major:-unknown}." >&2
+  exit 2
+fi
+
+exec sbt "$@"

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-08-31",
+  "hostTools": {
+    "java": "21",
+    "scala": "2.13.18",
+    "sbt": "1.12.4",
+    "chisel": "7.14.0",
+    "verilator": "5.050",
+    "llvm": "22.1.8",
+    "vivado": "2026.1",
+    "fpgaPart": "xc7a100tcsg324-1"
+  },
+  "upstreams": {
+    "riscvUnifiedDb": "45924b13080fa52cd6f2ff4d934332fa62ac77e0",
+    "spike": "c09c0cce98696f52abe0fe8c11f93f9ed74dc2bb",
+    "sailRiscv": "beaf44991eee362a062fcaaf6fcb78ca428ff710",
+    "riscvArchTestAct4": "759fbf9840d50dd1757028f35f1e152395476dad",
+    "riscvDv": "b7a0b4b0b51346a3c64f159f81ea262d867c14a9",
+    "riscvFormal": "4f29e83a8387a81467716548f165fd97045af617",
+    "berkeleyTestFloat3": "a9c849f1b0eb0264b626d9686ffae167d996e3be",
+    "riscvTests": "2ebecad997fa58cd9e5724340ba75aa4b59bd1d0",
+    "embenchIot": "09c2ed8c3b7008c95d08b038de4a3f6dc103ed70"
+  },
+  "zircon2024Baseline": {
+    "core": "65a3dd381f4c83a5844858a927dafdbc8263c35e",
+    "software": "5f81f2ad378f537182e4cf1a0fcb45159509a2ec",
+    "simulator": "b1694da4a92046edeead50c9b2a1c086a13e6511"
+  }
+}

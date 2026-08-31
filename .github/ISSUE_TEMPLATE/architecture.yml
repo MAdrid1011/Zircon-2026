@@ -1,0 +1,33 @@
+name: Architecture change
+description: Propose a processor contract or implementation change
+title: "[arch] "
+labels: [architecture]
+body:
+  - type: textarea
+    id: contract
+    attributes:
+      label: Current contract
+      description: State the existing interface, invariant, or accepted ADR.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Measured problem
+      description: Include trace, IPC, PPA, coverage, or failure evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: Proposed change
+      description: Name affected modules, state, flush/replay, and verification impact.
+    validations:
+      required: true
+  - type: textarea
+    id: gate
+    attributes:
+      label: Acceptance gate
+      description: Give exact functional and quantitative sign-off criteria.
+    validations:
+      required: true
