@@ -1,9 +1,10 @@
 # 访存子系统架构文档
 
 本章是 M3 双 LSU、PMA、Cache、AXI4、MMIO 和 RV32A 的实现合同，关联
-ADR-0012 与 Issue #47。当前 RTL 只有 `PMAClassifier` 和局部
-`OrderedIOCombiner`，`ZirconCore` 仍把 memory capacity 置零；本规格并不把
-尚未接入的模块描述为已实现。
+ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
+`OrderedIOCombiner` 和独立的 8-entry `MemIssueQueue`；`ZirconCore` 仍把 memory
+capacity 置零。LSQ、LSU、Cache、AXI data engine 与 MMIO lifecycle 尚未接入，本规格
+不会把它们描述为已实现。
 
 ## 参数和边界
 
@@ -43,10 +44,13 @@ killed.
 
 ## Dispatch, issue, and LSU routing
 
-`BackendDispatch` sends every legal memory uop to MemIQ. `MemIssueQueue` uses ROB
-age with source-ready wakeup and accepts two dispatch lanes. It may issue one M0
-and one M1 request in a cycle, subject to global three-start arbitration. It drops
-only uops younger than a resolving branch and all local uops on global flush.
+`BackendDispatch` sends every legal memory uop to MemIQ. The implemented
+`MemIssueQueue` uses ROB age with source-ready wakeup, accepts two dispatch lanes,
+and can choose one M0 plus one M1 request per cycle. It gives the oldest M1-eligible
+load to M1, then lets M0 choose the oldest distinct M0-eligible uop; this permits
+an atomic/store beside a load and two independent loads on separate LSU paths. It
+drops only uops younger than a resolving branch and all local uops on global flush.
+The global three-start arbiter and live LSU handshakes remain integration work.
 
 M1 admission requires all of the following: load operation, naturally aligned
 address, readable Memory PMA, no atomic/ordering restriction, no older SQ entry
