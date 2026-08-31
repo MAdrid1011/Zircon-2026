@@ -3,8 +3,9 @@
 本规格对应 M1 Issue #7。译码器是组合逻辑；它不读取寄存器、不分配 ROB/IQ，
 也不直接产生 trap 或 redirect。非法编码以 `legal=false` 进入精确异常路径。
 
-当前实现：`RV32IDecoder`、`EndpointAdmission` 和无状态 `IntegerExecute` 已有
-directed tests；E0/E1 skid buffer、取数、ROB 写回和 redirect 尚未接入。
+当前实现：`RV32IDecoder`、`EndpointAdmission`、无状态 `IntegerOperandRead` 和
+`IntegerExecute` 已有 directed tests；E0/E1 skid buffer、ROB 写回和 redirect 尚未
+接入顶层。
 
 ## 接口
 
@@ -15,6 +16,17 @@ directed tests；E0/E1 skid buffer、取数、ROB 写回和 redirect 尚未接�
 | `lhs/rhs/pc/immediate` | execute input | 32 | 已完成取数/旁路的操作数 |
 | `result` | execute output | 32 | 整数写回值或地址计算结果 |
 | `controlTaken/controlTarget` | execute output | 1/32 | 仅供 E0 redirect 检查 |
+
+## Operand Read
+
+IntIQ 的 E0/E1 输出分别携带 compact `UopRef`。`IntegerOperandRead` 同周期生成两个
+ROB context read tag 与四个 PRF read address；只有 context valid 且 tag 与 UopRef
+相同，才允许对应 endpoint request fire。两条通道 ready/valid 独立。
+
+`SourceKind.IntegerRegister` 选择 PRF data，`Immediate` 选择 UopRef immediate，
+`ProgramCounter` 选择 ROB context PC，`None` 输出零。integer path 不接受
+`FloatingRegister`。IntIQ 已保证三个 source ready；operand-read 再断言该条件，避免
+未完成 producer 被绕过。
 
 ## 端点映射
 
@@ -41,7 +53,7 @@ E0 完成结果写入 FirstFaultRecord。
 
 ## 阻塞、回滚与异常
 
-译码和整数语义模块没有内部状态。E0/E1 的 one-entry completion skid buffer
+译码、operand-read 和整数语义模块没有内部状态。E0/E1 的 one-entry completion skid buffer
 负责 ready/valid 回压。redirect kill 年轻结果；已经进入统一 completion port 的
 结果仍须用 ROB generation/tag 检查后才能写 PRF。非法指令不允许产生 GPR、CSR、
 memory 或 control side effect。

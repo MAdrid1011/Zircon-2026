@@ -32,7 +32,7 @@ tag，使已 kill 的 completion 不能命中新 stream 的同一 index。
 ## Execution Context Read
 
 IntIQ 只保存 compact `UopRef`，E0/E1 issue 后以 live `robTag` 读取两个组合窄端口。
-每端口返回 `{pc, privilege, csrAddress, csrImmediate, csrRead, csrWrite,
+每端口返回 `{robTag, pc, privilege, csrAddress, csrImmediate, csrRead, csrWrite,
 hasBranchData, branchDataIndex}`，不复制 instruction、完整 decode、prediction metadata
 或 rename undo 字段。tag 必须 index 合法、valid 且 generation 匹配；两个端口不得读取
 同一 tag。global flush 同拍隐藏所有返回，branch tail rollback 期间仍允许 surviving

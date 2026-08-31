@@ -37,6 +37,7 @@ class ROBCommit(config: ZirconCoreConfig) extends Bundle {
 
 /** Narrow context read by E0/E1 after issue; large ROB-only fields stay out of IQ. */
 class ROBExecutionContext(config: ZirconCoreConfig) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
   val pc = UInt(32.W)
   val privilege = UInt(2.W)
   val csrAddress = UInt(12.W)
@@ -186,6 +187,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
 
     io.executionContext(port).valid := io.executionRead(port).valid &&
       matches && !io.flush
+    io.executionContext(port).bits.robTag := io.executionRead(port).bits
     io.executionContext(port).bits.pc := entry.pc
     io.executionContext(port).bits.privilege := entry.privilege
     io.executionContext(port).bits.csrAddress := entry.decoded.csrAddress
