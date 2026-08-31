@@ -47,6 +47,7 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadComplete.valid.poke(false)
     dut.io.loadComplete.bits.robTag.poke(0)
     dut.io.loadComplete.bits.cacheData.poke(0)
+    dut.io.loadResult.ready.poke(true)
     dut.io.loadContextRead.valid.poke(false)
     dut.io.loadContextRead.bits.poke(0)
     dut.io.commitAuthorize.valid.poke(false)

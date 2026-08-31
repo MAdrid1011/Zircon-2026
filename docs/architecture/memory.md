@@ -182,6 +182,16 @@ read/write metadata composition, metadata lifetime, and ROB-wrap selective
 recovery. Dual-LSU conflict resolution, PMA,
 fault creation, cache access, and AXI drains remain the next integration layer.
 
+`LoadCompletion` is now a ready/valid response boundary. The LQ publishes a
+`MemoryLoadResult` only when its corresponding result sink is ready, and marks
+the LQ complete plus writes retire metadata only on that same handshake. The
+result contains the byte-forwarded word, integer destination/write intent, and
+load width/sign rule. `MemoryLoadCompletion` converts this record to the
+architectural byte/halfword/word value and retains it in one two-entry
+`CompletionBuffer`; a third response backpressures instead of being lost. Its
+output is intentionally not connected to the top-level completion router until
+the separate M0/M1 endpoint ownership and PRF-port integration are complete.
+
 `MemoryQueueIngress` is the first live lifecycle layer above those queues. It
 accepts up to two already address-classified M0/M1 requests, emits an exact
 `FaultCandidate` for a misaligned/access-fault request without allocating queue

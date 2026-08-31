@@ -32,7 +32,8 @@ class LoadStoreQueues(
     val storeData = Flipped(Decoupled(new StoreDataUpdate(config)))
     val loadAddress = Flipped(Decoupled(new LoadAddressQuery(config)))
     val loadForward = Output(Valid(new LoadStoreForward(config)))
-    val loadComplete = Input(Valid(new LoadCompletion(config)))
+    val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
+    val loadResult = Decoupled(new MemoryLoadResult(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
 
@@ -61,6 +62,7 @@ class LoadStoreQueues(
   val lqUnsignedLoad = Reg(Vec(lqEntries, Bool()))
   val lqDestinationPhysical = Reg(Vec(lqEntries,
     UInt(log2Ceil(config.intPhysicalRegisters).W)))
+  val lqWritesInteger = Reg(Vec(lqEntries, Bool()))
   val lqIsAtomic = Reg(Vec(lqEntries, Bool()))
   val lqAq = Reg(Vec(lqEntries, Bool()))
   val lqRl = Reg(Vec(lqEntries, Bool()))
@@ -192,6 +194,20 @@ class LoadStoreQueues(
 
   val (loadCompleteMatch, loadCompleteIndex) = findMatch(
     lqValid, lqTag, io.loadComplete.bits.robTag, lqEntries, lqIndexWidth)
+  val loadCompleteEligible = loadCompleteMatch && lqAddressValid(loadCompleteIndex) &&
+    !lqCompleted(loadCompleteIndex) && !recoveryBlocked
+  val completedLoadData = MemoryByteLanes.merge(
+    io.loadComplete.bits.cacheData,
+    lqForwardData(loadCompleteIndex),
+    lqForwardMask(loadCompleteIndex))
+  io.loadResult.valid := io.loadComplete.valid && loadCompleteEligible
+  io.loadResult.bits.robTag := lqTag(loadCompleteIndex)
+  io.loadResult.bits.destinationPhysical := lqDestinationPhysical(loadCompleteIndex)
+  io.loadResult.bits.writesInteger := lqWritesInteger(loadCompleteIndex)
+  io.loadResult.bits.accessSize := lqAccessSize(loadCompleteIndex)
+  io.loadResult.bits.unsignedLoad := lqUnsignedLoad(loadCompleteIndex)
+  io.loadResult.bits.data := completedLoadData
+  io.loadComplete.ready := loadCompleteEligible && io.loadResult.ready
   val (loadContextMatch, loadContextIndex) = findMatch(
     lqValid, lqTag, io.loadContextRead.bits, lqEntries, lqIndexWidth)
   io.loadContext.valid := io.loadContextRead.valid && loadContextMatch && !recoveryBlocked
@@ -199,6 +215,7 @@ class LoadStoreQueues(
   io.loadContext.bits.accessSize := lqAccessSize(loadContextIndex)
   io.loadContext.bits.unsignedLoad := lqUnsignedLoad(loadContextIndex)
   io.loadContext.bits.destinationPhysical := lqDestinationPhysical(loadContextIndex)
+  io.loadContext.bits.writesInteger := lqWritesInteger(loadContextIndex)
   io.loadContext.bits.isAtomic := lqIsAtomic(loadContextIndex)
   io.loadContext.bits.aq := lqAq(loadContextIndex)
   io.loadContext.bits.rl := lqRl(loadContextIndex)
@@ -325,6 +342,7 @@ class LoadStoreQueues(
           lqAccessSize(index) := io.allocate(lane).bits.accessSize
           lqUnsignedLoad(index) := io.allocate(lane).bits.unsignedLoad
           lqDestinationPhysical(index) := io.allocate(lane).bits.destinationPhysical
+          lqWritesInteger(index) := io.allocate(lane).bits.writesInteger
           lqIsAtomic(index) := io.allocate(lane).bits.isAtomic
           lqAq(index) := io.allocate(lane).bits.aq
           lqRl(index) := io.allocate(lane).bits.rl
@@ -366,20 +384,14 @@ class LoadStoreQueues(
       lqForwardMask(loadAddressIndex) := requestedForwardMask
       lqForwardData(loadAddressIndex) := forwardData
     }
-    when(io.loadComplete.valid && loadCompleteMatch) {
-      assert(lqAddressValid(loadCompleteIndex),
-        "load completion requires an accepted load-address query")
-      assert(!lqCompleted(loadCompleteIndex), "load completed twice")
+    when(io.loadComplete.fire) {
       lqCompleted(loadCompleteIndex) := true.B
       lqMetadataValid(loadCompleteIndex) := true.B
       lqMetadata(loadCompleteIndex).robTag := lqTag(loadCompleteIndex)
       lqMetadata(loadCompleteIndex).address := lqAddress(loadCompleteIndex)
       lqMetadata(loadCompleteIndex).readMask := lqReadMask(loadCompleteIndex)
       lqMetadata(loadCompleteIndex).writeMask := 0.U
-      lqMetadata(loadCompleteIndex).readData := MemoryByteLanes.merge(
-        io.loadComplete.bits.cacheData,
-        lqForwardData(loadCompleteIndex),
-        lqForwardMask(loadCompleteIndex))
+      lqMetadata(loadCompleteIndex).readData := completedLoadData
       lqMetadata(loadCompleteIndex).writeData := 0.U
     }
     when(io.commitAuthorize.fire) {

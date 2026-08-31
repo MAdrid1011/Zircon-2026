@@ -25,7 +25,8 @@ class MemoryQueueIngress(
     val fault = Output(Vec(batchWidth, new FaultCandidate(config)))
 
     val loadForward = Output(Valid(new LoadStoreForward(config)))
-    val loadComplete = Input(Valid(new LoadCompletion(config)))
+    val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
+    val loadResult = Decoupled(new MemoryLoadResult(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
 
@@ -51,7 +52,12 @@ class MemoryQueueIngress(
   queues.io.robHeadTag := io.robHeadTag
   queues.io.squash := io.squash
   queues.io.flush := io.flush
-  queues.io.loadComplete := io.loadComplete
+  queues.io.loadComplete.valid := io.loadComplete.valid
+  queues.io.loadComplete.bits := io.loadComplete.bits
+  io.loadComplete.ready := queues.io.loadComplete.ready
+  io.loadResult.valid := queues.io.loadResult.valid
+  io.loadResult.bits := queues.io.loadResult.bits
+  queues.io.loadResult.ready := io.loadResult.ready
   queues.io.loadContextRead := io.loadContextRead
   io.loadForward := queues.io.loadForward
   io.loadContext := queues.io.loadContext
@@ -118,6 +124,8 @@ class MemoryQueueIngress(
     queues.io.allocate(lane).bits.unsignedLoad := intakeRequest(lane).address.unsignedLoad
     queues.io.allocate(lane).bits.destinationPhysical :=
       intakeRequest(lane).request.uop.destinationPhysical
+    queues.io.allocate(lane).bits.writesInteger :=
+      intakeRequest(lane).request.uop.writesInteger
     queues.io.allocate(lane).bits.isAtomic := intakeRequest(lane).address.isAtomic
     queues.io.allocate(lane).bits.aq := intakeRequest(lane).address.aq
     queues.io.allocate(lane).bits.rl := intakeRequest(lane).address.rl

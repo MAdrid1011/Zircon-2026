@@ -15,6 +15,7 @@ class MemoryQueueAllocate(config: ZirconCoreConfig = ZirconCoreConfig.default) e
   val accessSize = UInt(2.W)
   val unsignedLoad = Bool()
   val destinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val writesInteger = Bool()
   val isAtomic = Bool()
   val aq = Bool()
   val rl = Bool()
@@ -55,12 +56,26 @@ class LoadCompletion(config: ZirconCoreConfig = ZirconCoreConfig.default) extend
   val cacheData = UInt(32.W)
 }
 
+/** A load response after byte forwarding but before architectural completion.
+  * It remains Decoupled so cache response ownership is retained whenever the
+  * corresponding two-entry LSU completion buffer is full.
+  */
+class MemoryLoadResult(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val destinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val writesInteger = Bool()
+  val accessSize = UInt(2.W)
+  val unsignedLoad = Bool()
+  val data = UInt(32.W)
+}
+
 /** Static LQ data retained for LSU completion and atomic ordering decisions. */
 class LoadQueueContext(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
   val accessSize = UInt(2.W)
   val unsignedLoad = Bool()
   val destinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val writesInteger = Bool()
   val isAtomic = Bool()
   val aq = Bool()
   val rl = Bool()

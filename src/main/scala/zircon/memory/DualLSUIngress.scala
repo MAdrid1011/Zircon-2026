@@ -27,7 +27,8 @@ class DualLSUIngress(
 
     val fault = Output(Vec(2, new FaultCandidate(config)))
     val loadForward = Output(Valid(new LoadStoreForward(config)))
-    val loadComplete = Input(Valid(new LoadCompletion(config)))
+    val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
+    val loadResult = Decoupled(new MemoryLoadResult(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
     val commitAuthorize = Flipped(Decoupled(UInt(config.robTagWidth.W)))
@@ -81,7 +82,12 @@ class DualLSUIngress(
   ingress.io.flush := io.flush
   io.fault := ingress.io.fault
   io.loadForward := ingress.io.loadForward
-  ingress.io.loadComplete := io.loadComplete
+  ingress.io.loadComplete.valid := io.loadComplete.valid
+  ingress.io.loadComplete.bits := io.loadComplete.bits
+  io.loadComplete.ready := ingress.io.loadComplete.ready
+  io.loadResult.valid := ingress.io.loadResult.valid
+  io.loadResult.bits := ingress.io.loadResult.bits
+  ingress.io.loadResult.ready := io.loadResult.ready
   ingress.io.loadContextRead := io.loadContextRead
   io.loadContext := ingress.io.loadContext
   ingress.io.commitAuthorize.valid := io.commitAuthorize.valid
