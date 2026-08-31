@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "design": "Zircon-2026",
+  "revision": "working-tree",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan, partial RTL inventory",
+  "completeness": "partial",
+  "known_omissions": [
+    "the CPU top is not complete; LongPipe, dual LSU, LQ/SQ, caches, AXI, FPU, and miniTAGE RTL are missing",
+    "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
+    "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
+    "cache rows currently include data capacity only and must not be interpreted as complete cache area"
+  ],
+  "storage": [
+    {
+      "name": "integer_prf_data",
+      "class": "register_payload",
+      "entries": 56,
+      "bits_per_entry": 32,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ZirconCoreConfig.intPhysicalRegisters and IntegerPhysicalRegisterFile"
+    },
+    {
+      "name": "floating_prf_data_planned",
+      "class": "register_payload",
+      "entries": 32,
+      "bits_per_entry": 32,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "frozen 32x32 2R1W FPR contract"
+    },
+    {
+      "name": "issue_queue_uop_payload",
+      "class": "register_payload",
+      "entries": 24,
+      "bits_per_entry": 86,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "UopFootprintSpec and frozen 12+4+8 IQ entries"
+    },
+    {
+      "name": "l1i_data_planned",
+      "class": "memory_data",
+      "entries": 1024,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ZirconCoreConfig.l1i"
+    },
+    {
+      "name": "l1d_data_planned",
+      "class": "memory_data",
+      "entries": 1024,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ZirconCoreConfig.l1d"
+    },
+    {
+      "name": "l2_data_default_planned",
+      "class": "memory_data",
+      "entries": 4096,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ZirconCoreConfig.l2 default"
+    }
+  ],
+  "logic": [
+    {
+      "name": "integer_prf_read_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 6,
+      "width": 32,
+      "fanin": 56,
+      "source": "frozen 56x32 6R2W PRF interface"
+    }
+  ]
+}

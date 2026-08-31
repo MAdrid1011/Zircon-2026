@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "design": "Zircon-2024",
+  "revision": "65a3dd381f4c83a5844858a927dafdbc8263c35e",
+  "configuration": "complete frozen core, currently partial inventory",
+  "completeness": "partial",
+  "known_omissions": [
+    "ROB and BDB payload/control widths are not yet extracted from elaborated RTL",
+    "cache tag, valid, dirty, replacement, MSHR, and controller state are not yet inventoried",
+    "PRF read muxes, forwarding, issue selection, and arithmetic logic proxies are not yet inventoried",
+    "the manual IQ number includes payload and local state while other rows currently include payload only"
+  ],
+  "storage": [
+    {
+      "name": "integer_prf_data",
+      "class": "register_payload",
+      "entries": 62,
+      "bits_per_entry": 32,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "docs/performance/zircon-2024-static-inventory.md"
+    },
+    {
+      "name": "issue_queue_payload_and_local_state",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 6924,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "docs/performance/zircon-2024-static-inventory.md"
+    },
+    {
+      "name": "l1i_data",
+      "class": "memory_data",
+      "entries": 1024,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "frozen 1 KiB L1I configuration"
+    },
+    {
+      "name": "l1d_data",
+      "class": "memory_data",
+      "entries": 1024,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "frozen 1 KiB L1D configuration"
+    },
+    {
+      "name": "l2_data",
+      "class": "memory_data",
+      "entries": 8192,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "frozen 8 KiB L2 configuration"
+    }
+  ],
+  "logic": []
+}
