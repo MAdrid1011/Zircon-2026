@@ -31,11 +31,14 @@ class DualLSUAdmission(
   val m0Address = Module(new MemoryAddressUnit(config))
   val m1Address = Module(new MemoryAddressUnit(config))
   val replayAddress = Module(new MemoryAddressUnit(config))
+  m0Address.io.valid := io.m0Input.valid
+  m1Address.io.valid := io.m1Input.valid
   m0Address.io.request := io.m0Input.bits
   m1Address.io.request := io.m1Input.bits
 
   val replayValid = RegInit(false.B)
   val replayRequest = Reg(new MemoryAddressRequest(config))
+  replayAddress.io.valid := replayValid
   replayAddress.io.request := replayRequest
   val recoveryBlocked = io.flush || io.squash.valid
 

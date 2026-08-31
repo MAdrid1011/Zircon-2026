@@ -27,6 +27,7 @@ class DualLSUIngress(
 
     val fault = Output(Vec(2, new FaultCandidate(config)))
     val loadForward = Output(Valid(new LoadStoreForward(config)))
+    val loadForwardReady = Input(Bool())
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val m0Completion = Decoupled(new CompletionResult(config))
     val m1Completion = Decoupled(new CompletionResult(config))
@@ -89,10 +90,12 @@ class DualLSUIngress(
     io.fault(lane) := loadCompletion.io.faultAccepted(lane)
   }
   io.loadForward := ingress.io.loadForward
+  ingress.io.loadForwardReady := io.loadForwardReady
   ingress.io.loadComplete.valid := io.loadComplete.valid
   ingress.io.loadComplete.bits := io.loadComplete.bits
   io.loadComplete.ready := ingress.io.loadComplete.ready
   loadCompletion.io.loadResult <> ingress.io.loadResult
+  loadCompletion.io.loadFault <> ingress.io.loadFault
   loadCompletion.io.robHeadTag := io.robHeadTag
   loadCompletion.io.squash := io.squash
   loadCompletion.io.flush := io.flush

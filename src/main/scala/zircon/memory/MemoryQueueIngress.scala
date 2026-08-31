@@ -26,8 +26,10 @@ class MemoryQueueIngress(
     val faultReady = Input(Vec(batchWidth, Bool()))
 
     val loadForward = Output(Valid(new LoadStoreForward(config)))
+    val loadForwardReady = Input(Bool())
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val loadResult = Decoupled(new MemoryLoadResult(config))
+    val loadFault = Decoupled(new LoadAccessFault(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
 
@@ -59,8 +61,12 @@ class MemoryQueueIngress(
   io.loadResult.valid := queues.io.loadResult.valid
   io.loadResult.bits := queues.io.loadResult.bits
   queues.io.loadResult.ready := io.loadResult.ready
+  io.loadFault.valid := queues.io.loadFault.valid
+  io.loadFault.bits := queues.io.loadFault.bits
+  queues.io.loadFault.ready := io.loadFault.ready
   queues.io.loadContextRead := io.loadContextRead
   io.loadForward := queues.io.loadForward
+  queues.io.loadForwardReady := io.loadForwardReady
   io.loadContext := queues.io.loadContext
   for (lane <- 0 until config.commitWidth) {
     queues.io.retire(lane) := io.retire(lane)
@@ -104,20 +110,17 @@ class MemoryQueueIngress(
     port.valid && !port.bits.address.faultValid))
   val normalCount = PopCount(incomingNormal)
   val intakeEmpty = !intakeValid.asUInt.orR
-  val faultCreditAvailable = VecInit(io.input.zipWithIndex.map {
-    case (port, lane) =>
-      !port.valid || !port.bits.address.faultValid || io.faultReady(lane)
-  })
-  val acceptInputs = !recoveryBlocked && (normalCount === 0.U || intakeEmpty) &&
-    faultCreditAvailable.asUInt.andR
-  io.input.foreach(_.ready := acceptInputs)
+  val normalIntakeOpen = !recoveryBlocked &&
+    (normalCount === 0.U || intakeEmpty)
 
   for (lane <- 0 until batchWidth) {
-    io.fault(lane).valid := io.input(lane).valid &&
-      io.input(lane).bits.address.faultValid && !recoveryBlocked
+    val faulting = io.input(lane).valid && io.input(lane).bits.address.faultValid
+    io.fault(lane).valid := faulting && normalIntakeOpen
     io.fault(lane).record.robTag := io.input(lane).bits.address.robTag
     io.fault(lane).record.cause := io.input(lane).bits.address.faultCause
     io.fault(lane).record.trapValue := io.input(lane).bits.address.faultTval
+    io.input(lane).ready := normalIntakeOpen && Mux(faulting,
+      io.faultReady(lane), true.B)
   }
 
   val updateEmpty = !updateValid.asUInt.orR

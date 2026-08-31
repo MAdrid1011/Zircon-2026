@@ -10,6 +10,13 @@ class RetireTraceFormatterSpec extends AnyFunSpec with ChiselSim {
   private def clearInputs(dut: RetireTraceFormatter): Unit = {
     for (lane <- 0 until 2) {
       dut.io.retired(lane).valid.poke(false)
+      dut.io.memoryMetadata(lane).valid.poke(false)
+      dut.io.memoryMetadata(lane).bits.robTag.poke(0)
+      dut.io.memoryMetadata(lane).bits.address.poke(0)
+      dut.io.memoryMetadata(lane).bits.readMask.poke(0)
+      dut.io.memoryMetadata(lane).bits.writeMask.poke(0)
+      dut.io.memoryMetadata(lane).bits.readData.poke(0)
+      dut.io.memoryMetadata(lane).bits.writeData.poke(0)
       dut.io.gprData(lane).poke(0)
       val entry = dut.io.retired(lane).bits.entry
       entry.pc.poke(0)
@@ -86,6 +93,13 @@ class RetireTraceFormatterSpec extends AnyFunSpec with ChiselSim {
           destination = 1, data = 1)
         driveRetired(dut, 1, BigInt("80000004", 16), BigInt("00200113", 16),
           destination = 2, data = 2)
+        dut.io.memoryMetadata(1).valid.poke(true)
+        dut.io.memoryMetadata(1).bits.robTag.poke(1)
+        dut.io.memoryMetadata(1).bits.address.poke(BigInt("80001000", 16))
+        dut.io.memoryMetadata(1).bits.readMask.poke(15)
+        dut.io.memoryMetadata(1).bits.writeMask.poke(0)
+        dut.io.memoryMetadata(1).bits.readData.poke(BigInt("12345678", 16))
+        dut.io.memoryMetadata(1).bits.writeData.poke(0)
         dut.io.currentFflags.poke(3)
 
         dut.io.events(0).valid.expect(true)
@@ -99,6 +113,9 @@ class RetireTraceFormatterSpec extends AnyFunSpec with ChiselSim {
         dut.io.events(1).order.expect(1)
         dut.io.events(1).gprAddress.expect(2)
         dut.io.events(1).gprData.expect(2)
+        dut.io.events(1).memoryAddress.expect(BigInt("80001000", 16))
+        dut.io.events(1).memoryReadMask.expect(15)
+        dut.io.events(1).memoryReadData.expect(BigInt("12345678", 16))
         dut.clock.step()
 
         dut.io.retired(1).valid.poke(false)

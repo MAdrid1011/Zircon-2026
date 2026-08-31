@@ -32,8 +32,10 @@ class LoadStoreQueues(
     val storeData = Flipped(Decoupled(new StoreDataUpdate(config)))
     val loadAddress = Flipped(Decoupled(new LoadAddressQuery(config)))
     val loadForward = Output(Valid(new LoadStoreForward(config)))
+    val loadForwardReady = Input(Bool())
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val loadResult = Decoupled(new MemoryLoadResult(config))
+    val loadFault = Decoupled(new LoadAccessFault(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
 
@@ -157,7 +159,8 @@ class LoadStoreQueues(
       MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
       (sqWriteMask(index) & io.loadAddress.bits.readMask).orR &&
       !sqDataValid(index)).reduce(_ || _)
-  val loadMayProceed = loadAddressMatch && !olderUnknownAddress && !olderUnknownData
+  val loadMayProceed = loadAddressMatch && !olderUnknownAddress && !olderUnknownData &&
+    io.loadForwardReady
   io.loadAddress.ready := !recoveryBlocked && loadMayProceed
 
   val forwardMaskBits = Wire(Vec(4, Bool()))
@@ -201,7 +204,8 @@ class LoadStoreQueues(
     io.loadComplete.bits.cacheData,
     lqForwardData(loadCompleteIndex),
     lqForwardMask(loadCompleteIndex))
-  io.loadResult.valid := io.loadComplete.valid && loadCompleteEligible
+  io.loadResult.valid := io.loadComplete.valid && loadCompleteEligible &&
+    !io.loadComplete.bits.accessFault
   io.loadResult.bits.robTag := lqTag(loadCompleteIndex)
   io.loadResult.bits.destinationPhysical := lqDestinationPhysical(loadCompleteIndex)
   io.loadResult.bits.writesInteger := lqWritesInteger(loadCompleteIndex)
@@ -209,7 +213,13 @@ class LoadStoreQueues(
   io.loadResult.bits.accessSize := lqAccessSize(loadCompleteIndex)
   io.loadResult.bits.unsignedLoad := lqUnsignedLoad(loadCompleteIndex)
   io.loadResult.bits.data := completedLoadData
-  io.loadComplete.ready := loadCompleteEligible && io.loadResult.ready
+  io.loadFault.valid := io.loadComplete.valid && loadCompleteEligible &&
+    io.loadComplete.bits.accessFault
+  io.loadFault.bits.robTag := lqTag(loadCompleteIndex)
+  io.loadFault.bits.m1Owner := lqM1Owner(loadCompleteIndex)
+  io.loadFault.bits.trapValue := io.loadComplete.bits.faultAddress
+  io.loadComplete.ready := loadCompleteEligible && Mux(io.loadComplete.bits.accessFault,
+    io.loadFault.ready, io.loadResult.ready)
   val (loadContextMatch, loadContextIndex) = findMatch(
     lqValid, lqTag, io.loadContextRead.bits, lqEntries, lqIndexWidth)
   io.loadContext.valid := io.loadContextRead.valid && loadContextMatch && !recoveryBlocked
@@ -390,13 +400,15 @@ class LoadStoreQueues(
     }
     when(io.loadComplete.fire) {
       lqCompleted(loadCompleteIndex) := true.B
-      lqMetadataValid(loadCompleteIndex) := true.B
-      lqMetadata(loadCompleteIndex).robTag := lqTag(loadCompleteIndex)
-      lqMetadata(loadCompleteIndex).address := lqAddress(loadCompleteIndex)
-      lqMetadata(loadCompleteIndex).readMask := lqReadMask(loadCompleteIndex)
-      lqMetadata(loadCompleteIndex).writeMask := 0.U
-      lqMetadata(loadCompleteIndex).readData := completedLoadData
-      lqMetadata(loadCompleteIndex).writeData := 0.U
+      when(!io.loadComplete.bits.accessFault) {
+        lqMetadataValid(loadCompleteIndex) := true.B
+        lqMetadata(loadCompleteIndex).robTag := lqTag(loadCompleteIndex)
+        lqMetadata(loadCompleteIndex).address := lqAddress(loadCompleteIndex)
+        lqMetadata(loadCompleteIndex).readMask := lqReadMask(loadCompleteIndex)
+        lqMetadata(loadCompleteIndex).writeMask := 0.U
+        lqMetadata(loadCompleteIndex).readData := completedLoadData
+        lqMetadata(loadCompleteIndex).writeData := 0.U
+      }
     }
     when(io.commitAuthorize.fire) {
       sqCommitAuthorized(commitIndex) := true.B

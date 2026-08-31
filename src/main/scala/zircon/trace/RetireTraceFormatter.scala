@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
 import zircon.backend.{CSRCommitWrite, ROBCommit, TrapCommit}
+import zircon.memory.MemoryRetireMetadata
 
 /** Formats true commit and trap metadata into the simulation retire boundary.
   *
@@ -15,6 +16,8 @@ class RetireTraceFormatter(
 ) extends Module {
   val io = IO(new Bundle {
     val retired = Input(Vec(config.commitWidth, Valid(new ROBCommit(config))))
+    val memoryMetadata = Input(Vec(config.commitWidth,
+      Valid(new MemoryRetireMetadata(config))))
     val gprData = Input(Vec(config.commitWidth, UInt(32.W)))
     val csrWrite = Input(Valid(new CSRCommitWrite))
     val trapCommit = Input(Valid(new TrapCommit))
@@ -58,11 +61,12 @@ class RetireTraceFormatter(
       !isTrap
     event.csrAddress := io.csrWrite.bits.address
     event.csrData := io.csrWrite.bits.data
-    event.memoryAddress := 0.U
-    event.memoryReadMask := 0.U
-    event.memoryWriteMask := 0.U
-    event.memoryReadData := 0.U
-    event.memoryWriteData := 0.U
+    val memoryValid = retired.valid && io.memoryMetadata(lane).valid && !isTrap
+    event.memoryAddress := Mux(memoryValid, io.memoryMetadata(lane).bits.address, 0.U)
+    event.memoryReadMask := Mux(memoryValid, io.memoryMetadata(lane).bits.readMask, 0.U)
+    event.memoryWriteMask := Mux(memoryValid, io.memoryMetadata(lane).bits.writeMask, 0.U)
+    event.memoryReadData := Mux(memoryValid, io.memoryMetadata(lane).bits.readData, 0.U)
+    event.memoryWriteData := Mux(memoryValid, io.memoryMetadata(lane).bits.writeData, 0.U)
     event.trap := isTrap
     event.interrupt := isTrap && io.trapCommit.bits.interrupt
     event.cause := Mux(isTrap,

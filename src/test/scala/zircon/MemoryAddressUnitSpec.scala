@@ -18,6 +18,7 @@ class MemoryAddressUnitSpec extends AnyFunSpec with ChiselSim {
       aq: Boolean = false,
       rl: Boolean = false
   ): Unit = {
+    dut.io.valid.poke(true)
     val request = dut.io.request
     request.uop.robTag.poke(3)
     request.uop.allowedEndpoints.poke(endpoints)

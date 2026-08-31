@@ -6,7 +6,7 @@ import zircon.ZirconCoreConfig
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, SourceKind}
 import zircon.frontend.M1Frontend
-import zircon.memory.DualLSUIngress
+import zircon.memory.{AXIDataReadEngine, DualLSUIngress, L1DLoadCache}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -27,6 +27,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val longPipe = Module(new LongPipe(cfg))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
   val lsuIngress = Module(new DualLSUIngress(cfg))
+  val l1dLoadCache = Module(new L1DLoadCache(cfg))
+  val dataReadEngine = Module(new AXIDataReadEngine(cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
 
   frontend.io.enable := true.B
@@ -111,8 +113,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag
   lsuIngress.io.squash := backend.io.squash
   lsuIngress.io.flush := backend.io.globalFlush
-  lsuIngress.io.loadComplete.valid := false.B
-  lsuIngress.io.loadComplete.bits := 0.U.asTypeOf(lsuIngress.io.loadComplete.bits)
+  lsuIngress.io.loadForwardReady := l1dLoadCache.io.request.ready
+  l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid
+  l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
+  lsuIngress.io.loadComplete <> l1dLoadCache.io.completion
+  l1dLoadCache.io.dataRequest <> dataReadEngine.io.request
+  l1dLoadCache.io.dataResponse <> dataReadEngine.io.response
+  l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
+  l1dLoadCache.io.squash := backend.io.squash
+  l1dLoadCache.io.flush := backend.io.globalFlush
   lsuIngress.io.loadContextRead.valid := false.B
   lsuIngress.io.loadContextRead.bits := 0.U
   lsuIngress.io.commitAuthorize.valid := false.B
@@ -151,16 +160,43 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   io.axi.w.valid := false.B
   io.axi.w.bits := 0.U.asTypeOf(io.axi.w.bits)
   io.axi.b.ready := true.B
-  io.axi.ar.valid := frontend.io.ar.valid
-  io.axi.ar.bits := frontend.io.ar.bits
-  frontend.io.ar.ready := io.axi.ar.ready
-  frontend.io.r.valid := io.axi.r.valid
+  val arLockValid = RegInit(false.B)
+  val arLockData = RegInit(false.B)
+  val dataArTurn = RegInit(false.B)
+  val unlockedDataSelection = Mux(frontend.io.ar.valid && dataReadEngine.io.ar.valid,
+    dataArTurn, dataReadEngine.io.ar.valid)
+  val selectDataAr = Mux(arLockValid, arLockData, unlockedDataSelection)
+  io.axi.ar.valid := Mux(selectDataAr, dataReadEngine.io.ar.valid,
+    frontend.io.ar.valid)
+  io.axi.ar.bits := Mux(selectDataAr, dataReadEngine.io.ar.bits,
+    frontend.io.ar.bits)
+  frontend.io.ar.ready := io.axi.ar.ready && !selectDataAr
+  dataReadEngine.io.ar.ready := io.axi.ar.ready && selectDataAr
+  when(!arLockValid && io.axi.ar.valid && !io.axi.ar.ready) {
+    arLockValid := true.B
+    arLockData := selectDataAr
+  }
+  when(io.axi.ar.fire) {
+    arLockValid := false.B
+    dataArTurn := !selectDataAr
+  }
+
+  val rToFetch = io.axi.r.bits.id === 0.U
+  frontend.io.r.valid := io.axi.r.valid && rToFetch
   frontend.io.r.bits := io.axi.r.bits
-  io.axi.r.ready := frontend.io.r.ready
+  dataReadEngine.io.r.valid := io.axi.r.valid && !rToFetch
+  dataReadEngine.io.r.bits := io.axi.r.bits
+  io.axi.r.ready := Mux(rToFetch, frontend.io.r.ready,
+    dataReadEngine.io.r.ready)
+  when(io.axi.r.valid) {
+    assert(io.axi.r.bits.id <= 4.U,
+      "top-level AXI R used an ID outside fetch and four data owners")
+  }
 
   io.trace.foreach { trace =>
     val formatter = Module(new RetireTraceFormatter(cfg))
     formatter.io.retired := backend.io.retired
+    formatter.io.memoryMetadata := lsuIngress.io.retireMetadata
     formatter.io.gprData := backend.io.auxReadData
     formatter.io.csrWrite := backend.io.csrWrite
     formatter.io.trapCommit := backend.io.trapCommit

@@ -58,6 +58,7 @@ class MemoryAddressUnit(
     config: ZirconCoreConfig = ZirconCoreConfig.default
 ) extends Module {
   val io = IO(new Bundle {
+    val valid = Input(Bool())
     val request = Input(new MemoryAddressRequest(config))
     val result = Output(new MemoryAddressResult(config))
   })
@@ -151,7 +152,7 @@ class MemoryAddressUnit(
   io.result.aq := request.atomicAq
   io.result.rl := request.atomicRl
 
-  when(legalMemoryOperation) {
+  when(io.valid && legalMemoryOperation) {
     assert((request.uop.uopClass === UopClass.Load) ===
       (isIntegerLoad && !isAtomic),
       "integer load operations must carry the Load uop class")

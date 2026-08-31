@@ -25,7 +25,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       trap: Boolean,
       interrupt: Boolean,
       cause: BigInt,
-      trapValue: BigInt
+      trapValue: BigInt,
+      memoryAddress: BigInt,
+      memoryReadMask: BigInt,
+      memoryReadData: BigInt
   )
 
   private def clearInputs(dut: ZirconCore): Unit = {
@@ -59,7 +62,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     }
   }
 
-  /** Drives a deterministic one-outstanding AXI instruction memory.
+  /** Drives deterministic AXI memory with per-request ID-preserving responses.
     *
     * The memory returns each accepted AR burst in order and holds R valid until
     * the core accepts the beat. The default instruction is NOP so a test only
@@ -72,9 +75,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       driveInterrupts: (ZirconCore, Seq[TraceSample]) => Unit = (_, _) => (),
       arReadyForCycle: Int => Boolean = _ => true,
       rValidForCycle: Int => Boolean = _ => true,
+      rResponse: (BigInt, BigInt) => Int = (_, _) => 0,
       observeCycle: (ZirconCore, Int) => Unit = (_, _) => ()
   ): Seq[TraceSample] = {
-    val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, Boolean)]
+    val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, BigInt, BigInt, Boolean)]
     val events = scala.collection.mutable.ArrayBuffer.empty[TraceSample]
 
     dut.clock.step(128) // Deterministic bimodal/BTB scrubs.
@@ -83,11 +87,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       dut.io.axi.ar.ready.poke(arReadyForCycle(cycle))
       val rOffered = pendingReads.nonEmpty && rValidForCycle(cycle)
       if (rOffered) {
-        val (data, last) = pendingReads.front
+        val (id, address, data, last) = pendingReads.front
         dut.io.axi.r.valid.poke(true)
-        dut.io.axi.r.bits.id.poke(0)
+        dut.io.axi.r.bits.id.poke(id)
         dut.io.axi.r.bits.data.poke(data)
-        dut.io.axi.r.bits.resp.poke(0)
+        dut.io.axi.r.bits.resp.poke(rResponse(id, address))
         dut.io.axi.r.bits.last.poke(last)
       } else {
         dut.io.axi.r.valid.poke(false)
@@ -108,7 +112,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             trap = event.trap.peek().litToBoolean,
             interrupt = event.interrupt.peek().litToBoolean,
             cause = event.cause.peek().litValue,
-            trapValue = event.trapValue.peek().litValue
+            trapValue = event.trapValue.peek().litValue,
+            memoryAddress = event.memoryAddress.peek().litValue,
+            memoryReadMask = event.memoryReadMask.peek().litValue,
+            memoryReadData = event.memoryReadData.peek().litValue
           )
         }
       }
@@ -116,6 +123,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val arFire = dut.io.axi.ar.valid.peek().litToBoolean &&
         dut.io.axi.ar.ready.peek().litToBoolean
       val arAddress = dut.io.axi.ar.bits.addr.peek().litValue
+      val arId = dut.io.axi.ar.bits.id.peek().litValue
       val arBeats = dut.io.axi.ar.bits.len.peek().litValue.toInt + 1
       val rFire = rOffered && dut.io.axi.r.ready.peek().litToBoolean
 
@@ -128,7 +136,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       if (arFire) {
         for (beat <- 0 until arBeats) {
           val address = arAddress + beat * 4
-          pendingReads.enqueue((program.getOrElse(address, Nop), beat == arBeats - 1))
+          pendingReads.enqueue((arId, address, program.getOrElse(address, Nop),
+            beat == arBeats - 1))
         }
       }
     }
@@ -687,17 +696,36 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("blocks a cacheable load without a fabricated completion") {
+    it("executes a cacheable load through the data AXI refill path") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
-        val events = runProgram(dut, Map(
+        val events = throughFirstTrap(runProgram(dut, Map(
           ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
           ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
           ResetVector + 8 -> BigInt("00100073", 16)
-        ), cycles = 96)
+        ), cycles = 192))
 
-        assert(events.map(_.pc) == Seq(ResetVector),
-          "a cacheable load retired before a real data response existed")
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4, ResetVector + 8))
+        assert(events(1).gprWrite && events(1).gprAddress == 2 &&
+          events(1).gprData == BigInt("800000b7", 16))
+        assert(events(1).memoryAddress == ResetVector &&
+          events(1).memoryReadMask == 15 &&
+          events(1).memoryReadData == BigInt("800000b7", 16))
+      }
+    }
+
+    it("turns a data AXI RRESP error into the exact load-access trap") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 8 -> BigInt("00100073", 16)
+        ), cycles = 192, rResponse = (id, _) => if (id == 0) 0 else 2))
+
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4))
+        assert(events(1).trap && !events(1).gprWrite && events(1).cause == 5 &&
+          events(1).trapValue == ResetVector)
       }
     }
   }

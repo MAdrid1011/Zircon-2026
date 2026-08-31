@@ -90,10 +90,11 @@ external effect.
 Both LSUs receive their PC/instruction/privilege context from the ROB and produce
 only ready/valid completions or `FaultCandidate`s indexed by their real ROB tag.
 Each endpoint has one two-entry completion buffer shared by load results and
-classified no-write fault completions. A faulting ingress batch is accepted only
-when its endpoint buffer has credit, so `FirstFaultRecord` and the matching ROB
-completion cannot diverge. Completion to a stale tag drains through the existing
-completion network without PRF or ready-table mutation.
+no-write fault completions from classified ingress or data-side response errors.
+A faulting ingress lane or LQ error response is accepted only when its endpoint
+buffer has credit, so `FirstFaultRecord` and the matching ROB completion cannot
+diverge. Completion to a stale tag drains through the existing completion network
+without PRF or ready-table mutation.
 
 `MemoryOperandRead` is the current bridge from MemIQ to that future LSU boundary.
 For each request it performs an exact-tag ROB context read, obtains base and
@@ -205,22 +206,24 @@ read/write metadata composition, metadata lifetime, and ROB-wrap selective
 recovery. Dual-LSU conflict resolution, PMA,
 fault creation, cache access, and AXI drains remain the next integration layer.
 
-`LoadCompletion` is now a ready/valid response boundary. The LQ publishes a
-`MemoryLoadResult` only when its corresponding result sink is ready, and marks
-the LQ complete plus writes retire metadata only on that same handshake. The
-result contains the byte-forwarded word, integer destination/write intent, and
-load width/sign rule. `MemoryLoadCompletion` converts this record to the
+`LoadCompletion` is now a ready/valid response boundary. A normal response makes
+the LQ publish a `MemoryLoadResult` only when its corresponding result sink is
+ready, and marks the LQ complete plus writes retire metadata only on that same
+handshake. An access-error response instead publishes a `LoadAccessFault` with
+the retained LQ owner and exact word address; it has no integer write or retire
+metadata. The normal result contains the byte-forwarded word, integer
+destination/write intent, and load width/sign rule. `MemoryLoadCompletion` converts this record to the
 architectural byte/halfword/word value and retains it in one two-entry
 `CompletionBuffer`; a third response backpressures instead of being lost. Its
 `m1Owner` is allocated with the LQ record rather than reconstructed from a bus
 response. `DualMemoryLoadCompletion` uses it to select one independent M0 or
 M1 two-entry buffer, so an M0 response cannot consume M1 capacity and vice
-versa. The same endpoint buffer also accepts an exact classified access fault
-as a non-writing `CompletionResult`; an older load result wins local admission
-when both contend, and the fault waits with its original ingress request for a
-credit. `ZirconCore` connects the two outputs to completion endpoints M0/M1 and
-connects the accepted fault candidates to the matching backend fault inputs;
-the top-level still has no Cache/data-AXI response producer.
+versa. The same endpoint buffer also accepts an exact classified or data-response
+access fault as a non-writing `CompletionResult`; an older load result wins local
+admission when both contend, and the fault waits with its original ingress
+request or LQ response for a credit. `ZirconCore` connects the two outputs to
+completion endpoints M0/M1 and connects the accepted fault candidates to the
+matching backend fault inputs.
 
 `MemoryQueueIngress` is the first live lifecycle layer above those queues. It
 accepts up to two already address-classified M0/M1 requests, emits an exact
@@ -237,6 +240,18 @@ completion/commit interfaces but does not yet produce a completion, Cache, AXI,
 or store side effect.
 
 ## Cache hierarchy
+
+### Executable load-path slice
+
+The first executable M3 data slice is specified in
+[`data-axi-load-path.md`](data-axi-load-path.md). It connects the LQ forwarding
+result to a 1 KiB two-way `L1DLoadCache` with four refill owners, then to the
+shared data AXI read engine. It accepts only cacheable integer loads; full
+store-forwarding completes through the LQ without a bus transaction. The slice
+uses IDs 1-4, eight-beat line refills, owner-local response backpressure,
+RRESP-to-exact-load-fault conversion, and recovery drain. Stores, AMOs, MMIO,
+dirty state, L2 ownership, and writeback do not enter this slice and remain
+blocked until their respective M3 owners exist.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,

@@ -55,6 +55,17 @@ class LoadStoreForward(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 class LoadCompletion(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
   val cacheData = UInt(32.W)
+  val accessFault = Bool()
+  val faultAddress = UInt(32.W)
+}
+
+/** An AXI data-read failure that remains owned by the exact LQ entry until its
+  * M0/M1 completion buffer accepts the matching no-write completion.
+  */
+class LoadAccessFault(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val m1Owner = Bool()
+  val trapValue = UInt(32.W)
 }
 
 /** A load response after byte forwarding but before architectural completion.
@@ -100,6 +111,19 @@ class StoreEffect(config: ZirconCoreConfig = ZirconCoreConfig.default) extends B
 
 class StoreEffectComplete(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
+}
+
+/** A line-fill request from L1D to the sole data-side AXI read engine. */
+class DataReadRequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val mshr = UInt(log2Ceil(config.l1d.mshrs).W)
+  val lineAddress = UInt(32.W)
+}
+
+/** One fully drained eight-word cache-line response for its exact MSHR owner. */
+class DataReadResponse(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val mshr = UInt(log2Ceil(config.l1d.mshrs).W)
+  val lineData = Vec(config.l1d.lineBytes / 4, UInt(32.W))
+  val accessFault = Bool()
 }
 
 /** Exact architectural memory information kept until the owning ROB entry

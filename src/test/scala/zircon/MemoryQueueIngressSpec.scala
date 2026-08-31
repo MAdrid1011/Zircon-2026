@@ -48,8 +48,12 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadComplete.valid.poke(false)
     dut.io.loadComplete.bits.robTag.poke(0)
     dut.io.loadComplete.bits.cacheData.poke(0)
+    dut.io.loadComplete.bits.accessFault.poke(false)
+    dut.io.loadComplete.bits.faultAddress.poke(0)
     dut.io.faultReady.foreach(_.poke(true))
+    dut.io.loadForwardReady.poke(true)
     dut.io.loadResult.ready.poke(true)
+    dut.io.loadFault.ready.poke(true)
     dut.io.loadContextRead.valid.poke(false)
     dut.io.loadContextRead.bits.poke(0)
     dut.io.commitAuthorize.valid.poke(false)
@@ -206,6 +210,29 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
         clearRequests(dut)
         dut.io.loadCount.expect(0)
         dut.io.storeCount.expect(0)
+      }
+    }
+
+    it("does not accept a fault until its source lane handshakes") {
+      simulate(new MemoryQueueIngress) { dut =>
+        clear(dut)
+        request(dut, 0, tag = 1, load = true, store = false,
+          address = BigInt("80001000", 16))
+        dut.clock.step()
+        clearRequests(dut)
+
+        request(dut, 0, tag = 2, load = true, store = false,
+          address = BigInt("90000000", 16), fault = Some(5 -> BigInt("90000000", 16)))
+        request(dut, 1, tag = 3, load = true, store = false,
+          address = BigInt("80001004", 16))
+        dut.io.input(0).ready.expect(false)
+        dut.io.fault(0).valid.expect(false)
+        dut.clock.step()
+
+        dut.io.input(0).ready.expect(true)
+        dut.io.fault(0).valid.expect(true)
+        dut.clock.step()
+        dut.io.fault(0).valid.expect(false)
       }
     }
 

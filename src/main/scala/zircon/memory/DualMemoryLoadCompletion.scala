@@ -3,7 +3,7 @@ package zircon.memory
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.backend.{CompletionResult, FaultCandidate, FirstFaultRecord}
+import zircon.backend.{CompletionResult, FaultCandidate, FirstFaultRecord, ROBTagOrder}
 
 /** Sends each retained load result to its frozen M0 or M1 completion buffer. */
 class DualMemoryLoadCompletion(
@@ -12,6 +12,7 @@ class DualMemoryLoadCompletion(
   val io = IO(new Bundle {
     val loadResult = Flipped(Decoupled(new MemoryLoadResult(config)))
     val fault = Flipped(Vec(2, Decoupled(new FirstFaultRecord(config))))
+    val loadFault = Flipped(Decoupled(new LoadAccessFault(config)))
     val faultAccepted = Output(Vec(2, new FaultCandidate(config)))
     val m0Completion = Decoupled(new CompletionResult(config))
     val m1Completion = Decoupled(new CompletionResult(config))
@@ -39,11 +40,45 @@ class DualMemoryLoadCompletion(
   io.loadResult.ready := Mux(io.loadResult.valid && io.loadResult.bits.m1Owner,
     m1Buffer.io.loadResult.ready, m0Buffer.io.loadResult.ready)
 
-  m0Buffer.io.fault <> io.fault(0)
-  m1Buffer.io.fault <> io.fault(1)
-  for (lane <- 0 until 2) {
-    io.faultAccepted(lane).valid := io.fault(lane).fire
-    io.faultAccepted(lane).record := io.fault(lane).bits
+  val m0LoadFault = io.loadFault.valid && !io.loadFault.bits.m1Owner
+  val m1LoadFault = io.loadFault.valid && io.loadFault.bits.m1Owner
+  val m0LoadFaultRecord = Wire(new FirstFaultRecord(config))
+  m0LoadFaultRecord.robTag := io.loadFault.bits.robTag
+  m0LoadFaultRecord.cause := 5.U // load access fault
+  m0LoadFaultRecord.trapValue := io.loadFault.bits.trapValue
+  val m1LoadFaultRecord = Wire(new FirstFaultRecord(config))
+  m1LoadFaultRecord.robTag := io.loadFault.bits.robTag
+  m1LoadFaultRecord.cause := 5.U // load access fault
+  m1LoadFaultRecord.trapValue := io.loadFault.bits.trapValue
+
+  val m0IngressAge = ROBTagOrder.ageFromHead(io.fault(0).bits.robTag,
+    io.robHeadTag, config)
+  val m0LoadAge = ROBTagOrder.ageFromHead(io.loadFault.bits.robTag,
+    io.robHeadTag, config)
+  val m0SelectIngress = io.fault(0).valid &&
+    (!m0LoadFault || m0IngressAge <= m0LoadAge)
+  m0Buffer.io.fault.valid := io.fault(0).valid || m0LoadFault
+  m0Buffer.io.fault.bits := Mux(m0SelectIngress, io.fault(0).bits,
+    m0LoadFaultRecord)
+  io.fault(0).ready := m0SelectIngress && m0Buffer.io.fault.ready
+
+  val m1IngressAge = ROBTagOrder.ageFromHead(io.fault(1).bits.robTag,
+    io.robHeadTag, config)
+  val m1LoadAge = ROBTagOrder.ageFromHead(io.loadFault.bits.robTag,
+    io.robHeadTag, config)
+  val m1SelectIngress = io.fault(1).valid &&
+    (!m1LoadFault || m1IngressAge <= m1LoadAge)
+  m1Buffer.io.fault.valid := io.fault(1).valid || m1LoadFault
+  m1Buffer.io.fault.bits := Mux(m1SelectIngress, io.fault(1).bits,
+    m1LoadFaultRecord)
+  io.fault(1).ready := m1SelectIngress && m1Buffer.io.fault.ready
+  io.loadFault.ready := Mux(io.loadFault.bits.m1Owner,
+    m1LoadFault && !m1SelectIngress && m1Buffer.io.fault.ready,
+    m0LoadFault && !m0SelectIngress && m0Buffer.io.fault.ready)
+
+  for ((buffer, lane) <- Seq((m0Buffer, 0), (m1Buffer, 1))) {
+    io.faultAccepted(lane).valid := buffer.io.fault.fire
+    io.faultAccepted(lane).record := buffer.io.fault.bits
   }
 
   io.m0Completion <> m0Buffer.io.completion
