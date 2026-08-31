@@ -58,6 +58,11 @@ E0 完成结果写入 FirstFaultRecord。
 结果仍须用 ROB generation/tag 检查后才能写 PRF。非法指令不允许产生 GPR、CSR、
 memory 或 control side effect。
 
+E0 实际使用专用一项两阶段 result slot：branch 先发 BDB resolve，再发 completion；
+其余当前支持的 integer uop 直接进入 completion 阶段。E1 使用普通一项
+`CompletionBuffer`。两者都按 resolving tag 做 selective squash；E0 branch 自身等于
+boundary，必须保留到 rollback 结束后完成。
+
 ## 验证映射
 
 - 每条 RV32I/Zicsr/Zifencei 指令至少一个合法 directed vector。
