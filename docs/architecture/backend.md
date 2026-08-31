@@ -1,6 +1,6 @@
 # 后端架构文档
 
-这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename、[IntIQ→E0/E1→completion 整数执行闭环](integer-execution-backend.md)、`FirstFaultTracker`、[BDB 与 lossless recovery 闭环](branch-recovery.md)、M-mode CSR 状态与 [commit controller](commit-control.md)。其中 dispatch、rename、整数执行、BDB recovery 和 FirstFault 已形成[组合后端](integer-dispatch-recovery-backend.md)；提交/CSR、E0 system side effect 和前端尚未接成可执行顶层。
+这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename、[IntIQ→E0/E1→completion 整数执行闭环](integer-execution-backend.md)、`FirstFaultTracker`、[BDB 与 lossless recovery 闭环](branch-recovery.md)、M-mode CSR 状态与 [commit controller](commit-control.md)。dispatch、rename、整数执行、BDB recovery 和 FirstFault 已形成[组合后端](integer-dispatch-recovery-backend.md)，提交仲裁、CSR state 和单端口 BDB retirement 已形成 [Commit/CSR 组合](commit-csr-subsystem.md)；两个组合域、E0 system side effect 和前端尚未接成可执行顶层。
 
 <!-- 图：后端模块关系和数据通路 -->
 <!-- ![后端模块关系和数据通路](./assets/backend-overview.svg) -->

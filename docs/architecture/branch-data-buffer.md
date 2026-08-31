@@ -25,12 +25,14 @@
 - `resolve`: E0 携带 `{index, robTag, actualTaken, actualTarget}`；`resolution` 采用
   ready/valid，可被恢复控制器回压。只有两个接口同拍握手后才写 actual 字段并改变
   BDB 状态；输出包含 mispredict、history、RAS checkpoint/action 和最终 redirect target。
-- `commit`: commit controller 携带 `{index, robTag}`；读取完整 training record，并只清 valid 位。
+- `commit`: commit controller 携带 `{index, robTag}`；读取完整 training record，并只清 valid 位。commit read 在同拍 `flushAll` 时仍可握手，以保留 lane-1 exception 前已经退休的 older branch training。
 - `flushAll`: trap、MRET、FENCE.I 或其他全局 rollback 清除所有未提交 BDB 项。
 
 端口优先级为 commit read > resolve read。成功握手的 resolve 同时占用 read/write，
 因此阻塞 allocate；被回压的 resolve 只保持组合读结果，仍允许向其他 free entry 做一次
-allocate write。commit 只读 data 并清 valid bit，可与一次 allocate write 并行。
+allocate write。commit 只读 data 并清 valid bit，可与一次 allocate write 并行；若同拍
+`flushAll`，allocate 和 resolve 被禁止，training 仍由覆盖前 entry 产生，edge 后由 flush
+清空全部 valid。
 free-index 选择把同周期 commit 的槽位视为可用，因此满 BDB 可以一进一出而不产生
 气泡。这个调度在任意周期至多一次 data read、一次 data write。
 

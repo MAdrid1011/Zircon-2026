@@ -231,6 +231,34 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("keeps the retiring prefix visible during a commit-generated flush") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveEnqueue(dut, 0, BigInt("80000000", 16),
+          initiallyComplete = true)
+        driveEnqueue(dut, 1, BigInt("80000004", 16),
+          initiallyComplete = true)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        dut.io.flush.poke(true)
+        dut.io.commit(0).valid.expect(true)
+        dut.io.commit(1).valid.expect(true)
+        dut.io.commit(0).ready.poke(true)
+        dut.io.commit(1).ready.poke(false)
+        dut.io.enqueueCapacity.expect(0)
+        dut.io.completion(0).valid.poke(true)
+        dut.io.completion(0).robTag.poke(1)
+        dut.io.completionAccepted(0).expect(false)
+        dut.clock.step()
+
+        dut.io.flush.poke(false)
+        dut.io.completion(0).valid.poke(false)
+        dut.io.count.expect(0)
+        dut.io.commit.foreach(_.valid.expect(false))
+      }
+    }
+
     it("walks the tail two entries at a time and preserves the resolving prefix") {
       simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)
