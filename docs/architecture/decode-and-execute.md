@@ -3,6 +3,9 @@
 本规格对应 M1 Issue #7。译码器是组合逻辑；它不读取寄存器、不分配 ROB/IQ，
 也不直接产生 trap 或 redirect。非法编码以 `legal=false` 进入精确异常路径。
 
+当前实现：`RV32IDecoder`、`EndpointAdmission` 和无状态 `IntegerExecute` 已有
+directed tests；E0/E1 skid buffer、取数、ROB 写回和 redirect 尚未接入。
+
 ## 接口
 
 | 信号 | 方向 | 宽度 | 语义 |
