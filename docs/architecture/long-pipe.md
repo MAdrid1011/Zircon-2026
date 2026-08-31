@@ -72,5 +72,7 @@ only accepted results write PRF, ready state, or wakeup.
   selective squash, and global flush.
 - LongPipe tests cover signed/unsigned product halves, div/rem corner cases, variable
   latency, response backpressure, stale discard, and both kill modes.
-- Integration tests cover E1-to-E2 and E2-to-E1 RAW, two-wide commit, E0/E1/E2
-  completion arbitration, and branch recovery while division is active.
+- Integration tests cover E1-to-E2 and E2-to-E1 RAW, an observed E0/E1/E2
+  three-start followed by recovery kill, simultaneous E1/E2 completion with dual
+  retirement, and four explicit-seed AXI AR/R backpressure recovery runs. The
+  test-only observation port is absent from the default production configuration.

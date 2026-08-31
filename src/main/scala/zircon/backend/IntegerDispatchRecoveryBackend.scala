@@ -67,6 +67,10 @@ class IntegerDispatchRecoveryBackend(
     val intCount = Output(UInt(intCountWidth.W))
     val branchDataCount = Output(UInt(
       log2Ceil(config.branchDataEntries + 1).W))
+    val e0Start = Output(Bool())
+    val e1Start = Output(Bool())
+    val e1Completion = Output(Bool())
+    val e2Completion = Output(Bool())
   })
 
   val dispatch = Module(new BackendDispatch(config))
@@ -171,6 +175,10 @@ class IntegerDispatchRecoveryBackend(
   io.robCount := execution.io.robCount
   io.intCount := execution.io.intCount
   io.branchDataCount := recovery.io.count
+  io.e0Start := execution.io.e0Start
+  io.e1Start := execution.io.e1Start
+  io.e1Completion := execution.io.e1Completion
+  io.e2Completion := execution.io.e2Completion
 
   when(io.globalFlush) {
     assert(!dispatch.io.acceptedCount.orR,

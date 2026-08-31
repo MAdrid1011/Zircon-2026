@@ -107,4 +107,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     formatter.io.currentFflags := backend.io.currentFflags
     trace := formatter.io.events
   }
+
+  io.m2Observation.foreach { observation =>
+    observation.e0Start := backend.io.e0Start
+    observation.e1Start := backend.io.e1Start
+    observation.e2Start := longPipe.io.input.fire
+    observation.e1Completion := backend.io.e1Completion
+    observation.e2Completion := backend.io.e2Completion
+  }
 }

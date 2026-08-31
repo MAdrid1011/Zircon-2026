@@ -73,6 +73,10 @@ class M1BackendSubsystem(
     val branchDataCount = Output(UInt(
       log2Ceil(config.branchDataEntries + 1).W))
     val recoveryActive = Output(Bool())
+    val e0Start = Output(Bool())
+    val e1Start = Output(Bool())
+    val e1Completion = Output(Bool())
+    val e2Completion = Output(Bool())
   })
 
   val backend = Module(new IntegerDispatchRecoveryBackend(config))
@@ -142,6 +146,10 @@ class M1BackendSubsystem(
   io.intCount := backend.io.intCount
   io.branchDataCount := backend.io.branchDataCount
   io.recoveryActive := backend.io.recoveryActive
+  io.e0Start := backend.io.e0Start
+  io.e1Start := backend.io.e1Start
+  io.e1Completion := backend.io.e1Completion
+  io.e2Completion := backend.io.e2Completion
 
   when(commit.io.globalFlush) {
     assert(!backend.io.frontendRecovery.valid,

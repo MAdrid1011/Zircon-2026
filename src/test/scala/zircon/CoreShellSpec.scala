@@ -1,12 +1,16 @@
 package zircon
 
 import chisel3.simulator.scalatest.ChiselSim
+import java.nio.file.{Files, Paths}
 import org.scalatest.funspec.AnyFunSpec
+import scala.util.Random
 import zircon.core.ZirconCore
 
 class CoreShellSpec extends AnyFunSpec with ChiselSim {
   private val ResetVector = BigInt("80000000", 16)
   private val Nop = BigInt("00000013", 16)
+  private val M2RecoveryBackpressureSeeds = Seq(0x5eedL, 0x5eed1001L,
+    0x5eed2002L, 0x5eed3003L)
 
   private case class TraceSample(
       order: BigInt,
@@ -67,7 +71,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       cycles: Int = 128,
       driveInterrupts: (ZirconCore, Seq[TraceSample]) => Unit = (_, _) => (),
       arReadyForCycle: Int => Boolean = _ => true,
-      rValidForCycle: Int => Boolean = _ => true
+      rValidForCycle: Int => Boolean = _ => true,
+      observeCycle: (ZirconCore, Int) => Unit = (_, _) => ()
   ): Seq[TraceSample] = {
     val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, Boolean)]
     val events = scala.collection.mutable.ArrayBuffer.empty[TraceSample]
@@ -114,6 +119,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val arBeats = dut.io.axi.ar.bits.len.peek().litValue.toInt + 1
       val rFire = rOffered && dut.io.axi.r.ready.peek().litToBoolean
 
+      observeCycle(dut, cycle)
       dut.clock.step()
 
       if (rFire) {
@@ -138,6 +144,34 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     assert(trapIndices.size >= count,
       s"the program did not reach expected trap number $count")
     events.take(trapIndices(count - 1) + 1)
+  }
+
+  private def seededBackpressure(seed: Long, cycles: Int):
+      (IndexedSeq[Boolean], IndexedSeq[Boolean]) = {
+    val random = new Random(seed)
+    val arReady = Vector.tabulate(cycles) { cycle =>
+      cycle % 7 == 0 || random.nextInt(100) < 70
+    }
+    val rValid = Vector.tabulate(cycles) { cycle =>
+      cycle % 5 == 0 || random.nextInt(100) < 65
+    }
+    (arReady, rValid)
+  }
+
+  private def saveM2RecoveryFailure(
+      seed: Long,
+      arReady: IndexedSeq[Boolean],
+      rValid: IndexedSeq[Boolean],
+      events: Seq[TraceSample]
+  ): Unit = {
+    val directory = Paths.get("target", "zircon-failures")
+    Files.createDirectories(directory)
+    val evidence =
+      s"seed=$seed\n" +
+        s"ar_ready=${arReady.map(value => if (value) '1' else '0').mkString}\n" +
+        s"r_valid=${rValid.map(value => if (value) '1' else '0').mkString}\n" +
+        events.mkString("retire_trace=\n", "\n", "\n")
+    Files.writeString(directory.resolve(s"m2-recovery-backpressure-$seed.txt"), evidence)
   }
 
   describe("ZirconCore executable M1/M2 integration") {
@@ -192,10 +226,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("removes the trace port from a trace-disabled configuration") {
+    it("removes trace and M2 observation ports from the production configuration") {
       simulate(new ZirconCore(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)
         assert(dut.io.trace.isEmpty)
+        assert(dut.io.m2Observation.isEmpty)
       }
     }
 
@@ -466,6 +501,134 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         assert(events(3).gprWrite && events(3).gprAddress == 4 &&
           events(3).gprData == 41)
         assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("starts E0, E1, and E2 together then kills younger work on recovery") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        var observedThreeStarts = false
+        val startMasks = scala.collection.mutable.ArrayBuffer.empty[(Int, Boolean, Boolean, Boolean)]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("00700093", 16), // addi x1,x0,7
+          ResetVector + 4 -> BigInt("00300113", 16), // addi x2,x0,3
+          ResetVector + 8 -> BigInt("0220c1b3", 16), // div x3,x1,x2
+          ResetVector + 12 -> BigInt("00318663", 16), // beq x3,x3,+12
+          ResetVector + 16 -> BigInt("00118213", 16), // wrong-path addi x4,x3,1
+          ResetVector + 20 -> BigInt("022182b3", 16), // wrong-path mul x5,x3,x2
+          ResetVector + 24 -> BigInt("00218313", 16), // addi x6,x3,2
+          ResetVector + 28 -> BigInt("00100073", 16) // ebreak
+        ), cycles = 192, observeCycle = (core, cycle) => {
+          val observation = core.io.m2Observation.get
+          val e0Start = observation.e0Start.peek().litToBoolean
+          val e1Start = observation.e1Start.peek().litToBoolean
+          val e2Start = observation.e2Start.peek().litToBoolean
+          if (e0Start || e1Start || e2Start) {
+            startMasks += ((cycle, e0Start, e1Start, e2Start))
+          }
+          observedThreeStarts ||= e0Start && e1Start && e2Start
+        }))
+
+        assert(observedThreeStarts,
+          s"the frozen E0/E1/E2 three-start contract was not observed: $startMasks")
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+          ResetVector + 8, ResetVector + 12, ResetVector + 24, ResetVector + 28))
+        assert(events(4).gprWrite && events(4).gprAddress == 6 &&
+          events(4).gprData == 4)
+        assert(!events.exists(_.instruction == BigInt("00118213", 16)))
+        assert(!events.exists(_.instruction == BigInt("022182b3", 16)))
+      }
+    }
+
+    it("accepts simultaneous E1/E2 completions and retires their ordered pair") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        var observedTwoCompletions = false
+        var observedDualRetirement = false
+        val completionMasks = scala.collection.mutable.ArrayBuffer.empty[(Int, Boolean, Boolean)]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("00500093", 16), // addi x1,x0,5
+          ResetVector + 4 -> BigInt("00600113", 16), // addi x2,x0,6
+          ResetVector + 8 -> BigInt("0220c1b3", 16), // div x3,x1,x2
+          ResetVector + 12 -> BigInt("00118213", 16), // addi x4,x3,1
+          ResetVector + 16 -> BigInt("022182b3", 16), // mul x5,x3,x2
+          ResetVector + 20 -> BigInt("00120313", 16), // addi x6,x4,1
+          ResetVector + 24 -> BigInt("00100073", 16) // ebreak
+        ), cycles = 160, observeCycle = (core, cycle) => {
+          val observation = core.io.m2Observation.get
+          val e1Completion = observation.e1Completion.peek().litToBoolean
+          val e2Completion = observation.e2Completion.peek().litToBoolean
+          if (e1Completion || e2Completion) {
+            completionMasks += ((cycle, e1Completion, e2Completion))
+          }
+          observedTwoCompletions ||= e1Completion && e2Completion
+          observedDualRetirement ||= core.io.trace.get(0).valid.peek().litToBoolean &&
+            core.io.trace.get(1).valid.peek().litToBoolean
+        }))
+
+        assert(observedTwoCompletions,
+          s"E1 and E2 never used the two completion ports in the same cycle: $completionMasks")
+        assert(observedDualRetirement,
+          "the contiguous E2/E1 pair did not retire through both commit lanes")
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+          ResetVector + 8, ResetVector + 12, ResetVector + 16, ResetVector + 20,
+          ResetVector + 24))
+        assert(events(2).gprWrite && events(2).gprAddress == 3 &&
+          events(2).gprData == 0)
+        assert(events(3).gprWrite && events(3).gprAddress == 4 &&
+          events(3).gprData == 1)
+        assert(events(4).gprWrite && events(4).gprAddress == 5 &&
+          events(4).gprData == 0)
+        assert(events(5).gprWrite && events(5).gprAddress == 6 &&
+          events(5).gprData == 2)
+      }
+    }
+
+    it("preserves RV32M recovery under explicitly seeded AXI backpressure") {
+      for (seed <- M2RecoveryBackpressureSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 384
+          val (arReady, rValid) = seededBackpressure(seed, cycles)
+          var observedThreeStarts = false
+          val events = runProgram(dut, Map(
+            ResetVector -> BigInt("00700093", 16), // addi x1,x0,7
+            ResetVector + 4 -> BigInt("00300113", 16), // addi x2,x0,3
+            ResetVector + 8 -> BigInt("0220c1b3", 16), // div x3,x1,x2
+            ResetVector + 12 -> BigInt("00318663", 16), // beq x3,x3,+12
+            ResetVector + 16 -> BigInt("00118213", 16), // wrong-path addi x4,x3,1
+            ResetVector + 20 -> BigInt("022182b3", 16), // wrong-path mul x5,x3,x2
+            ResetVector + 24 -> BigInt("00218313", 16), // addi x6,x3,2
+            ResetVector + 28 -> BigInt("00100073", 16) // ebreak
+          ), cycles = cycles, arReadyForCycle = cycle => arReady(cycle),
+            rValidForCycle = cycle => rValid(cycle),
+            observeCycle = (core, _) => {
+              val observation = core.io.m2Observation.get
+              observedThreeStarts ||= observation.e0Start.peek().litToBoolean &&
+                observation.e1Start.peek().litToBoolean &&
+                observation.e2Start.peek().litToBoolean
+            })
+
+          try {
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=$seed") {
+              assert(observedThreeStarts)
+              assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12, ResetVector + 24, ResetVector + 28))
+              assert(retired(4).gprWrite && retired(4).gprAddress == 6 &&
+                retired(4).gprData == 4)
+              assert(!retired.exists(_.instruction == BigInt("00118213", 16)))
+              assert(!retired.exists(_.instruction == BigInt("022182b3", 16)))
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM2RecoveryFailure(seed, arReady, rValid, events)
+              throw failure
+          }
+        }
       }
     }
 

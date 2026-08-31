@@ -10,7 +10,8 @@ bounded Spike retire-prefix 闭环；M2 已部分接入 RV32M E2 LongIQ/LongPipe
 directed 和 17-event Spike prefix 验证。它仍远未达到最终验收：双 LSU、非阻塞 Cache、A/F、
 miniTAGE、完整中断矩阵、完整差分/形式化/coverage、性能和最终静态面积闭环均未完成。
 
-当前续作是完成 M2 剩余 pressure/Sail/IPC 证据，然后进入 M3 memory path。详细当前
+当前续作是完成 M2 剩余 Sail/IPC 证据，然后进入 M3 memory path。M2 的三启动、双完成和
+显式 seed 的 recovery/AXI backpressure 现已在本地 directed regression 覆盖。详细当前
 证据以 `docs/STATUS.md`、`docs/verification/plan.md` 和相关子模块 PR 为准；本手册中
 第 6 节保留的 M1 顺序为已完成的历史闭环，不应重复实现。
 
@@ -241,7 +242,9 @@ FPR 为 32×32 bit、2R1W，不做浮点重命名。scoreboard 阻塞 FPR RAW/WA
 M1 的 AXI transport、frontend、precise trace、top-level integration、ZirconSim
 deterministic ELF/AXI harness 和 bounded Spike commit-prefix 已完成。后续 `tohost`
 store 仍因没有 LSU 合法阻塞，不能称为 ELF pass。M2 已实现 E2 RV32M，并在 ZirconSim
-子模块 commit `92923a7`（PR #6）以 seed 1 与锁定 Spike 匹配 17 条 M retirement。
+子模块 commit `92923a7`（PR #6）以 seed 1 与锁定 Spike 匹配 17 条 M retirement；父仓
+`CoreShellSpec` 还观测 E0/E1/E2 同周期启动后的 recovery kill、E1/E2 双 completion 和
+4 个显式 seed 的 AXI AR/R backpressure recovery。
 
 ### 6.2 M1 历史续作顺序（已完成）
 

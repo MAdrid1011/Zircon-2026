@@ -45,6 +45,7 @@ final case class ZirconCoreConfig(
     resetVector: BigInt = BigInt("80000000", 16),
     hartId: Int = 0,
     enableTrace: Boolean = false,
+    enableM2Observation: Boolean = false,
     fetchWidth: Int = 4,
     decodeWidth: Int = 2,
     commitWidth: Int = 2,
