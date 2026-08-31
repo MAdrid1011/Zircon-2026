@@ -93,13 +93,8 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val entryData = Reg(Vec(entries, new BranchDataEntry(config)))
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
 
-  private def ageFromHead(tag: UInt): UInt = {
-    val headIndex = io.robHeadTag(config.robIndexWidth - 1, 0)
-    val index = tag(config.robIndexWidth - 1, 0)
-    Mux(index >= headIndex,
-      index - headIndex,
-      index + config.robEntries.U - headIndex)
-  }
+  private def ageFromHead(tag: UInt): UInt =
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
 
   val commitIndex = io.commit.bits.index
   val resolveIndex = io.resolve.bits.reference.index
@@ -182,9 +177,12 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
       entryData(resolveIndex).actualTarget := io.resolve.bits.actualTarget
 
       when(resolveMispredict) {
-        val resolvingAge = ageFromHead(io.resolve.bits.reference.robTag)
         for (entry <- 0 until entries) {
-          when(entryValid(entry) && ageFromHead(entryData(entry).robTag) > resolvingAge) {
+          when(entryValid(entry) && ROBTagOrder.isYounger(
+            entryData(entry).robTag,
+            io.resolve.bits.reference.robTag,
+            io.robHeadTag,
+            config)) {
             entryValid(entry) := false.B
           }
         }

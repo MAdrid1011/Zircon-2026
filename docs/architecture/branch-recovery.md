@@ -65,8 +65,10 @@ IntIQ、BDB 和 FirstFaultRecord 以当前 ROB head 为原点计算 modulo-24 ag
 buffer 对年轻 tag 执行同一 kill；较老结果保持 backpressure，rollback 结束后继续
 写回。LongPipe/LSU 内部 operation 必须接收 kill，已进入 AXI 的事务转为后台 drain。
 
-当前实现分两步进入：先实现 ROB walker、per-slot generation 和 Rename undo；随后接入
-IQ/FirstFault/completion selective kill 后，才能把 E0 redirect 连到顶层。
+ROB walker、per-slot generation、Rename undo、IntIQ、FirstFault 和 completion buffer
+selective squash 已有局部实现与 directed tests。下一步必须给持有 in-flight uop 的
+endpoint/LongPipe/LSU 接入同一 kill，并完成 E0/BDB/前端/dispatch 顶层握手；在此之前
+仍不能把局部模块宣称为可运行 M1 core。
 
 ## 不变量、计数器与验证
 

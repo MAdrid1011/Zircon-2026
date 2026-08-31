@@ -33,9 +33,10 @@ tag，使已 kill 的 completion 不能命中新 stream 的同一 index。
 当前 ROB head 到候选 index 的 modulo-24 距离计算；最小距离是最老 fault。这比每个
 候选和 ROB entry 保存绝对 order 更小，并在 head 移动时保持正确。
 
-FirstFaultRecord 只在下列事件清除：fault 位于 head 且由 commit/trap controller
-消费，或包含该 fault 的 instruction stream 被 flush。exception priority 先在每条
-指令内部解析，再把最多两个已经唯一化的候选送入 tracker。
+FirstFaultRecord 在 fault 位于 head 且由 commit/trap controller 消费、global flush，
+或 branch-selective squash 证明该 fault 比 resolving branch 更年轻时清除。squash
+同周期到达的新 fault candidate 也先按相同年龄规则过滤；较老 fault 保留。exception
+priority 先在每条指令内部解析，再把最多两个已经唯一化的候选送入 tracker。
 
 ## 必须断言
 
@@ -45,3 +46,4 @@ FirstFaultRecord 只在下列事件清除：fault 位于 head 且由 commit/trap
 - 不匹配 generation 的 completion 不修改 entry。
 - commit PC/instruction/tag 在 backpressure 下稳定。
 - FirstFaultRecord 始终选择相对 head 最老的有效候选。
+- selective squash 后 IQ、completion buffer 和 FirstFaultRecord 不保留年轻 tag。
