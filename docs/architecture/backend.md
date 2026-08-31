@@ -1,11 +1,11 @@
 # 后端架构文档
 
-这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename/PRF/ready table、ROB、IntIQ、endpoint completion buffer、双 completion arbiter、`FirstFaultTracker`、M-mode CSR 状态与 [commit controller](commit-control.md)；operand read 和 [Branch Data Buffer](branch-data-buffer.md) 尚未接入顶层。
+这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename/PRF/ready table、ROB、IntIQ、endpoint completion buffer、双 completion arbiter、ROB disposition/整数写回路由、`FirstFaultTracker`、M-mode CSR 状态与 [commit controller](commit-control.md)；这些局部模块尚未组合成可执行顶层。
 
 <!-- 图：后端模块关系和数据通路 -->
 <!-- ![后端模块关系和数据通路](./assets/backend-overview.svg) -->
 
-译码结果写入 ROB，dispatch 只向 IQ 发送紧凑 `UopRef`。IntIQ 选择 E0/E1，LongIQ 选择 E2，MemIQ 选择 M0/M1；全局启动仲裁每周期选择最多三项。完成结果先进入各端点 buffer，再由两个 completion port 写 PRF/ROB。commit 按 ROB 年龄每周期退休最多两项，更新 architectural map、CSR/FPR 和提交级预测状态。
+译码结果写入 ROB，dispatch 只向 IQ 发送紧凑 `UopRef`。IntIQ 选择 E0/E1，LongIQ 选择 E2，MemIQ 选择 M0/M1；全局启动仲裁每周期选择最多三项。完成结果先进入各端点 buffer，再由两个 completion port 请求 ROB disposition；live accepted 结果同拍写 ROB/PRF/ready table/IntIQ wakeup，stale discarded 结果只排空。commit 按 ROB 年龄每周期退休最多两项，更新 architectural map、CSR/FPR 和提交级预测状态。
 
 ## UopRef
 

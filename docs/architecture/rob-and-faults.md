@@ -16,6 +16,12 @@ tag，使已 kill 的 completion 不能命中新 stream 的同一 index。
 和 AXI controller 仍须在 kill 时清空/标记其本地结果；ROB generation 不是允许无限
 延迟陈旧消息的替代品。
 
+ROB 为两个端口分别输出 `completionAccepted` 和 `completionDiscarded`。live match 且
+当前不在 flush/rollback block 时返回 accepted；non-match 且未 block 时返回 discarded；
+block 时两者都为零。writeback router 只对 accepted 产生 PRF/wakeup，对 discarded 仅
+释放 endpoint buffer。这样 stale result 既不能污染新 generation，也不会永久占住完成
+端口。
+
 ## 入队与提交
 
 - lane 1 valid 隐含 lane 0 valid；两条按一个原子 bundle 获得容量。
@@ -56,7 +62,7 @@ priority 先在每条指令内部解析，再把最多两个已经唯一化的�
 - `count <= 24`，且 count 等于 valid entry 数。
 - lane 1 enqueue/commit 不越过 lane 0。
 - completion tag index 合法，同周期两端口 tag 不重复。
-- 不匹配 generation 的 completion 不修改 entry。
+- accepted/discarded 互斥；不匹配 generation 的 completion 只返回 discarded，不修改 entry。
 - commit PC/instruction/tag 在 backpressure 下稳定。
 - execution-context read 只命中 live generation，双端口 tag 不重复。
 - FirstFaultRecord 始终选择相对 head 最老的有效候选。

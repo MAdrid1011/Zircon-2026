@@ -205,6 +205,7 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion(0).robTag.poke(0)
         dut.io.flush.poke(true)
         dut.io.completionAccepted(0).expect(false)
+        dut.io.completionDiscarded(0).expect(false)
         dut.clock.step()
         dut.io.count.expect(0)
 
@@ -218,6 +219,7 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion(0).valid.poke(true)
         dut.io.completion(0).robTag.poke(0)
         dut.io.completionAccepted(0).expect(false)
+        dut.io.completionDiscarded(0).expect(true)
         dut.clock.step()
         dut.io.commit(0).valid.expect(false)
 
@@ -255,8 +257,14 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.rollbackUndo.bits.records(0).robTag.expect(5)
         dut.io.rollbackUndo.bits.records(1).robTag.expect(4)
 
-        // Backpressure must keep the tail bundle and occupancy stable.
+        // Backpressure must keep the tail bundle and occupancy stable. A live
+        // completion is neither accepted nor discarded while rollback blocks.
+        dut.io.completion(0).valid.poke(true)
+        dut.io.completion(0).robTag.poke(0)
+        dut.io.completionAccepted(0).expect(false)
+        dut.io.completionDiscarded(0).expect(false)
         dut.clock.step()
+        dut.io.completion(0).valid.poke(false)
         dut.io.count.expect(6)
         dut.io.rollbackUndo.bits.records(0).robTag.expect(5)
         dut.io.rollbackUndo.ready.poke(true)
@@ -331,6 +339,7 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion(0).valid.poke(true)
         dut.io.completion(0).robTag.poke(1)
         dut.io.completionAccepted(0).expect(false)
+        dut.io.completionDiscarded(0).expect(true)
         dut.clock.step()
         dut.io.completion(0).robTag.poke(33)
         dut.io.completionAccepted(0).expect(true)
