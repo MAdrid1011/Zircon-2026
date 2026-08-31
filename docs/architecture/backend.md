@@ -1,6 +1,6 @@
 # 后端架构文档
 
-这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、integer rename/PRF、ROB、IntIQ、endpoint completion buffer、双 completion arbiter、`FirstFaultTracker` 和 M-mode CSR 状态；operand read、branch checkpoint 和 [commit controller](commit-control.md) 尚未接入顶层。
+这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、integer rename/PRF、ROB、IntIQ、endpoint completion buffer、双 completion arbiter、`FirstFaultTracker`、M-mode CSR 状态与 [commit controller](commit-control.md)；operand read 和 [Branch Data Buffer](branch-data-buffer.md) 尚未接入顶层。
 
 <!-- 图：后端模块关系和数据通路 -->
 <!-- ![后端模块关系和数据通路](./assets/backend-overview.svg) -->
