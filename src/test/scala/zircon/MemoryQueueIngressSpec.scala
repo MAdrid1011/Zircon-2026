@@ -43,6 +43,7 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
       input.bits.address.faultTval.poke(0)
       input.bits.address.aq.poke(false)
       input.bits.address.rl.poke(false)
+      input.bits.m1Owner.poke(false)
     }
     dut.io.loadComplete.valid.poke(false)
     dut.io.loadComplete.bits.robTag.poke(0)
@@ -95,6 +96,7 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
     input.bits.address.faultValid.poke(fault.nonEmpty)
     input.bits.address.faultCause.poke(fault.map(_._1).getOrElse(0))
     input.bits.address.faultTval.poke(fault.map(_._2).getOrElse(BigInt(0)))
+    input.bits.m1Owner.poke(lane == 1)
   }
 
   private def clearRequests(dut: MemoryQueueIngress): Unit =

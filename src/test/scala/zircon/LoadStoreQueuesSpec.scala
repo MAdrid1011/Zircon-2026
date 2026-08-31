@@ -67,6 +67,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     port.bits.unsignedLoad.poke(false)
     port.bits.destinationPhysical.poke(32)
     port.bits.writesInteger.poke(true)
+    port.bits.m1Owner.poke(false)
     port.bits.isAtomic.poke(atomic)
     port.bits.aq.poke(false)
     port.bits.rl.poke(false)

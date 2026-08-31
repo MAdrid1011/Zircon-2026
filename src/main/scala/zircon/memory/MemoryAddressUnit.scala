@@ -50,6 +50,7 @@ class MemoryAddressResult(config: ZirconCoreConfig = ZirconCoreConfig.default) e
 class MemoryLSURequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val request = new MemoryAddressRequest(config)
   val address = new MemoryAddressResult(config)
+  val m1Owner = Bool()
 }
 
 /** Shared RV32I/A effective-address and PMA decoder for the two LSU paths. */

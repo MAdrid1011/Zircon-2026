@@ -3,7 +3,7 @@ package zircon.memory
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.backend.{FaultCandidate, ROBExecutionContext, UopRef}
+import zircon.backend.{CompletionResult, FaultCandidate, ROBExecutionContext, UopRef}
 
 /** Composes the pre-execution ownership path for the two M3 LSU roles.
   *
@@ -28,7 +28,8 @@ class DualLSUIngress(
     val fault = Output(Vec(2, new FaultCandidate(config)))
     val loadForward = Output(Valid(new LoadStoreForward(config)))
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
-    val loadResult = Decoupled(new MemoryLoadResult(config))
+    val m0Completion = Decoupled(new CompletionResult(config))
+    val m1Completion = Decoupled(new CompletionResult(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
     val commitAuthorize = Flipped(Decoupled(UInt(config.robTagWidth.W)))
@@ -50,6 +51,7 @@ class DualLSUIngress(
   val admission = Module(new DualLSUAdmission(config))
   val m0Arbiter = Module(new M0RequestArbiter(config))
   val ingress = Module(new MemoryQueueIngress(config))
+  val loadCompletion = Module(new DualMemoryLoadCompletion(config))
 
   operandRead.io.issue(0).valid := io.m0Issue.valid
   operandRead.io.issue(0).bits := io.m0Issue.bits
@@ -85,9 +87,12 @@ class DualLSUIngress(
   ingress.io.loadComplete.valid := io.loadComplete.valid
   ingress.io.loadComplete.bits := io.loadComplete.bits
   io.loadComplete.ready := ingress.io.loadComplete.ready
-  io.loadResult.valid := ingress.io.loadResult.valid
-  io.loadResult.bits := ingress.io.loadResult.bits
-  ingress.io.loadResult.ready := io.loadResult.ready
+  loadCompletion.io.loadResult <> ingress.io.loadResult
+  loadCompletion.io.robHeadTag := io.robHeadTag
+  loadCompletion.io.squash := io.squash
+  loadCompletion.io.flush := io.flush
+  io.m0Completion <> loadCompletion.io.m0Completion
+  io.m1Completion <> loadCompletion.io.m1Completion
   ingress.io.loadContextRead := io.loadContextRead
   io.loadContext := ingress.io.loadContext
   ingress.io.commitAuthorize.valid := io.commitAuthorize.valid

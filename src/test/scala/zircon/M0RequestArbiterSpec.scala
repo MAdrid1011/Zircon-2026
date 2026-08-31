@@ -43,6 +43,7 @@ class M0RequestArbiterSpec extends AnyFunSpec with ChiselSim {
       input.bits.address.faultTval.poke(0)
       input.bits.address.aq.poke(false)
       input.bits.address.rl.poke(false)
+      input.bits.m1Owner.poke(false)
     }
     dut.io.output.ready.poke(false)
     dut.io.robHeadTag.poke(0)
@@ -62,6 +63,7 @@ class M0RequestArbiterSpec extends AnyFunSpec with ChiselSim {
     input.bits.request.uop.robTag.poke(tag)
     input.bits.address.robTag.poke(tag)
     input.bits.address.address.poke(address)
+    input.bits.m1Owner.poke(replay)
   }
 
   describe("M0RequestArbiter") {

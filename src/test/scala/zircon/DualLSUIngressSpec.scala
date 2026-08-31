@@ -41,7 +41,8 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadComplete.valid.poke(false)
     dut.io.loadComplete.bits.robTag.poke(0)
     dut.io.loadComplete.bits.cacheData.poke(0)
-    dut.io.loadResult.ready.poke(true)
+    dut.io.m0Completion.ready.poke(true)
+    dut.io.m1Completion.ready.poke(true)
     dut.io.loadContextRead.valid.poke(false)
     dut.io.loadContextRead.bits.poke(0)
     dut.io.commitAuthorize.valid.poke(false)
@@ -158,6 +159,29 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
         clearIssues(dut)
         dut.io.loadCount.expect(0)
         dut.io.storeCount.expect(0)
+      }
+    }
+
+    it("routes an M1 response through its own completion buffer") {
+      simulate(new DualLSUIngress) { dut =>
+        clear(dut)
+        driveIssue(dut, m1 = true, tag = 11, IntOperation.Lw, UopClass.Load,
+          EndpointMask.CacheableLoadCandidate, basePhysical = 8)
+        context(dut, lane = 1, tag = 11)
+        dut.io.prfReadData(2).poke(BigInt("80005000", 16))
+        dut.clock.step()
+        clearIssues(dut)
+        dut.clock.step(2)
+        dut.io.loadComplete.valid.poke(true)
+        dut.io.loadComplete.bits.robTag.poke(11)
+        dut.io.loadComplete.bits.cacheData.poke(BigInt("cafebabe", 16))
+        dut.io.loadComplete.ready.expect(true)
+        dut.clock.step()
+        dut.io.loadComplete.valid.poke(false)
+        dut.io.m0Completion.valid.expect(false)
+        dut.io.m1Completion.valid.expect(true)
+        dut.io.m1Completion.bits.robTag.expect(11)
+        dut.io.m1Completion.bits.data.expect(BigInt("cafebabe", 16))
       }
     }
 

@@ -42,16 +42,19 @@ class DualLSUAdmission(
   io.m0Issue.valid := io.m0Input.valid && !recoveryBlocked
   io.m0Issue.bits.request := io.m0Input.bits
   io.m0Issue.bits.address := m0Address.io.result
+  io.m0Issue.bits.m1Owner := false.B
   io.m0Input.ready := io.m0Issue.ready && !recoveryBlocked
 
   val m1Accepted = m1Address.io.result.m1Eligible
   io.m1Issue.valid := io.m1Input.valid && m1Accepted && !recoveryBlocked
   io.m1Issue.bits.request := io.m1Input.bits
   io.m1Issue.bits.address := m1Address.io.result
+  io.m1Issue.bits.m1Owner := true.B
 
   io.m1Replay.valid := replayValid && !recoveryBlocked
   io.m1Replay.bits.request := replayRequest
   io.m1Replay.bits.address := replayAddress.io.result
+  io.m1Replay.bits.m1Owner := false.B
   val replayFree = !replayValid || io.m1Replay.fire
   io.m1Input.ready := !recoveryBlocked && Mux(m1Accepted,
     io.m1Issue.ready, replayFree)

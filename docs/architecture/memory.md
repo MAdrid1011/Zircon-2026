@@ -104,9 +104,13 @@ It retains the two M0/M1 MemIQ inputs, four shared-PRF read signals, two exact
 ROB-context reads, two `FaultCandidate` outputs, and LSQ forwarding/retirement
 interfaces. An eligible cacheable load reaches LQ ownership through M1; a
 device, atomic, or alignment/PMA-rejected candidate follows the replay-to-M0
-path. The composition stops at LSQ ownership and forwarding: no completion,
-Cache, AXI, or irreversible store action is generated here, and it is not yet
-wired to the top-level PRF-port arbiter.
+path. The selected owner bit is retained in the LQ until a later external
+`LoadCompletion` response. `DualMemoryLoadCompletion` then routes that result
+to separate two-entry M0 or M1 completion buffers; backpressure is therefore
+per owner and recovery accepts no new result. This is only the response-to-
+completion ownership boundary: no Cache, AXI, or irreversible store action is
+generated here, and neither buffer is yet wired to the top-level completion
+router or PRF-port arbiter.
 
 ## PMA and precise exceptions
 
@@ -189,8 +193,11 @@ result contains the byte-forwarded word, integer destination/write intent, and
 load width/sign rule. `MemoryLoadCompletion` converts this record to the
 architectural byte/halfword/word value and retains it in one two-entry
 `CompletionBuffer`; a third response backpressures instead of being lost. Its
-output is intentionally not connected to the top-level completion router until
-the separate M0/M1 endpoint ownership and PRF-port integration are complete.
+`m1Owner` is allocated with the LQ record rather than reconstructed from a bus
+response. `DualMemoryLoadCompletion` uses it to select one independent M0 or
+M1 two-entry buffer, so an M0 response cannot consume M1 capacity and vice
+versa. The two outputs are intentionally not connected to the top-level
+completion router until PRF-port integration is complete.
 
 `MemoryQueueIngress` is the first live lifecycle layer above those queues. It
 accepts up to two already address-classified M0/M1 requests, emits an exact
