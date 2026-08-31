@@ -48,6 +48,10 @@ class IntegerExecutionBackend(
       new CommitSideEffect))
     val e0Occupied = Output(Bool())
     val e1Count = Output(UInt(1.W))
+    val e0Start = Output(Bool())
+    val e1Start = Output(Bool())
+    val e1Completion = Output(Bool())
+    val e2Completion = Output(Bool())
 
     val auxReadPhysical = Input(Vec(2, UInt(physicalWidth.W)))
     val auxReadData = Output(Vec(2, UInt(32.W)))
@@ -123,6 +127,10 @@ class IntegerExecutionBackend(
   io.e0Fault := shortPipes.io.e0Fault
   io.e0Occupied := shortPipes.io.e0Occupied
   io.e1Count := shortPipes.io.e1Count
+  io.e0Start := shortPipes.io.e0.fire
+  io.e1Start := shortPipes.io.e1.fire
+  io.e1Completion := shortPipes.io.e1Completion.fire
+  io.e2Completion := io.otherCompletion(0).fire
 
   for (lane <- 0 until config.commitWidth) {
     shortPipes.io.retire(lane).valid := io.commit(lane).fire

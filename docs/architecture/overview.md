@@ -1,6 +1,6 @@
 # Zircon-2026 整体架构设计
 
-Zircon-2026 的目标配置为 `RV32IMAF_Zicsr_Zifencei`、单 hart、M-mode。处理器由 4-wide frontend、2-wide rename/dispatch/commit backend、整数和长延迟执行端点、M0/M1 两条访存流水线、L1I/L1D、共享 L2、PMA、AXI4 master 和提交级验证接口组成。当前 M1 partial 代码已将 [M1Frontend](m1-frontend.md)、dispatch/rename/整数执行/BDB recovery/FirstFault、commit/CSR/BDB retirement 与 AXI read channel 接到 `ZirconCore`，可执行 directed RV32I 指令流；正式 I-Cache、LongPipe、LSU、FPU 和完整数据通路仍未实现。
+Zircon-2026 的目标配置为 `RV32IMAF_Zicsr_Zifencei`、单 hart、M-mode。处理器由 4-wide frontend、2-wide rename/dispatch/commit backend、整数和长延迟执行端点、M0/M1 两条访存流水线、L1I/L1D、共享 L2、PMA、AXI4 master 和提交级验证接口组成。当前 M1/M2 partial 代码已将 [M1Frontend](m1-frontend.md)、dispatch/rename/整数执行/BDB recovery/FirstFault、commit/CSR/BDB retirement、E2 [LongPipe](long-pipe.md) 与 AXI read channel 接到 `ZirconCore`，可执行 directed RV32IM 指令流；正式 I-Cache、LSU、FPU 和完整数据通路仍未实现。
 
 双路资源接纳与路由见 [dispatch](dispatch.md)，execute-time 分支恢复见
 [branch recovery](branch-recovery.md)，当前组合边界见

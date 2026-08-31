@@ -50,6 +50,7 @@ class M1BackendSubsystem(
     val wfiCommit = Output(Bool())
     val frontendRecovery = Output(Valid(
       new BranchResolutionResult(config)))
+    val squash = Output(Valid(UInt(config.robTagWidth.W)))
     val branchTraining = Output(Valid(new BranchTrainingRecord(config)))
 
     val auxReadPhysical = Input(Vec(2, UInt(physicalWidth.W)))
@@ -72,6 +73,10 @@ class M1BackendSubsystem(
     val branchDataCount = Output(UInt(
       log2Ceil(config.branchDataEntries + 1).W))
     val recoveryActive = Output(Bool())
+    val e0Start = Output(Bool())
+    val e1Start = Output(Bool())
+    val e1Completion = Output(Bool())
+    val e2Completion = Output(Bool())
   })
 
   val backend = Module(new IntegerDispatchRecoveryBackend(config))
@@ -127,6 +132,7 @@ class M1BackendSubsystem(
   io.fenceICommit := commit.io.fenceICommit
   io.wfiCommit := commit.io.wfiCommit
   io.frontendRecovery := backend.io.frontendRecovery
+  io.squash := backend.io.squash
   io.branchTraining := backend.io.branchTraining
   io.eligibleInterrupt := commit.io.eligibleInterrupt
   io.mstatusMie := commit.io.mstatusMie
@@ -140,6 +146,10 @@ class M1BackendSubsystem(
   io.intCount := backend.io.intCount
   io.branchDataCount := backend.io.branchDataCount
   io.recoveryActive := backend.io.recoveryActive
+  io.e0Start := backend.io.e0Start
+  io.e1Start := backend.io.e1Start
+  io.e1Completion := backend.io.e1Completion
+  io.e2Completion := backend.io.e2Completion
 
   when(commit.io.globalFlush) {
     assert(!backend.io.frontendRecovery.valid,

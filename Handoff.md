@@ -5,9 +5,16 @@
 
 ## 0. 一句话状态
 
-Zircon-2026 目前约完成总目标的 **20%–25%**：公共接口、部分前端预测积木、整数乱序后端、提交/CSR/精确异常骨架已经形成并有单元测试，但顶层 `ZirconCore` 仍是 AXI 空闲壳，尚不能执行 ELF；双 LSU、非阻塞 Cache、A/F、miniTAGE、完整中断、差分验证、性能和最终静态面积闭环仍未完成。
+Zircon-2026 的 M1 已完成可执行 RV32I/Zicsr directed、确定性 ELF AXI harness 和
+bounded Spike retire-prefix 闭环；M2 已部分接入 RV32M E2 LongIQ/LongPipe，并以本地
+directed 和 17-event Spike prefix 验证。它仍远未达到最终验收：双 LSU、非阻塞 Cache、A/F、
+miniTAGE、完整中断矩阵、完整差分/形式化/coverage、性能和最终静态面积闭环均未完成。
 
-当前正在把已完成的 M1 后端接成第一个可执行 RV32I 核。新加入的 `AXIInstructionFetch` 已通过 `sbt compile`，但尚无定向测试，也尚未接入顶层。
+M2 的受限 deterministic RV32M prefix IPC 对照现已记录；完整 workload/profile IPC 和
+`v0.3-rv32im` release 仍依赖 M3 memory path。当前续作进入 M3。M2 的三启动、双完成和
+显式 seed 的 recovery/AXI backpressure 现已在本地 directed regression 覆盖。详细当前
+证据以 `docs/STATUS.md`、`docs/verification/plan.md` 和相关子模块 PR 为准；本手册中
+第 6 节保留的 M1 顺序为已完成的历史闭环，不应重复实现。
 
 ## 1. 接管仓库：必须使用的分支和命令
 
@@ -217,9 +224,9 @@ FPR 为 32×32 bit、2R1W，不做浮点重命名。scoreboard 阻塞 FPR RAW/WA
 
 详细进度以 [`docs/STATUS.md`](docs/STATUS.md) 为证据索引；规格在 [`docs/architecture`](docs/architecture)，ADR 在 [`docs/decisions`](docs/decisions)，验证总计划在 [`docs/verification/plan.md`](docs/verification/plan.md)。
 
-## 6. 当前 WIP：第一个可执行 M1 核
+## 6. 已完成 M1 与当前 M2
 
-### 6.1 已写但未完成
+### 6.1 M1 已完成闭环
 
 [`src/main/scala/zircon/frontend/AXIInstructionFetch.scala`](src/main/scala/zircon/frontend/AXIInstructionFetch.scala) 是一个临时的单 outstanding AXI instruction-fetch transport，用于在完整 L1I 之前尽快建立可执行 RV32I 顶层。它当前：
 
@@ -228,13 +235,24 @@ FPR 为 32×32 bit、2R1W，不做浮点重命名。scoreboard 阻塞 FPR RAW/WA
 - redirect 后对已经接受的旧 AXI read 做后台 drain；
 - 把非 OKAY/EXOKAY RRESP 转成逐 word instruction access fault；
 - 对未知 ID、错误 RLAST、错误对齐 redirect、跨 4 KiB burst 做断言；
-- 已通过编译，尚未有 test，尚未接入 `ZirconCore`。
+- 已有 normal/4 KiB/backpressure/redirect-drain/RRESP/protocol assertion
+  定向测试，并经 `M1Frontend` 接入 `ZirconCore`。
 
 该 transport 是 M1 执行闭环的过渡实现，M3/M4 的正式 L1I 可替换它，但替换时必须保留已验证的 AXI、redirect/drain、fault 语义。
 
-### 6.2 立即续作顺序
+M1 的 AXI transport、frontend、precise trace、top-level integration、ZirconSim
+deterministic ELF/AXI harness 和 bounded Spike commit-prefix 已完成。后续 `tohost`
+store 仍因没有 LSU 合法阻塞，不能称为 ELF pass。M2 已实现 E2 RV32M，并在 ZirconSim
+子模块 commit `b51863c`（PR #6）以 seed 1 分别与锁定 Spike 和 Sail-RISC-V
+`beaf44991eee362a062fcaaf6fcb78ca428ff710` 匹配 17 条 M retirement，并以同一
+deterministic AXI slave 将该 17-retirement prefix 的 IPC 记录为 0.07234（235 cycles）；
+固定 Zircon-2024 为 0.09140（186 cycles），仅作为 M2 microbenchmark，不能代表 release；父仓
+`CoreShellSpec` 还观测 E0/E1/E2 同周期启动后的 recovery kill、E1/E2 双 completion 和
+4 个显式 seed 的 AXI AR/R backpressure recovery。
 
-严格按以下最短闭环推进，除非测试证明需要先修复基础模块：
+### 6.2 M1 历史续作顺序（已完成）
+
+以下顺序记录已完成的 M1 最短闭环，供后续维护时追溯：
 
 1. 为 `AXIInstructionFetch` 增加定向测试：正常 4 beat、临近 4 KiB 的 1/2/3 beat、AR 长时间 backpressure、AR 接受前/后 redirect、Receive/Present/Drain redirect、RRESP error 的 fault address、未知 ID、早/晚 RLAST。
 2. 修正测试发现的状态机问题；尤其证明“未接受 AR 不会被静默撤回”和“已接受事务一定被完整 drain”。

@@ -7,9 +7,11 @@ composes `IntegerDispatchRecoveryBackend` with `CommitCSRSubsystem` and is the
 first backend boundary in which decoded instructions can execute and make
 architectural state visible without an external commit test driver.
 
-The module is not the final core. Fetch/I-Cache, LongPipe, both LSU pipelines,
-FPR/FPU, frontend redirect arbitration, WFI sleep control, and retire-trace
-formatting remain outside this boundary.
+The module is not the final core. Fetch/I-Cache, both LSU pipelines, FPR/FPU,
+frontend redirect arbitration, WFI sleep control, and retire-trace formatting remain
+outside this boundary. M2 `ZirconCore` connects its exported `longEnqueue`,
+`otherCompletion[0]`, `squash`, PRF-ready, and auxiliary-read interfaces to E2;
+LongPipe remains outside this wrapper so M3/M4 endpoints use the same boundary.
 
 ## Parameters and interfaces
 
