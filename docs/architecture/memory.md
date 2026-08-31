@@ -78,6 +78,14 @@ removes this local speculative state, while selective recovery removes only a
 younger replay. Neither the M1 path nor replay path has a completion, Cache, or
 AXI effect at this stage.
 
+`M0RequestArbiter` is the next ownership boundary after admission. It compares
+the direct M0 and retained M1-replay candidates by ROB age and exposes exactly
+one M0 request. When the downstream LSU backpressures the output, it locks the
+selected source until its handshake; a newly arriving older replay cannot change
+the held valid payload. Recovery suppresses both input ready signals and clears
+the source lock. It neither allocates LSQ state nor creates a completion or
+external effect.
+
 Both LSUs receive their PC/instruction/privilege context from the ROB and produce
 only ready/valid completions or `FaultCandidate`s indexed by their real ROB tag.
 Each endpoint has a two-entry completion buffer. Completion to a stale tag drains
