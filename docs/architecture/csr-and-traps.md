@@ -10,7 +10,7 @@
 |---|---:|---|
 | `fflags/frm/fcsr` | `0x001/0x002/0x003` | `FS=Off` 时访问非法；分别保存 5/3/8 bit，合法写使 `FS` 变为 Dirty |
 | `mstatus` | `0x300` | 保存 `MIE/MPIE/FS`；`MPP` 固定读回 M，`SD` 由 `FS=Dirty` 组合产生，其余位 WPRI |
-| `misa` | `0x301` | 只读固定值，报告 RV32 与 I/M/A/F |
+| `misa` | `0x301` | 固定 WARL 值，报告 RV32 与 I/M/A/F；写访问合法但不能改变该值 |
 | `mie` | `0x304` | 仅保存 `MEIE/MSIE/MTIE` |
 | `mtvec` | `0x305` | BASE 四字节对齐；MODE 仅支持 Direct/Vectored，保留编码归一为 Direct |
 | `mscratch` | `0x340` | 全 32 bit 可写 |
@@ -22,7 +22,7 @@
 | `mvendorid/marchid/mimpid` | `0xf11/0xf12/0xf13` | 只读零，表示尚未分配 JEDEC vendor/architecture/implementation ID |
 | `mhartid` | `0xf14` | 只读 `ZirconCoreConfig.hartId` |
 
-`misa` 的 MXL 字段固定为 RV32，扩展位只设置 A、F、I、M。未列出的 CSR 地址非法；只读 CSR 的写访问非法。对 `mip` 的写入不报 illegal-instruction，但所有已实现 pending 位保持由外部输入驱动。
+`misa` 的 MXL 字段固定为 RV32，扩展位只设置 A、F、I、M。未列出的 CSR 地址非法；地址编码为只读的 ID CSR 写访问非法。对 `misa` 或 `mip` 的写入不报 illegal-instruction，但固定 ISA 字段和所有已实现 pending 位均保持不变。
 
 ## 接口
 
@@ -39,7 +39,7 @@
 
 ## 提交与状态优先级
 
-CSR 和 system 指令在 M1 采用面积优先的提交序列化：它们只能独占发生架构副作用的提交周期，因而一个周期最多有一项 `commitWrite`、`trapCommit` 或 `mretCommit`。普通双退休仍可把 `retiredInstructions` 设为 0、1 或 2。
+CSR 和 system 指令在 M1 采用面积优先的提交序列化：它们只能独占发生架构副作用的提交周期，因而一个周期最多有一项 `commitWrite`、`trapCommit` 或 `mretCommit`。`commitWrite` 不与 F 指令的 `fpCommit` 同周期发生；普通双退休仍可把 `retiredInstructions` 设为 0、1 或 2。中断可以在普通指令退休后的同一边界产生 `trapCommit`，因此允许该事件与已退休 F 指令的 `fpCommit` 同周期生效。
 
 每周期先进行普通计数器递增；对 `mcycle[h]` 或 `minstret[h]` 的显式 CSR 写覆盖同周期对应 counter 的自动增量。提交控制器负责在写 `minstret[h]` 的周期传入已经按架构顺序调整的 retire count。
 
