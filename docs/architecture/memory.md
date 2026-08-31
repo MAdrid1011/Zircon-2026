@@ -67,6 +67,17 @@ with an unknown address, and an available LQ/cache resource. A failed admission
 does not complete: it replays to M0. M0 handles every store, LR/SC, AMO, device
 access, M1 replay, PMA access failure, and any load M1 cannot accept.
 
+### Current dual-LSU admission boundary
+
+`DualLSUAdmission` now applies that M1 rule before either LSU can own a request.
+It sends only `MemoryAddressUnit.m1Eligible` normal loads to M1. A device,
+misaligned, inaccessible, atomic, or otherwise ineligible M1 candidate enters a
+one-entry replay owner with stable payload and exact tag; its explicit M0 replay
+output is what the later M0/direct-input arbiter must consume. Global flush
+removes this local speculative state, while selective recovery removes only a
+younger replay. Neither the M1 path nor replay path has a completion, Cache, or
+AXI effect at this stage.
+
 Both LSUs receive their PC/instruction/privilege context from the ROB and produce
 only ready/valid completions or `FaultCandidate`s indexed by their real ROB tag.
 Each endpoint has a two-entry completion buffer. Completion to a stale tag drains

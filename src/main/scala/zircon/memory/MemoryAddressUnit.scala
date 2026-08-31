@@ -44,6 +44,14 @@ class MemoryAddressResult(config: ZirconCoreConfig = ZirconCoreConfig.default) e
   val rl = Bool()
 }
 
+/** An address-classified LSU request. It is valid only while one LSU owns the
+  * request; no completion or external effect is implied by this record.
+  */
+class MemoryLSURequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val request = new MemoryAddressRequest(config)
+  val address = new MemoryAddressResult(config)
+}
+
 /** Shared RV32I/A effective-address and PMA decoder for the two LSU paths. */
 class MemoryAddressUnit(
     config: ZirconCoreConfig = ZirconCoreConfig.default
