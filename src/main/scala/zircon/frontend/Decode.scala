@@ -253,11 +253,13 @@ class RV32IDecoder extends Module {
       }
     }
     is("b0001111".U) { // FENCE / FENCE.I
-      when(funct3 === 0.U && instruction(31, 28) === 0.U &&
-        instruction(19, 15) === 0.U && instruction(11, 7) === 0.U) {
+      when(funct3 === 0.U) {
+        // Base implementations conservatively treat reserved fm/pred/succ
+        // combinations as FENCE and ignore the reserved rs1/rd fields.
         mark(IntOperation.Fence, UopClass.System, EndpointMask.E0)
-      }.elsewhen(funct3 === 1.U && instruction(31, 20) === 0.U &&
-        instruction(19, 15) === 0.U && instruction(11, 7) === 0.U) {
+      }.elsewhen(funct3 === 1.U) {
+        // Zifencei requires implementations to ignore the reserved immediate,
+        // rs1, and rd fields for forward compatibility.
         mark(IntOperation.FenceI, UopClass.System, EndpointMask.E0)
         decoded.isFenceI := true.B
       }

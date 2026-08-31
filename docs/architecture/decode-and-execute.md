@@ -28,7 +28,9 @@ directed tests；E0/E1 skid buffer、取数、ROB 写回和 redirect 尚未接�
 
 M/A/F opcode 在对应里程碑到来前必须译为非法；不能把未知 `funct3/funct7` 当作
 相近整数操作。保留的 shift immediate 高位、JALR 非零 `funct3`、未知 branch/
-load/store width、未知 system immediate 和保留 CSR funct3 都是 illegal。
+load/store width、未知 system immediate 和保留 CSR funct3 都是 illegal。按基础
+ISA 的前向兼容要求，FENCE 的保留 mode/集合以及 FENCE/FENCE.I 的保留 rs1、rd、
+immediate 字段例外：硬件忽略这些字段并执行保守的完整 fence。
 
 ## 立即数
 
@@ -51,3 +53,6 @@ memory 或 control side effect。
 - 立即数最小/最大值、x0、同源、溢出、移位 0/31、signed/unsigned 比较边界。
 - 所有 branch taken/not-taken；JALR bit 0 清除；E1 admission 对 control/system
   操作恒为 false。
+
+参考：[RV32I FENCE](https://docs.riscv.org/reference/isa/unpriv/rv32.html)、
+[Zifencei](https://docs.riscv.org/reference/isa/unpriv/zifencei.html)。

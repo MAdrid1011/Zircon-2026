@@ -144,7 +144,6 @@ class DecoderSpec extends AnyFunSpec with ChiselSim {
           iType(0, 1, 1, 3, 0x67), // JALR funct3 must be zero
           iType(0, 1, 3, 3, 0x03), // reserved load width
           sType(0, 2, 1, 3), // reserved store width
-          BigInt("0010100f", 16), // FENCE.I reserved immediate
           BigInt("00200073", 16), // unknown SYSTEM immediate
           BigInt("00004073", 16) // reserved CSR funct3
         )
@@ -154,6 +153,14 @@ class DecoderSpec extends AnyFunSpec with ChiselSim {
           dut.io.decoded.allowedEndpoints.expect(EndpointMask.None)
           dut.io.decoded.writesRd.expect(false)
         }
+
+        // FENCE and FENCE.I reserved operands are ignored for forward compatibility.
+        dut.io.instruction.poke(BigInt("ffff8f8f", 16))
+        dut.io.decoded.operation.expect(IntOperation.Fence)
+        dut.io.decoded.legal.expect(true)
+        dut.io.instruction.poke(BigInt("fff0908f", 16))
+        dut.io.decoded.operation.expect(IntOperation.FenceI)
+        dut.io.decoded.legal.expect(true)
       }
     }
 
