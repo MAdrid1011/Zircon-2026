@@ -21,6 +21,19 @@ port 1 获得次老项；两端口 ready 独立，一个端口 backpressure 不�
 两个有效输出不得携带相同 ROB tag，也不得写同一非零 integer physical register。
 这些条件违反 rename/issue 的唯一性，必须由 assertion 立即终止仿真。
 
+## ROB disposition 与整数写回
+
+`CompletionWritebackRouter` 把两个仲裁输出逐端口送给 ROB。ROB 对每项返回互斥的
+`accepted` 或 `discarded`：前者表示 tag 命中 live、未完成的 ROB entry；后者表示恢复后
+晚到、generation 不匹配或 entry 已失效的结果。rollback/global block 期间两者均为零，
+端点继续保持 payload，不把暂时阻塞误判为失效。
+
+`accepted` 与 `discarded` 都会令对应 endpoint result fire 并释放本地 buffer；只有
+`accepted && writesInteger` 同拍产生 PRF write 和 IntIQ/ready-table wakeup。非 GPR 写
+指令只置 ROB complete。`discarded` 绝不能写 PRF 或产生 wakeup。这一反馈路径没有
+组合环：arbiter output valid 不依赖 ready，ROB disposition 只依赖 valid/tag/ROB 状态，
+再组合生成 endpoint ready。
+
 ## Flush 与 Selective Squash
 
 global flush 在同周期撤销 buffer 的 in.ready/out.valid，并在时钟边界清空 count；
@@ -45,8 +58,9 @@ registered recovery-active 期间不允许 enqueue 或 completion fire。该状�
 - E0 branch-resolution tag 必须等于其 completion tag。
 - E0/E1 只接收各自 endpoint mask 允许的 RV32I uop；E1 永不执行 control operation。
 - active recovery 期间 E0 不发生 enqueue/completion transfer；global flush 清空本地槽。
+- ROB `accepted`/`discarded` 互斥且只能对应 valid completion；失效结果无 writeback/wakeup。
 - 集成层分别统计 E0 resolve、E0 completion、E1 completion 的 `valid && !ready` 周期；
-  统一仲裁器另统计五端点竞争导致的等待周期。
+  统一仲裁器另统计五端点竞争等待和 ROB stale-discard 次数。
 
 ## 覆盖
 
@@ -55,5 +69,7 @@ registered recovery-active 期间不允许 enqueue 或 completion fire。该状�
   squash、misaligned target FirstFault 和 E0/E1 独立前进。
 - 2 项 buffer 的 FIFO 顺序、full 同周期 pop/push、flush、环形 head 下 selective compact。
 - 五输入少于/等于/多于两项、ROB index wrap、两个输出独立 backpressure。
+- 双 accepted 同拍 PRF/wakeup、port 1 独立前进、non-writing completion、stale drain 无
+  副作用，以及 rollback/global flush 阻塞。
 - 同 ROB tag、同 physical destination 和 out-of-range tag 的断言由 mutation/
   assertion tests 覆盖。

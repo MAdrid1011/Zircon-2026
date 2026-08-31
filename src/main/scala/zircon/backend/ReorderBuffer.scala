@@ -72,6 +72,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     val enqueueTag = Output(Vec(2, Valid(UInt(config.robTagWidth.W))))
     val completion = Input(Vec(2, new ROBCompletion(config)))
     val completionAccepted = Output(Vec(2, Bool()))
+    val completionDiscarded = Output(Vec(2, Bool()))
     val commit = Vec(2, Decoupled(new ROBCommit(config)))
     val flush = Input(Bool())
 
@@ -165,6 +166,8 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
       entryGeneration(safeIndex) === generation
     io.completionAccepted(port) := io.completion(port).valid &&
       completionMatch(port) && !normalBlocked
+    io.completionDiscarded(port) := io.completion(port).valid &&
+      !completionMatch(port) && !normalBlocked
     when(io.completion(port).valid) {
       assert(inRange, "ROB completion tag index out of range")
     }

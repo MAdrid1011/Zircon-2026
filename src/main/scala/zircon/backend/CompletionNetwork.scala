@@ -160,3 +160,68 @@ class UnifiedCompletionArbiter(
       "completion arbiter accepted an input during selective squash")
   }
 }
+
+/** Couples the unified completion ports to ROB disposition and integer writeback.
+  * A live result updates every consumer on the same handshake. A stale result is
+  * drained without architectural or microarchitectural side effects.
+  */
+class CompletionWritebackRouter(
+    config: ZirconCoreConfig = ZirconCoreConfig.default
+) extends Module {
+  private val endpointCount = 5
+  private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
+
+  val io = IO(new Bundle {
+    val endpoints = Flipped(Vec(endpointCount,
+      Decoupled(new CompletionResult(config))))
+    val robCompletion = Output(Vec(2, new ROBCompletion(config)))
+    val robCompletionAccepted = Input(Vec(2, Bool()))
+    val robCompletionDiscarded = Input(Vec(2, Bool()))
+    val prfWrite = Output(Vec(2,
+      Valid(new IntegerPhysicalWrite(physicalWidth))))
+    val wakeup = Output(Vec(2, new PhysicalWakeup(config)))
+    val robHeadTag = Input(UInt(config.robTagWidth.W))
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
+    val flush = Input(Bool())
+  })
+
+  val arbiter = Module(new UnifiedCompletionArbiter(config, endpointCount))
+  arbiter.io.inputs <> io.endpoints
+  arbiter.io.robHeadTag := io.robHeadTag
+  arbiter.io.squash := io.squash
+  arbiter.io.flush := io.flush
+
+  for (port <- 0 until 2) {
+    val result = arbiter.io.outputs(port)
+    val accepted = io.robCompletionAccepted(port)
+    val discarded = io.robCompletionDiscarded(port)
+    val integerWrite = accepted && result.bits.writesInteger
+
+    io.robCompletion(port).valid := result.valid
+    io.robCompletion(port).robTag := result.bits.robTag
+    result.ready := accepted || discarded
+
+    io.prfWrite(port).valid := integerWrite
+    io.prfWrite(port).bits.physical := result.bits.destinationPhysical
+    io.prfWrite(port).bits.data := result.bits.data
+    io.wakeup(port).valid := integerWrite
+    io.wakeup(port).physical := result.bits.destinationPhysical
+
+    assert(!(accepted && discarded),
+      "ROB accepted and discarded the same completion")
+    when(accepted || discarded) {
+      assert(result.valid,
+        "ROB returned a completion disposition without a valid result")
+    }
+    when(integerWrite) {
+      assert(result.bits.destinationPhysical =/= 0.U,
+        "accepted integer completion attempted to write p0")
+      assert(result.bits.destinationPhysical < config.intPhysicalRegisters.U,
+        "accepted integer completion destination out of range")
+    }
+    when(discarded) {
+      assert(!io.prfWrite(port).valid && !io.wakeup(port).valid,
+        "discarded completion produced an integer side effect")
+    }
+  }
+}
