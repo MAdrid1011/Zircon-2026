@@ -31,7 +31,6 @@ class M1BackendSubsystem(
     val otherFault = Input(Vec(3, new FaultCandidate(config)))
 
     val interrupts = Input(new InterruptInputs)
-    val interruptEpc = Input(UInt(32.W))
     val interruptBlocked = Input(Bool())
     val systemSerializingReady = Input(Bool())
     val fpCommit = Input(Valid(new FloatingStateCommit))
@@ -44,6 +43,8 @@ class M1BackendSubsystem(
     val globalFlush = Output(Bool())
     val csrWrite = Output(Valid(new CSRCommitWrite))
     val trapCommit = Output(Valid(new TrapCommit))
+    val trapEntry = Output(Valid(new ROBCommit(config)))
+    val trapLane = Output(UInt(1.W))
     val mretCommit = Output(Bool())
     val fenceICommit = Output(Bool())
     val wfiCommit = Output(Bool())
@@ -65,6 +66,7 @@ class M1BackendSubsystem(
     val acceptedCount = Output(UInt(2.W))
     val renameFreeCount = Output(UInt(
       log2Ceil(config.intPhysicalRegisters + 1).W))
+    val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(log2Ceil(config.robEntries + 1).W))
     val intCount = Output(UInt(log2Ceil(config.intIssueEntries + 1).W))
     val branchDataCount = Output(UInt(
@@ -102,7 +104,7 @@ class M1BackendSubsystem(
   backend.io.systemSerializingReady := io.systemSerializingReady
 
   commit.io.interrupts := io.interrupts
-  commit.io.interruptEpc := io.interruptEpc
+  commit.io.interruptHead := backend.io.robHead
   commit.io.interruptBlocked := io.interruptBlocked
   commit.io.fpCommit := io.fpCommit
   backend.io.globalFlush := commit.io.globalFlush
@@ -119,6 +121,8 @@ class M1BackendSubsystem(
   io.globalFlush := commit.io.globalFlush
   io.csrWrite := commit.io.csrWrite
   io.trapCommit := commit.io.trapCommit
+  io.trapEntry := commit.io.trapEntry
+  io.trapLane := commit.io.trapLane
   io.mretCommit := commit.io.mretCommit
   io.fenceICommit := commit.io.fenceICommit
   io.wfiCommit := commit.io.wfiCommit
@@ -131,6 +135,7 @@ class M1BackendSubsystem(
 
   io.acceptedCount := backend.io.acceptedCount
   io.renameFreeCount := backend.io.renameFreeCount
+  io.robHead := backend.io.robHead
   io.robCount := backend.io.robCount
   io.intCount := backend.io.intCount
   io.branchDataCount := backend.io.branchDataCount

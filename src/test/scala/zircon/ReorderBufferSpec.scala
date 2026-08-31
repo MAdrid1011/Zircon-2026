@@ -79,6 +79,9 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.enqueue.foreach(_.valid.poke(false))
         dut.io.count.expect(2)
+        dut.io.head.valid.expect(true)
+        dut.io.head.bits.robTag.expect(0)
+        dut.io.head.bits.entry.pc.expect(BigInt("80000000", 16))
         dut.io.commit(0).valid.expect(false)
         dut.io.completion(0).valid.poke(true)
         dut.io.completion(0).robTag.poke(0)
@@ -93,6 +96,7 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.commit.foreach(_.ready.poke(true))
         dut.clock.step()
         dut.io.count.expect(0)
+        dut.io.head.valid.expect(false)
       }
     }
 

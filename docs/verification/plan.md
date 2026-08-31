@@ -36,3 +36,20 @@
 - MMIO 相邻合并、强顺序单拍、4 KiB 边界。
 - 两路 fault detection 的最老异常选择。
 - 顶层 M0 shell 的 AXI idle 和两个 invalid retire lane。
+
+## 当前 M1 执行边界
+
+以下 M1 检查已经是 deterministic ChiselSim regression 的一部分；它们不是 ACT4、
+ELF 或 differential 完成声明。
+
+| Contract | Evidence | Remaining release evidence |
+|---|---|---|
+| AXI instruction transport | `AXIInstructionFetchSpec`: 4-beat、1/2/3-beat 4 KiB truncation、AR backpressure、redirect drain、RRESP、ID/RLAST assertion | AXI random stress and formal protocol properties |
+| Frontend redirect/prediction | `M1FrontendSpec`: earliest control, JALR barrier, commit training, commit-over-recovery priority | Core-level branch/JAL/JALR/mispredict programs |
+| Precise commit/trap metadata | `CommitControllerSpec`, `CommitCSRSubsystemSpec`, `ReorderBufferSpec`, `RetireTraceFormatterSpec` | Interrupt timing matrix and external reference comparison |
+| Executable top-level | `CoreShellSpec`: AXI-fed `ADDI -> ADDI -> EBREAK`, trace-disabled elaboration, RRESP fetch fault | Deterministic ELF/AXI harness, ACT4 I/Zicsr subset, Spike then Sail comparison |
+
+The local evidence command is `./scripts/sbtw test`; the current integration
+run completed 39 suites and 172 tests. `make verilog` elaborates the same
+configuration. New randomized tests must declare a seed and persist the ELF,
+trace, tool SHA, and waveform on failure.

@@ -88,6 +88,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     val rollbackDone = Output(Bool())
 
     val headTag = Output(UInt(config.robTagWidth.W))
+    val head = Output(Valid(new ROBCommit(config)))
     val count = Output(UInt(countWidth.W))
     val enqueueCapacity = Output(UInt(2.W))
   })
@@ -119,6 +120,9 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   val secondHeadIndex = advance(headIndex, 1.U)
   val headMatches = entryValid(headIndex)
   val secondHeadMatches = entryValid(secondHeadIndex)
+  io.head.valid := count =/= 0.U && headMatches
+  io.head.bits.robTag := tag(entryGeneration(headIndex), headIndex)
+  io.head.bits.entry := entryData(headIndex)
   // A commit decision may itself generate io.flush (exception after lane 0,
   // MRET, or FENCE.I). Keep completed heads visible during that cycle so the
   // retiring prefix can fire; flush still blocks enqueue, completion, context

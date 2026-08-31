@@ -62,6 +62,7 @@ class IntegerDispatchRecoveryBackend(
 
     val acceptedCount = Output(UInt(2.W))
     val renameFreeCount = Output(UInt(freeCountWidth.W))
+    val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(robCountWidth.W))
     val intCount = Output(UInt(intCountWidth.W))
     val branchDataCount = Output(UInt(
@@ -166,6 +167,7 @@ class IntegerDispatchRecoveryBackend(
   io.firstFault.bits := firstFault.io.record
 
   io.renameFreeCount := rename.io.freeCount
+  io.robHead := execution.io.robHead
   io.robCount := execution.io.robCount
   io.intCount := execution.io.intCount
   io.branchDataCount := recovery.io.count

@@ -48,6 +48,7 @@ class IntegerBackendState(
     val rollbackDone = Output(Bool())
 
     val robHeadTag = Output(UInt(config.robTagWidth.W))
+    val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(robCountWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
@@ -69,6 +70,7 @@ class IntegerBackendState(
   io.rollbackActive := rob.io.rollbackActive
   io.rollbackDone := rob.io.rollbackDone
   io.robHeadTag := rob.io.headTag
+  io.robHead := rob.io.head
   io.robCount := rob.io.count
   rob.io.flush := io.flush
 

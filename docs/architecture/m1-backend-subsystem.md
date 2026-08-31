@@ -22,9 +22,9 @@ entries. The main interfaces are:
 | `input[2]` | input | In-order fetch-queue entries; lane 1 cannot be valid alone |
 | `longEnqueue/memEnqueue` | output | Compact uops for milestone-external E2 and memory queues |
 | `otherCompletion/otherFault` | input | E2, M0, and M1 result/fault placeholders |
-| `interrupts/interruptEpc/interruptBlocked` | input | M-mode interrupt levels and the precise next-PC boundary supplied by future frontend integration |
+| `interrupts/interruptBlocked` | input | M-mode interrupt levels and irrevocable-transaction gate; EPC comes only from the live ROB head |
 | `systemSerializingReady` | input | Old stores/device operations and instruction-side invalidation have completed |
-| `retired/redirect/globalFlush` | output | Architectural retirement and commit-stage control transfer |
+| `retired/trapEntry/trapLane/redirect/globalFlush` | output | Architectural retirement, exact trap metadata, and commit-stage control transfer |
 | `frontendRecovery/branchTraining` | output | Execute-stage mispredict recovery and commit-stage predictor training |
 | maps, PRF auxiliary read, occupancy | debug/performance | Directed-test observation and future performance counter sources |
 

@@ -59,6 +59,7 @@ class IntegerExecutionBackend(
     val rollbackActive = Output(Bool())
     val rollbackDone = Output(Bool())
     val robHeadTag = Output(UInt(config.robTagWidth.W))
+    val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(robCountWidth.W))
 
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
@@ -81,6 +82,7 @@ class IntegerExecutionBackend(
   io.rollbackActive := state.io.rollbackActive
   io.rollbackDone := state.io.rollbackDone
   io.robHeadTag := state.io.robHeadTag
+  io.robHead := state.io.robHead
   io.robCount := state.io.robCount
 
   issue.io.enqueue <> io.intEnqueue

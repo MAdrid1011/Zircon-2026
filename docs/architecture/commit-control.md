@@ -1,6 +1,6 @@
 # 提交控制器
 
-`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)，并通过 [M1 Backend Subsystem](m1-backend-subsystem.md) 接入 E0 CSR/System side effect 与整数后端。完整 `RetireEvent` 格式化、WFI 唤醒状态机和 memory drain 实现仍待接入。
+`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)，并通过 [M1 Backend Subsystem](m1-backend-subsystem.md) 接入 E0 CSR/System side effect 与整数后端。精确 `RetireEvent` 格式化已经在 trace-enabled 顶层接入；WFI 唤醒状态机和 memory drain 实现仍待接入。
 
 ## 参数与接口
 
@@ -8,13 +8,13 @@
 
 - 两条按程序序排列、已经完成的 ROB head `Decoupled[ROBCommit]`；lane 1 valid 隐含 lane 0 valid。
 - 两条 `CommitSideEffect`，保存 CSR 写地址/数据以及 system/fence 的 `serializingReady`。
-- 当前 `FirstFaultRecord`、CSR 选择出的 `EligibleInterrupt`、interrupt EPC 和 `interruptBlocked`。
+- 当前 `FirstFaultRecord`、CSR 选择出的 `EligibleInterrupt`、live `ROBCommit` head 和 `interruptBlocked`。
 - CSR 文件组合产生的 trap vector 与 MRET target。
 
 输出为：
 
 - 两条 ROB ready、正常退休记录、rename commit 和 0–2 的 `retiredInstructions`。
-- 最多一项 CSR write、trap commit 或 MRET commit。
+- 最多一项 CSR write、trap commit 或 MRET commit；trap 的真实 `ROBCommit` 与 lane index。
 - `flush`、带原因的 redirect、`firstFaultClear`、`fenceICommit` 和 `wfiCommit`。
 
 CSR/system 指令只在 lane 0 独占退休；若它出现在 lane 1，本周期只退休 lane 0，使 system 指令下一周期移动到 head。`serializingReady` 对普通指令无意义；对 CSR/system 为零时阻塞其正常退休。MRET、FENCE.I、WFI 和普通 FENCE 的具体排空条件由上游汇总到这一位。
@@ -24,7 +24,7 @@ CSR/system 指令只在 lane 0 独占退休；若它出现在 lane 1，本周期
 提交决定按以下顺序，任一高优先级事件成立后不再执行低优先级分支：
 
 1. **lane 0 同步异常**：不退休 faulting instruction，产生 trap、清除 FirstFaultRecord，并 flush 全部 speculative state。
-2. **可接收 interrupt**：只有 `EligibleInterrupt.valid && !interruptBlocked` 时成立；它发生在下一条未退休指令之前，本周期不退休 ROB 项，`mepc` 使用 `interruptEpc`。lane 1 或更年轻的已知异常不阻止 interrupt；lane 0 已知同步异常仍优先。
+2. **可接收 interrupt**：只有 `EligibleInterrupt.valid && !interruptBlocked && liveHead.valid` 时成立；它发生在 `liveHead` 所指下一条未退休指令之前，本周期不退休 ROB 项，`mepc` 使用该 entry 的 PC。lane 1 或更年轻的已知异常不阻止 interrupt；lane 0 已知同步异常仍优先。
 3. **lane 1 同步异常**：若 lane 0 是普通指令，则同周期退休 lane 0 并对 lane 1 产生 trap；faulting lane 1 不退休。若 lane 0 是 CSR/system，则先独占退休 lane 0，下一周期再处理已经成为 head 的异常。
 4. **正常退休**：普通指令最多两条；CSR/system 最多一条且必须位于 lane 0。
 
