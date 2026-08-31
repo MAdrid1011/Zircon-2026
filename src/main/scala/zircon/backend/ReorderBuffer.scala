@@ -118,13 +118,18 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   val secondHeadIndex = advance(headIndex, 1.U)
   val headMatches = entryValid(headIndex)
   val secondHeadMatches = entryValid(secondHeadIndex)
-  val normalBlocked = io.flush || rollbackActive || io.rollback.valid
+  // A commit decision may itself generate io.flush (exception after lane 0,
+  // MRET, or FENCE.I). Keep completed heads visible during that cycle so the
+  // retiring prefix can fire; flush still blocks enqueue, completion, context
+  // reads, and rollback, then clears all remaining speculative entries.
+  val rollbackBlocked = rollbackActive || io.rollback.valid
+  val normalBlocked = io.flush || rollbackBlocked
 
-  io.commit(0).valid := !normalBlocked && count =/= 0.U &&
+  io.commit(0).valid := !rollbackBlocked && count =/= 0.U &&
     headMatches && entryComplete(headIndex)
   io.commit(0).bits.robTag := tag(entryGeneration(headIndex), headIndex)
   io.commit(0).bits.entry := entryData(headIndex)
-  io.commit(1).valid := !normalBlocked && count > 1.U &&
+  io.commit(1).valid := !rollbackBlocked && count > 1.U &&
     io.commit(0).valid && secondHeadMatches && entryComplete(secondHeadIndex)
   io.commit(1).bits.robTag :=
     tag(entryGeneration(secondHeadIndex), secondHeadIndex)

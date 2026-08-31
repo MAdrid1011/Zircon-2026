@@ -107,7 +107,11 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     resolveEntry.robTag === io.resolve.bits.reference.robTag
 
   // Commit owns the single data read port. Resolve uses both read and write.
-  io.commit.ready := !io.flushAll
+  // A lane-1 exception may retire an older lane-0 branch and flush younger
+  // state on the same edge. The single commit read remains available in that
+  // cycle so predictor training is not lost; the sequential flush still wins
+  // when clearing BDB entries.
+  io.commit.ready := true.B
   val resolveCanProceed = !io.flushAll && !io.commit.valid
   io.resolve.ready := resolveCanProceed && io.resolution.ready
   val commitFire = io.commit.fire

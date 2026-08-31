@@ -1,6 +1,6 @@
 # 提交控制器
 
-`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 局部模块的决定逻辑；完整 `RetireEvent` 格式化、WFI 唤醒状态机和 memory drain 信号在集成 PR 接入。
+`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)。完整 `RetireEvent` 格式化、E0 CSR/System side effect、WFI 唤醒状态机和 memory drain 信号仍待接入。
 
 ## 参数与接口
 
@@ -41,6 +41,11 @@ CSR/system 指令只在 lane 0 独占退休；若它出现在 lane 1，本周期
 ## Flush 与状态更新顺序
 
 lane 1 exception 允许 lane 0 的 GPR rename 和普通架构结果先提交，再 flush faulting lane 及所有年轻指令。ROB 必须使用同周期 ready fire 数计算 `headAfterCommit`，再翻转新 stream generation。lane 0 exception 和 interrupt 的 ROB fire 数为零。
+
+ROB completed head 的 `valid` 不得被 commit controller 同拍产生的 `flush` 反向抑制，
+否则会形成组合环并丢失 MRET/FENCE.I 或 lane-1 exception 前的合法退休。flush 当拍只由
+controller 的 ready 选择实际 fire prefix；enqueue、completion、execution read 和
+rollback 则必须立即阻塞，edge 后清空其余 ROB 状态。
 
 `firstFaultClear` 只在同步异常被消费时置位；interrupt、MRET 和 FENCE.I 通过全局 `flush` 清除 tracker，因此不伪装为异常消费。所有 redirect 都伴随 `flush`。普通 branch redirect 不经过本模块，由 E0 执行恢复路径处理。
 

@@ -1,6 +1,6 @@
 # CSR 与 trap 状态模块
 
-本规格冻结 M1 的 `MachineCSRFile` 和 `CSRInstructionUnit` 契约。它只覆盖单 hart、M-mode、无 MMU/PMP/delegation 的状态与组合语义；ROB 提交仲裁、八周期中断响应计数和流水线 redirect 在后续 commit-controller 模块完成。实现依据为仓库锁定版本对应的 RISC-V Unprivileged ISA 与 Privileged Architecture machine-level 规则。
+本规格冻结 M1 的 `MachineCSRFile` 和 `CSRInstructionUnit` 契约。它只覆盖单 hart、M-mode、无 MMU/PMP/delegation 的状态与组合语义；ROB 提交仲裁和流水线 redirect 已在 [Commit/CSR Subsystem](commit-csr-subsystem.md) 形成组合边界，E0 side effect、八周期中断响应计数和完整后端连接仍待实现。实现依据为仓库锁定版本对应的 RISC-V Unprivileged ISA 与 Privileged Architecture machine-level 规则。
 
 ## 参数与实现集合
 

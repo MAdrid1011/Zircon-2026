@@ -333,17 +333,26 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("clears every outstanding checkpoint on a global flush") {
+    it("trains an older committing branch while globally flushing checkpoints") {
       simulate(new BranchDataBuffer) { dut =>
         clearInputs(dut)
         allocate(dut, 0, BigInt("80000000", 16), expectedIndex = 0)
+        resolve(dut, 0, 0, actualTaken = false,
+          actualTarget = BigInt("80000004", 16), expectedMispredict = false,
+          expectedHistory = 0)
         allocate(dut, 1, BigInt("80000004", 16), expectedIndex = 1)
         dut.io.count.expect(2)
+        dut.io.commit.valid.poke(true)
+        dut.io.commit.bits.index.poke(0)
+        dut.io.commit.bits.robTag.poke(0)
         dut.io.flushAll.poke(true)
         dut.io.allocate.ready.expect(false)
         dut.io.resolve.ready.expect(false)
-        dut.io.commit.ready.expect(false)
+        dut.io.commit.ready.expect(true)
+        dut.io.training.valid.expect(true)
+        dut.io.training.bits.reference.robTag.expect(0)
         dut.clock.step()
+        dut.io.commit.valid.poke(false)
         dut.io.flushAll.poke(false)
         dut.io.count.expect(0)
         allocate(dut, 32, BigInt("80001000", 16), expectedIndex = 0)

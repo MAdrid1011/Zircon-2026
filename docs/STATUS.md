@@ -12,8 +12,8 @@
 | 顶层 AXI4/interrupt/trace 接口 | completed | `AXI4MasterPort`、`InterruptInputs`、`RetireEvent` 可 elaboration | 连接取指、提交与异常响应 |
 | PMA 分类 | completed | Memory/DeviceStrong/DeviceBurstable/空洞单元测试 | 接入 LSU 和 fetch access fault |
 | 有序 MMIO 合并 | partially completed | 4-beat 聚合、4 KiB 边界、强顺序单拍测试 | 接入 ROB/M0、AXI response 和精确提交 |
-| FirstFaultRecord | completed | 记录仅含 `{robTag,cause,tval}`，以 ROB head 的 modulo-24 距离选择最老异常 | 接入 commit/trap controller 的 consume/flush |
-| M1 RV32I 前后端 | partially completed | 组合译码、双路最长前缀 dispatch/三类 IQ 路由/dispatch-time fault、双路 rename、IntIQ→双路 operand-read→E0/E1→五端点 completion→ROB/PRF/ready/wakeup、BDB→lossless recovery→ROB tail walk→rename undo、六路 FirstFault 候选已形成组合后端，并覆盖双发射 RAW、误预测删除年轻整数与 illegal+flush；另有 24 项 ROB、56×32 6R2W PRF、12 项 IntIQ、8 项 1R1W BDB、512×2-bit 四银行 bimodal、64 项 2-way 四银行 BTB、8 项 RAS、64-bit 推测历史、4 项 fetch/decode queue、六种 Zicsr、M-mode CSR/trap 与精确双提交 directed tests；顶层仍为 M0 shell | 接入 commit/CSR 与 E0 system side effect，再连接前端/I-Cache 形成可执行 datapath |
+| FirstFaultRecord | completed | 记录仅含 `{robTag,cause,tval}`，以 ROB head 的 modulo-24 距离选择最老异常；commit/CSR 组合已消费/清除同步异常 | 接入完整后端并交叉外部 fault、interrupt 与 recovery |
+| M1 RV32I 前后端 | partially completed | 组合译码、双路最长前缀 dispatch/三类 IQ 路由/dispatch-time fault、双路 rename、IntIQ→双路 operand-read→E0/E1→五端点 completion→ROB/PRF/ready/wakeup、BDB→lossless recovery→ROB tail walk→rename undo、六路 FirstFault 候选已形成组合后端；commit controller、M-mode CSR state、单端口 BDB branch retirement 也已形成提交组合域，并覆盖双发射 RAW、误预测删除年轻整数、illegal+flush、普通双退休、连续 branch 序列化和 lane-1 fault+older branch training；另有 bimodal/BTB/RAS/推测历史/fetch-decode queue directed tests；顶层仍为 M0 shell | 连接两个后端组合域并实现 E0 CSR/System side effect，再接前端/I-Cache |
 | M2 RV32M/多发射 | missing | `UopRef`/endpoint 类型已定义 | M 扩展和 3-start/2-complete 测试 |
 | M3 双 LSU/Cache/A | missing | 配置与 PMA/MMIO 边界已定义 | memory milestone 回归 |
 | M4 F/interrupt/miniTAGE | partially completed | 顶层中断/trace 字段与 CSR 内 MEI>MSI>MTI 仲裁、Direct/Vectored trap 状态转换已有 directed tests | FPU、interrupt commit/取消/WFI 和 miniTAGE 后运行 TestFloat/ACT4/中断回归 |
