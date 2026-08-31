@@ -23,8 +23,10 @@ endpoint mask，而不是在 dispatch 时静态绑定一个 endpoint。
 可用本周期 issue.fire 的空位接收同样数量的新项，不产生额外 full bubble。
 
 lane 1 enqueue valid 隐含 lane 0 valid；两个输入按原子 bundle 获得容量。global
-flush 清除全部项并禁止当周期 issue/enqueue。branch-selective kill 需要 BDB checkpoint
-接口，将在 branch recovery PR 接入；当前只允许单元验证，不可接入最终 redirect。
+flush 清除全部项并禁止当周期 issue/enqueue。branch-selective `squash` 携带 resolving
+`robTag`；队列以当前 ROB head 为原点删除所有更年轻项并保留 branch 之前的工作，
+当周期同样禁止 issue/enqueue。BDB、ROB、IQ 与 completion 使用统一的
+`ROBTagOrder` modulo-24 判定；完整 redirect 仍需顶层 dispatch/operand-read 接线。
 
 ## 不变量与覆盖
 
@@ -33,4 +35,4 @@ flush 清除全部项并禁止当周期 issue/enqueue。branch-selective kill �
 - E1 输出的 endpoint mask 必须包含 E1，且不得包含 E0-exclusive 操作。
 - 不 ready 的 source 不能 issue；每个 producer completion port 都能唤醒两个源。
 - 覆盖 E0-exclusive+simple、两个 simple、E0/E1 独立 backpressure、ROB wrap age、
-  full 同周期双 issue/双 enqueue 和 flush。
+  full 同周期双 issue/双 enqueue、global flush、selective squash 全删/部分保留。

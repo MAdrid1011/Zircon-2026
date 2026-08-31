@@ -14,6 +14,8 @@ class IntegerIssueQueueSpec extends AnyFunSpec with ChiselSim {
     dut.io.issueE0.ready.poke(false)
     dut.io.issueE1.ready.poke(false)
     dut.io.robHeadTag.poke(0)
+    dut.io.squash.valid.poke(false)
+    dut.io.squash.bits.poke(0)
     dut.io.flush.poke(false)
   }
 
@@ -122,6 +124,51 @@ class IntegerIssueQueueSpec extends AnyFunSpec with ChiselSim {
         dut.io.issueE0.valid.expect(false)
         dut.io.issueE1.valid.expect(false)
         dut.clock.step()
+        dut.io.count.expect(0)
+      }
+    }
+
+    it("selectively removes younger uops and preserves older work across ROB wrap") {
+      simulate(new IntegerIssueQueue(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        dut.io.robHeadTag.poke(20)
+        driveUop(dut, 0, robTag = 21, endpoints = EndpointMask.E0)
+        driveUop(dut, 1, robTag = 23, endpoints = EndpointMask.E0)
+        dut.clock.step()
+        driveUop(dut, 0, robTag = 0, endpoints = EndpointMask.E0)
+        driveUop(dut, 1, robTag = 2, endpoints = EndpointMask.E0)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+        dut.io.count.expect(4)
+
+        // Branch tag 23 survives with older tag 21; wrapped tags 0 and 2 die.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(23)
+        dut.io.issueE0.ready.poke(true)
+        dut.io.enqueue(0).ready.expect(false)
+        dut.io.issueE0.valid.expect(false)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.count.expect(2)
+        dut.io.issueE0.valid.expect(true)
+        dut.io.issueE0.bits.robTag.expect(21)
+        dut.clock.step()
+        dut.io.issueE0.bits.robTag.expect(23)
+      }
+    }
+
+    it("drops every queued uop younger than a branch that has already issued") {
+      simulate(new IntegerIssueQueue(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveUop(dut, 0, robTag = 6, endpoints = EndpointMask.E0)
+        driveUop(dut, 1, robTag = 7, endpoints = EndpointMask.E1)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(5)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
         dut.io.count.expect(0)
       }
     }

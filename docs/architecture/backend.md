@@ -23,7 +23,7 @@ E1/E2 共享 operand admission。全局端点选择必须满足最多三条启�
 
 ## FirstFaultTracker
 
-执行端点提交 `FaultCandidate {valid, robTag, cause, trapValue}`。`FirstFaultTracker` 以当前 ROB head 为基准计算 modulo-24 age，在同周期和跨周期候选中保留最老 tag；commit 消费异常或全局 rollback 时通过 `clear/flush` 释放记录。
+执行端点提交 `FaultCandidate {valid, robTag, cause, trapValue}`。`FirstFaultTracker` 以当前 ROB head 为基准计算 modulo-24 age，在同周期和跨周期候选中保留最老 tag；commit 消费异常、global flush 或 branch-selective squash 释放失效记录。
 
 ## 阻塞、回滚和异常
 

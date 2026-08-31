@@ -20,6 +20,7 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     val issueE0 = Decoupled(new UopRef(config))
     val issueE1 = Decoupled(new UopRef(config))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
     val count = Output(UInt(countWidth.W))
   })
@@ -28,13 +29,8 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val entryUop = Reg(Vec(entries, new UopRef(config)))
   val count = RegInit(0.U(countWidth.W))
 
-  private val headIndex = io.robHeadTag(config.robIndexWidth - 1, 0)
-  private def ageFromHead(tag: UInt): UInt = {
-    val index = tag(config.robIndexWidth - 1, 0)
-    Mux(index >= headIndex,
-      index - headIndex,
-      index + config.robEntries.U - headIndex)
-  }
+  private def ageFromHead(tag: UInt): UInt =
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     var selectedValid: Bool = false.B
@@ -79,9 +75,10 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val selectedE1Valid = Mux(exclusiveE0Valid, e1AfterExclusiveValid, normalE1Valid)
   val selectedE1Index = Mux(exclusiveE0Valid, e1AfterExclusiveIndex, normalE1Index)
 
-  io.issueE0.valid := selectedE0Valid && !io.flush
+  val recoveryBlocked = io.flush || io.squash.valid
+  io.issueE0.valid := selectedE0Valid && !recoveryBlocked
   io.issueE0.bits := entryUop(selectedE0Index)
-  io.issueE1.valid := selectedE1Valid && !io.flush
+  io.issueE1.valid := selectedE1Valid && !recoveryBlocked
   io.issueE1.bits := entryUop(selectedE1Index)
   when(io.issueE0.valid) {
     assert(io.issueE0.bits.allowedEndpoints(0), "IntIQ sent an ineligible uop to E0")
@@ -98,7 +95,7 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     Mux(io.issueE1.fire, UIntToOH(selectedE1Index, entries), 0.U)
   val reusableMask = (~entryValid.asUInt).asUInt | issuedMask
   val requestedEnqueueCount = PopCount(io.enqueue.map(_.valid))
-  val enqueueBundleReady = !io.flush &&
+  val enqueueBundleReady = !recoveryBlocked &&
     PopCount(reusableMask) >= requestedEnqueueCount
   io.enqueue.foreach(_.ready := enqueueBundleReady)
   assert(!io.enqueue(1).valid || io.enqueue(0).valid,
@@ -122,9 +119,21 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     updated
   }
 
+  val squashSurvivor = VecInit((0 until entries).map(index =>
+    entryValid(index) && !ROBTagOrder.isYounger(
+      entryUop(index).robTag,
+      io.squash.bits,
+      io.robHeadTag,
+      config)))
+
   when(io.flush) {
     entryValid.foreach(_ := false.B)
     count := 0.U
+  }.elsewhen(io.squash.valid) {
+    for (index <- 0 until entries) {
+      entryValid(index) := squashSurvivor(index)
+    }
+    count := PopCount(squashSurvivor)
   }.otherwise {
     count := count + enqueueCount - issueCount
     for (index <- 0 until entries) {
@@ -145,5 +154,13 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   assert(count <= entries.U, "IntIQ occupancy exceeded its configured depth")
   assert(PopCount(entryValid) === count,
     "IntIQ occupancy credit must equal the number of valid entries")
+  when(io.squash.valid) {
+    assert(io.squash.bits(config.robIndexWidth - 1, 0) < config.robEntries.U,
+      "IntIQ squash boundary ROB index out of range")
+    assert(!io.issueE0.fire && !io.issueE1.fire,
+      "IntIQ issued while selective squash was active")
+    assert(!io.enqueue.exists(_.fire),
+      "IntIQ enqueued while selective squash was active")
+  }
   io.count := count
 }

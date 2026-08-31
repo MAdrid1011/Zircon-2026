@@ -1,6 +1,7 @@
 package zircon.backend
 
 import chisel3._
+import chisel3.util.Valid
 import zircon.ZirconCoreConfig
 
 class FirstFaultRecord(config: ZirconCoreConfig) extends Bundle {
@@ -27,6 +28,7 @@ class FirstFaultTracker(
     val candidates = Input(Vec(candidateWidth, new FaultCandidate(config)))
     val clear = Input(Bool())
     val flush = Input(Bool())
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val valid = Output(Bool())
     val record = Output(new FirstFaultRecord(config))
   })
@@ -34,21 +36,21 @@ class FirstFaultTracker(
   val validReg = RegInit(false.B)
   val recordReg = Reg(new FirstFaultRecord(config))
 
-  private val headIndex = io.robHeadTag(config.robIndexWidth - 1, 0)
-  private def ageFromHead(tag: UInt): UInt = {
-    val index = tag(config.robIndexWidth - 1, 0)
-    Mux(index >= headIndex,
-      index - headIndex,
-      index + config.robEntries.U - headIndex)
-  }
+  private def ageFromHead(tag: UInt): UInt =
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
 
-  var selectedValid: Bool = validReg
+  private def survivesSquash(tag: UInt): Bool =
+    !io.squash.valid || !ROBTagOrder.isYounger(
+      tag, io.squash.bits, io.robHeadTag, config)
+
+  var selectedValid: Bool = validReg && survivesSquash(recordReg.robTag)
   var selectedRecord: FirstFaultRecord = recordReg
   for (candidate <- io.candidates) {
-    val take = candidate.valid &&
+    val candidateValid = candidate.valid && survivesSquash(candidate.record.robTag)
+    val take = candidateValid &&
       (!selectedValid || ageFromHead(candidate.record.robTag) < ageFromHead(selectedRecord.robTag))
     selectedRecord = Mux(take, candidate.record, selectedRecord)
-    selectedValid = selectedValid || candidate.valid
+    selectedValid = selectedValid || candidateValid
   }
 
   when(io.clear || io.flush) {
@@ -60,6 +62,14 @@ class FirstFaultTracker(
     }
   }
 
-  io.valid := validReg
+  // Keep clear/flush sequential, as commit may consume the visible record on
+  // the same edge. A younger squashed record, however, must disappear before
+  // any recovery-cycle observer can act on it.
+  io.valid := validReg && survivesSquash(recordReg.robTag)
   io.record := recordReg
+
+  when(io.squash.valid) {
+    assert(io.squash.bits(config.robIndexWidth - 1, 0) < config.robEntries.U,
+      "FirstFault squash boundary ROB index out of range")
+  }
 }
