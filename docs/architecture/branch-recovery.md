@@ -24,6 +24,12 @@ pointer/count 并重做实际 call/return，redirect 到 actual taken target 或
 ROB rollback。global flush 优先，取消 pending rollback 和等待完成状态。零年轻项时
 ROB 可在恢复发起同周期拉高 `rollbackDone`，控制器不得留下伪 active 周期。
 
+`BranchRecoverySubsystem` 已将 8 项 BDB 与 lossless recovery controller 组合为上述
+单一事务边界。接口保留一个 allocate、一个 execute resolution 和一个 commit/training
+端口；mispredict 的 `squash`、frontend recovery、`dispatchBlocked` 与首个 ROB
+rollback request 必须同周期可见。ROB 未接受请求时，控制器稳定保持 rollback tag；
+正确预测则只留下可在提交时训练的 BDB 记录。
+
 ## ROB Tail Walker
 
 ROB tail 指向下一个空 slot。walker 保存 `stopIndex = branchIndex + 1 mod 24`，每周期
@@ -73,10 +79,11 @@ buffer 对年轻 tag 执行同一 kill；较老结果保持 backpressure，rollb
 写回。LongPipe/LSU 内部 operation 必须接收 kill，已进入 AXI 的事务转为后台 drain。
 
 ROB walker、per-slot generation、Rename undo、IntIQ、FirstFault、completion buffer
-selective squash、BDB 可回压 resolution 和 lossless recovery controller 已有局部实现
-与 directed tests。下一步必须给持有 in-flight uop 的 endpoint/LongPipe/LSU 接入同一
-kill，并完成 E0/BDB/前端/dispatch 顶层握手；在此之前仍不能把局部模块宣称为可运行
-M1 core。
+selective squash，以及 BDB→lossless recovery controller 的闭环已有实现与 directed
+tests。闭环测试覆盖正确预测只训练、误预测同拍广播、年轻 BDB 项删除、ROB 请求回压
+保持和 `rollbackDone` 前 dispatch 阻塞。下一步必须把该子系统接到 dispatch/rename、
+`IntegerExecutionBackend`、前端 checkpoint 和 commit；LongPipe/LSU 加入后还必须接收
+同一 kill。完成这些组合前仍不能把局部模块宣称为可运行 M1 core。
 
 ## 不变量、计数器与验证
 
@@ -88,6 +95,10 @@ M1 core。
 - global flush 与 rollback 同周期时 global flush 获胜并取消 walker。
 - 每次 mispredict 只产生一次 squash/frontend recovery；ROB backpressure 不得丢失或
   重复 rollback tag。
+- 正确预测不得产生 squash、frontend recovery 或 ROB rollback，且提交时恰好产生一项
+  predictor training record。
+- 误预测发起周期的 squash、frontend recovery、dispatch block 和 ROB rollback request
+  必须原子出现；global flush 时这些输出均被抑制。
 
 性能计数器至少记录 `branch_rollback_count`、`branch_rollback_cycles`、
 `branch_rollback_entries` 和最大 observed entries。directed tests 覆盖 0/1/2/23 项、
