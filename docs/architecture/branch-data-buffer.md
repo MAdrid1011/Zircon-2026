@@ -22,17 +22,23 @@
 ## 接口与端口仲裁
 
 - `allocate`: dispatch 写入一项预测/checkpoint，返回 3-bit index。每周期最多分配一条控制指令；同一 decode bundle 出现两条控制指令时由 dispatch 保留第二条。
-- `resolve`: E0 携带 `{index, robTag, actualTaken, actualTarget}`；接受后读旧预测、写 actual 字段并输出 mispredict、history 以及 RAS checkpoint/action。
+- `resolve`: E0 携带 `{index, robTag, actualTaken, actualTarget}`；`resolution` 采用
+  ready/valid，可被恢复控制器回压。只有两个接口同拍握手后才写 actual 字段并改变
+  BDB 状态；输出包含 mispredict、history、RAS checkpoint/action 和最终 redirect target。
 - `commit`: commit controller 携带 `{index, robTag}`；读取完整 training record，并只清 valid 位。
 - `flushAll`: trap、MRET、FENCE.I 或其他全局 rollback 清除所有未提交 BDB 项。
 
-端口优先级为 commit read > resolve read。resolve 同时占用 read/write，因此阻塞 allocate；commit 只读 data 并清 valid bit，可与一次 allocate write 并行。free-index 选择把同周期 commit 的槽位视为可用，因此满 BDB 可以一进一出而不产生气泡。这个调度在任意周期至多一次 data read、一次 data write。
+端口优先级为 commit read > resolve read。成功握手的 resolve 同时占用 read/write，
+因此阻塞 allocate；被回压的 resolve 只保持组合读结果，仍允许向其他 free entry 做一次
+allocate write。commit 只读 data 并清 valid bit，可与一次 allocate write 并行。
+free-index 选择把同周期 commit 的槽位视为可用，因此满 BDB 可以一进一出而不产生
+气泡。这个调度在任意周期至多一次 data read、一次 data write。
 
 commit 请求必须命中 valid、相同 `robTag` 且已经 resolved 的项；resolve 请求必须命中 valid 和相同 tag。违反均为内部协议错误。预测器训练没有 ready，`training.valid` 与 commit handshake 同周期出现。
 
 ## 错误恢复
 
-条件分支的恢复历史为 `{historyBefore[62:0], actualTaken}`；JAL/JALR 不写 GHR，恢复为原 checkpoint。RAS pointer/count 从预测前 checkpoint 出发，先执行 taken return 的 pop，再执行 taken call 的 push：空栈 pop 不改变 pointer/count，push 将 count 饱和到 8，call/return 同时为真时按 coroutine pop-then-push 处理。resolution 同时输出原 pointer/count、push/pop 和 `pc+4`，供 RAS 恢复检查点并重做正确事件。溢出后被覆盖的 RAS 内容属于允许的预测近似，不影响 JALR 的架构执行结果。mispredict 条件为 direction 不同，或 actual taken 且 predicted/actual target 不同。not-taken 指令忽略 target 字段差异。
+条件分支的恢复历史为 `{historyBefore[62:0], actualTaken}`；JAL/JALR 不写 GHR，恢复为原 checkpoint。RAS pointer/count 从预测前 checkpoint 出发，先执行 taken return 的 pop，再执行 taken call 的 push：空栈 pop 不改变 pointer/count，push 将 count 饱和到 8，call/return 同时为真时按 coroutine pop-then-push 处理。resolution 同时输出原 pointer/count、push/pop 和 `pc+4`，供 RAS 恢复检查点并重做正确事件。`redirectTarget` 在 taken 时为 `actualTarget`，not-taken 时为 metadata `pc+4`，不信任 E0 请求中无意义的 not-taken target。溢出后被覆盖的 RAS 内容属于允许的预测近似，不影响 JALR 的架构执行结果。mispredict 条件为 direction 不同，或 actual taken 且 predicted/actual target 不同。not-taken 指令忽略 target 字段差异。
 
 resolve 检测到 mispredict 时，BDB 以当前 ROB head 的 modulo-24 age 清除所有比 resolving branch 更年轻的项，保留 resolving branch 和更老、尚未提交的分支。前端同周期使用 `recoveryHistory`，ROB/IQ/rename 的年轻项由 E0 全局恢复路径清除。trap/MRET/FENCE.I 不依赖年龄，直接 `flushAll`。
 
@@ -42,6 +48,8 @@ resolve 检测到 mispredict 时，BDB 以当前 ROB head 的 modulo-24 age 清�
 - 同一周期最多一次 data read、一次 data write；resolve 不与 allocate/commit fire。
 - commit+allocate 可复用同一 index，training 输出仍必须是覆盖前的旧 entry。
 - stale `robTag` 不得修改任何项。
+- resolution backpressure 下 valid、tag、history、RAS 和 redirect target 保持稳定，
+  BDB entry 不得提前标记 resolved。
 - commit 训练只来自 resolved entry；错误路径项永不训练预测表。
 - mispredict 后不存在 ROB 年龄大于 resolving branch 的 valid BDB 项。
 - direction、taken-target、not-taken-target、RAS overflow/underflow、coroutine pop-then-push 和 64-bit 历史边界均有定向测试。

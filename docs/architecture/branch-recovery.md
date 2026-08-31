@@ -10,12 +10,19 @@ MRET 和 `FENCE.I` 仍在提交点执行 global flush。
 ## 恢复请求
 
 E0 先向 BDB 提交 `{index, robTag, actualTaken, actualTarget}`。BDB 验证引用并输出
-`resolution`；只有 `mispredict=1` 时启动恢复。请求中的 resolving `robTag` 必须仍是
-ROB valid 项。branch 本身保留并写 complete，年轻项被删除。
+ready/valid `resolution`；只有 `mispredict=1` 时启动恢复。恢复控制器在接受结果的
+同周期原子广播 backend `squash` 与完整 frontend recovery，并向 ROB 发出 rollback。
+若 ROB 暂时不能接受，请求 tag 被寄存并稳定保持；dispatch 从接受 mispredict 起一直
+阻塞到 `rollbackDone`。请求中的 resolving `robTag` 必须仍是 ROB valid 项。branch
+本身保留并写 complete，年轻项被删除。
 
 前端在请求被接受后清空 fetch/decode queue，安装 `recoveryHistory`，恢复 RAS 的
 pointer/count 并重做实际 call/return，redirect 到 actual taken target 或 `pc+4`。
 前端可以提前 fetch，但 `rollbackDone` 前 dispatch 必须阻塞。
+
+正确预测的 resolution 只更新 BDB resolved/actual 状态，不产生 squash、redirect 或
+ROB rollback。global flush 优先，取消 pending rollback 和等待完成状态。零年轻项时
+ROB 可在恢复发起同周期拉高 `rollbackDone`，控制器不得留下伪 active 周期。
 
 ## ROB Tail Walker
 
@@ -65,10 +72,11 @@ IntIQ、BDB 和 FirstFaultRecord 以当前 ROB head 为原点计算 modulo-24 ag
 buffer 对年轻 tag 执行同一 kill；较老结果保持 backpressure，rollback 结束后继续
 写回。LongPipe/LSU 内部 operation 必须接收 kill，已进入 AXI 的事务转为后台 drain。
 
-ROB walker、per-slot generation、Rename undo、IntIQ、FirstFault 和 completion buffer
-selective squash 已有局部实现与 directed tests。下一步必须给持有 in-flight uop 的
-endpoint/LongPipe/LSU 接入同一 kill，并完成 E0/BDB/前端/dispatch 顶层握手；在此之前
-仍不能把局部模块宣称为可运行 M1 core。
+ROB walker、per-slot generation、Rename undo、IntIQ、FirstFault、completion buffer
+selective squash、BDB 可回压 resolution 和 lossless recovery controller 已有局部实现
+与 directed tests。下一步必须给持有 in-flight uop 的 endpoint/LongPipe/LSU 接入同一
+kill，并完成 E0/BDB/前端/dispatch 顶层握手；在此之前仍不能把局部模块宣称为可运行
+M1 core。
 
 ## 不变量、计数器与验证
 
@@ -78,6 +86,8 @@ endpoint/LongPipe/LSU 接入同一 kill，并完成 E0/BDB/前端/dispatch 顶�
 - 被删除 slot 再分配时 generation 必须变化；stale completion 不得 complete 新项。
 - rollback active 时 ROB enqueue/commit/completion 均不 fire。
 - global flush 与 rollback 同周期时 global flush 获胜并取消 walker。
+- 每次 mispredict 只产生一次 squash/frontend recovery；ROB backpressure 不得丢失或
+  重复 rollback tag。
 
 性能计数器至少记录 `branch_rollback_count`、`branch_rollback_cycles`、
 `branch_rollback_entries` 和最大 observed entries。directed tests 覆盖 0/1/2/23 项、
