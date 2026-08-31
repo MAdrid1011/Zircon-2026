@@ -45,6 +45,8 @@ class ROBExecutionContext(config: ZirconCoreConfig) extends Bundle {
   val csrImmediate = UInt(5.W)
   val csrRead = Bool()
   val csrWrite = Bool()
+  val atomicAq = Bool()
+  val atomicRl = Bool()
   val hasBranchData = Bool()
   val branchDataIndex = UInt(log2Ceil(config.branchDataEntries).W)
 }
@@ -212,6 +214,8 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     io.executionContext(port).bits.csrImmediate := entry.decoded.csrImmediate
     io.executionContext(port).bits.csrRead := entry.decoded.csrRead
     io.executionContext(port).bits.csrWrite := entry.decoded.csrWrite
+    io.executionContext(port).bits.atomicAq := entry.decoded.atomicAq
+    io.executionContext(port).bits.atomicRl := entry.decoded.atomicRl
     io.executionContext(port).bits.hasBranchData := entry.hasBranchData
     io.executionContext(port).bits.branchDataIndex := entry.branchDataIndex
 

@@ -83,6 +83,13 @@ only ready/valid completions or `FaultCandidate`s indexed by their real ROB tag.
 Each endpoint has a two-entry completion buffer. Completion to a stale tag drains
 through the existing completion network without PRF or ready-table mutation.
 
+`MemoryOperandRead` is the current bridge from MemIQ to that future LSU boundary.
+For each request it performs an exact-tag ROB context read, obtains base and
+optional store operands from the shared integer PRF interface, and carries the
+ROB-owned atomic `aq/rl` bits in `MemoryAddressRequest`. A missing/mismatched
+context or global flush blocks the handshake. This ensures an LSU never rebuilds
+ordering metadata by re-decoding a current instruction stream.
+
 ## PMA and precise exceptions
 
 `PMAClassifier` remains first-match by configuration order. Its default regions

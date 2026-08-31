@@ -63,6 +63,8 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
     decoded.isControl.poke(false)
     decoded.isMemory.poke(false)
     decoded.isFenceI.poke(false)
+    decoded.atomicAq.poke(false)
+    decoded.atomicRl.poke(false)
   }
 
   describe("ReorderBuffer") {
@@ -137,6 +139,8 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.enqueue(0).bits.entry.decoded.csrImmediate.poke(7)
         dut.io.enqueue(0).bits.entry.decoded.csrRead.poke(true)
         dut.io.enqueue(0).bits.entry.decoded.csrWrite.poke(true)
+        dut.io.enqueue(0).bits.entry.decoded.atomicAq.poke(true)
+        dut.io.enqueue(0).bits.entry.decoded.atomicRl.poke(true)
         dut.io.enqueue(0).bits.entry.hasBranchData.poke(true)
         dut.io.enqueue(0).bits.entry.branchDataIndex.poke(5)
         dut.clock.step()
@@ -158,6 +162,8 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.executionContext(1).bits.csrImmediate.expect(7)
         dut.io.executionContext(1).bits.csrRead.expect(true)
         dut.io.executionContext(1).bits.csrWrite.expect(true)
+        dut.io.executionContext(1).bits.atomicAq.expect(true)
+        dut.io.executionContext(1).bits.atomicRl.expect(true)
         dut.io.executionContext(1).bits.hasBranchData.expect(true)
         dut.io.executionContext(1).bits.branchDataIndex.expect(5)
 
