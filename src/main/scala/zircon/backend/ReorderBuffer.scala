@@ -35,6 +35,18 @@ class ROBCommit(config: ZirconCoreConfig) extends Bundle {
   val entry = new ROBEntry(config)
 }
 
+/** Narrow context read by E0/E1 after issue; large ROB-only fields stay out of IQ. */
+class ROBExecutionContext(config: ZirconCoreConfig) extends Bundle {
+  val pc = UInt(32.W)
+  val privilege = UInt(2.W)
+  val csrAddress = UInt(12.W)
+  val csrImmediate = UInt(5.W)
+  val csrRead = Bool()
+  val csrWrite = Bool()
+  val hasBranchData = Bool()
+  val branchDataIndex = UInt(log2Ceil(config.branchDataEntries).W)
+}
+
 class ROBRollbackRecord(config: ZirconCoreConfig) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
   val architecturalDestination = UInt(5.W)
@@ -61,6 +73,11 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     val completionAccepted = Output(Vec(2, Bool()))
     val commit = Vec(2, Decoupled(new ROBCommit(config)))
     val flush = Input(Bool())
+
+    val executionRead = Input(Vec(2,
+      Valid(UInt(config.robTagWidth.W))))
+    val executionContext = Output(Vec(2,
+      Valid(new ROBExecutionContext(config))))
 
     val rollback = Flipped(Decoupled(UInt(config.robTagWidth.W)))
     val rollbackUndo = Decoupled(new ROBRollbackBundle(config))
@@ -157,6 +174,35 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   assert(!(io.completion(0).valid && io.completion(1).valid &&
     io.completion(0).robTag === io.completion(1).robTag),
     "completion ports must not carry the same ROB tag")
+
+  for (port <- 0 until 2) {
+    val rawIndex = io.executionRead(port).bits(indexWidth - 1, 0)
+    val inRange = rawIndex < entries.U
+    val safeIndex = Mux(inRange, rawIndex, 0.U)
+    val generation = io.executionRead(port).bits(config.robTagWidth - 1)
+    val matches = inRange && entryValid(safeIndex) &&
+      entryGeneration(safeIndex) === generation
+    val entry = entryData(safeIndex)
+
+    io.executionContext(port).valid := io.executionRead(port).valid &&
+      matches && !io.flush
+    io.executionContext(port).bits.pc := entry.pc
+    io.executionContext(port).bits.privilege := entry.privilege
+    io.executionContext(port).bits.csrAddress := entry.decoded.csrAddress
+    io.executionContext(port).bits.csrImmediate := entry.decoded.csrImmediate
+    io.executionContext(port).bits.csrRead := entry.decoded.csrRead
+    io.executionContext(port).bits.csrWrite := entry.decoded.csrWrite
+    io.executionContext(port).bits.hasBranchData := entry.hasBranchData
+    io.executionContext(port).bits.branchDataIndex := entry.branchDataIndex
+
+    when(io.executionRead(port).valid && !io.flush) {
+      assert(inRange, "ROB execution-context tag index out of range")
+      assert(matches, "ROB execution-context tag did not match a live entry")
+    }
+  }
+  assert(!(io.executionRead(0).valid && io.executionRead(1).valid &&
+    io.executionRead(0).bits === io.executionRead(1).bits),
+    "execution-context ports requested the same ROB tag")
 
   val rollbackIndexRaw = io.rollback.bits(indexWidth - 1, 0)
   val rollbackIndexInRange = rollbackIndexRaw < entries.U
