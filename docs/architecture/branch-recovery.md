@@ -82,9 +82,10 @@ ROB walker、per-slot generation、Rename undo、IntIQ、FirstFault、completion
 selective squash，以及 BDB→lossless recovery controller 的闭环已有实现与 directed
 tests。闭环测试覆盖正确预测只训练、误预测同拍广播、年轻 BDB 项删除、ROB 请求回压
 保持和 `rollbackDone` 前 dispatch 阻塞。BDB/recovery 已在
-`IntegerDispatchRecoveryBackend` 中接到 dispatch/rename、整数执行和 FirstFault；下一步
-必须连接前端 checkpoint/redirect 和 commit policy。LongPipe/LSU 加入后还必须接收同一
-kill。完成这些组合前仍不能把局部模块宣称为可运行 M1 core。
+`IntegerDispatchRecoveryBackend` 中接到 dispatch/rename、整数执行和 FirstFault，并由
+`M1BackendSubsystem` 接入 commit policy；下一步必须连接前端 checkpoint/redirect。
+LongPipe/LSU 加入后还必须接收同一 kill。完成前端与存储组合前仍不能把局部模块宣称为
+完整可运行 M1 core。
 
 ## 不变量、计数器与验证
 
