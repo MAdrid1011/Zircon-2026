@@ -21,6 +21,9 @@
 - 2-bit privilege；M1 固定写 M-mode，但字段保留在验证边界。
 - fetch fault 的 valid、6-bit cause 和 32-bit tval。
 
+当前 bundle 宽度由测试冻结为 219 bit；四项 payload 为 876 bit。相同字段若做成八项
+将是 1752 bit，尚未计算 valid/pointer/control 即多出 876 bit。
+
 完整 `DecodedInstruction` 不进入本队列，避免四份宽组合译码结果常驻。正式两路 decoder
 在 dequeue 之后运行，decode result 与 instruction/PC 一起集中写入 24 项 ROB。
 
