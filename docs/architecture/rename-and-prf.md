@@ -1,0 +1,53 @@
+# Rename 与整数物理寄存器文件
+
+本模块服务 M1 Issue #7，并冻结为 2-wide rename、56×32 bit integer PRF、6R2W。
+物理寄存器 p0 永久对应 x0；reset 时 x0–x31 映射 p0–p31，p32–p55 空闲。
+
+## 双路 rename
+
+两条输入必须保持程序序，lane 1 valid 隐含 lane 0 valid。整个 bundle 只在
+`accept && canAllocate` 时改变状态；如果本周期目的寄存器所需的 free entries
+不足，两条都不接受，避免半包 dispatch。
+
+lane 1 的源和旧目的映射必须旁路 lane 0 的新映射。因此以下序列在同一周期
+rename 时不经过 RAT 的下一周期状态：
+
+```text
+lane 0: add x5, x1, x2   -> p32
+lane 1: sub x6, x5, x3   -> prs1=p32
+```
+
+对 x0 的写不分配物理寄存器；x0 源始终映射 p0。
+
+## Speculative 与 committed 状态
+
+模块分别保存 speculative map/free-list 和 committed map/free-list。dispatch 从
+speculative free-list 分配；commit 按 lane 0、lane 1 程序序更新 committed map，
+释放每条指令的 old physical destination。trap/global rollback 使用本周期 commit
+后的 committed snapshot 恢复 speculative 状态。
+
+分支误预测的低延迟恢复不能退回 committed snapshot；它将在 BDB/branch
+checkpoint 模块中保存 speculative map/free-list checkpoint。该接口未接入前，
+rename 模块状态为 M1 partial，不可用于性能签收。
+
+## 6R2W PRF
+
+六个组合读端口对应 E0 两源、共享 E1/E2 两源和双 LSU 各一个基址/数据调度
+预算；具体端口映射可在 operand-read stage 复用，但总端口数不得增加。两个写
+端口来自统一 completion arbiter。
+
+- 写 p0 为协议错误并由 assertion 捕获。
+- 两个有效写端口命中同一非零 physical register 为协议错误。
+- 同周期 read-after-write 使用 completion forwarding，避免额外一周期 wakeup。
+- reset 将全部寄存器清零；p0 的读值恒为零。
+
+## 不变量与验证映射
+
+- speculative map 和 committed map 的 x0 项恒为 p0。
+- free physical 不能同时出现在对应 map 中。
+- 两条 rename 不得获得相同 physical destination。
+- 同周期 WAW 时，lane 1 old destination 等于 lane 0 new destination。
+- 双 commit 同一 architectural destination 时，最终 committed map 指向 lane 1，
+  lane 0 new destination成为 free。
+- flush 恢复 committed map/free-list，所有未提交分配重新可用。
+- PRF 覆盖六路同时读、两路写、write-forwarding、x0 和同目标写 assertion。
