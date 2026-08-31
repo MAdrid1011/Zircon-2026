@@ -277,6 +277,7 @@ class FetchRedirectPrediction(config: ZirconCoreConfig) extends Bundle {
   val call = Bool()
   val ret = Bool()
   val btbWay = UInt(1.W)
+  val btbHit = Bool()
   val rasUsed = Bool()
 }
 
@@ -286,48 +287,95 @@ class FetchTargetSelector(
 ) extends Module {
   val io = IO(new Bundle {
     val fetchBase = Input(UInt(32.W))
-    val btbReady = Input(Bool())
+    val predictorsReady = Input(Bool())
+    val slotValid = Input(Vec(config.fetchWidth, Bool()))
+    val predecode = Input(Vec(config.fetchWidth, new ControlPredecode))
     val btb = Input(Vec(config.fetchWidth, new BranchTargetPrediction))
     val directionTaken = Input(Vec(config.fetchWidth, Bool()))
     val rasTopValid = Input(Bool())
     val rasTop = Input(UInt(32.W))
     val redirect = Output(Valid(new FetchRedirectPrediction(config)))
+    val unresolvedIndirect = Output(Valid(UInt(log2Ceil(config.fetchWidth).W)))
+    val acceptedMask = Output(UInt(config.fetchWidth.W))
     val rasAction = Output(Valid(new RasAction))
   })
 
   require(config.fetchWidth == 4,
     "the target selector is frozen for four-wide fetch")
 
-  val candidates = Wire(Vec(config.fetchWidth, Bool()))
+  val redirectCandidates = Wire(Vec(config.fetchWidth, Bool()))
+  val unresolvedCandidates = Wire(Vec(config.fetchWidth, Bool()))
+  val stopCandidates = Wire(Vec(config.fetchWidth, Bool()))
   for (slot <- 0 until config.fetchWidth) {
-    candidates(slot) := io.btbReady && io.btb(slot).hit &&
-      (!io.btb(slot).conditional || io.directionTaken(slot))
+    val directTaken = io.predecode(slot).direct &&
+      (!io.predecode(slot).conditional || io.directionTaken(slot))
+    val indirectTargetValid = io.predecode(slot).indirect &&
+      ((io.predecode(slot).ret && io.rasTopValid) || io.btb(slot).hit)
+    redirectCandidates(slot) := io.predictorsReady && io.slotValid(slot) &&
+      io.predecode(slot).control && (directTaken || indirectTargetValid)
+    unresolvedCandidates(slot) := io.predictorsReady && io.slotValid(slot) &&
+      io.predecode(slot).control && io.predecode(slot).indirect &&
+      !indirectTargetValid
+    stopCandidates(slot) := redirectCandidates(slot) ||
+      unresolvedCandidates(slot)
   }
-  val ownerOH = PriorityEncoderOH(candidates.asUInt)
+  val ownerOH = PriorityEncoderOH(stopCandidates.asUInt)
   val ownerSlot = OHToUInt(ownerOH)
-  val selected = Mux1H(ownerOH, io.btb)
-  val rasUsed = selected.ret && io.rasTopValid
-  val selectedTarget = Mux(rasUsed, io.rasTop, selected.target)
+  val selectedPredecode = Mux1H(ownerOH, io.predecode)
+  val selectedBtb = Mux1H(ownerOH, io.btb)
+  val selectedRedirect = Mux1H(ownerOH, redirectCandidates)
+  val selectedUnresolved = Mux1H(ownerOH, unresolvedCandidates)
+  val rasUsed = selectedPredecode.ret && io.rasTopValid
+  val indirectTarget = Mux(rasUsed, io.rasTop, selectedBtb.target)
+  val selectedTarget = Mux(selectedPredecode.direct,
+    selectedPredecode.directTarget, indirectTarget)
 
-  io.redirect.valid := candidates.asUInt.orR
+  io.redirect.valid := stopCandidates.asUInt.orR && selectedRedirect
   io.redirect.bits.slot := ownerSlot
   io.redirect.bits.target := selectedTarget
-  io.redirect.bits.conditional := selected.conditional
-  io.redirect.bits.call := selected.call
-  io.redirect.bits.ret := selected.ret
-  io.redirect.bits.btbWay := selected.way
+  io.redirect.bits.conditional := selectedPredecode.conditional
+  io.redirect.bits.call := selectedPredecode.call
+  io.redirect.bits.ret := selectedPredecode.ret
+  io.redirect.bits.btbWay := selectedBtb.way
+  io.redirect.bits.btbHit := selectedBtb.hit
   io.redirect.bits.rasUsed := rasUsed
 
-  io.rasAction.valid := io.redirect.valid && (selected.call || selected.ret)
-  io.rasAction.bits.push := selected.call
-  io.rasAction.bits.pop := selected.ret
+  io.unresolvedIndirect.valid := stopCandidates.asUInt.orR && selectedUnresolved
+  io.unresolvedIndirect.bits := ownerSlot
+
+  val accepted = Wire(Vec(config.fetchWidth, Bool()))
+  for (slot <- 0 until config.fetchWidth) {
+    val stoppedEarlier = if (slot == 0) false.B
+      else stopCandidates.take(slot).reduce(_ || _)
+    accepted(slot) := io.predictorsReady && io.slotValid(slot) && !stoppedEarlier
+  }
+  io.acceptedMask := accepted.asUInt
+
+  io.rasAction.valid := io.redirect.valid &&
+    (selectedPredecode.call || selectedPredecode.ret)
+  io.rasAction.bits.push := selectedPredecode.call
+  io.rasAction.bits.pop := selectedPredecode.ret
   io.rasAction.bits.returnAddress := io.fetchBase +
     (ownerSlot << 2) + 4.U
 
   assert(PopCount(ownerOH) <= 1.U,
     "more than one redirect owner was selected")
-  when(!io.btbReady) {
+  private def isPrefix(mask: UInt): Bool =
+    (0 to config.fetchWidth).map(length =>
+      mask === ((BigInt(1) << length) - 1).U(config.fetchWidth.W)
+    ).reduce(_ || _)
+  assert(isPrefix(io.slotValid.asUInt),
+    "fetch slot validity must be a low-order prefix")
+  assert(isPrefix(io.acceptedMask),
+    "accepted fetch slots must be a low-order prefix")
+  assert(!(io.redirect.valid && io.unresolvedIndirect.valid),
+    "redirect and unresolved-indirect ownership must be exclusive")
+  when(!io.predictorsReady) {
     assert(!io.redirect.valid,
-      "a redirect escaped while the BTB query was not ready")
+      "a redirect escaped while the predictors were not ready")
+    assert(!io.unresolvedIndirect.valid,
+      "an indirect barrier escaped while the predictors were not ready")
+    assert(io.acceptedMask === 0.U,
+      "fetch slots were accepted while the predictors were not ready")
   }
 }

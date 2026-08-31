@@ -38,6 +38,11 @@ prefix，并包含 redirect 或 unresolved JALR owner 本身。
 | `recover` | in | BDB mispredict recovery history |
 | `clear` | in | 清空非架构预测状态 |
 
+`FetchControlPrediction` 是连接契约：实例化四个 predecoder，把 selector 的
+`acceptedMask` 直接送入 history scan，并只在 fetch group 的 `accept` 握手后推进
+history。`accept` 不得与 recover/clear 同周期。Base/BTB/RAS 本体仍在外部，以便
+M4 替换方向 provider 而不重写本模块。
+
 ## 预译码与 RAS hint
 
 conditional branch 仅接受 funct3 `000/001/100/101/110/111`；保留 `010/011` 不预测。
