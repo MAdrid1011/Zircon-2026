@@ -27,7 +27,7 @@ class CommitCSRSubsystem(
     val csrAccessData = Output(UInt(32.W))
     val csrAccessLegal = Output(Bool())
     val interrupts = Input(new InterruptInputs)
-    val interruptEpc = Input(UInt(32.W))
+    val interruptHead = Input(Valid(new ROBCommit(config)))
     val interruptBlocked = Input(Bool())
     val fpCommit = Input(Valid(new FloatingStateCommit))
 
@@ -41,6 +41,8 @@ class CommitCSRSubsystem(
 
     val csrWrite = Output(Valid(new CSRCommitWrite))
     val trapCommit = Output(Valid(new TrapCommit))
+    val trapEntry = Output(Valid(new ROBCommit(config)))
+    val trapLane = Output(UInt(1.W))
     val mretCommit = Output(Bool())
     val firstFaultClear = Output(Bool())
     val globalFlush = Output(Bool())
@@ -78,7 +80,7 @@ class CommitCSRSubsystem(
   }
   controller.io.firstFault := io.firstFault
   controller.io.eligibleInterrupt := csr.io.eligibleInterrupt
-  controller.io.interruptEpc := io.interruptEpc
+  controller.io.interruptHead := io.interruptHead
   controller.io.interruptBlocked := io.interruptBlocked
   controller.io.trapVector := csr.io.trapTarget
   controller.io.mretTarget := csr.io.mretTarget
@@ -109,6 +111,8 @@ class CommitCSRSubsystem(
   io.retiredInstructions := controller.io.retiredInstructions
   io.csrWrite := controller.io.csrWrite
   io.trapCommit := controller.io.trapCommit
+  io.trapEntry := controller.io.trapEntry
+  io.trapLane := controller.io.trapLane
   io.mretCommit := controller.io.mretCommit
   io.firstFaultClear := controller.io.firstFaultClear
   io.globalFlush := controller.io.flush

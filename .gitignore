@@ -5,6 +5,7 @@
 .vscode/
 build/
 generated/
+generated-trace/
 out/
 project/project/
 project/target/

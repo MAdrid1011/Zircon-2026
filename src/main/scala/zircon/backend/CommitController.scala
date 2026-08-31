@@ -33,7 +33,7 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
     val firstFault = Input(Valid(new FirstFaultRecord(config)))
     val eligibleInterrupt = Input(new EligibleInterrupt)
-    val interruptEpc = Input(UInt(32.W))
+    val interruptHead = Input(Valid(new ROBCommit(config)))
     val interruptBlocked = Input(Bool())
     val trapVector = Input(UInt(32.W))
     val mretTarget = Input(UInt(32.W))
@@ -44,6 +44,8 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
     val csrWrite = Output(Valid(new CSRCommitWrite))
     val trapCommit = Output(Valid(new TrapCommit))
+    val trapEntry = Output(Valid(new ROBCommit(config)))
+    val trapLane = Output(UInt(1.W))
     val mretCommit = Output(Bool())
     val firstFaultClear = Output(Bool())
     val flush = Output(Bool())
@@ -64,7 +66,7 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val lane1Fault = io.firstFault.valid && io.rob(1).valid &&
     io.firstFault.bits.robTag === io.rob(1).bits.robTag
   val interruptAccepted = io.eligibleInterrupt.valid && !io.interruptBlocked &&
-    !lane0Fault
+    io.interruptHead.valid && !lane0Fault
 
   val retireLane = WireDefault(VecInit.fill(config.commitWidth)(false.B))
   val exceptionValid = WireDefault(false.B)
@@ -129,9 +131,15 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val exceptionPc = Mux(exceptionLane === 0.U,
     io.rob(0).bits.entry.pc, io.rob(1).bits.entry.pc)
   io.trapCommit.bits.exceptionPc := Mux(interruptAccepted,
-    io.interruptEpc, exceptionPc)
+    io.interruptHead.bits.entry.pc, exceptionPc)
   io.trapCommit.bits.trapValue := Mux(interruptAccepted,
     0.U, io.firstFault.bits.trapValue)
+
+  io.trapEntry.valid := io.trapCommit.valid && Mux(interruptAccepted,
+    io.interruptHead.valid, exceptionValid)
+  io.trapEntry.bits := Mux(interruptAccepted, io.interruptHead.bits,
+    Mux(exceptionLane === 0.U, io.rob(0).bits, io.rob(1).bits))
+  io.trapLane := Mux(interruptAccepted || exceptionLane === 0.U, 0.U, 1.U)
 
   io.firstFaultClear := exceptionValid
 
@@ -162,6 +170,8 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   when(interruptAccepted) {
     assert(!retireLane.asUInt.orR,
       "an accepted interrupt occurs before all currently unretired instructions")
+    assert(io.interruptHead.valid,
+      "an interrupt must name a live ROB head for its EPC")
   }
   when(exceptionValid) {
     assert(!io.firstFault.bits.cause(31),
@@ -170,6 +180,10 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   when(io.trapCommit.valid) {
     assert(!io.trapCommit.bits.exceptionPc(1, 0).orR,
       "a precise trap EPC must satisfy the frozen IALIGN=32 contract")
+  }
+  when(io.trapEntry.valid && !io.trapCommit.bits.interrupt) {
+    assert(io.trapEntry.bits.entry.pc === io.trapCommit.bits.exceptionPc,
+      "synchronous trap metadata did not name the faulting ROB entry")
   }
   when(io.mretCommit) {
     assert(!io.mretTarget(1, 0).orR,

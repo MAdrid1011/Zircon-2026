@@ -21,7 +21,12 @@ class IntegerShortPipesSpec extends AnyFunSpec with ChiselSim {
       writesInteger: Boolean = true,
       destinationPhysical: Int = 32,
       hasBranchData: Boolean = false,
-      branchDataIndex: Int = 0
+      branchDataIndex: Int = 0,
+      instruction: BigInt = BigInt("00000013", 16),
+      csrAddress: Int = 0,
+      csrImmediate: Int = 0,
+      csrRead: Boolean = false,
+      csrWrite: Boolean = false
   ): Unit = {
     request.bits.uop.robTag.poke(tag)
     request.bits.uop.allowedEndpoints.poke(endpoint)
@@ -40,11 +45,12 @@ class IntegerShortPipesSpec extends AnyFunSpec with ChiselSim {
 
     request.bits.context.robTag.poke(tag)
     request.bits.context.pc.poke(pc)
+    request.bits.context.instruction.poke(instruction)
     request.bits.context.privilege.poke(3)
-    request.bits.context.csrAddress.poke(0)
-    request.bits.context.csrImmediate.poke(0)
-    request.bits.context.csrRead.poke(false)
-    request.bits.context.csrWrite.poke(false)
+    request.bits.context.csrAddress.poke(csrAddress)
+    request.bits.context.csrImmediate.poke(csrImmediate)
+    request.bits.context.csrRead.poke(csrRead)
+    request.bits.context.csrWrite.poke(csrWrite)
     request.bits.context.hasBranchData.poke(hasBranchData)
     request.bits.context.branchDataIndex.poke(branchDataIndex)
     request.bits.lhs.poke(lhs)
@@ -61,6 +67,13 @@ class IntegerShortPipesSpec extends AnyFunSpec with ChiselSim {
     dut.io.e0Completion.ready.poke(false)
     dut.io.e1Completion.ready.poke(false)
     dut.io.branchResolve.ready.poke(false)
+    dut.io.csrAccessData.poke(0)
+    dut.io.csrAccessLegal.poke(false)
+    dut.io.systemSerializingReady.poke(true)
+    dut.io.retire.foreach { retire =>
+      retire.valid.poke(false)
+      retire.bits.poke(0)
+    }
     dut.io.robHeadTag.poke(0)
     dut.io.squash.valid.poke(false)
     dut.io.squash.bits.poke(0)
@@ -275,6 +288,98 @@ class IntegerShortPipesSpec extends AnyFunSpec with ChiselSim {
         dut.io.e1Completion.bits.robTag.expect(9)
         dut.io.e1Completion.bits.data.expect(BigInt("5a5aa5a5", 16))
         dut.io.e0Completion.valid.expect(false)
+      }
+    }
+
+    it("executes a head CSR and retains its write until matching retirement") {
+      simulate(new IntegerShortPipes) { dut =>
+        clearInputs(dut)
+        val instruction = BigInt("340092f3", 16) // csrrw x5, mscratch, x1
+        driveRequest(dut.io.e0, tag = 12, endpoint = EndpointMask.E0,
+          uopClass = UopClass.Csr, operation = IntOperation.Csrrw,
+          lhs = BigInt("12345678", 16), destinationPhysical = 35,
+          instruction = instruction, csrAddress = 0x340,
+          csrRead = true, csrWrite = true)
+        dut.io.robHeadTag.poke(12)
+        dut.io.csrAccessData.poke(BigInt("deadbeef", 16))
+        dut.io.csrAccessLegal.poke(true)
+        dut.io.e0.valid.poke(true)
+
+        dut.io.e0.ready.expect(true)
+        dut.io.csrAccess.address.expect(0x340)
+        dut.io.csrAccess.write.expect(true)
+        dut.io.e0Fault.valid.expect(false)
+        dut.clock.step()
+
+        dut.io.e0.valid.poke(false)
+        dut.io.e0Completion.valid.expect(true)
+        dut.io.e0Completion.bits.writesInteger.expect(true)
+        dut.io.e0Completion.bits.destinationPhysical.expect(35)
+        dut.io.e0Completion.bits.data.expect(BigInt("deadbeef", 16))
+        dut.io.commitSideEffect.valid.expect(true)
+        dut.io.commitSideEffect.bits.robTag.expect(12)
+        dut.io.commitSideEffect.bits.sideEffect.csrWrite.expect(true)
+        dut.io.commitSideEffect.bits.sideEffect.csrAddress.expect(0x340)
+        dut.io.commitSideEffect.bits.sideEffect.csrData.expect(
+          BigInt("12345678", 16))
+        dut.io.e0Completion.ready.poke(true)
+        dut.clock.step()
+
+        dut.io.e0Completion.ready.poke(false)
+        dut.io.commitSideEffect.valid.expect(true)
+        dut.io.retire(0).valid.poke(true)
+        dut.io.retire(0).bits.poke(12)
+        dut.clock.step()
+        dut.io.retire(0).valid.poke(false)
+        dut.io.commitSideEffect.valid.expect(false)
+      }
+    }
+
+    it("turns an illegal CSR access into a precise illegal-instruction fault") {
+      simulate(new IntegerShortPipes) { dut =>
+        clearInputs(dut)
+        val instruction = BigInt("fff092f3", 16)
+        driveRequest(dut.io.e0, tag = 13, endpoint = EndpointMask.E0,
+          uopClass = UopClass.Csr, operation = IntOperation.Csrrw,
+          lhs = 7, destinationPhysical = 36, instruction = instruction,
+          csrAddress = 0xfff, csrRead = true, csrWrite = true)
+        dut.io.robHeadTag.poke(13)
+        dut.io.csrAccessLegal.poke(false)
+        dut.io.e0.valid.poke(true)
+
+        dut.io.e0.ready.expect(true)
+        dut.io.e0Fault.valid.expect(true)
+        dut.io.e0Fault.record.cause.expect(2)
+        dut.io.e0Fault.record.trapValue.expect(instruction)
+        dut.clock.step()
+
+        dut.io.e0.valid.poke(false)
+        dut.io.e0Completion.valid.expect(true)
+        dut.io.e0Completion.bits.writesInteger.expect(false)
+        dut.io.commitSideEffect.valid.expect(true)
+        dut.io.commitSideEffect.bits.sideEffect.csrWrite.expect(false)
+      }
+    }
+
+    it("holds a System uop away from E0 until it reaches the ROB head") {
+      simulate(new IntegerShortPipes) { dut =>
+        clearInputs(dut)
+        driveRequest(dut.io.e0, tag = 15, endpoint = EndpointMask.E0,
+          uopClass = UopClass.System, operation = IntOperation.Fence,
+          writesInteger = false)
+        dut.io.robHeadTag.poke(14)
+        dut.io.e0.valid.poke(true)
+        dut.io.e0.ready.expect(false)
+
+        dut.io.robHeadTag.poke(15)
+        dut.io.e0.ready.expect(true)
+        dut.clock.step()
+        dut.io.e0.valid.poke(false)
+        dut.io.systemSerializingReady.poke(false)
+        dut.io.commitSideEffect.valid.expect(true)
+        dut.io.commitSideEffect.bits.sideEffect.serializingReady.expect(false)
+        dut.io.systemSerializingReady.poke(true)
+        dut.io.commitSideEffect.bits.sideEffect.serializingReady.expect(true)
       }
     }
   }

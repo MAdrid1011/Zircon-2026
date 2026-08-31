@@ -30,6 +30,7 @@ class IntegerOperandReadSpec extends AnyFunSpec with ChiselSim {
       context.valid.poke(true)
       context.bits.robTag.poke(lane)
       context.bits.pc.poke(BigInt("80000000", 16) + lane * 4)
+      context.bits.instruction.poke(BigInt("00000013", 16))
       context.bits.privilege.poke(3)
       context.bits.csrAddress.poke(0)
       context.bits.csrImmediate.poke(0)

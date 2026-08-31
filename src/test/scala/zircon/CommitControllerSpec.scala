@@ -20,7 +20,7 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
     dut.io.firstFault.bits.trapValue.poke(0)
     dut.io.eligibleInterrupt.valid.poke(false)
     dut.io.eligibleInterrupt.cause.poke(0)
-    dut.io.interruptEpc.poke(BigInt("80001000", 16))
+    dut.io.interruptHead.valid.poke(false)
     dut.io.interruptBlocked.poke(false)
     dut.io.trapVector.poke(BigInt("80000100", 16))
     dut.io.mretTarget.poke(BigInt("80000200", 16))
@@ -113,6 +113,9 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
         dut.io.trapCommit.bits.cause.expect(2)
         dut.io.trapCommit.bits.exceptionPc.expect(BigInt("80000020", 16))
         dut.io.trapCommit.bits.trapValue.expect(BigInt("bad00000", 16))
+        dut.io.trapEntry.valid.expect(true)
+        dut.io.trapEntry.bits.entry.pc.expect(BigInt("80000020", 16))
+        dut.io.trapLane.expect(0)
         dut.io.firstFaultClear.expect(true)
         dut.io.flush.expect(true)
         dut.io.redirect.bits.target.expect(BigInt("80000100", 16))
@@ -130,6 +133,9 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
         dut.io.renameCommit(1).valid.expect(false)
         dut.io.trapCommit.bits.cause.expect(5)
         dut.io.trapCommit.bits.exceptionPc.expect(BigInt("80000024", 16))
+        dut.io.trapEntry.valid.expect(true)
+        dut.io.trapEntry.bits.entry.pc.expect(BigInt("80000024", 16))
+        dut.io.trapLane.expect(1)
       }
     }
 
@@ -138,6 +144,8 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
         clearInputs(dut)
         driveRobLane(dut, 0, 4, BigInt("80000010", 16))
         driveRobLane(dut, 1, 5, BigInt("80000014", 16))
+        dut.io.interruptHead.valid.poke(true)
+        dut.io.interruptHead.bits.entry.pc.poke(BigInt("80000010", 16))
         dut.io.eligibleInterrupt.valid.poke(true)
         dut.io.eligibleInterrupt.cause.poke(MachineInterruptCause.External)
 
@@ -146,8 +154,11 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
         dut.io.trapCommit.valid.expect(true)
         dut.io.trapCommit.bits.interrupt.expect(true)
         dut.io.trapCommit.bits.cause.expect(MachineInterruptCause.External)
-        dut.io.trapCommit.bits.exceptionPc.expect(BigInt("80001000", 16))
+        dut.io.trapCommit.bits.exceptionPc.expect(BigInt("80000010", 16))
         dut.io.trapCommit.bits.trapValue.expect(0)
+        dut.io.trapEntry.valid.expect(true)
+        dut.io.trapEntry.bits.entry.pc.expect(BigInt("80000010", 16))
+        dut.io.trapLane.expect(0)
         dut.io.firstFaultClear.expect(false)
         dut.io.redirect.bits.reason.expect(CommitRedirectReason.Interrupt)
 

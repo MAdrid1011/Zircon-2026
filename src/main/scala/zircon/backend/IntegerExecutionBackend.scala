@@ -40,6 +40,12 @@ class IntegerExecutionBackend(
 
     val branchResolve = Decoupled(new BranchResolutionRequest(config))
     val e0Fault = Output(new FaultCandidate(config))
+    val csrAccess = Output(new CSRAccessRequest)
+    val csrAccessData = Input(UInt(32.W))
+    val csrAccessLegal = Input(Bool())
+    val systemSerializingReady = Input(Bool())
+    val commitSideEffect = Output(Vec(config.commitWidth,
+      new CommitSideEffect))
     val e0Occupied = Output(Bool())
     val e1Count = Output(UInt(1.W))
 
@@ -53,6 +59,7 @@ class IntegerExecutionBackend(
     val rollbackActive = Output(Bool())
     val rollbackDone = Output(Bool())
     val robHeadTag = Output(UInt(config.robTagWidth.W))
+    val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(robCountWidth.W))
 
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
@@ -75,6 +82,7 @@ class IntegerExecutionBackend(
   io.rollbackActive := state.io.rollbackActive
   io.rollbackDone := state.io.rollbackDone
   io.robHeadTag := state.io.robHeadTag
+  io.robHead := state.io.robHead
   io.robCount := state.io.robCount
 
   issue.io.enqueue <> io.intEnqueue
@@ -107,10 +115,39 @@ class IntegerExecutionBackend(
   shortPipes.io.squash := io.squash
   shortPipes.io.recoveryActive := io.recoveryActive
   shortPipes.io.flush := io.flush
+  shortPipes.io.csrAccessData := io.csrAccessData
+  shortPipes.io.csrAccessLegal := io.csrAccessLegal
+  shortPipes.io.systemSerializingReady := io.systemSerializingReady
+  io.csrAccess := shortPipes.io.csrAccess
   io.branchResolve <> shortPipes.io.branchResolve
   io.e0Fault := shortPipes.io.e0Fault
   io.e0Occupied := shortPipes.io.e0Occupied
   io.e1Count := shortPipes.io.e1Count
+
+  for (lane <- 0 until config.commitWidth) {
+    shortPipes.io.retire(lane).valid := io.commit(lane).fire
+    shortPipes.io.retire(lane).bits := io.commit(lane).bits.robTag
+
+    val serialized = io.commit(lane).valid &&
+      (io.commit(lane).bits.entry.decoded.uopClass === UopClass.Csr ||
+        io.commit(lane).bits.entry.decoded.uopClass === UopClass.System)
+    val matchingSideEffect = shortPipes.io.commitSideEffect.valid &&
+      shortPipes.io.commitSideEffect.bits.robTag === io.commit(lane).bits.robTag
+    io.commitSideEffect(lane).csrWrite := matchingSideEffect &&
+      shortPipes.io.commitSideEffect.bits.sideEffect.csrWrite
+    io.commitSideEffect(lane).csrAddress :=
+      shortPipes.io.commitSideEffect.bits.sideEffect.csrAddress
+    io.commitSideEffect(lane).csrData :=
+      shortPipes.io.commitSideEffect.bits.sideEffect.csrData
+    io.commitSideEffect(lane).serializingReady := !serialized ||
+      (matchingSideEffect &&
+        shortPipes.io.commitSideEffect.bits.sideEffect.serializingReady)
+
+    when(serialized && io.commit(lane).ready) {
+      assert(matchingSideEffect,
+        "a CSR/System retirement lacked its tagged E0 side effect")
+    }
+  }
 
   state.io.endpointCompletion(0) <> shortPipes.io.e0Completion
   state.io.endpointCompletion(1) <> shortPipes.io.e1Completion

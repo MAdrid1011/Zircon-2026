@@ -34,7 +34,7 @@ class FirstFaultTracker(
   })
 
   val validReg = RegInit(false.B)
-  val recordReg = Reg(new FirstFaultRecord(config))
+  val recordReg = RegInit(0.U.asTypeOf(new FirstFaultRecord(config)))
 
   private def ageFromHead(tag: UInt): UInt =
     ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
@@ -62,10 +62,12 @@ class FirstFaultTracker(
     }
   }
 
-  // Keep clear/flush sequential, as commit may consume the visible record on
-  // the same edge. A younger squashed record, however, must disappear before
-  // any recovery-cycle observer can act on it.
-  io.valid := validReg && survivesSquash(recordReg.robTag)
+  // Keep every visible output register-only. The squash edge removes a younger
+  // record for the following cycle; the resolving branch is older and remains
+  // incomplete in the launch cycle, so that record cannot match a committable
+  // ROB head. Avoiding a combinational squash filter also keeps BDB commit,
+  // branch resolution, fault visibility, and commit arbitration acyclic.
+  io.valid := validReg
   io.record := recordReg
 
   when(io.squash.valid) {

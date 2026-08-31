@@ -32,6 +32,13 @@ class IntegerDispatchRecoveryBackend(
       Decoupled(new CompletionResult(config))))
     val otherFault = Input(Vec(3, new FaultCandidate(config)))
 
+    val csrAccess = Output(new CSRAccessRequest)
+    val csrAccessData = Input(UInt(32.W))
+    val csrAccessLegal = Input(Bool())
+    val systemSerializingReady = Input(Bool())
+    val commitSideEffect = Output(Vec(config.commitWidth,
+      new CommitSideEffect))
+
     val commit = Vec(config.commitWidth, Decoupled(new ROBCommit(config)))
     val renameCommit = Input(Vec(config.commitWidth,
       new RenameCommit(physicalWidth)))
@@ -55,6 +62,7 @@ class IntegerDispatchRecoveryBackend(
 
     val acceptedCount = Output(UInt(2.W))
     val renameFreeCount = Output(UInt(freeCountWidth.W))
+    val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(robCountWidth.W))
     val intCount = Output(UInt(intCountWidth.W))
     val branchDataCount = Output(UInt(
@@ -119,6 +127,11 @@ class IntegerDispatchRecoveryBackend(
   execution.io.squash := recovery.io.squash
   execution.io.recoveryActive := recovery.io.recoveryActive
   execution.io.flush := io.globalFlush
+  execution.io.csrAccessData := io.csrAccessData
+  execution.io.csrAccessLegal := io.csrAccessLegal
+  execution.io.systemSerializingReady := io.systemSerializingReady
+  io.csrAccess := execution.io.csrAccess
+  io.commitSideEffect := execution.io.commitSideEffect
   rename.io.rollback <> execution.io.rollbackUndo
   rename.io.commit := io.renameCommit
   rename.io.flushToCommitted := io.globalFlush
@@ -154,6 +167,7 @@ class IntegerDispatchRecoveryBackend(
   io.firstFault.bits := firstFault.io.record
 
   io.renameFreeCount := rename.io.freeCount
+  io.robHead := execution.io.robHead
   io.robCount := execution.io.robCount
   io.intCount := execution.io.intCount
   io.branchDataCount := recovery.io.count

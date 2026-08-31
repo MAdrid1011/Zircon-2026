@@ -35,6 +35,17 @@ block 时两者都为零。writeback router 只对 accepted 产生 PRF/wakeup，
 - branch rollback 保留 resolving branch 和所有更老项，从 tail 每周期逆序删除最多两项；
   rollback active 时禁止 enqueue、completion 和 commit。
 
+## Live Head And Precise Metadata
+
+ROB 额外输出 `head: Valid[ROBCommit]`。它在 head entry live 时有效，即使该 entry
+尚未完成而不能出现在 normal `commit[2]` 端口。这是 interrupt 的唯一 EPC 来源：commit
+controller 只在 `head.valid` 时接受 interrupt，并以 `head.entry.pc` 写入 `mepc`。因此
+顶层不允许从 fetch PC、预测 target 或测试平台输入猜测 interrupt boundary。
+
+同步异常继续由 normal completed commit lane 和 `FirstFaultRecord` 识别。controller
+输出 faulting `ROBCommit` 与 lane index；lane-1 exception 可以同时保留 lane-0 retirement
+和 lane-1 trap metadata。这个窄输出复用已有 ROB entry，不在每项复制 exception payload。
+
 ## Execution Context Read
 
 IntIQ 只保存 compact `UopRef`，E0/E1 issue 后以 live `robTag` 读取两个组合窄端口。
@@ -54,8 +65,10 @@ older uop 读取。
 
 FirstFaultRecord 在 fault 位于 head 且由 commit/trap controller 消费、global flush，
 或 branch-selective squash 证明该 fault 比 resolving branch 更年轻时清除。squash
-同周期到达的新 fault candidate 也先按相同年龄规则过滤；较老 fault 保留。exception
-priority 先在每条指令内部解析，再把最多两个已经唯一化的候选送入 tracker。
+同周期到达的新 fault candidate 先按相同年龄规则过滤；已保存的年轻 fault 在该边沿
+清除，输出不增加组合 squash filter。resolving branch 在发起恢复时尚未完成，因此年轻
+fault 不可能匹配可提交 ROB head。exception priority 先在每条指令内部解析，再把最多
+两个已经唯一化的候选送入 tracker。
 
 ## 必须断言
 

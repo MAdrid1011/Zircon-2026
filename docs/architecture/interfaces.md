@@ -1,6 +1,6 @@
 # 顶层接口
 
-`ZirconCoreIO` 是处理器与 SoC、仿真器和差分参考模型之间的稳定边界。当前实现已生成 AXI4 master、中断输入和可选提交跟踪端口；M0 shell 不产生总线请求或退休事件。
+`ZirconCoreIO` 是处理器与 SoC、仿真器和差分参考模型之间的稳定边界。当前 M1 实现生成 AXI4 master、中断输入和可选提交跟踪端口；AXI read channel 已可驱动 directed RV32I retire trace，write channel 仍等待 M3 LSU/MMIO。
 
 <!-- 图：ZirconCoreIO 信号方向 -->
 <!-- ![ZirconCoreIO 信号方向](./assets/core-io.svg) -->
@@ -25,4 +25,4 @@ valid 在握手前必须保持，ready 可独立回压。R channel 可在不同 
 - memory 地址、读写 mask 和数据
 - `trap/interrupt/cause/trapValue/fflags`
 
-`order` 是跨双退休 lane 单调递增的 64-bit 指令序号。综合配置不生成 trace 端口，避免验证状态进入面积结果。
+`order` 是跨双退休 lane 单调递增的 64-bit 指令序号。事件直接使用 retired ROB entry 或 trap 的真实 faulting/interrupted ROB entry；lane-1 exception 保留 older lane-0 retirement 后的 trap 顺序。综合配置不生成 trace 端口、formatter 或 order counter，避免验证状态进入面积结果。

@@ -39,6 +39,7 @@ class ROBCommit(config: ZirconCoreConfig) extends Bundle {
 class ROBExecutionContext(config: ZirconCoreConfig) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
   val pc = UInt(32.W)
+  val instruction = UInt(32.W)
   val privilege = UInt(2.W)
   val csrAddress = UInt(12.W)
   val csrImmediate = UInt(5.W)
@@ -87,6 +88,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     val rollbackDone = Output(Bool())
 
     val headTag = Output(UInt(config.robTagWidth.W))
+    val head = Output(Valid(new ROBCommit(config)))
     val count = Output(UInt(countWidth.W))
     val enqueueCapacity = Output(UInt(2.W))
   })
@@ -118,18 +120,25 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   val secondHeadIndex = advance(headIndex, 1.U)
   val headMatches = entryValid(headIndex)
   val secondHeadMatches = entryValid(secondHeadIndex)
+  io.head.valid := count =/= 0.U && headMatches
+  io.head.bits.robTag := tag(entryGeneration(headIndex), headIndex)
+  io.head.bits.entry := entryData(headIndex)
   // A commit decision may itself generate io.flush (exception after lane 0,
   // MRET, or FENCE.I). Keep completed heads visible during that cycle so the
   // retiring prefix can fire; flush still blocks enqueue, completion, context
   // reads, and rollback, then clears all remaining speculative entries.
-  val rollbackBlocked = rollbackActive || io.rollback.valid
-  val normalBlocked = io.flush || rollbackBlocked
+  // An already active tail walk blocks commit visibility. A newly arriving
+  // rollback request does not: an older completed prefix may retire while the
+  // request is retained by the recovery controller. This also keeps a
+  // commit-generated flush out of the ROB-valid combinational cone.
+  val commitBlocked = rollbackActive
+  val normalBlocked = io.flush || rollbackActive || io.rollback.valid
 
-  io.commit(0).valid := !rollbackBlocked && count =/= 0.U &&
+  io.commit(0).valid := !commitBlocked && count =/= 0.U &&
     headMatches && entryComplete(headIndex)
   io.commit(0).bits.robTag := tag(entryGeneration(headIndex), headIndex)
   io.commit(0).bits.entry := entryData(headIndex)
-  io.commit(1).valid := !rollbackBlocked && count > 1.U &&
+  io.commit(1).valid := !commitBlocked && count > 1.U &&
     io.commit(0).valid && secondHeadMatches && entryComplete(secondHeadIndex)
   io.commit(1).bits.robTag :=
     tag(entryGeneration(secondHeadIndex), secondHeadIndex)
@@ -197,6 +206,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
       matches && !io.flush
     io.executionContext(port).bits.robTag := io.executionRead(port).bits
     io.executionContext(port).bits.pc := entry.pc
+    io.executionContext(port).bits.instruction := entry.instruction
     io.executionContext(port).bits.privilege := entry.privilege
     io.executionContext(port).bits.csrAddress := entry.decoded.csrAddress
     io.executionContext(port).bits.csrImmediate := entry.decoded.csrImmediate
@@ -222,8 +232,12 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     entryGeneration(rollbackIndex) === rollbackGeneration
   val requestedStopIndex = advance(rollbackIndex, 1.U)
   val requestHasYounger = tailIndex =/= requestedStopIndex
-  io.rollback.ready := !io.flush && !rollbackActive
+  io.rollback.ready := !io.flush && !rollbackActive &&
+    !io.commit.map(_.fire).reduce(_ || _)
   val rollbackStart = io.rollback.fire
+
+  assert(!(rollbackStart && io.commit.map(_.fire).reduce(_ || _)),
+    "ROB accepted rollback and retirement on the same edge")
 
   val youngestIndex = previous(tailIndex)
   val nextYoungestIndex = previous(youngestIndex)
@@ -337,7 +351,9 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   when(count =/= 0.U) {
     assert(headMatches, "ROB head tag must reference a valid entry")
   }
-  when(rollbackActive || io.rollback.valid) {
+  // A pending rollback request may wait behind an older completed retirement
+  // prefix. Only an accepted request enters the tail-walk exclusion region.
+  when(rollbackActive) {
     assert(!io.commit.exists(_.fire),
       "ROB committed during branch rollback")
     assert(!io.enqueue.exists(_.fire),
