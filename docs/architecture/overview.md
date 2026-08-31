@@ -11,7 +11,7 @@ Zircon-2026 的目标配置为 `RV32IMAF_Zicsr_Zifencei`、单 hart、M-mode。�
 
 具体接口见 [顶层接口](interfaces.md)，后端目标结构见 [后端](backend.md)，M1 方向预测见 [Banked Bimodal Predictor](bimodal-predictor.md)，目标与调用栈预测见 [BTB、RAS 与目标选择](target-prediction.md)，控制预译码和历史见 [控制流预译码与推测历史](speculative-history.md)，四路到两路缓冲见 [Fetch/Decode Queue](fetch-decode-queue.md)，执行期错误预测处理见 [分支选择性恢复](branch-recovery.md)，访存目标结构见 [访存子系统](memory.md)，特权行为见 [特权态](privileged.md)。
 
-可执行 M1 在正式 L1I 前使用单 outstanding 的 [AXI instruction fetch transport](axi-instruction-fetch.md)；它只负责 AXI 请求、redirect drain 和逐 word fetch fault，不替代 M3 的 I-Cache。
+可执行 M1 在正式 L1I 前使用单 outstanding 的 [AXI instruction fetch transport](axi-instruction-fetch.md)；它只负责 AXI 请求、redirect drain 和逐 word fetch fault，不替代 M3 的 I-Cache。[M1Frontend](m1-frontend.md) 复用现有 Base/BTB/RAS/history/queue，将该 transport 接到两路 decode 流。
 
 关于缩写：
 
