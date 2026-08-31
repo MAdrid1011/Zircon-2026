@@ -1,6 +1,8 @@
 # IPC 与 PPA 基线
 
-当前状态：尚未测量。该文件定义稳定报告字段，不预填推测数字。
+当前状态：正式数据尚未测量。固定提交的可运行性和非正式 smoke 已记录在
+[`zircon-2024-reproduction.md`](zircon-2024-reproduction.md)，静态面积预算见
+[`zircon-2024-static-inventory.md`](zircon-2024-static-inventory.md)。
 
 ## Zircon-2024 固定点
 
