@@ -26,6 +26,25 @@ class RenameSpec extends AnyFunSpec with ChiselSim {
       commit.newPhysical.poke(0)
     }
     dut.io.flushToCommitted.poke(false)
+    dut.io.rollback.valid.poke(false)
+    dut.io.rollback.bits.count.poke(1)
+    for (lane <- 0 until 2) {
+      dut.io.rollback.bits.records(lane).robTag.poke(0)
+      dut.io.rollback.bits.records(lane).architecturalDestination.poke(0)
+      dut.io.rollback.bits.records(lane).oldPhysicalDestination.poke(0)
+      dut.io.rollback.bits.records(lane).newPhysicalDestination.poke(0)
+      dut.io.rollback.bits.records(lane).allocatesPhysical.poke(false)
+    }
+  }
+
+  private def rollbackRecord(dut: IntegerRename, lane: Int,
+      architectural: Int, oldPhysical: Int, newPhysical: Int): Unit = {
+    val record = dut.io.rollback.bits.records(lane)
+    record.robTag.poke(0)
+    record.architecturalDestination.poke(architectural)
+    record.oldPhysicalDestination.poke(oldPhysical)
+    record.newPhysicalDestination.poke(newPhysical)
+    record.allocatesPhysical.poke(true)
   }
 
   private def request(
@@ -150,6 +169,87 @@ class RenameSpec extends AnyFunSpec with ChiselSim {
         dut.io.speculativeMap(5).expect(33)
         dut.io.speculativeMap(7).expect(7)
         assert(dut.io.speculativeFree.peek().litValue.testBit(5))
+        dut.io.speculativeFree.expect(dut.io.committedFree.peek().litValue)
+      }
+    }
+
+    it("undoes dual WAW allocations newest-first without a RAT checkpoint") {
+      simulate(new IntegerRename(ZirconCoreConfig.default)) { dut =>
+        clearRequests(dut)
+        clearCommit(dut)
+
+        request(dut, 0, rs1 = 1, rs2 = 2, rd = 5)
+        request(dut, 1, rs1 = 3, rs2 = 4, rd = 5)
+        dut.io.accept.poke(true)
+        dut.io.response(0).newDestinationPhysical.expect(32)
+        dut.io.response(1).newDestinationPhysical.expect(33)
+        dut.clock.step()
+        request(dut, 0, rs1 = 1, rs2 = 2, rd = 5)
+        request(dut, 1, rs1 = 3, rs2 = 4, rd = 5)
+        dut.io.response(0).newDestinationPhysical.expect(34)
+        dut.io.response(1).newDestinationPhysical.expect(35)
+        dut.clock.step()
+        clearRequests(dut)
+        dut.io.speculativeMap(5).expect(35)
+        dut.io.freeCount.expect(20)
+
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.count.poke(2)
+        rollbackRecord(dut, 0, architectural = 5,
+          oldPhysical = 34, newPhysical = 35)
+        rollbackRecord(dut, 1, architectural = 5,
+          oldPhysical = 33, newPhysical = 34)
+        dut.io.rollback.ready.expect(true)
+        dut.clock.step()
+        dut.io.speculativeMap(5).expect(33)
+        assert(dut.io.speculativeFree.peek().litValue.testBit(34))
+        assert(dut.io.speculativeFree.peek().litValue.testBit(35))
+        assert(!dut.io.speculativeFree.peek().litValue.testBit(33))
+
+        rollbackRecord(dut, 0, architectural = 5,
+          oldPhysical = 32, newPhysical = 33)
+        rollbackRecord(dut, 1, architectural = 5,
+          oldPhysical = 5, newPhysical = 32)
+        dut.clock.step()
+        dut.io.rollback.valid.poke(false)
+        dut.io.speculativeMap(5).expect(5)
+        dut.io.freeCount.expect(24)
+        for (physical <- 32 to 35) {
+          assert(dut.io.speculativeFree.peek().litValue.testBit(physical))
+        }
+      }
+    }
+
+    it("backpressures rollback during commit and gives global flush priority") {
+      simulate(new IntegerRename(ZirconCoreConfig.default)) { dut =>
+        clearRequests(dut)
+        clearCommit(dut)
+        request(dut, 0, rs1 = 1, rs2 = 2, rd = 7)
+        dut.io.request(1).valid.poke(false)
+        dut.io.accept.poke(true)
+        dut.io.response(0).newDestinationPhysical.expect(32)
+        dut.clock.step()
+        clearRequests(dut)
+
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.count.poke(1)
+        rollbackRecord(dut, 0, architectural = 7,
+          oldPhysical = 7, newPhysical = 32)
+        dut.io.commit(0).valid.poke(true)
+        dut.io.commit(0).architectural.poke(7)
+        dut.io.commit(0).oldPhysical.poke(7)
+        dut.io.commit(0).newPhysical.poke(32)
+        dut.io.rollback.ready.expect(false)
+        dut.clock.step()
+        dut.io.speculativeMap(7).expect(32)
+
+        dut.io.commit(0).valid.poke(false)
+        dut.io.flushToCommitted.poke(true)
+        dut.io.rollback.ready.expect(false)
+        dut.clock.step()
+        dut.io.flushToCommitted.poke(false)
+        dut.io.rollback.valid.poke(false)
+        dut.io.speculativeMap(7).expect(32)
         dut.io.speculativeFree.expect(dut.io.committedFree.peek().litValue)
       }
     }

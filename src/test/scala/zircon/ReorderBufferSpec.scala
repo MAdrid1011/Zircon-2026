@@ -14,6 +14,9 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
     }
     dut.io.commit.foreach(_.ready.poke(false))
     dut.io.flush.poke(false)
+    dut.io.rollback.valid.poke(false)
+    dut.io.rollback.bits.poke(0)
+    dut.io.rollbackUndo.ready.poke(false)
   }
 
   private def driveEnqueue(
@@ -174,6 +177,157 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.completion(0).valid.poke(false)
         dut.io.commit(0).valid.expect(true)
+      }
+    }
+
+    it("walks the tail two entries at a time and preserves the resolving prefix") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        for (pair <- 0 until 3) {
+          driveEnqueue(dut, 0, BigInt("80000000", 16) + pair * 8,
+            initiallyComplete = true)
+          driveEnqueue(dut, 1, BigInt("80000004", 16) + pair * 8,
+            initiallyComplete = true)
+          dut.clock.step()
+        }
+        dut.io.enqueue.foreach(_.valid.poke(false))
+        dut.io.count.expect(6)
+
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.poke(1)
+        dut.io.rollback.ready.expect(true)
+        dut.io.commit.foreach(_.valid.expect(false))
+        dut.clock.step()
+        dut.io.rollback.valid.poke(false)
+        dut.io.rollbackActive.expect(true)
+        dut.io.rollbackUndo.valid.expect(true)
+        dut.io.rollbackUndo.bits.count.expect(2)
+        dut.io.rollbackUndo.bits.records(0).robTag.expect(5)
+        dut.io.rollbackUndo.bits.records(1).robTag.expect(4)
+
+        // Backpressure must keep the tail bundle and occupancy stable.
+        dut.clock.step()
+        dut.io.count.expect(6)
+        dut.io.rollbackUndo.bits.records(0).robTag.expect(5)
+        dut.io.rollbackUndo.ready.poke(true)
+        dut.io.rollbackDone.expect(false)
+        dut.clock.step()
+        dut.io.count.expect(4)
+        dut.io.rollbackUndo.bits.records(0).robTag.expect(3)
+        dut.io.rollbackUndo.bits.records(1).robTag.expect(2)
+        dut.io.rollbackDone.expect(true)
+        dut.clock.step()
+        dut.io.count.expect(2)
+        dut.io.rollbackActive.expect(false)
+        dut.io.rollbackUndo.valid.expect(false)
+        dut.io.commit(0).valid.expect(true)
+        dut.io.commit(0).bits.robTag.expect(0)
+        dut.io.commit(1).bits.robTag.expect(1)
+      }
+    }
+
+    it("completes a zero-younger rollback without entering walker state") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveEnqueue(dut, 0, BigInt("80000000", 16), initiallyComplete = true)
+        driveEnqueue(dut, 1, BigInt("80000004", 16), initiallyComplete = true)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.poke(1)
+        dut.io.rollback.ready.expect(true)
+        dut.io.rollbackDone.expect(true)
+        dut.clock.step()
+        dut.io.rollback.valid.poke(false)
+        dut.io.rollbackActive.expect(false)
+        dut.io.count.expect(2)
+      }
+    }
+
+    it("changes a rewound slot generation before rejecting stale completion") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        for (pair <- 0 until 2) {
+          driveEnqueue(dut, 0, BigInt("80000000", 16) + pair * 8,
+            initiallyComplete = false)
+          driveEnqueue(dut, 1, BigInt("80000004", 16) + pair * 8,
+            initiallyComplete = false)
+          dut.clock.step()
+        }
+        dut.io.enqueue.foreach(_.valid.poke(false))
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.poke(0)
+        dut.clock.step()
+        dut.io.rollback.valid.poke(false)
+        dut.io.rollbackUndo.ready.poke(true)
+        dut.clock.step()
+        dut.io.rollbackDone.expect(true)
+        dut.clock.step()
+        dut.io.rollbackUndo.ready.poke(false)
+        dut.io.count.expect(1)
+
+        driveEnqueue(dut, 0, BigInt("80001000", 16), initiallyComplete = false)
+        driveEnqueue(dut, 1, BigInt("80001004", 16), initiallyComplete = false)
+        dut.io.enqueueTag(0).bits.expect(33)
+        dut.io.enqueueTag(1).bits.expect(34)
+        dut.clock.step()
+        driveEnqueue(dut, 0, BigInt("80001008", 16), initiallyComplete = false)
+        dut.io.enqueue(1).valid.poke(false)
+        dut.io.enqueueTag(0).bits.expect(35)
+        dut.clock.step()
+        dut.io.enqueue(0).valid.poke(false)
+
+        dut.io.completion(0).valid.poke(true)
+        dut.io.completion(0).robTag.poke(1)
+        dut.io.completionAccepted(0).expect(false)
+        dut.clock.step()
+        dut.io.completion(0).robTag.poke(33)
+        dut.io.completionAccepted(0).expect(true)
+      }
+    }
+
+    it("rolls back across the physical index wrap") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        for (pair <- 0 until 12) {
+          driveEnqueue(dut, 0, BigInt("80000000", 16) + pair * 8,
+            initiallyComplete = true)
+          driveEnqueue(dut, 1, BigInt("80000004", 16) + pair * 8,
+            initiallyComplete = true)
+          dut.clock.step()
+        }
+        dut.io.enqueue.foreach(_.valid.poke(false))
+        dut.io.commit.foreach(_.ready.poke(true))
+        dut.clock.step(10)
+        dut.io.commit.foreach(_.ready.poke(false))
+        dut.io.count.expect(4)
+        dut.io.headTag.expect(20)
+
+        for (pair <- 0 until 2) {
+          driveEnqueue(dut, 0, BigInt("80001000", 16) + pair * 8,
+            initiallyComplete = false)
+          driveEnqueue(dut, 1, BigInt("80001004", 16) + pair * 8,
+            initiallyComplete = false)
+          dut.io.enqueueTag(0).bits.expect(32 + pair * 2)
+          dut.io.enqueueTag(1).bits.expect(33 + pair * 2)
+          dut.clock.step()
+        }
+        dut.io.enqueue.foreach(_.valid.poke(false))
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.poke(23)
+        dut.clock.step()
+        dut.io.rollback.valid.poke(false)
+        dut.io.rollbackUndo.ready.poke(true)
+        dut.io.rollbackUndo.bits.records(0).robTag.expect(35)
+        dut.io.rollbackUndo.bits.records(1).robTag.expect(34)
+        dut.clock.step()
+        dut.io.rollbackUndo.bits.records(0).robTag.expect(33)
+        dut.io.rollbackUndo.bits.records(1).robTag.expect(32)
+        dut.io.rollbackDone.expect(true)
+        dut.clock.step()
+        dut.io.count.expect(4)
+        dut.io.rollbackActive.expect(false)
       }
     }
   }

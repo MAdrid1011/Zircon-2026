@@ -35,6 +35,20 @@ class ROBCommit(config: ZirconCoreConfig) extends Bundle {
   val entry = new ROBEntry(config)
 }
 
+class ROBRollbackRecord(config: ZirconCoreConfig) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val architecturalDestination = UInt(5.W)
+  val oldPhysicalDestination = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val newPhysicalDestination = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val allocatesPhysical = Bool()
+}
+
+class ROBRollbackBundle(config: ZirconCoreConfig) extends Bundle {
+  val count = UInt(2.W)
+  val records = Vec(2, new ROBRollbackRecord(config))
+}
+
+/** 24-entry ROB with dual enqueue/complete/commit and two-entry tail rollback. */
 class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   private val entries = config.robEntries
   private val indexWidth = config.robIndexWidth
@@ -48,6 +62,11 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     val commit = Vec(2, Decoupled(new ROBCommit(config)))
     val flush = Input(Bool())
 
+    val rollback = Flipped(Decoupled(UInt(config.robTagWidth.W)))
+    val rollbackUndo = Decoupled(new ROBRollbackBundle(config))
+    val rollbackActive = Output(Bool())
+    val rollbackDone = Output(Bool())
+
     val headTag = Output(UInt(config.robTagWidth.W))
     val count = Output(UInt(countWidth.W))
   })
@@ -55,34 +74,40 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   val entryData = Reg(Vec(entries, new ROBEntry(config)))
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
   val entryComplete = RegInit(VecInit.fill(entries)(false.B))
-  val entryGeneration = RegInit(VecInit.fill(entries)(false.B))
+  // Initialize to one so the first allocation receives generation zero.
+  val entryGeneration = RegInit(VecInit.fill(entries)(true.B))
 
   val headIndex = RegInit(0.U(indexWidth.W))
-  val headGeneration = RegInit(false.B)
   val tailIndex = RegInit(0.U(indexWidth.W))
-  val tailGeneration = RegInit(false.B)
   val count = RegInit(0.U(countWidth.W))
 
-  private def advance(index: UInt, generation: Bool, amount: UInt): (UInt, Bool) = {
+  val rollbackActive = RegInit(false.B)
+  val rollbackStopIndex = RegInit(0.U(indexWidth.W))
+
+  private def advance(index: UInt, amount: UInt): UInt = {
     val sum = index +& amount
-    val wraps = sum >= entries.U
-    val normalized = Mux(wraps, sum - entries.U, sum)
-    (normalized(indexWidth - 1, 0), generation ^ wraps)
+    val normalized = Mux(sum >= entries.U, sum - entries.U, sum)
+    normalized(indexWidth - 1, 0)
   }
+
+  private def previous(index: UInt): UInt =
+    Mux(index === 0.U, (entries - 1).U, index - 1.U)
 
   private def tag(generation: Bool, index: UInt): UInt = generation ## index
 
-  val (secondHeadIndex, secondHeadGeneration) = advance(headIndex, headGeneration, 1.U)
-  val headMatches = entryValid(headIndex) && entryGeneration(headIndex) === headGeneration
-  val secondHeadMatches = entryValid(secondHeadIndex) &&
-    entryGeneration(secondHeadIndex) === secondHeadGeneration
+  val secondHeadIndex = advance(headIndex, 1.U)
+  val headMatches = entryValid(headIndex)
+  val secondHeadMatches = entryValid(secondHeadIndex)
+  val normalBlocked = io.flush || rollbackActive || io.rollback.valid
 
-  io.commit(0).valid := count =/= 0.U && headMatches && entryComplete(headIndex)
-  io.commit(0).bits.robTag := tag(headGeneration, headIndex)
+  io.commit(0).valid := !normalBlocked && count =/= 0.U &&
+    headMatches && entryComplete(headIndex)
+  io.commit(0).bits.robTag := tag(entryGeneration(headIndex), headIndex)
   io.commit(0).bits.entry := entryData(headIndex)
-  io.commit(1).valid := count > 1.U && io.commit(0).valid &&
-    secondHeadMatches && entryComplete(secondHeadIndex)
-  io.commit(1).bits.robTag := tag(secondHeadGeneration, secondHeadIndex)
+  io.commit(1).valid := !normalBlocked && count > 1.U &&
+    io.commit(0).valid && secondHeadMatches && entryComplete(secondHeadIndex)
+  io.commit(1).bits.robTag :=
+    tag(entryGeneration(secondHeadIndex), secondHeadIndex)
   io.commit(1).bits.entry := entryData(secondHeadIndex)
 
   assert(!io.commit(1).ready || io.commit(0).ready,
@@ -93,16 +118,18 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   val commitCount = PopCount(io.commit.map(_.fire))
   val requestedEnqueueCount = PopCount(io.enqueue.map(_.valid))
   val freeSlots = entries.U - count
-  val enqueueBundleReady = !io.flush &&
+  val enqueueBundleReady = !normalBlocked &&
     freeSlots + commitCount >= requestedEnqueueCount
   io.enqueue.foreach(_.ready := enqueueBundleReady)
   val enqueueCount = PopCount(io.enqueue.map(_.fire))
 
-  val (secondTailIndex, secondTailGeneration) = advance(tailIndex, tailGeneration, 1.U)
+  val secondTailIndex = advance(tailIndex, 1.U)
+  val allocationGeneration = VecInit(
+    !entryGeneration(tailIndex), !entryGeneration(secondTailIndex))
   io.enqueueTag(0).valid := io.enqueue(0).fire
-  io.enqueueTag(0).bits := tag(tailGeneration, tailIndex)
+  io.enqueueTag(0).bits := tag(allocationGeneration(0), tailIndex)
   io.enqueueTag(1).valid := io.enqueue(1).fire
-  io.enqueueTag(1).bits := tag(secondTailGeneration, secondTailIndex)
+  io.enqueueTag(1).bits := tag(allocationGeneration(1), secondTailIndex)
 
   val completionIndex = Wire(Vec(2, UInt(indexWidth.W)))
   val completionMatch = Wire(Vec(2, Bool()))
@@ -115,7 +142,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     completionMatch(port) := inRange && entryValid(safeIndex) &&
       entryGeneration(safeIndex) === generation
     io.completionAccepted(port) := io.completion(port).valid &&
-      completionMatch(port) && !io.flush
+      completionMatch(port) && !normalBlocked
     when(io.completion(port).valid) {
       assert(inRange, "ROB completion tag index out of range")
     }
@@ -127,25 +154,93 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     io.completion(0).robTag === io.completion(1).robTag),
     "completion ports must not carry the same ROB tag")
 
-  val (headAfterCommitIndex, headAfterCommitGeneration) =
-    advance(headIndex, headGeneration, commitCount)
-  val (tailAfterEnqueueIndex, tailAfterEnqueueGeneration) =
-    advance(tailIndex, tailGeneration, enqueueCount)
+  val rollbackIndexRaw = io.rollback.bits(indexWidth - 1, 0)
+  val rollbackIndexInRange = rollbackIndexRaw < entries.U
+  val rollbackIndex = Mux(rollbackIndexInRange, rollbackIndexRaw, 0.U)
+  val rollbackGeneration = io.rollback.bits(config.robTagWidth - 1)
+  val rollbackTargetMatch = rollbackIndexInRange && entryValid(rollbackIndex) &&
+    entryGeneration(rollbackIndex) === rollbackGeneration
+  val requestedStopIndex = advance(rollbackIndex, 1.U)
+  val requestHasYounger = tailIndex =/= requestedStopIndex
+  io.rollback.ready := !io.flush && !rollbackActive
+  val rollbackStart = io.rollback.fire
+
+  val youngestIndex = previous(tailIndex)
+  val nextYoungestIndex = previous(youngestIndex)
+  val oneRollbackEntry = youngestIndex === rollbackStopIndex
+  val rollbackCount = Mux(oneRollbackEntry, 1.U, 2.U)
+  val tailAfterRollback = Mux(oneRollbackEntry,
+    youngestIndex, nextYoungestIndex)
+
+  io.rollbackUndo.valid := rollbackActive && !io.flush
+  io.rollbackUndo.bits.count := rollbackCount
+  val rollbackIndices = VecInit(youngestIndex, nextYoungestIndex)
+  for (lane <- 0 until 2) {
+    val index = rollbackIndices(lane)
+    val laneActive = lane.U < rollbackCount
+    io.rollbackUndo.bits.records(lane).robTag :=
+      Mux(laneActive, tag(entryGeneration(index), index), 0.U)
+    io.rollbackUndo.bits.records(lane).architecturalDestination :=
+      Mux(laneActive, entryData(index).architecturalDestination, 0.U)
+    io.rollbackUndo.bits.records(lane).oldPhysicalDestination :=
+      Mux(laneActive, entryData(index).oldPhysicalDestination, 0.U)
+    io.rollbackUndo.bits.records(lane).newPhysicalDestination :=
+      Mux(laneActive, entryData(index).newPhysicalDestination, 0.U)
+    io.rollbackUndo.bits.records(lane).allocatesPhysical :=
+      laneActive && entryData(index).allocatesPhysical
+  }
+  val rollbackUndoFire = io.rollbackUndo.fire
+  val rollbackFinishes = rollbackUndoFire &&
+    tailAfterRollback === rollbackStopIndex
+  io.rollbackDone := (rollbackStart && rollbackTargetMatch &&
+    !requestHasYounger) || rollbackFinishes
+  io.rollbackActive := rollbackActive
+
+  when(rollbackStart) {
+    assert(rollbackTargetMatch,
+      "ROB rollback target did not match a live entry")
+  }
+  when(io.rollbackUndo.valid) {
+    assert(entryValid(youngestIndex),
+      "ROB rollback tail did not reference a live youngest entry")
+    when(!oneRollbackEntry) {
+      assert(entryValid(nextYoungestIndex),
+        "ROB rollback second tail entry was not live")
+    }
+  }
+
+  val headAfterCommit = advance(headIndex, commitCount)
+  val tailAfterEnqueue = advance(tailIndex, enqueueCount)
 
   when(io.flush) {
     entryValid.foreach(_ := false.B)
     entryComplete.foreach(_ := false.B)
     count := 0.U
-    headIndex := headAfterCommitIndex
-    tailIndex := headAfterCommitIndex
-    headGeneration := !headAfterCommitGeneration
-    tailGeneration := !headAfterCommitGeneration
+    tailIndex := headIndex
+    rollbackActive := false.B
+  }.elsewhen(rollbackActive) {
+    when(rollbackUndoFire) {
+      entryValid(youngestIndex) := false.B
+      entryComplete(youngestIndex) := false.B
+      when(!oneRollbackEntry) {
+        entryValid(nextYoungestIndex) := false.B
+        entryComplete(nextYoungestIndex) := false.B
+      }
+      tailIndex := tailAfterRollback
+      count := count - rollbackCount
+      when(rollbackFinishes) {
+        rollbackActive := false.B
+      }
+    }
+  }.elsewhen(rollbackStart) {
+    when(rollbackTargetMatch && requestHasYounger) {
+      rollbackActive := true.B
+      rollbackStopIndex := requestedStopIndex
+    }
   }.otherwise {
     count := count + enqueueCount - commitCount
-    headIndex := headAfterCommitIndex
-    headGeneration := headAfterCommitGeneration
-    tailIndex := tailAfterEnqueueIndex
-    tailGeneration := tailAfterEnqueueGeneration
+    headIndex := headAfterCommit
+    tailIndex := tailAfterEnqueue
 
     for (port <- 0 until 2) {
       when(io.completionAccepted(port)) {
@@ -166,13 +261,13 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
       entryData(tailIndex) := io.enqueue(0).bits.entry
       entryValid(tailIndex) := true.B
       entryComplete(tailIndex) := io.enqueue(0).bits.initiallyComplete
-      entryGeneration(tailIndex) := tailGeneration
+      entryGeneration(tailIndex) := allocationGeneration(0)
     }
     when(io.enqueue(1).fire) {
       entryData(secondTailIndex) := io.enqueue(1).bits.entry
       entryValid(secondTailIndex) := true.B
       entryComplete(secondTailIndex) := io.enqueue(1).bits.initiallyComplete
-      entryGeneration(secondTailIndex) := secondTailGeneration
+      entryGeneration(secondTailIndex) := allocationGeneration(1)
     }
   }
 
@@ -182,7 +277,18 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   when(count =/= 0.U) {
     assert(headMatches, "ROB head tag must reference a valid entry")
   }
+  when(rollbackActive || io.rollback.valid) {
+    assert(!io.commit.exists(_.fire),
+      "ROB committed during branch rollback")
+    assert(!io.enqueue.exists(_.fire),
+      "ROB enqueued during branch rollback")
+    assert(!io.completionAccepted.asUInt.orR,
+      "ROB accepted completion during branch rollback")
+  }
 
-  io.headTag := tag(headGeneration, headIndex)
+  val emptyHeadGeneration = !entryGeneration(headIndex)
+  io.headTag := Mux(count === 0.U,
+    tag(emptyHeadGeneration, headIndex),
+    tag(entryGeneration(headIndex), headIndex))
   io.count := count
 }

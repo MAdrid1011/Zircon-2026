@@ -7,8 +7,9 @@ M1 ROB 固定为 24 项、双入队、双完成、双提交。ROB 保存 PC、�
 ## ROB tag
 
 `robTag` 为 6 bit：`generation[0] ## index[4:0]`，只有 index 0–23 合法。
-generation 在 tail 跨过 index 23 时翻转。global flush 从当前 head index 重新分配，
-同时反转 generation，使已 kill 的 completion 不能命中新 stream 的同一 index。
+generation 是 per-slot allocation epoch：每个物理 slot 每次重新分配时翻转。natural
+wrap、global flush 后复用和 branch tail rewind 后复用均得到不同于上一次 occupant 的
+tag，使已 kill 的 completion 不能命中新 stream 的同一 index。
 
 每个 completion 同时比较 valid、index 和 generation；不匹配的陈旧结果被丢弃，
 匹配但已经 complete 的第二份结果触发 duplicate-completion assertion。LongPipe、LSU
@@ -23,6 +24,8 @@ generation 在 tail 跨过 index 23 时翻转。global flush 从当前 head inde
 - illegal/fetch-fault 等 dispatch-time fault 可用 `initiallyComplete` 入队，但 fault
   载荷只进入 FirstFaultRecord。
 - global flush 禁止新入队、清除全部 valid，并从 flush 后的新 generation 重新开始。
+- branch rollback 保留 resolving branch 和所有更老项，从 tail 每周期逆序删除最多两项；
+  rollback active 时禁止 enqueue、completion 和 commit。
 
 ## FirstFaultRecord
 

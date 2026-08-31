@@ -44,6 +44,7 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
 
     val commit = Input(Vec(2, new RenameCommit(physicalWidth)))
     val flushToCommitted = Input(Bool())
+    val rollback = Flipped(Decoupled(new ROBRollbackBundle(config)))
 
     val speculativeMap = Output(Vec(32, UInt(physicalWidth.W)))
     val committedMap = Output(Vec(32, UInt(physicalWidth.W)))
@@ -60,7 +61,9 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
   val allocate = VecInit(io.request.map(request =>
     request.valid && request.writesRd && request.rd =/= 0.U))
   val requiredPhysical = PopCount(allocate)
-  io.canAllocate := PopCount(speculativeFree) >= requiredPhysical
+  val normalCanAllocate = PopCount(speculativeFree) >= requiredPhysical
+  io.canAllocate := normalCanAllocate && !io.rollback.valid &&
+    !io.flushToCommitted
 
   val allocation0OH = PriorityEncoderOH(speculativeFree)
   val freeAfterAllocation0 = speculativeFree &
@@ -108,6 +111,9 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
   assert(!io.accept || io.canAllocate,
     "rename state cannot advance without enough free physical registers")
 
+  val commitValid = io.commit.map(_.valid).reduce(_ || _)
+  io.rollback.ready := !io.flushToCommitted && !io.accept && !commitValid
+  val rollbackFire = io.rollback.fire
   val doRename = io.accept && io.canAllocate
   val allocationMask = Mux(doRename && allocate(0), allocation0OH, 0.U) |
     Mux(doRename && allocate(1), allocation1OH, 0.U)
@@ -157,11 +163,62 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
     }
   }
 
+  val rollbackRecordValid = VecInit(
+    io.rollback.bits.count >= 1.U &&
+      io.rollback.bits.records(0).allocatesPhysical,
+    io.rollback.bits.count >= 2.U &&
+      io.rollback.bits.records(1).allocatesPhysical)
+  val rollbackMapAfterLane0 = WireDefault(speculativeMap)
+  when(rollbackRecordValid(0)) {
+    rollbackMapAfterLane0(
+      io.rollback.bits.records(0).architecturalDestination) :=
+      io.rollback.bits.records(0).oldPhysicalDestination
+  }
+  val rollbackMapAfterLane1 = WireDefault(rollbackMapAfterLane0)
+  when(rollbackRecordValid(1)) {
+    rollbackMapAfterLane1(
+      io.rollback.bits.records(1).architecturalDestination) :=
+      io.rollback.bits.records(1).oldPhysicalDestination
+  }
+
+  private def undoFreeMask(current: UInt, record: ROBRollbackRecord,
+      valid: Bool): UInt = {
+    Mux(valid,
+      (current | UIntToOH(record.newPhysicalDestination, physicalRegisters)) &
+        ~UIntToOH(record.oldPhysicalDestination, physicalRegisters),
+      current)
+  }
+  val rollbackFreeAfterLane0 = undoFreeMask(speculativeFree,
+    io.rollback.bits.records(0), rollbackRecordValid(0))
+  val rollbackFreeAfterLane1 = undoFreeMask(rollbackFreeAfterLane0,
+    io.rollback.bits.records(1), rollbackRecordValid(1))
+
+  when(io.rollback.valid) {
+    assert(io.rollback.bits.count >= 1.U && io.rollback.bits.count <= 2.U,
+      "rename rollback bundle must contain one or two records")
+    for (lane <- 0 until 2) {
+      when(lane.U < io.rollback.bits.count &&
+        io.rollback.bits.records(lane).allocatesPhysical) {
+        val record = io.rollback.bits.records(lane)
+        assert(record.architecturalDestination =/= 0.U,
+          "rename rollback allocation cannot target x0")
+        assert(record.oldPhysicalDestination < physicalRegisters.U &&
+          record.newPhysicalDestination < physicalRegisters.U,
+          "rename rollback physical register out of range")
+        assert(record.newPhysicalDestination =/= 0.U,
+          "rename rollback cannot release p0")
+      }
+    }
+  }
+
   committedMap := committedMapAfterLane1
   committedFree := committedFreeAfterLane1
   when(io.flushToCommitted) {
     speculativeMap := committedMapAfterLane1
     speculativeFree := committedFreeAfterLane1
+  }.elsewhen(rollbackFire) {
+    speculativeMap := rollbackMapAfterLane1
+    speculativeFree := rollbackFreeAfterLane1
   }.otherwise {
     speculativeMap := speculativeMapAfterLane1
     speculativeFree := speculativeFreeAfterNormalOperation

@@ -26,9 +26,10 @@ speculative free-list 分配；commit 按 lane 0、lane 1 程序序更新 commit
 释放每条指令的 old physical destination。trap/global rollback 使用本周期 commit
 后的 committed snapshot 恢复 speculative 状态。
 
-分支误预测的低延迟恢复不能退回 committed snapshot；它将在 BDB/branch
-checkpoint 模块中保存 speculative map/free-list checkpoint。该接口未接入前，
-rename 模块状态为 M1 partial，不可用于性能签收。
+分支误预测的 execute-time 恢复不能退回 committed snapshot。Rename 从 ROB tail
+walker 接收最多两项、newest→older 的 undo bundle，使用 ROB 已保存的 old/new
+physical destination 恢复 speculative map/free-list，不在每个 BDB 项复制整份状态。
+该接口与 IQ/completion selective kill 全部接入前，rename 仍为 M1 partial。
 
 ## 6R2W PRF
 
@@ -50,4 +51,6 @@ rename 模块状态为 M1 partial，不可用于性能签收。
 - 双 commit 同一 architectural destination 时，最终 committed map 指向 lane 1，
   lane 0 new destination成为 free。
 - flush 恢复 committed map/free-list，所有未提交分配重新可用。
+- branch rollback bundle 必须 newest→older；连续 WAW undo 后 RAT 指向 surviving prefix
+  的最后一个 physical destination，所有被撤销 new physical 均回到 free-list。
 - PRF 覆盖六路同时读、两路写、write-forwarding、x0 和同目标写 assertion。
