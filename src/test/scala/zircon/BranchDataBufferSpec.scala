@@ -10,6 +10,7 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
   private def clearInputs(dut: BranchDataBuffer): Unit = {
     dut.io.robHeadTag.poke(0)
     dut.io.flushAll.poke(false)
+    dut.io.resolution.ready.poke(true)
 
     dut.io.allocate.valid.poke(false)
     dut.io.allocate.bits.robTag.poke(0)
@@ -102,7 +103,8 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
       expectedMispredict: Boolean,
       expectedHistory: BigInt,
       expectedRasPointer: Int = 0,
-      expectedRasCount: Int = 0
+      expectedRasCount: Int = 0,
+      expectedRedirectTarget: Option[BigInt] = None
   ): Unit = {
     dut.io.resolve.valid.poke(true)
     dut.io.resolve.bits.reference.index.poke(index)
@@ -115,6 +117,8 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
     dut.io.resolution.bits.recoveryHistory.expect(expectedHistory & HistoryMask)
     dut.io.resolution.bits.recoveryRasPointer.expect(expectedRasPointer)
     dut.io.resolution.bits.recoveryRasCount.expect(expectedRasCount)
+    expectedRedirectTarget.foreach(
+      dut.io.resolution.bits.redirectTarget.expect(_))
     dut.clock.step()
     dut.io.resolve.valid.poke(false)
   }
@@ -129,7 +133,8 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
           expectedIndex = 0)
         resolve(dut, 0, 0, actualTaken = true,
           actualTarget = BigInt("80000100", 16), expectedMispredict = false,
-          expectedHistory = ((history << 1) | 1) & HistoryMask)
+          expectedHistory = ((history << 1) | 1) & HistoryMask,
+          expectedRedirectTarget = Some(BigInt("80000100", 16)))
 
         dut.io.commit.valid.poke(true)
         dut.io.commit.bits.index.poke(0)
@@ -149,7 +154,8 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.count.expect(1)
         resolve(dut, 0, 1, actualTaken = false,
           actualTarget = BigInt("80000008", 16), expectedMispredict = false,
-          expectedHistory = 0)
+          expectedHistory = 0,
+          expectedRedirectTarget = Some(BigInt("80000008", 16)))
       }
     }
 
@@ -167,7 +173,8 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
 
         resolve(dut, 1, 23, actualTaken = true,
           actualTarget = BigInt("80000100", 16), expectedMispredict = true,
-          expectedHistory = ((history << 1) | 1) & HistoryMask)
+          expectedHistory = ((history << 1) | 1) & HistoryMask,
+          expectedRedirectTarget = Some(BigInt("80000100", 16)))
         dut.io.count.expect(2)
 
         // The cleared younger slot is immediately reusable by the correct path.
@@ -197,7 +204,8 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
           expectedIndex = 0)
         resolve(dut, 0, 1, actualTaken = false,
           actualTarget = BigInt("deadbeef", 16), expectedMispredict = false,
-          expectedHistory = 0)
+          expectedHistory = 0,
+          expectedRedirectTarget = Some(BigInt("80000008", 16)))
       }
     }
 
@@ -284,6 +292,44 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.allocate.valid.poke(false)
         dut.io.resolve.ready.expect(true)
         dut.io.resolution.valid.expect(true)
+      }
+    }
+
+    it("holds an unresolved result stable under recovery-controller backpressure") {
+      simulate(new BranchDataBuffer) { dut =>
+        clearInputs(dut)
+        val pc = BigInt("80000040", 16)
+        val target = BigInt("80000100", 16)
+        allocate(dut, 4, pc, predictedTaken = false,
+          predictedTarget = pc + 4, expectedIndex = 0)
+
+        dut.io.resolution.ready.poke(false)
+        dut.io.resolve.valid.poke(true)
+        dut.io.resolve.bits.reference.index.poke(0)
+        dut.io.resolve.bits.reference.robTag.poke(4)
+        dut.io.resolve.bits.actualTaken.poke(true)
+        dut.io.resolve.bits.actualTarget.poke(target)
+        dut.io.resolve.ready.expect(false)
+        dut.io.resolution.valid.expect(true)
+        dut.io.resolution.bits.reference.robTag.expect(4)
+        dut.io.resolution.bits.mispredict.expect(true)
+        dut.io.resolution.bits.redirectTarget.expect(target)
+
+        // A stalled resolve is read-only, so the independent write port remains usable.
+        driveAllocation(dut, 5, BigInt("80000044", 16), 0,
+          predictedTaken = false, predictedTarget = BigInt("80000048", 16))
+        dut.io.allocate.ready.expect(true)
+        dut.clock.step()
+        dut.io.allocate.valid.poke(false)
+        dut.io.count.expect(2)
+        dut.io.resolution.bits.reference.robTag.expect(4)
+        dut.io.resolution.bits.redirectTarget.expect(target)
+
+        dut.io.resolution.ready.poke(true)
+        dut.io.resolve.ready.expect(true)
+        dut.clock.step()
+        dut.io.resolve.valid.poke(false)
+        dut.io.resolution.valid.expect(false)
       }
     }
 

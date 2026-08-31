@@ -54,6 +54,7 @@ class BranchResolutionResult(config: ZirconCoreConfig) extends Bundle {
   val rasReturnAddress = UInt(32.W)
   val actualTaken = Bool()
   val actualTarget = UInt(32.W)
+  val redirectTarget = UInt(32.W)
 }
 
 class BranchTrainingRecord(config: ZirconCoreConfig) extends Bundle {
@@ -81,7 +82,7 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     val allocate = Flipped(Decoupled(new BranchDataAllocation(config)))
     val allocatedIndex = Output(Valid(UInt(indexWidth.W)))
     val resolve = Flipped(Decoupled(new BranchResolutionRequest(config)))
-    val resolution = Output(Valid(new BranchResolutionResult(config)))
+    val resolution = Decoupled(new BranchResolutionResult(config))
     val commit = Flipped(Decoupled(new BranchDataReference(config)))
     val training = Output(Valid(new BranchTrainingRecord(config)))
     val flushAll = Input(Bool())
@@ -107,7 +108,8 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
   // Commit owns the single data read port. Resolve uses both read and write.
   io.commit.ready := !io.flushAll
-  io.resolve.ready := !io.flushAll && !io.commit.valid
+  val resolveCanProceed = !io.flushAll && !io.commit.valid
+  io.resolve.ready := resolveCanProceed && io.resolution.ready
   val commitFire = io.commit.fire
   val resolveFire = io.resolve.fire
 
@@ -144,7 +146,7 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     Mux(rasCountAfterPop < 8.U, rasCountAfterPop + 1.U, 8.U),
     rasCountAfterPop)
 
-  io.resolution.valid := resolveFire && resolveMatch
+  io.resolution.valid := resolveCanProceed && io.resolve.valid && resolveMatch
   io.resolution.bits.reference := io.resolve.bits.reference
   io.resolution.bits.mispredict := resolveMispredict
   io.resolution.bits.recoveryHistory := recoveryHistory
@@ -157,6 +159,8 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   io.resolution.bits.rasReturnAddress := resolveEntry.metadata.pc + 4.U
   io.resolution.bits.actualTaken := io.resolve.bits.actualTaken
   io.resolution.bits.actualTarget := io.resolve.bits.actualTarget
+  io.resolution.bits.redirectTarget := Mux(io.resolve.bits.actualTaken,
+    io.resolve.bits.actualTarget, resolveEntry.metadata.pc + 4.U)
 
   io.training.valid := commitFire && commitMatch
   io.training.bits.reference := io.commit.bits
