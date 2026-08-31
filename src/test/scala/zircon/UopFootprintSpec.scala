@@ -12,8 +12,8 @@ class UopFootprintSpec extends AnyFlatSpec with Matchers {
     val newUopBits = (new UopRef).getWidth
     val newIqPayloadBits = newUopBits * (12 + 4 + 8)
 
-    newUopBits shouldBe 83
-    newIqPayloadBits shouldBe 1992
+    newUopBits shouldBe 84
+    newIqPayloadBits shouldBe 2016
     newIqPayloadBits * 10 should be <= (oldIqPayloadAndStateBits * 7)
   }
 }

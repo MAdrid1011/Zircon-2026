@@ -12,8 +12,8 @@
 | 顶层 AXI4/interrupt/trace 接口 | completed | `AXI4MasterPort`、`InterruptInputs`、`RetireEvent` 可 elaboration | 连接取指、提交与异常响应 |
 | PMA 分类 | completed | Memory/DeviceStrong/DeviceBurstable/空洞单元测试 | 接入 LSU 和 fetch access fault |
 | 有序 MMIO 合并 | partially completed | 4-beat 聚合、4 KiB 边界、强顺序单拍测试 | 接入 ROB/M0、AXI response 和精确提交 |
-| FirstFaultRecord | completed | 两路异常乱序到达时保留最老 order | 接入 ROB 提交/flush |
-| M1 RV32I 前后端 | partially completed | 组合译码、E0/E1 整数语义、双路 integer rename 和 56×32 6R2W PRF 已有 directed tests；顶层仍为 M0 shell | 接入 fetch/branch checkpoint/ROB/IQ/completion/commit，再运行 ELF 与 Spike 差分 |
+| FirstFaultRecord | completed | 记录仅含 `{robTag,cause,tval}`，以 ROB head 的 modulo-24 距离选择最老异常 | 接入 commit/trap controller 的 consume/flush |
+| M1 RV32I 前后端 | partially completed | 组合译码、E0/E1 整数语义、双路 rename、56×32 6R2W PRF、24 项双完成/双提交 ROB 已有 directed tests；顶层仍为 M0 shell | 接入 fetch/branch checkpoint/IQ/completion/commit controller，再运行 ELF 与 Spike 差分 |
 | M2 RV32M/多发射 | missing | `UopRef`/endpoint 类型已定义 | M 扩展和 3-start/2-complete 测试 |
 | M3 双 LSU/Cache/A | missing | 配置与 PMA/MMIO 边界已定义 | memory milestone 回归 |
 | M4 F/interrupt/miniTAGE | missing | 顶层中断和 trace 字段已定义 | TestFloat/ACT4/中断回归 |

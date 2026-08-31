@@ -1,5 +1,7 @@
 package zircon
 
+import chisel3.util.log2Ceil
+
 sealed trait PMARegionKind { def code: Int }
 object PMARegionKind {
   case object Inaccessible extends PMARegionKind { val code = 0 }
@@ -70,6 +72,9 @@ final case class ZirconCoreConfig(
   require(l2.bytes == 4096 || l2.bytes == 8192, "L2 is restricted to the measured 4/8 KiB points")
   require(resetVector >= 0 && resetVector < (BigInt(1) << 32))
   require(hartId >= 0)
+
+  val robIndexWidth: Int = log2Ceil(robEntries)
+  val robTagWidth: Int = robIndexWidth + 1
 }
 
 object ZirconCoreConfig {

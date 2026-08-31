@@ -1,6 +1,6 @@
 # 后端架构文档
 
-这一章记录由研发计划冻结的后端契约。当前 M0 代码提供 `UopRef`、执行端点类型和 `FirstFaultTracker`；rename、issue、execution、ROB 和 commit 尚未接入。
+这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、integer rename/PRF、ROB 和 `FirstFaultTracker`；issue、operand read、completion arbiter 和 commit controller 尚未接入顶层。
 
 <!-- 图：后端模块关系和数据通路 -->
 <!-- ![后端模块关系和数据通路](./assets/backend-overview.svg) -->
@@ -9,7 +9,7 @@
 
 ## UopRef
 
-`UopRef` 保存 `robTag`、目标端点、uop class、operation、三项源类型、两项整数物理源、源 ready、目的物理寄存器、写整数/浮点标志和 immediate。PC、instruction、预测数据和完整 architectural side effect 不在 IQ 中复制。
+`UopRef` 保存带 wrap generation 的 6-bit `robTag`、目标端点、uop class、operation、三项源类型、两项整数物理源、源 ready、目的物理寄存器、写整数/浮点标志和 immediate。PC、instruction、预测数据和完整 architectural side effect 不在 IQ 中复制。
 
 ## 执行端点
 
@@ -23,7 +23,7 @@ E1/E2 共享 operand admission。全局端点选择必须满足最多三条启�
 
 ## FirstFaultTracker
 
-执行端点提交 `FaultCandidate {valid, order, robTag, cause, trapValue}`。`FirstFaultTracker` 在同周期和跨周期候选中保留最小 `order`，commit 消费异常或全局 rollback 时通过 `clear/flush` 释放记录。
+执行端点提交 `FaultCandidate {valid, robTag, cause, trapValue}`。`FirstFaultTracker` 以当前 ROB head 为基准计算 modulo-24 age，在同周期和跨周期候选中保留最老 tag；commit 消费异常或全局 rollback 时通过 `clear/flush` 释放记录。
 
 ## 阻塞、回滚和异常
 
