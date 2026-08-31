@@ -98,8 +98,11 @@ the integration asserts that the two redirect sources are mutually exclusive.
 
 Directed integration tests cover a dependent `ADDI -> CSRRW` sequence followed
 by a committed CSR read, precise M-mode `ECALL`, FENCE serialization
-backpressure, and enabled software-interrupt entry followed by MRET. Lower-level
-tests cover illegal CSR access, side-effect retention, head-only System
-admission, branch misalignment, selective squash, completion backpressure, and
-ROB rollback. M1 release still requires executable frontend and memory models
-plus ACT4 and Spike/Sail differential testing.
+backpressure, and enabled software-interrupt entry followed by MRET. The
+AXI-driven `CoreShellSpec` extends that coverage through branch recovery,
+direct/indirect jumps, programmed trap handlers, FENCE.I, channel backpressure,
+and blocked unimplemented LSU traffic. Lower-level tests cover illegal CSR
+access, side-effect retention, head-only System admission, branch misalignment,
+selective squash, completion backpressure, and ROB rollback. M1 release still
+requires executable ELF/device models plus ACT4 and Spike/Sail differential
+testing.

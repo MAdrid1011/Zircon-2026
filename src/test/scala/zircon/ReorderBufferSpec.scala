@@ -263,6 +263,44 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("retires an older prefix before accepting a pending branch rollback") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveEnqueue(dut, 0, BigInt("80000000", 16), initiallyComplete = true)
+        driveEnqueue(dut, 1, BigInt("80000004", 16), initiallyComplete = true)
+        dut.clock.step()
+        driveEnqueue(dut, 0, BigInt("80000008", 16), initiallyComplete = false)
+        driveEnqueue(dut, 1, BigInt("8000000c", 16), initiallyComplete = true)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        // The resolving branch is tag 2. Its completion is intentionally still
+        // absent, so tags 0/1 may retire while tag 3 remains speculative.
+        dut.io.commit.foreach(_.ready.poke(true))
+        dut.io.rollback.valid.poke(true)
+        dut.io.rollback.bits.poke(2)
+        dut.io.commit(0).bits.robTag.expect(0)
+        dut.io.commit(1).bits.robTag.expect(1)
+        dut.io.rollback.ready.expect(false)
+        dut.clock.step()
+
+        dut.io.count.expect(2)
+        dut.io.commit(0).valid.expect(false)
+        dut.io.rollback.ready.expect(true)
+        dut.clock.step()
+        dut.io.rollback.valid.poke(false)
+        dut.io.rollbackActive.expect(true)
+        dut.io.rollbackUndo.bits.records(0).robTag.expect(3)
+        dut.io.rollbackUndo.ready.poke(true)
+        dut.clock.step()
+
+        dut.io.count.expect(1)
+        dut.io.rollbackActive.expect(false)
+        dut.io.commit.foreach(_.valid.expect(false))
+        dut.io.head.bits.robTag.expect(2)
+      }
+    }
+
     it("walks the tail two entries at a time and preserves the resolving prefix") {
       simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)

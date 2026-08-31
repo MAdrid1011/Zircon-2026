@@ -45,9 +45,9 @@ ELF 或 differential 完成声明。
 | Contract | Evidence | Remaining release evidence |
 |---|---|---|
 | AXI instruction transport | `AXIInstructionFetchSpec`: 4-beat、1/2/3-beat 4 KiB truncation、AR backpressure、redirect drain、RRESP、ID/RLAST assertion | AXI random stress and formal protocol properties |
-| Frontend redirect/prediction | `M1FrontendSpec`: earliest control, JALR barrier, commit training, commit-over-recovery priority | Core-level branch/JAL/JALR/mispredict programs |
-| Precise commit/trap metadata | `CommitControllerSpec`, `CommitCSRSubsystemSpec`, `ReorderBufferSpec`, `RetireTraceFormatterSpec` | Interrupt timing matrix and external reference comparison |
-| Executable top-level | `CoreShellSpec`: AXI-fed `ADDI -> ADDI -> EBREAK`, trace-disabled elaboration, RRESP fetch fault | Deterministic ELF/AXI harness, ACT4 I/Zicsr subset, Spike then Sail comparison |
+| Frontend redirect/prediction | `M1FrontendSpec` plus `CoreShellSpec`: earliest control, JALR barrier, commit training, commit-over-recovery priority, cold branch recovery, JAL and JALR link/target behavior | Randomized branch/predictor stress and external reference comparison |
+| Precise commit/trap metadata | `CommitControllerSpec`, `CommitCSRSubsystemSpec`, `ReorderBufferSpec`, `RetireTraceFormatterSpec`, `CoreShellSpec`: lane-1 ordering, ECALL, illegal instruction, software interrupt at live head, MRET | Full interrupt timing matrix and external reference comparison |
+| Executable top-level | `CoreShellSpec`: AXI-fed dependency, CSR dependency, RRESP fetch fault, FENCE/FENCE.I, AXI AR/R backpressure, and no false LSU completion | Deterministic ELF/AXI harness, ACT4 I/Zicsr subset, Spike then Sail comparison |
 
 The local evidence command is `./scripts/sbtw test`; the current integration
 run completed 39 suites and 172 tests. `make verilog` elaborates the same

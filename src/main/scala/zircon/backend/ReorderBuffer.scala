@@ -351,7 +351,9 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   when(count =/= 0.U) {
     assert(headMatches, "ROB head tag must reference a valid entry")
   }
-  when(rollbackActive || io.rollback.valid) {
+  // A pending rollback request may wait behind an older completed retirement
+  // prefix. Only an accepted request enters the tail-walk exclusion region.
+  when(rollbackActive) {
     assert(!io.commit.exists(_.fire),
       "ROB committed during branch rollback")
     assert(!io.enqueue.exists(_.fire),
