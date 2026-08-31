@@ -13,7 +13,7 @@
 | PMA 分类 | completed | Memory/DeviceStrong/DeviceBurstable/空洞单元测试 | 接入 LSU 和 fetch access fault |
 | 有序 MMIO 合并 | partially completed | 4-beat 聚合、4 KiB 边界、强顺序单拍测试 | 接入 ROB/M0、AXI response 和精确提交 |
 | FirstFaultRecord | completed | 两路异常乱序到达时保留最老 order | 接入 ROB 提交/flush |
-| M1 RV32I 前后端 | partially completed | RV32I/Zicsr/Zifencei 组合译码、E0/E1 端点约束和无状态整数执行语义已有 directed tests；顶层仍为 M0 shell | 接入 fetch/rename/ROB/PRF/IQ/completion/commit，再运行 ELF 与 Spike 差分 |
+| M1 RV32I 前后端 | partially completed | 组合译码、E0/E1 整数语义、双路 integer rename 和 56×32 6R2W PRF 已有 directed tests；顶层仍为 M0 shell | 接入 fetch/branch checkpoint/ROB/IQ/completion/commit，再运行 ELF 与 Spike 差分 |
 | M2 RV32M/多发射 | missing | `UopRef`/endpoint 类型已定义 | M 扩展和 3-start/2-complete 测试 |
 | M3 双 LSU/Cache/A | missing | 配置与 PMA/MMIO 边界已定义 | memory milestone 回归 |
 | M4 F/interrupt/miniTAGE | missing | 顶层中断和 trace 字段已定义 | TestFloat/ACT4/中断回归 |
