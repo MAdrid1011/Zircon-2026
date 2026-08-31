@@ -2,7 +2,8 @@
 
 本清单只依据固定核心提交
 `65a3dd381f4c83a5844858a927dafdbc8263c35e` 的 Scala 源码和 elaborated RTL。
-它用于解释 Zircon-2026 的面积预算，不替代 Vivado 2026.1 post-route 报告。
+它是 Zircon-2026 静态面积基线的第一版人工清单；正式签收将由 ADR-0009 规定的同规则
+manifest 和脚本重算，并补齐端口复制与组合复杂度代理。
 
 ## 固定配置对比
 
@@ -31,8 +32,8 @@ Zircon-2024 的每个 `IQEntry` 复制完整 `BackendPackage`。按冻结源码�
 Zircon-2026 的 `UopRef` elaborated width 为 86 bit，其中 6-bit ROB tag 包含
 wrap generation、5-bit mask 保留 endpoint 调度弹性；三个队列仍合计 24 项，
 直接 payload 为 2064 bit。相对旧 payload/state 下界减少 70.2%，超过
-“IQ 状态至少下降 30%”门槛。最终报告仍须用综合后的分层 LUT/FF/BRAM
-验证；本计算不能覆盖新增 wakeup、age、valid 和 replay 状态。
+“IQ 状态至少下降 30%”门槛。本计算尚未覆盖新增 wakeup、age、valid、replay、CAM
+比较和选择 mux，因此不能单独代表完整后端面积结论。
 
 ## 新增面积的偿还路径
 
@@ -45,5 +46,5 @@ Zircon-2026 新增第二 LSU、4 个 L1D MSHR、FPR/FPU、A 扩展和 miniTAGE�
 4. FPR 使用 2R1W，并用两周期三源读取避免第三读端口。
 5. L2 先以 4 KiB 签收；只有性能门槛失败时回退到 8 KiB。
 
-任何“完整 2026 小于完整 2024”的结论都必须等待相同 wrapper、约束、
-策略与 Vivado 2026.1 的 post-route 报告。
+任何“完整 2026 小于完整 2024”的结论都必须等待同一静态面积脚本覆盖完整配置，逐项
+披露端口复制、状态 bit 和组合代理；当前人工清单只说明已经落实的缩减方向。
