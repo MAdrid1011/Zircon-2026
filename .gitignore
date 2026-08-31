@@ -3,6 +3,8 @@
 .idea/
 .metals/
 .vscode/
+__pycache__/
+*.pyc
 build/
 generated/
 out/
