@@ -2,13 +2,13 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan, partial RTL inventory",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with the partial M3 read-only L1D/data-AXI slice",
   "completeness": "partial",
   "known_omissions": [
-    "the CPU top is not complete; LongPipe, dual LSU, LQ/SQ, caches, AXI, FPU, and miniTAGE RTL are missing",
+    "the read-only L1D, load/store queue state, and data AXI read engine are inventoried, but commit-authorized stores, dirty/replacement state, writeback, L2, MMIO, atomics, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
-    "cache rows currently include data capacity only and must not be interpreted as complete cache area"
+    "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
   ],
   "storage": [
     {
@@ -48,13 +48,112 @@
       "source": "ZirconCoreConfig.l1i"
     },
     {
-      "name": "l1d_data_planned",
+      "name": "l1d_data_read_slice",
       "class": "memory_data",
       "entries": 1024,
       "bits_per_entry": 8,
       "instances": 1,
       "replication_factor": 1,
-      "source": "ZirconCoreConfig.l1d"
+      "source": "ZirconCoreConfig.l1d and L1DLoadCache.cacheData"
+    },
+    {
+      "name": "l1d_tag_and_valid_read_slice",
+      "class": "tag_metadata",
+      "entries": 32,
+      "bits_per_entry": 24,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "L1DLoadCache.cacheTag (23 bits) and cacheValid"
+    },
+    {
+      "name": "l1d_mshr_control_read_slice",
+      "class": "register_control",
+      "entries": 4,
+      "bits_per_entry": 41,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "L1DLoadCache mshrValid/Issued/Filled/Fault, line address, set, and way"
+    },
+    {
+      "name": "l1d_waiter_records_read_slice",
+      "class": "register_control",
+      "entries": 8,
+      "bits_per_entry": 12,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "L1DLoadCache waiterValid, MSHR, ROB tag, and word offset"
+    },
+    {
+      "name": "l1d_immediate_completion_read_slice",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 72,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "L1DLoadCache immediateValid and LoadCompletion register"
+    },
+    {
+      "name": "lq_entries_current",
+      "class": "register_control",
+      "entries": 8,
+      "bits_per_entry": 206,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "LoadStoreQueues LQ state including exact retire metadata"
+    },
+    {
+      "name": "sq_entries_current",
+      "class": "register_control",
+      "entries": 8,
+      "bits_per_entry": 196,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "LoadStoreQueues SQ state including exact retire metadata"
+    },
+    {
+      "name": "axi_data_read_owner_line_buffers",
+      "class": "register_payload",
+      "entries": 4,
+      "bits_per_entry": 256,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIDataReadEngine ownerWords: four eight-word line buffers"
+    },
+    {
+      "name": "axi_data_read_owner_control",
+      "class": "register_control",
+      "entries": 4,
+      "bits_per_entry": 6,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIDataReadEngine ownerValid, four-bit beat counter, and ownerFault"
+    },
+    {
+      "name": "axi_data_ar_hold",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 35,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIDataReadEngine arPending and DataReadRequest hold register"
+    },
+    {
+      "name": "axi_data_response_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 260,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIDataReadEngine responseValid and DataReadResponse hold register"
+    },
+    {
+      "name": "top_axi_ar_arbiter_state",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 3,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ZirconCore arLockValid, arLockData, and dataArTurn"
     },
     {
       "name": "l2_data_default_planned",
@@ -74,6 +173,54 @@
       "width": 32,
       "fanin": 56,
       "source": "frozen 56x32 6R2W PRF interface"
+    },
+    {
+      "name": "l1d_data_read_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 2,
+      "width": 32,
+      "fanin": 128,
+      "source": "L1DLoadCache two Reg-backed 128-word way reads"
+    },
+    {
+      "name": "l1d_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache two-way tag lookup; conservatively charged as 32-bit compares"
+    },
+    {
+      "name": "l1d_mshr_line_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache matching-MSHR line-address comparisons"
+    },
+    {
+      "name": "l1d_waiter_oldest_select",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 6,
+      "fanin": 8,
+      "source": "L1DLoadCache oldest filled-MSHR waiter selector"
+    },
+    {
+      "name": "axi_data_line_response_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 256,
+      "fanin": 4,
+      "source": "AXIDataReadEngine selected-owner line response assembly"
+    },
+    {
+      "name": "top_axi_ar_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 64,
+      "fanin": 2,
+      "source": "ZirconCore locked fetch/data AXI address mux, conservatively rounded to 64 bits"
     }
   ]
 }

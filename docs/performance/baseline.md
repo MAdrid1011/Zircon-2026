@@ -37,3 +37,9 @@ make static-area
 
 前一命令验证 manifest/schema 和计算器单元测试；后一命令输出 Markdown 对照。任一
 manifest 为 `partial` 时报告必须显示 `PARTIAL`，缺失结构不得按零面积计入优势。
+
+当前 M3 read-only L1D/data-AXI slice 已将实际 LQ/SQ、L1D tag/data/MSHR/waiter、
+AXI owner/line buffer、held request/response 与顶层 AR arbiter state 录入 candidate。
+该工作树记录为 59,694 storage bit、20,096 mux-input-bit proxy、6 个 32-bit compare
+proxy 和 48 priority-select bit；Zircon-2024 manifest 同样仍有缺项，因此这只是 `PARTIAL`
+进度证据，不能比较作最终面积结论。
