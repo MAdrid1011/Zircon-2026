@@ -14,6 +14,7 @@
 | `provider/alternateProvider` | 2+2 | miniTAGE 的 Base/T0/T1/T2 provider 身份 |
 | `providerPrediction/alternatePrediction` | 1+1 | 提交训练与 useful 更新依据 |
 | `btbWay` | 1 | 64 项 2-way BTB 的替换/命中 way |
+| `rasPointerBefore/rasCountBefore` | 3+4 | 8 项 RAS 的 next-push 指针和有效深度 checkpoint |
 | `resolved/actualTaken/actualTarget` | 1+1+32 | E0 resolve 后、commit training 前保存实际结果 |
 
 索引、tag 和折叠历史不在 BDB 重复保存；提交训练以 `pc + historyBefore` 重新计算，换取更少状态位。JAL/JALR 也分配 BDB 以保存 target/BTB/RAS 数据，但只有 `conditional` 项推进 global history。
@@ -31,7 +32,7 @@ commit 请求必须命中 valid、相同 `robTag` 且已经 resolved 的项；re
 
 ## 错误恢复
 
-条件分支的恢复历史为 `{historyBefore[62:0], actualTaken}`；JAL/JALR 不写 GHR，恢复为原 checkpoint。mispredict 条件为 direction 不同，或 actual taken 且 predicted/actual target 不同。not-taken 指令忽略 target 字段差异。
+条件分支的恢复历史为 `{historyBefore[62:0], actualTaken}`；JAL/JALR 不写 GHR，恢复为原 checkpoint。RAS pointer/count 从预测前 checkpoint 出发：taken call 将 next-push pointer 加一并把 count 饱和到 8，taken return 将 pointer 减一并把 count 饱和到 0。溢出后被覆盖的 RAS 内容属于允许的预测近似，不影响 JALR 的架构执行结果。mispredict 条件为 direction 不同，或 actual taken 且 predicted/actual target 不同。not-taken 指令忽略 target 字段差异。
 
 resolve 检测到 mispredict 时，BDB 以当前 ROB head 的 modulo-24 age 清除所有比 resolving branch 更年轻的项，保留 resolving branch 和更老、尚未提交的分支。前端同周期使用 `recoveryHistory`，ROB/IQ/rename 的年轻项由 E0 全局恢复路径清除。trap/MRET/FENCE.I 不依赖年龄，直接 `flushAll`。
 
@@ -43,6 +44,6 @@ resolve 检测到 mispredict 时，BDB 以当前 ROB head 的 modulo-24 age 清�
 - stale `robTag` 不得修改任何项。
 - commit 训练只来自 resolved entry；错误路径项永不训练预测表。
 - mispredict 后不存在 ROB 年龄大于 resolving branch 的 valid BDB 项。
-- direction、taken-target、not-taken-target 三种判定和 64-bit 历史边界均有定向测试。
+- direction、taken-target、not-taken-target、RAS overflow/underflow 和 64-bit 历史边界均有定向测试。
 
 M1 先用 `provider=Base` 驱动 bimodal；M4 miniTAGE 增加 provider 选择、提交分配/老化和 RAS 状态机，但不改变 BDB 容量和外部事务。
