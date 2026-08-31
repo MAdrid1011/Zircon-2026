@@ -79,6 +79,18 @@ failure similarly create one exact access fault for the owning ROB entry. The
 `FirstFaultTracker` selects the oldest live fault and recovery removes younger
 metadata before any trap redirect.
 
+### Current address boundary
+
+`MemoryAddressUnit` is the shared combinational M0/M1 boundary. It derives the
+effective address, width, unsigned-load flag, byte masks, shifted store data,
+and natural-alignment result from the decoded RV32I/A operation. It invokes the
+configured `PMAClassifier` before any queue allocation: M0 receives exact load
+or store/AMO misalignment/access fault classification and the effective address
+as `tval`. M1 admission is deliberately narrower, accepting only naturally
+aligned, readable `Memory`-PMA non-atomic integer loads; every other candidate
+must replay to M0. Atomic `aq/rl` remains in the request/ROB context and is
+carried through the typed result rather than being reconstructed later.
+
 ## LQ, SQ, forwarding, and commit effects
 
 Loads wait while any older store address is unresolved. After all are resolved,

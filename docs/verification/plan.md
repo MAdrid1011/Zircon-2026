@@ -66,7 +66,7 @@ required fail-to-pass set for Issue #47 and must exist before corresponding RTL:
 | --- | --- |
 | MemIQ/M0/M1 | two enqueue; one M0 plus one M1 issue; source wakeup; ROB-age selection; M1-to-M0 replay; selective squash/global flush; queue full; no false completion |
 | LQ/SQ | `LoadStoreQueuesSpec` currently passes directed older unknown-address/data block, full byte forwarding, partial cache merge, same-address youngest winner, both queues full, commit-only store effects, metadata-to-retire, and ROB-wrap squash/flush. Dual-LSU conflict matrix remains required after the live LSU integration. |
-| PMA/fault | all default regions; permissions; aligned/misaligned load/store/AMO; RRESP/BRESP to exact tag/cause/tval; oldest fault selection |
+| PMA/fault | `MemoryAddressUnitSpec` currently passes byte-mask/data alignment, load/store misalignment priority, inaccessible and atomic-PMA denial causes, and M1 cacheable-load eligibility. All default-region permissions, AXI RRESP/BRESP exact-tag faults, and oldest-fault integration remain required. |
 | AXI data | four read IDs, one write; independent AR/AW/W/R/B backpressure; eight-beat refill; 1-4 beat device groups; 4 KiB edge; cross-ID reorder; unknown ID, duplicate/early/late beat and RLAST assertions; cancellation drain |
 | Cache | hit/hit, hit/miss, miss/miss, same bank/set/line/address; secondary merge; MSHR/victim full; dirty writeback; L1D/L2/transfer exclusive owner assertion; 4/8 KiB geometry |
 | MMIO/A | strong/burstable read/write groups; group break causes; per-beat read mapping; response-gated commit; LR/SC success and every failure cause; each AMO; aq/rl/FENCE ordering |
