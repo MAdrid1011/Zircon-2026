@@ -29,6 +29,17 @@ tag，使已 kill 的 completion 不能命中新 stream 的同一 index。
 - branch rollback 保留 resolving branch 和所有更老项，从 tail 每周期逆序删除最多两项；
   rollback active 时禁止 enqueue、completion 和 commit。
 
+## Execution Context Read
+
+IntIQ 只保存 compact `UopRef`，E0/E1 issue 后以 live `robTag` 读取两个组合窄端口。
+每端口返回 `{pc, privilege, csrAddress, csrImmediate, csrRead, csrWrite,
+hasBranchData, branchDataIndex}`，不复制 instruction、完整 decode、prediction metadata
+或 rename undo 字段。tag 必须 index 合法、valid 且 generation 匹配；两个端口不得读取
+同一 tag。global flush 同拍隐藏所有返回，branch tail rollback 期间仍允许 surviving
+older uop 读取。
+
+该选择增加两个 24:1 窄 mux，但不增加每项持久状态；最终时序/面积在 M5 按层次报告。
+
 ## FirstFaultRecord
 
 记录严格采用 `{robTag, cause, tval}`，不保存 64-bit program order。候选的年龄由
@@ -47,5 +58,6 @@ priority 先在每条指令内部解析，再把最多两个已经唯一化的�
 - completion tag index 合法，同周期两端口 tag 不重复。
 - 不匹配 generation 的 completion 不修改 entry。
 - commit PC/instruction/tag 在 backpressure 下稳定。
+- execution-context read 只命中 live generation，双端口 tag 不重复。
 - FirstFaultRecord 始终选择相对 head 最老的有效候选。
 - selective squash 后 IQ、completion buffer 和 FirstFaultRecord 不保留年轻 tag。

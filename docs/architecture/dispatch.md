@@ -30,6 +30,10 @@ ROB enqueue handshake 同周期返回 `robTag`。该 tag 写入目标 `UopRef`�
 读取 lane 0 新 destination 时强制 not-ready。无 integer source 的位置 ready=1，
 source kind 为 None。
 
+issue 后，E0/E1 用 `robTag` 从 ROB 双窄读口取得 PC、privilege、CSR 和 BDB reference；
+这些字段不回填到 UopRef。operand-read 必须在 execution-context valid 后才允许端点
+request fire。
+
 ## Dispatch-Time Fault
 
 fetch fault 优先于 decoder illegal：cause/tval 直接来自 `FetchFault`。否则非法编码产生

@@ -17,6 +17,10 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
     dut.io.rollback.valid.poke(false)
     dut.io.rollback.bits.poke(0)
     dut.io.rollbackUndo.ready.poke(false)
+    dut.io.executionRead.foreach { read =>
+      read.valid.poke(false)
+      read.bits.poke(0)
+    }
   }
 
   private def driveEnqueue(
@@ -117,6 +121,46 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.foreach(_.valid.poke(false))
         dut.io.commit(0).valid.expect(true)
         dut.io.commit(1).valid.expect(true)
+      }
+    }
+
+    it("reads narrow execution context by live tag and suppresses it on flush") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveEnqueue(dut, 0, BigInt("80000040", 16), initiallyComplete = false)
+        driveEnqueue(dut, 1, BigInt("80000044", 16), initiallyComplete = false)
+        dut.io.enqueue(0).bits.entry.decoded.csrAddress.poke(0x305)
+        dut.io.enqueue(0).bits.entry.decoded.csrImmediate.poke(7)
+        dut.io.enqueue(0).bits.entry.decoded.csrRead.poke(true)
+        dut.io.enqueue(0).bits.entry.decoded.csrWrite.poke(true)
+        dut.io.enqueue(0).bits.entry.hasBranchData.poke(true)
+        dut.io.enqueue(0).bits.entry.branchDataIndex.poke(5)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        dut.io.executionRead(0).valid.poke(true)
+        dut.io.executionRead(0).bits.poke(1)
+        dut.io.executionRead(1).valid.poke(true)
+        dut.io.executionRead(1).bits.poke(0)
+        dut.io.executionContext(0).valid.expect(true)
+        dut.io.executionContext(0).bits.pc.expect(BigInt("80000044", 16))
+        dut.io.executionContext(0).bits.hasBranchData.expect(false)
+        dut.io.executionContext(1).valid.expect(true)
+        dut.io.executionContext(1).bits.pc.expect(BigInt("80000040", 16))
+        dut.io.executionContext(1).bits.privilege.expect(3)
+        dut.io.executionContext(1).bits.csrAddress.expect(0x305)
+        dut.io.executionContext(1).bits.csrImmediate.expect(7)
+        dut.io.executionContext(1).bits.csrRead.expect(true)
+        dut.io.executionContext(1).bits.csrWrite.expect(true)
+        dut.io.executionContext(1).bits.hasBranchData.expect(true)
+        dut.io.executionContext(1).bits.branchDataIndex.expect(5)
+
+        dut.io.flush.poke(true)
+        dut.io.executionContext.foreach(_.valid.expect(false))
+        dut.clock.step()
+        dut.io.executionRead.foreach(_.valid.poke(false))
+        dut.io.flush.poke(false)
+        dut.io.count.expect(0)
       }
     }
 
