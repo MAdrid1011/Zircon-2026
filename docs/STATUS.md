@@ -7,6 +7,7 @@
 | M0 GitHub 主仓与子模块分支 | partially completed | 公开父仓和两个 `zircon-2026` 子模块分支已建立；基线提交写入 `toolchain.lock.json` | 合入父仓 foundation PR，并启用分支保护和 CI required checks |
 | M0 固定工具链 | partially completed | Scala/sbt/Chisel/Verilator/LLVM/Vivado 与第三方 SHA 已锁定 | CI 容器复现并保存版本清单 |
 | M0 2024 脏改动审计 | completed | `docs/migration/zircon-2024-audit.md` | 逐项决定是否移植 |
+| M0 2024 固定提交复现 | partially completed | 独立 clone 已完成 Java/LLVM/Verilator build 和 picotest smoke；静态资源差异已量化 | 接入确定性同构 AXI profile；安装 Vivado 2026.1 后测 post-route |
 | M0 可复现仿真底座 | partially completed | ZirconSim 已有显式 seed、ELF32 加载、`tohost` 判定、单元测试和有界 smoke；当前 M0 空闲顶层只允许显式 timeout | 接入 AXI memory/device model、退休 trace 与真实程序执行 |
 | 顶层 AXI4/interrupt/trace 接口 | completed | `AXI4MasterPort`、`InterruptInputs`、`RetireEvent` 可 elaboration | 连接取指、提交与异常响应 |
 | PMA 分类 | completed | Memory/DeviceStrong/DeviceBurstable/空洞单元测试 | 接入 LSU 和 fetch access fault |
