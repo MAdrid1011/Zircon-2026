@@ -81,9 +81,10 @@ buffer 对年轻 tag 执行同一 kill；较老结果保持 backpressure，rollb
 ROB walker、per-slot generation、Rename undo、IntIQ、FirstFault、completion buffer
 selective squash，以及 BDB→lossless recovery controller 的闭环已有实现与 directed
 tests。闭环测试覆盖正确预测只训练、误预测同拍广播、年轻 BDB 项删除、ROB 请求回压
-保持和 `rollbackDone` 前 dispatch 阻塞。下一步必须把该子系统接到 dispatch/rename、
-`IntegerExecutionBackend`、前端 checkpoint 和 commit；LongPipe/LSU 加入后还必须接收
-同一 kill。完成这些组合前仍不能把局部模块宣称为可运行 M1 core。
+保持和 `rollbackDone` 前 dispatch 阻塞。BDB/recovery 已在
+`IntegerDispatchRecoveryBackend` 中接到 dispatch/rename、整数执行和 FirstFault；下一步
+必须连接前端 checkpoint/redirect 和 commit policy。LongPipe/LSU 加入后还必须接收同一
+kill。完成这些组合前仍不能把局部模块宣称为可运行 M1 core。
 
 ## 不变量、计数器与验证
 
