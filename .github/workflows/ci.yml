@@ -67,6 +67,8 @@ jobs:
           esac
       - name: Unit tests
         run: ./scripts/sbtw test
+      - name: Validate static-area manifests
+        run: make static-area-check
       - name: Elaborate synthesizable top
         run: ./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"
       - name: Build both software contracts

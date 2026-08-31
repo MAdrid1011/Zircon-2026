@@ -27,3 +27,13 @@ debug/trace 在正式配置关闭，验证接口不进入账本。
 
 报告必须区分“精确源码/生成 RTL 位数”和“实现相关的保守代理”，不得把后者写成
 LUT、FF、BRAM、频率或功耗。Vivado/Yosys 报告只作为可选旁证，不是发布门槛。
+
+当前可执行入口为：
+
+```sh
+make static-area-check
+make static-area
+```
+
+前一命令验证 manifest/schema 和计算器单元测试；后一命令输出 Markdown 对照。任一
+manifest 为 `partial` 时报告必须显示 `PARTIAL`，缺失结构不得按零面积计入优势。
