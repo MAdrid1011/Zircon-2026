@@ -18,8 +18,11 @@ endpoint mask，而不是在 dispatch 时静态绑定一个 endpoint。
 
 ## Wakeup 与容量
 
-两个统一 completion physical-destination wakeup 在周期边界更新源 ready。入队项
-也观察同周期 wakeup，避免“完成与 consumer dispatch 同周期”丢失唤醒。满队列
+两个统一 completion physical-destination wakeup 在周期边界更新源 ready。入队项和
+已经排队的 issue candidate 都组合观察同周期 wakeup：前者避免“完成与 consumer
+dispatch 同周期”丢失唤醒，后者允许 producer completion 与 dependent consumer issue
+同周期发生。issue 输出携带已经旁路后的 source-ready 位，operand-read 不会把它误判为
+未就绪。满队列
 可用本周期 issue.fire 的空位接收同样数量的新项，不产生额外 full bubble。
 `enqueueCapacity` 将包含本周期 issue.fire 回收项的即时容量饱和报告为 0/1/2；
 selective squash 或 global flush 时固定为 0，供 dispatch 在产生任何子事务前选择
@@ -36,6 +39,7 @@ flush 清除全部项并禁止当周期 issue/enqueue。branch-selective `squash
 - valid count 与 occupancy credit 相等，范围 0–12。
 - 两个 issue 端口不能选择同一 entry/ROB tag。
 - E1 输出的 endpoint mask 必须包含 E1，且不得包含 E0-exclusive 操作。
-- 不 ready 的 source 不能 issue；每个 producer completion port 都能唤醒两个源。
+- 不 ready 且本周期未被 wakeup 的 source 不能 issue；每个 producer completion port 都能
+  唤醒两个源，queued consumer 可同拍 issue。
 - 覆盖 E0-exclusive+simple、两个 simple、E0/E1 独立 backpressure、ROB wrap age、
   full 同周期双 issue/双 enqueue、global flush、selective squash 全删/部分保留。

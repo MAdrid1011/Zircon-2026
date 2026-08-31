@@ -102,6 +102,26 @@ class IntegerIssueQueueSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("bypasses same-cycle wakeup into issue for an already queued consumer") {
+      simulate(new IntegerIssueQueue(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveUop(dut, 0, robTag = 0, endpoints = EndpointMask.E1,
+          source0Ready = false, source0Physical = 32)
+        dut.io.enqueue(1).valid.poke(false)
+        dut.clock.step()
+
+        dut.io.enqueue(0).valid.poke(false)
+        dut.io.issueE1.ready.poke(true)
+        dut.io.issueE1.valid.expect(false)
+        dut.io.wakeup(0).valid.poke(true)
+        dut.io.wakeup(0).physical.poke(32)
+        dut.io.issueE1.valid.expect(true)
+        dut.io.issueE1.bits.sourceReady(0).expect(true)
+        dut.clock.step()
+        dut.io.count.expect(0)
+      }
+    }
+
     it("recycles two issuing slots while full and flushes atomically") {
       simulate(new IntegerIssueQueue(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)

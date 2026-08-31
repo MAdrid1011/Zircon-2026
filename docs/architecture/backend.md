@@ -1,6 +1,6 @@
 # 后端架构文档
 
-这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename、IntIQ、endpoint completion buffer、[ROB/PRF/ready 集成状态切片](integer-backend-state.md)、`FirstFaultTracker`、M-mode CSR 状态与 [commit controller](commit-control.md)；执行、恢复和提交切片尚未组合成可执行顶层。
+这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename、[IntIQ→E0/E1→completion 整数执行闭环](integer-execution-backend.md)、`FirstFaultTracker`、M-mode CSR 状态与 [commit controller](commit-control.md)；dispatch/rename、BDB recovery、提交和前端尚未组合成可执行顶层。
 
 <!-- 图：后端模块关系和数据通路 -->
 <!-- ![后端模块关系和数据通路](./assets/backend-overview.svg) -->
