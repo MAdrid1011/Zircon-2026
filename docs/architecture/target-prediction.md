@@ -41,9 +41,10 @@ counter，也不根据 opcode 自行重新译码。
 | `recover` | in | 分支错误恢复后的 pointer/count 与正确事件 |
 | `clear` | in | reset/FENCE.I/全前端清空时丢弃预测栈 |
 
-`FetchTargetSelector` 输入四项 BTB 查询、四项方向预测和 RAS top，输出至多一个
-redirect，并给出 owner slot、target、call/return。return 在 RAS 非空时使用 RAS
-top，空栈时退回 BTB target。
+`FetchTargetSelector` 输入四项 control predecode、BTB 查询、方向预测和 RAS top，
+输出至多一个 redirect，并给出 owner slot、target、call/return。direct branch/JAL
+使用 predecode target，不依赖 BTB hit；JALR return 在 RAS 非空时使用 RAS top，
+否则使用 BTB target。两者都没有时输出 unresolved-indirect barrier。
 
 ## 流水与端口时序
 
@@ -62,12 +63,12 @@ pointer/count。
 
 ## redirect 与恢复规则
 
-slot 按 0→3 程序序扫描：
+slot 按 0→3 程序序扫描，控制流身份以来自当前 instruction word 的 predecode 为准：
 
-1. BTB miss 不是控制流候选。
-2. conditional 只有方向 provider 给出 taken 时才是候选。
-3. unconditional 命中总是候选。
-4. 第一项候选独占 redirect；更晚 slot 不得更新 GHR 或 RAS。
+1. conditional 只有方向 provider 给出 taken 时才是 redirect 候选，direct target 不依赖 BTB。
+2. JAL 总是 direct redirect 候选。
+3. JALR 必须有 RAS 或 BTB target；否则成为 unresolved barrier。
+4. 第一项 redirect/barrier 独占 owner；更晚 slot 不得更新 GHR 或 RAS。
 5. return 优先使用有效 RAS top，否则使用该 BTB 项保存的 target。
 
 BDB 在每条被接受的控制流 uop 中保存预测前的 GHR、RAS pointer/count、BTB way 和
