@@ -42,6 +42,19 @@ physical destination 恢复 speculative map/free-list，不在每个 BDB 项复�
 - 同周期 read-after-write 使用 completion forwarding，避免额外一周期 wakeup。
 - reset 将全部寄存器清零；p0 的读值恒为零。
 
+## Integer Ready Table
+
+56-bit ready table 与 PRF 分离：dispatch 为每个实际分配的 integer physical
+destination 清 ready，两个统一 completion 为对应位置 ready。completion mask 组合
+旁路到 `ready` 输出，使“producer completion 与 consumer dispatch 同周期”不会把
+consumer 永久留在 not-ready；新 allocation mask 最后清零，禁止新 producer 被误判为
+已完成。p0 永远 ready。
+
+branch rollback 和 global flush 不扫描 ready table。被放回 free-list 的错误路径
+physical register 在下次 allocation 时必然再次清 busy；surviving prefix 的旧映射保持
+原 readiness。这个选择避免一条 56-bit 恢复写路径，但要求所有 endpoint kill 晚到的
+错误路径 completion。
+
 ## 不变量与验证映射
 
 - speculative map 和 committed map 的 x0 项恒为 p0。
@@ -53,4 +66,6 @@ physical destination 恢复 speculative map/free-list，不在每个 BDB 项复�
 - flush 恢复 committed map/free-list，所有未提交分配重新可用。
 - branch rollback bundle 必须 newest→older；连续 WAW undo 后 RAT 指向 surviving prefix
   的最后一个 physical destination，所有被撤销 new physical 均回到 free-list。
+- dual allocation/dual completion 的 physical destination 各自唯一；同一 physical
+  不得在同周期 allocation 和 completion。
 - PRF 覆盖六路同时读、两路写、write-forwarding、x0 和同目标写 assertion。

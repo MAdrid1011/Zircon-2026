@@ -23,6 +23,7 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
     val count = Output(UInt(countWidth.W))
+    val enqueueCapacity = Output(UInt(2.W))
   })
 
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
@@ -94,9 +95,12 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val issuedMask = Mux(io.issueE0.fire, UIntToOH(selectedE0Index, entries), 0.U) |
     Mux(io.issueE1.fire, UIntToOH(selectedE1Index, entries), 0.U)
   val reusableMask = (~entryValid.asUInt).asUInt | issuedMask
+  val immediateReusable = PopCount(reusableMask)
+  io.enqueueCapacity := Mux(recoveryBlocked, 0.U,
+    Mux(immediateReusable >= 2.U, 2.U, immediateReusable(1, 0)))
   val requestedEnqueueCount = PopCount(io.enqueue.map(_.valid))
   val enqueueBundleReady = !recoveryBlocked &&
-    PopCount(reusableMask) >= requestedEnqueueCount
+    immediateReusable >= requestedEnqueueCount
   io.enqueue.foreach(_.ready := enqueueBundleReady)
   assert(!io.enqueue(1).valid || io.enqueue(0).valid,
     "IntIQ enqueue lane 1 cannot be valid when lane 0 is a bubble")

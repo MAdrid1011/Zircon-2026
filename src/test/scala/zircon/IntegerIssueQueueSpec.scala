@@ -52,6 +52,7 @@ class IntegerIssueQueueSpec extends AnyFunSpec with ChiselSim {
     it("reserves E0 for exclusive work and lets E1 issue a flexible uop independently") {
       simulate(new IntegerIssueQueue(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)
+        dut.io.enqueueCapacity.expect(2)
         driveUop(dut, 0, robTag = 1, endpoints = EndpointMask.IntegerSimple)
         driveUop(dut, 1, robTag = 2, endpoints = EndpointMask.E0)
         dut.clock.step()
@@ -110,16 +111,19 @@ class IntegerIssueQueueSpec extends AnyFunSpec with ChiselSim {
           dut.clock.step()
         }
         dut.io.count.expect(12)
+        dut.io.enqueueCapacity.expect(0)
 
         driveUop(dut, 0, robTag = 12, endpoints = EndpointMask.IntegerSimple)
         driveUop(dut, 1, robTag = 13, endpoints = EndpointMask.IntegerSimple)
         dut.io.issueE0.ready.poke(true)
         dut.io.issueE1.ready.poke(true)
+        dut.io.enqueueCapacity.expect(2)
         dut.io.enqueue(0).ready.expect(true)
         dut.clock.step()
         dut.io.count.expect(12)
 
         dut.io.flush.poke(true)
+        dut.io.enqueueCapacity.expect(0)
         dut.io.enqueue(0).ready.expect(false)
         dut.io.issueE0.valid.expect(false)
         dut.io.issueE1.valid.expect(false)

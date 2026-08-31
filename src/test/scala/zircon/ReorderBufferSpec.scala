@@ -65,6 +65,7 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
     it("accepts two entries, completes out of order, and only commits a contiguous prefix") {
       simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)
+        dut.io.enqueueCapacity.expect(2)
         driveEnqueue(dut, 0, BigInt("80000000", 16), initiallyComplete = false)
         driveEnqueue(dut, 1, BigInt("80000004", 16), initiallyComplete = true)
         dut.io.enqueue(0).ready.expect(true)
@@ -130,10 +131,12 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
           dut.clock.step()
         }
         dut.io.count.expect(24)
+        dut.io.enqueueCapacity.expect(0)
 
         driveEnqueue(dut, 0, BigInt("80000100", 16), initiallyComplete = false)
         driveEnqueue(dut, 1, BigInt("80000104", 16), initiallyComplete = false)
         dut.io.commit.foreach(_.ready.poke(true))
+        dut.io.enqueueCapacity.expect(2)
         dut.io.enqueue(0).ready.expect(true)
         dut.io.enqueueTag(0).bits.expect(32)
         dut.io.enqueueTag(1).bits.expect(33)
@@ -196,6 +199,7 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
         dut.io.rollback.valid.poke(true)
         dut.io.rollback.bits.poke(1)
         dut.io.rollback.ready.expect(true)
+        dut.io.enqueueCapacity.expect(0)
         dut.io.commit.foreach(_.valid.expect(false))
         dut.clock.step()
         dut.io.rollback.valid.poke(false)

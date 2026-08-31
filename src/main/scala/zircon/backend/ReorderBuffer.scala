@@ -69,6 +69,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
 
     val headTag = Output(UInt(config.robTagWidth.W))
     val count = Output(UInt(countWidth.W))
+    val enqueueCapacity = Output(UInt(2.W))
   })
 
   val entryData = Reg(Vec(entries, new ROBEntry(config)))
@@ -118,8 +119,11 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   val commitCount = PopCount(io.commit.map(_.fire))
   val requestedEnqueueCount = PopCount(io.enqueue.map(_.valid))
   val freeSlots = entries.U - count
+  val immediateFreeSlots = freeSlots + commitCount
+  io.enqueueCapacity := Mux(normalBlocked, 0.U,
+    Mux(immediateFreeSlots >= 2.U, 2.U, immediateFreeSlots(1, 0)))
   val enqueueBundleReady = !normalBlocked &&
-    freeSlots + commitCount >= requestedEnqueueCount
+    immediateFreeSlots >= requestedEnqueueCount
   io.enqueue.foreach(_.ready := enqueueBundleReady)
   val enqueueCount = PopCount(io.enqueue.map(_.fire))
 
