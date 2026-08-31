@@ -5,7 +5,7 @@ Zircon-2026 的目标配置为 `RV32IMAF_Zicsr_Zifencei`、单 hart、M-mode。�
 <!-- 图：Zircon-2026 整体架构及五个执行端点 -->
 <!-- ![Zircon-2026 整体架构](./assets/zircon-overview.svg) -->
 
-具体接口见 [顶层接口](interfaces.md)，后端目标结构见 [后端](backend.md)，M1 方向预测见 [Banked Bimodal Predictor](bimodal-predictor.md)，目标与调用栈预测见 [BTB、RAS 与目标选择](target-prediction.md)，控制预译码和历史见 [控制流预译码与推测历史](speculative-history.md)，四路到两路缓冲见 [Fetch/Decode Queue](fetch-decode-queue.md)，访存目标结构见 [访存子系统](memory.md)，特权行为见 [特权态](privileged.md)。
+具体接口见 [顶层接口](interfaces.md)，后端目标结构见 [后端](backend.md)，M1 方向预测见 [Banked Bimodal Predictor](bimodal-predictor.md)，目标与调用栈预测见 [BTB、RAS 与目标选择](target-prediction.md)，控制预译码和历史见 [控制流预译码与推测历史](speculative-history.md)，四路到两路缓冲见 [Fetch/Decode Queue](fetch-decode-queue.md)，执行期错误预测处理见 [分支选择性恢复](branch-recovery.md)，访存目标结构见 [访存子系统](memory.md)，特权行为见 [特权态](privileged.md)。
 
 关于缩写：
 

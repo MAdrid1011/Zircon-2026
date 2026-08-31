@@ -26,9 +26,10 @@ speculative free-list 分配；commit 按 lane 0、lane 1 程序序更新 commit
 释放每条指令的 old physical destination。trap/global rollback 使用本周期 commit
 后的 committed snapshot 恢复 speculative 状态。
 
-分支误预测的低延迟恢复不能退回 committed snapshot；它将在 BDB/branch
-checkpoint 模块中保存 speculative map/free-list checkpoint。该接口未接入前，
-rename 模块状态为 M1 partial，不可用于性能签收。
+分支误预测的 execute-time 恢复不能退回 committed snapshot。Rename 从 ROB tail
+walker 接收最多两项、newest→older 的 undo bundle，使用 ROB 已保存的 old/new
+physical destination 恢复 speculative map/free-list，不在每个 BDB 项复制整份状态。
+该接口与 IQ/completion selective kill 全部接入前，rename 仍为 M1 partial。
 
 ## 6R2W PRF
 
