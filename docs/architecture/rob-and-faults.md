@@ -54,8 +54,10 @@ older uop 读取。
 
 FirstFaultRecord 在 fault 位于 head 且由 commit/trap controller 消费、global flush，
 或 branch-selective squash 证明该 fault 比 resolving branch 更年轻时清除。squash
-同周期到达的新 fault candidate 也先按相同年龄规则过滤；较老 fault 保留。exception
-priority 先在每条指令内部解析，再把最多两个已经唯一化的候选送入 tracker。
+同周期到达的新 fault candidate 先按相同年龄规则过滤；已保存的年轻 fault 在该边沿
+清除，输出不增加组合 squash filter。resolving branch 在发起恢复时尚未完成，因此年轻
+fault 不可能匹配可提交 ROB head。exception priority 先在每条指令内部解析，再把最多
+两个已经唯一化的候选送入 tracker。
 
 ## 必须断言
 

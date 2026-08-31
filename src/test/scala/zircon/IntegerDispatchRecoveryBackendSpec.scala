@@ -63,6 +63,9 @@ class IntegerDispatchRecoveryBackendSpec extends AnyFunSpec with ChiselSim {
     dut.io.branchCommit.bits.robTag.poke(0)
     dut.io.firstFaultClear.poke(false)
     dut.io.globalFlush.poke(false)
+    dut.io.csrAccessData.poke(0)
+    dut.io.csrAccessLegal.poke(false)
+    dut.io.systemSerializingReady.poke(true)
     dut.io.auxReadPhysical.foreach(_.poke(0))
   }
 

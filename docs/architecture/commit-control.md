@@ -1,6 +1,6 @@
 # 提交控制器
 
-`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)。完整 `RetireEvent` 格式化、E0 CSR/System side effect、WFI 唤醒状态机和 memory drain 信号仍待接入。
+`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)，并通过 [M1 Backend Subsystem](m1-backend-subsystem.md) 接入 E0 CSR/System side effect 与整数后端。完整 `RetireEvent` 格式化、WFI 唤醒状态机和 memory drain 实现仍待接入。
 
 ## 参数与接口
 

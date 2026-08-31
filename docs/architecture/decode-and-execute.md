@@ -5,7 +5,8 @@
 
 当前实现：`RV32IDecoder`、`EndpointAdmission`、无状态 `IntegerOperandRead`、
 `IntegerExecute` 以及带本地结果槽的 `IntegerShortPipes` 已有 directed tests；统一
-completion→ROB/PRF 写回和 BDB→recovery broadcast 尚未接入顶层。
+completion→ROB/PRF 写回、BDB→recovery 和 commit/CSR 已接入 M1 后端子系统，但尚未接入
+最终 core 顶层。
 
 ## 接口
 
@@ -19,7 +20,9 @@ completion→ROB/PRF 写回和 BDB→recovery broadcast 尚未接入顶层。
 | `e0/e1` | short-pipe input | ready/valid | 已取数的 `UopRef`、ROB context 与两个整数操作数 |
 | `e0/e1Completion` | short-pipe output | ready/valid | 送统一完成网络的整数结果 |
 | `branchResolve` | E0 output | ready/valid | BDB reference 与实际方向/目标 |
-| `e0Fault` | E0 output | valid | 当前为 instruction-address-misaligned candidate |
+| `e0Fault` | E0 output | valid | instruction-address-misaligned、illegal CSR、ECALL 或 EBREAK candidate |
+| `csrAccess` | E0 output/input | query | 当前 ROB-head CSR 的组合读值和访问合法性 |
+| `commitSideEffect` | E0 output | tagged valid | 提交前保留的 CSR/System 副作用 |
 
 ## Operand Read
 
@@ -63,7 +66,8 @@ E0 完成结果写入 FirstFaultRecord。
 memory 或 control side effect。
 
 E0 实际使用专用一项两阶段 result slot：branch 先发 BDB resolve，再发 completion；
-其余当前支持的 integer uop 直接进入 completion 阶段。E1 使用普通一项
+其余 integer/CSR/System uop 直接进入 completion 阶段。CSR/System 另使用一项带 ROB tag
+的 side-effect slot 保留提交写，并且只在 ROB head 执行。E1 使用普通一项
 `CompletionBuffer`。E0 槽满时反压其取数入口，但不影响 E1；E1 同理。两者都按
 resolving tag 做 selective squash；E0 branch 自身等于 boundary，必须保留到 rollback
 结束后完成。global flush 无条件清空两个槽。

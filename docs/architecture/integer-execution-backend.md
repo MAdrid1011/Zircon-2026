@@ -3,7 +3,7 @@
 `IntegerExecutionBackend` 把 12 项 IntIQ、双路 ROB/PRF operand read、E0/E1 短流水线
 和 [Integer Backend State](integer-backend-state.md) 接成 M1 整数执行闭环。dispatch/rename
 在上游原子提供 ROB entry、`UopRef` 与 ready allocation；BDB/recovery 和 commit/CSR policy
-仍由外层连接，因此该模块不是最终 CPU 顶层。
+由 [M1 Backend Subsystem](m1-backend-subsystem.md) 在外层连接，因此该模块不是最终 CPU 顶层。
 
 ## 组成与端口映射
 
@@ -26,6 +26,8 @@ port 4/5 作为 `auxReadPhysical/Data` 暴露给后续 LSU/集成使用，不增
 - `otherCompletion[3]`：后续 LongPipe/双 LSU 的 ready/valid 结果。
 - `branchResolve`、`e0Fault`：E0 到 BDB 和 FirstFaultTracker 的专属副作用，不进入
   completion payload。
+- `csrAccess/commitSideEffect/systemSerializingReady`：E0 对架构 CSR 的组合查询、单项
+  tagged 提交副作用，以及 System 指令排空完成条件。
 - `commit[2]`、`rollback/Undo`：到 commit controller 和 rename tail-undo。
 - `squash`、`recoveryActive`、`flush`：执行期 selective recovery 与提交期 global flush。
 - `integerReady`、`wakeup`、accepted/discarded、队列/槽 occupancy：dispatch 反馈、调试和
@@ -59,11 +61,19 @@ tag，ROB tail walk 由外部 recovery controller 通过 `rollback` 启动。`re
 result 由 generation 判定 discarded。global flush 清 IntIQ、ROB 和短结果槽，但不扫描
 PRF/ready table。
 
+## CSR 与 System
+
+CSR/System 只允许在 `robTag == robHeadTag` 时进入 E0。CSR 旧值通过普通 completion
+写回目的物理寄存器；写地址/数据保留在一个 53-bit tagged side-effect slot，直到同 tag
+退休。非法 CSR、ECALL 和 EBREAK 产生 FirstFault candidate，faulting CSR completion
+禁止 PRF 写。FENCE、FENCE.I、WFI 和 MRET 在完成后由 `systemSerializingReady` 控制提交。
+
 ## 不变量与性能事件
 
 - 同一 dispatch instruction 的 ROB tag 与 IntIQ `UopRef.robTag` 必须相同。
 - operand read 只接受 live context，且 source 必须为存储 ready 或本周期 wakeup ready。
-- E0/E1 endpoint mask 与 operation class 一致；E1 永不执行 control/system。
+- E0/E1 endpoint mask 与 operation class 一致；E1 永不执行 control/system；CSR/System
+  不得离开 ROB head 执行。
 - accepted completion 的 ROB/PRF/ready/wakeup 原子，discarded 无副作用。
 - branch resolve 必须先于其 completion；恢复期间错误路径不修改状态。
 - 统计 IntIQ occupancy、E0/E1 slot occupancy、issue 数、wakeup-bypass issue、各端点

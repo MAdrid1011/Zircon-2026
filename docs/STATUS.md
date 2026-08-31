@@ -13,7 +13,7 @@
 | PMA 分类 | completed | Memory/DeviceStrong/DeviceBurstable/空洞单元测试 | 接入 LSU 和 fetch access fault |
 | 有序 MMIO 合并 | partially completed | 4-beat 聚合、4 KiB 边界、强顺序单拍测试 | 接入 ROB/M0、AXI response 和精确提交 |
 | FirstFaultRecord | completed | 记录仅含 `{robTag,cause,tval}`，以 ROB head 的 modulo-24 距离选择最老异常；commit/CSR 组合已消费/清除同步异常 | 接入完整后端并交叉外部 fault、interrupt 与 recovery |
-| M1 RV32I 前后端 | partially completed | 组合译码、双路最长前缀 dispatch/三类 IQ 路由/dispatch-time fault、双路 rename、IntIQ→双路 operand-read→E0/E1→五端点 completion→ROB/PRF/ready/wakeup、BDB→lossless recovery→ROB tail walk→rename undo、六路 FirstFault 候选已形成组合后端；commit controller、M-mode CSR state、单端口 BDB branch retirement 也已形成提交组合域，并覆盖双发射 RAW、误预测删除年轻整数、illegal+flush、普通双退休、连续 branch 序列化和 lane-1 fault+older branch training；另有 bimodal/BTB/RAS/推测历史/fetch-decode queue directed tests；顶层仍为 M0 shell | 连接两个后端组合域并实现 E0 CSR/System side effect，再接前端/I-Cache |
+| M1 RV32I 前后端 | partially completed | 两个后端组合域已接成可运行 `M1BackendSubsystem`：CSR/System 仅在 ROB head 进入 E0，单一 tagged side-effect slot 保留提交写，Zicsr GPR 写回、ECALL/EBREAK 精确异常、MRET/FENCE/FENCE.I/WFI 提交信号和 M-mode CSR state 已闭环；集成测试覆盖依赖 `ADDI→CSRRW→CSR read`、ECALL trap、FENCE 排空回压以及 MSI→MRET，既有双发射 RAW、误预测恢复、连续 branch、lane-1 fault 等回归保留；顶层仍为 M0 shell | 接前端/I-Cache、redirect 仲裁和 `RetireEvent`，形成可执行 RV32I 顶层后运行 ACT4/差分 |
 | M2 RV32M/多发射 | missing | `UopRef`/endpoint 类型已定义 | M 扩展和 3-start/2-complete 测试 |
 | M3 双 LSU/Cache/A | missing | 配置与 PMA/MMIO 边界已定义 | memory milestone 回归 |
 | M4 F/interrupt/miniTAGE | partially completed | 顶层中断/trace 字段与 CSR 内 MEI>MSI>MTI 仲裁、Direct/Vectored trap 状态转换已有 directed tests | FPU、interrupt commit/取消/WFI 和 miniTAGE 后运行 TestFloat/ACT4/中断回归 |
