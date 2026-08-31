@@ -14,7 +14,10 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       port.bits.accessSize.poke(2)
       port.bits.unsignedLoad.poke(false)
       port.bits.destinationPhysical.poke(0)
+      port.bits.writesInteger.poke(false)
+      port.bits.m1Owner.poke(false)
       port.bits.isAtomic.poke(false)
+      port.bits.pmaKind.poke(PMARegionKind.Memory.code)
       port.bits.aq.poke(false)
       port.bits.rl.poke(false)
     }
@@ -44,6 +47,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     dut.io.storeEffect.ready.poke(false)
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
+    dut.io.storeEffectComplete.bits.accessFault.poke(false)
     dut.io.retire.foreach { port =>
       port.valid.poke(false)
       port.bits.poke(0)
@@ -73,6 +77,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     port.bits.writesInteger.poke(true)
     port.bits.m1Owner.poke(false)
     port.bits.isAtomic.poke(atomic)
+    port.bits.pmaKind.poke(PMARegionKind.Memory.code)
     port.bits.aq.poke(false)
     port.bits.rl.poke(false)
   }
@@ -323,7 +328,42 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("combines atomic load and committed-store metadata at retirement") {
+    it("permits fault cleanup after an accepted store result but never creates retire metadata") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        allocate(dut, 0, 6, load = false, store = true)
+        dut.clock.step()
+        noAllocations(dut)
+        updateStoreAddress(dut, 6, BigInt("80002000", 16), 15)
+        updateStoreData(dut, 6, BigInt("abad1dea", 16))
+        dut.io.commitAuthorize.valid.poke(true)
+        dut.io.commitAuthorize.bits.poke(6)
+        dut.io.commitAuthorize.ready.expect(true)
+        dut.clock.step()
+        dut.io.commitAuthorize.valid.poke(false)
+        dut.io.storeEffect.ready.poke(true)
+        dut.io.storeEffect.valid.expect(true)
+        dut.clock.step()
+        dut.io.storeEffect.ready.poke(false)
+        dut.io.storeEffectComplete.valid.poke(true)
+        dut.io.storeEffectComplete.bits.robTag.poke(6)
+        dut.io.storeEffectComplete.bits.accessFault.poke(true)
+        dut.clock.step()
+        dut.io.storeEffectComplete.valid.poke(false)
+        dut.io.storeEffectComplete.bits.accessFault.poke(false)
+        dut.io.storeCommitInFlight.expect(false)
+        dut.io.retire(0).valid.poke(true)
+        dut.io.retire(0).bits.poke(6)
+        dut.io.retireMetadata(0).valid.expect(false)
+        dut.io.retire(0).valid.poke(false)
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.storeCount.expect(0)
+      }
+    }
+
+    it("keeps atomics outside the cacheable single-beat store slice") {
       simulate(new LoadStoreQueues) { dut =>
         clear(dut)
         allocate(dut, 0, 4, load = true, store = true, atomic = true)
@@ -343,24 +383,8 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.commitAuthorize.valid.poke(true)
         dut.io.commitAuthorize.bits.poke(4)
-        dut.io.commitAuthorize.ready.expect(true)
-        dut.clock.step()
-        dut.io.commitAuthorize.valid.poke(false)
-        dut.io.storeEffect.ready.poke(true)
-        dut.io.storeEffect.valid.expect(true)
-        dut.clock.step()
-        dut.io.storeEffect.ready.poke(false)
-        dut.io.storeEffectComplete.valid.poke(true)
-        dut.io.storeEffectComplete.bits.robTag.poke(4)
-        dut.clock.step()
-        dut.io.storeEffectComplete.valid.poke(false)
-
-        dut.io.retire(0).valid.poke(true)
-        dut.io.retire(0).bits.poke(4)
-        dut.io.retireMetadata(0).valid.expect(true)
-        dut.io.retireMetadata(0).bits.readData.expect(BigInt("12345678", 16))
-        dut.io.retireMetadata(0).bits.writeData.expect(BigInt("cafebabe", 16))
-        dut.clock.step()
+        dut.io.commitAuthorize.ready.expect(false)
+        dut.io.storeEffect.valid.expect(false)
       }
     }
 

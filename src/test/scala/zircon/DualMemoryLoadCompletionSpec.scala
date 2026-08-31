@@ -14,6 +14,14 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadResult.bits.accessSize.poke(2)
     dut.io.loadResult.bits.unsignedLoad.poke(false)
     dut.io.loadResult.bits.data.poke(0)
+    dut.io.loadFault.valid.poke(false)
+    dut.io.loadFault.bits.robTag.poke(0)
+    dut.io.loadFault.bits.m1Owner.poke(false)
+    dut.io.loadFault.bits.trapValue.poke(0)
+    dut.io.storeResult.valid.poke(false)
+    dut.io.storeResult.bits.robTag.poke(0)
+    dut.io.storeResult.bits.address.poke(0)
+    dut.io.storeResult.bits.accessFault.poke(false)
     dut.io.fault.foreach { fault =>
       fault.valid.poke(false)
       fault.bits.robTag.poke(0)
@@ -97,6 +105,40 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
         dut.io.m0Completion.bits.robTag.expect(5)
         dut.io.m0Completion.bits.writesInteger.expect(false)
         dut.io.m0Completion.bits.data.expect(0)
+      }
+    }
+
+    it("routes an exact store B result through M0, including cause-7 faults") {
+      simulate(new DualMemoryLoadCompletion) { dut =>
+        clear(dut)
+        dut.io.storeResult.valid.poke(true)
+        dut.io.storeResult.bits.robTag.poke(6)
+        dut.io.storeResult.bits.address.poke(BigInt("80001004", 16))
+        dut.io.storeResult.bits.accessFault.poke(false)
+        dut.io.storeResult.ready.expect(true)
+        dut.clock.step()
+        dut.io.storeResult.valid.poke(false)
+        dut.io.m0Completion.valid.expect(true)
+        dut.io.m0Completion.bits.robTag.expect(6)
+        dut.io.m0Completion.bits.writesInteger.expect(false)
+      }
+
+      simulate(new DualMemoryLoadCompletion) { dut =>
+        clear(dut)
+        dut.io.storeResult.valid.poke(true)
+        dut.io.storeResult.bits.robTag.poke(7)
+        dut.io.storeResult.bits.address.poke(BigInt("80001008", 16))
+        dut.io.storeResult.bits.accessFault.poke(true)
+        dut.io.storeResult.ready.expect(true)
+        dut.io.faultAccepted(0).valid.expect(true)
+        dut.io.faultAccepted(0).record.robTag.expect(7)
+        dut.io.faultAccepted(0).record.cause.expect(7)
+        dut.io.faultAccepted(0).record.trapValue.expect(BigInt("80001008", 16))
+        dut.clock.step()
+        dut.io.storeResult.valid.poke(false)
+        dut.io.m0Completion.valid.expect(true)
+        dut.io.m0Completion.bits.robTag.expect(7)
+        dut.io.m0Completion.bits.writesInteger.expect(false)
       }
     }
   }

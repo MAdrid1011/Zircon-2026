@@ -18,6 +18,7 @@ class MemoryQueueAllocate(config: ZirconCoreConfig = ZirconCoreConfig.default) e
   val writesInteger = Bool()
   val m1Owner = Bool()
   val isAtomic = Bool()
+  val pmaKind = UInt(2.W)
   val aq = Bool()
   val rl = Bool()
 }
@@ -105,12 +106,21 @@ class StoreEffect(config: ZirconCoreConfig = ZirconCoreConfig.default) extends B
   val writeMask = UInt(4.W)
   val writeData = UInt(32.W)
   val isAtomic = Bool()
+  val pmaKind = UInt(2.W)
   val aq = Bool()
   val rl = Bool()
 }
 
 class StoreEffectComplete(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
+  val accessFault = Bool()
+}
+
+/** One exact response for a commit-authorized cacheable store AXI write. */
+class StoreWriteResult(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val address = UInt(32.W)
+  val accessFault = Bool()
 }
 
 /** A line-fill request from L1D to the sole data-side AXI read engine. */

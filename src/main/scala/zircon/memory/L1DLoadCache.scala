@@ -36,6 +36,13 @@ class L1DLoadCache(
     val completion = Decoupled(new LoadCompletion(config))
     val dataRequest = Decoupled(new DataReadRequest(config))
     val dataResponse = Flipped(Decoupled(new DataReadResponse(config)))
+    /** Acceptability of the next commit-authorized write-through store. */
+    val storeAccept = Input(Valid(new StoreEffect(config)))
+    val storeAcceptReady = Output(Bool())
+    /** Pulses only when the store engine accepted the effect. */
+    val storeCommit = Input(Valid(new StoreEffect(config)))
+    /** Holds while AW/W/B are owned, preventing stale same-line cache use. */
+    val activeStore = Input(Valid(new StoreEffect(config)))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
@@ -68,6 +75,12 @@ class L1DLoadCache(
   val requestWord = io.request.bits.address(lineOffsetWidth - 1, 2)
   val requestLineAddress = Cat(io.request.bits.address(31, lineOffsetWidth),
     0.U(lineOffsetWidth.W))
+  val activeStoreLineAddress = Cat(io.activeStore.bits.address(31, lineOffsetWidth),
+    0.U(lineOffsetWidth.W))
+  val activeStoreSameLine = io.activeStore.valid &&
+    activeStoreLineAddress === requestLineAddress
+  val pendingStoreLineAddress = Cat(io.storeAccept.bits.address(31, lineOffsetWidth),
+    0.U(lineOffsetWidth.W))
   val cacheHit = VecInit((0 until ways).map(way =>
     cacheValid(way)(requestSet) && cacheTag(way)(requestSet) === requestTag))
   val anyCacheHit = cacheHit.asUInt.orR
@@ -91,6 +104,13 @@ class L1DLoadCache(
   val anyFreeWaiter = freeWaiter.orR
   val freeWaiterIndex = PriorityEncoder(freeWaiter)
 
+  val pendingStoreMatchesMshr = VecInit((0 until mshrCount).map(index =>
+    mshrValid(index) && mshrLineAddress(index) === pendingStoreLineAddress)).asUInt.orR
+  // A committed write may invalidate a resident line immediately, but it must
+  // wait for an older/newer same-line refill to drain so a late refill cannot
+  // resurrect stale data after the write-through AXI transaction begins.
+  io.storeAcceptReady := !recoveryBlocked && !pendingStoreMatchesMshr
+
   val reservedWay = Wire(Vec(ways, Bool()))
   for (way <- 0 until ways) {
     reservedWay(way) := (0 until mshrCount).map(index =>
@@ -105,11 +125,13 @@ class L1DLoadCache(
   val hasVictimWay = victimWays.orR
   val victimWay = PriorityEncoder(victimWays)
 
-  val immediateRequest = !io.request.bits.requiresCache || anyCacheHit
+  val immediateRequest = !io.request.bits.requiresCache ||
+    (anyCacheHit && !activeStoreSameLine)
   val immediateAvailable = !immediateValid || io.completion.ready
   val missResources = anyFreeWaiter && (anyMatchingMshr ||
     (anyFreeMshr && hasVictimWay))
-  io.request.ready := !recoveryBlocked && Mux(immediateRequest,
+  val blockedByActiveStore = io.request.bits.requiresCache && activeStoreSameLine
+  io.request.ready := !recoveryBlocked && !blockedByActiveStore && Mux(immediateRequest,
     immediateAvailable, missResources)
 
   val unissued = VecInit((0 until mshrCount).map(index =>
@@ -266,6 +288,20 @@ class L1DLoadCache(
             cacheData(way)(fillSet)(word) := io.dataResponse.bits.lineData(word)
           }
         }
+      }
+    }
+  }
+  when(io.storeCommit.valid) {
+    assert(io.storeAcceptReady,
+      "L1D accepted a committed store while its line had a live refill")
+    assert(!io.storeCommit.bits.isAtomic,
+      "the read-only L1D write-through slice cannot accept atomics")
+    val storeSet = io.storeCommit.bits.address(lineOffsetWidth + setWidth - 1,
+      lineOffsetWidth)
+    val storeTag = io.storeCommit.bits.address(31, lineOffsetWidth + setWidth)
+    for (way <- 0 until ways) {
+      when(cacheValid(way)(storeSet) && cacheTag(way)(storeSet) === storeTag) {
+        cacheValid(way)(storeSet) := false.B
       }
     }
   }

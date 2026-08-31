@@ -2,7 +2,7 @@ package zircon.memory
 
 import chisel3._
 import chisel3.util._
-import zircon.ZirconCoreConfig
+import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.ROBTagOrder
 
 /** Eight-entry load and store queues with byte-precise forwarding.
@@ -42,6 +42,7 @@ class LoadStoreQueues(
     val commitAuthorize = Flipped(Decoupled(UInt(config.robTagWidth.W)))
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
+    val storeCommitInFlight = Output(Bool())
 
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
@@ -87,11 +88,13 @@ class LoadStoreQueues(
   val sqDataValid = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqWriteData = Reg(Vec(sqEntries, UInt(32.W)))
   val sqIsAtomic = Reg(Vec(sqEntries, Bool()))
+  val sqPmaKind = Reg(Vec(sqEntries, UInt(2.W)))
   val sqAq = Reg(Vec(sqEntries, Bool()))
   val sqRl = Reg(Vec(sqEntries, Bool()))
   val sqCommitAuthorized = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqEffectIssued = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqEffectComplete = RegInit(VecInit.fill(sqEntries)(false.B))
+  val sqEffectFault = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqMetadataValid = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqMetadata = Reg(Vec(sqEntries, new MemoryRetireMetadata(config)))
 
@@ -236,7 +239,9 @@ class LoadStoreQueues(
   val (commitMatch, commitIndex) = findMatch(
     sqValid, sqTag, io.commitAuthorize.bits, sqEntries, sqIndexWidth)
   val commitEligible = commitMatch && sqAddressValid(commitIndex) &&
-    sqDataValid(commitIndex) && !sqCommitAuthorized(commitIndex)
+    sqDataValid(commitIndex) && !sqCommitAuthorized(commitIndex) &&
+    !sqIsAtomic(commitIndex) &&
+    sqPmaKind(commitIndex) === PMARegionKind.Memory.code.U
   io.commitAuthorize.ready := !recoveryBlocked && commitEligible
 
   var selectedStoreValid: Bool = false.B
@@ -258,6 +263,7 @@ class LoadStoreQueues(
   io.storeEffect.bits.writeMask := sqWriteMask(selectedStoreIndex)
   io.storeEffect.bits.writeData := sqWriteData(selectedStoreIndex)
   io.storeEffect.bits.isAtomic := sqIsAtomic(selectedStoreIndex)
+  io.storeEffect.bits.pmaKind := sqPmaKind(selectedStoreIndex)
   io.storeEffect.bits.aq := sqAq(selectedStoreIndex)
   io.storeEffect.bits.rl := sqRl(selectedStoreIndex)
 
@@ -314,8 +320,8 @@ class LoadStoreQueues(
 
   when(io.flush) {
     for (index <- 0 until sqEntries) {
-      assert(!sqValid(index) || !sqCommitAuthorized(index),
-        "a flush cannot discard a commit-authorized store effect")
+      assert(!sqValid(index) || !sqCommitAuthorized(index) || sqEffectFault(index),
+        "a flush can discard a commit-authorized store only after its exact fault")
     }
     lqValid.foreach(_ := false.B)
     sqValid.foreach(_ := false.B)
@@ -372,11 +378,13 @@ class LoadStoreQueues(
           sqAccessSize(index) := io.allocate(lane).bits.accessSize
           sqDataValid(index) := false.B
           sqIsAtomic(index) := io.allocate(lane).bits.isAtomic
+          sqPmaKind(index) := io.allocate(lane).bits.pmaKind
           sqAq(index) := io.allocate(lane).bits.aq
           sqRl(index) := io.allocate(lane).bits.rl
           sqCommitAuthorized(index) := false.B
           sqEffectIssued(index) := false.B
           sqEffectComplete(index) := false.B
+          sqEffectFault(index) := false.B
           sqMetadataValid(index) := false.B
         }
       }
@@ -421,13 +429,16 @@ class LoadStoreQueues(
         "store effect completion requires an issued commit-authorized action")
       assert(!sqEffectComplete(effectCompleteIndex), "store effect completed twice")
       sqEffectComplete(effectCompleteIndex) := true.B
-      sqMetadataValid(effectCompleteIndex) := true.B
-      sqMetadata(effectCompleteIndex).robTag := sqTag(effectCompleteIndex)
-      sqMetadata(effectCompleteIndex).address := sqAddress(effectCompleteIndex)
-      sqMetadata(effectCompleteIndex).readMask := 0.U
-      sqMetadata(effectCompleteIndex).writeMask := sqWriteMask(effectCompleteIndex)
-      sqMetadata(effectCompleteIndex).readData := 0.U
-      sqMetadata(effectCompleteIndex).writeData := sqWriteData(effectCompleteIndex)
+      sqEffectFault(effectCompleteIndex) := io.storeEffectComplete.bits.accessFault
+      when(!io.storeEffectComplete.bits.accessFault) {
+        sqMetadataValid(effectCompleteIndex) := true.B
+        sqMetadata(effectCompleteIndex).robTag := sqTag(effectCompleteIndex)
+        sqMetadata(effectCompleteIndex).address := sqAddress(effectCompleteIndex)
+        sqMetadata(effectCompleteIndex).readMask := 0.U
+        sqMetadata(effectCompleteIndex).writeMask := sqWriteMask(effectCompleteIndex)
+        sqMetadata(effectCompleteIndex).readData := 0.U
+        sqMetadata(effectCompleteIndex).writeData := sqWriteData(effectCompleteIndex)
+      }
     }
   }
 
@@ -456,4 +467,6 @@ class LoadStoreQueues(
   assert(PopCount(sqValid) <= sqEntries.U, "SQ occupancy exceeded its depth")
   io.loadCount := PopCount(lqValid)
   io.storeCount := PopCount(sqValid)
+  io.storeCommitInFlight := VecInit((0 until sqEntries).map(index =>
+    sqValid(index) && sqCommitAuthorized(index) && !sqEffectFault(index))).asUInt.orR
 }

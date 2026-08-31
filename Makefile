@@ -1,4 +1,4 @@
-.PHONY: compile test verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -6,6 +6,13 @@ compile:
 
 test:
 	./scripts/sbtw test
+
+# Fast, focused M3 cacheable-store regression. Each invocation is intentionally
+# bounded well below the five-minute component-simulation target.
+test-m3-store:
+	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a cacheable store"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "cacheable store BRESP error"'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

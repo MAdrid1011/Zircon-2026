@@ -4,17 +4,18 @@ import chisel3._
 import chisel3.util.PopCount
 import zircon.ZirconCoreConfig
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
-  M1BackendSubsystem, MemIssueQueue, SourceKind}
+  M1BackendSubsystem, MemIssueQueue, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
-import zircon.memory.{AXIDataReadEngine, DualLSUIngress, L1DLoadCache}
+import zircon.memory.{AXIDataReadEngine, AXIDataStoreEngine, DualLSUIngress, L1DLoadCache}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
  *
  * E2 and M0/M1 share the two auxiliary PRF read ports under the frozen global
  * three-start limit. The LSU request/response ownership path is live through
- * the completion network, but data-cache, AXI-data, and store-effect execution
- * remain blocked until their M3 transaction owners exist.
+ * the completion network. Cacheable integer loads and commit-authorized
+ * cacheable stores own real AXI transactions; MMIO, atomics, writeback, L2,
+ * and the final dual-LSU conflict policy remain later M3 work.
  */
 class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Module {
   override val desiredName: String = "ZirconCore"
@@ -29,6 +30,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val lsuIngress = Module(new DualLSUIngress(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
+  val dataStoreEngine = Module(new AXIDataStoreEngine(cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
 
   frontend.io.enable := true.B
@@ -122,12 +124,28 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
+  l1dLoadCache.io.storeAccept.valid := lsuIngress.io.storeEffect.valid
+  l1dLoadCache.io.storeAccept.bits := lsuIngress.io.storeEffect.bits
+  dataStoreEngine.io.invalidateReady := l1dLoadCache.io.storeAcceptReady
+  dataStoreEngine.io.effect.valid := lsuIngress.io.storeEffect.valid
+  dataStoreEngine.io.effect.bits := lsuIngress.io.storeEffect.bits
+  lsuIngress.io.storeEffect.ready := dataStoreEngine.io.effect.ready
+  l1dLoadCache.io.storeCommit.valid := dataStoreEngine.io.effect.fire
+  l1dLoadCache.io.storeCommit.bits := dataStoreEngine.io.effect.bits
+  l1dLoadCache.io.activeStore := dataStoreEngine.io.activeStore
   lsuIngress.io.loadContextRead.valid := false.B
   lsuIngress.io.loadContextRead.bits := 0.U
-  lsuIngress.io.commitAuthorize.valid := false.B
-  lsuIngress.io.commitAuthorize.bits := 0.U
-  lsuIngress.io.storeEffect.ready := false.B
-  lsuIngress.io.storeEffectComplete := 0.U.asTypeOf(lsuIngress.io.storeEffectComplete)
+  val robHeadIsStore = backend.io.robHead.valid &&
+    backend.io.robHead.bits.entry.decoded.uopClass === UopClass.Store
+  // A store becomes externally visible only when its true ROB head owns an SQ
+  // record. It remains incomplete until the exact B response reaches M0.
+  lsuIngress.io.commitAuthorize.valid := robHeadIsStore
+  lsuIngress.io.commitAuthorize.bits := backend.io.robHead.bits.robTag
+  lsuIngress.io.storeWriteResult <> dataStoreEngine.io.result
+  lsuIngress.io.storeEffectComplete.valid := dataStoreEngine.io.result.fire
+  lsuIngress.io.storeEffectComplete.bits.robTag := dataStoreEngine.io.result.bits.robTag
+  lsuIngress.io.storeEffectComplete.bits.accessFault :=
+    dataStoreEngine.io.result.bits.accessFault
   for (lane <- 0 until cfg.commitWidth) {
     lsuIngress.io.retire(lane).valid := backend.io.retired(lane).valid
     lsuIngress.io.retire(lane).bits := backend.io.retired(lane).bits.robTag
@@ -140,7 +158,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.otherFault(1) := lsuIngress.io.fault(0)
   backend.io.otherFault(2) := lsuIngress.io.fault(1)
   backend.io.interrupts := io.interrupts
-  backend.io.interruptBlocked := false.B
+  backend.io.interruptBlocked := lsuIngress.io.storeCommitInFlight
   backend.io.systemSerializingReady := true.B
   backend.io.fpCommit.valid := false.B
   backend.io.fpCommit.bits.flags := 0.U
@@ -155,11 +173,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       traceReadPhysical, auxiliaryRead.io.readPhysical(lane))
   }
 
-  io.axi.aw.valid := false.B
-  io.axi.aw.bits := 0.U.asTypeOf(io.axi.aw.bits)
-  io.axi.w.valid := false.B
-  io.axi.w.bits := 0.U.asTypeOf(io.axi.w.bits)
-  io.axi.b.ready := true.B
+  io.axi.aw.valid := dataStoreEngine.io.aw.valid
+  io.axi.aw.bits := dataStoreEngine.io.aw.bits
+  dataStoreEngine.io.aw.ready := io.axi.aw.ready
+  io.axi.w.valid := dataStoreEngine.io.w.valid
+  io.axi.w.bits := dataStoreEngine.io.w.bits
+  dataStoreEngine.io.w.ready := io.axi.w.ready
+  dataStoreEngine.io.b.valid := io.axi.b.valid
+  dataStoreEngine.io.b.bits := io.axi.b.bits
+  io.axi.b.ready := dataStoreEngine.io.b.ready
   val arLockValid = RegInit(false.B)
   val arLockData = RegInit(false.B)
   val dataArTurn = RegInit(false.B)

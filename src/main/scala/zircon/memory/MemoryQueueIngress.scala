@@ -36,6 +36,7 @@ class MemoryQueueIngress(
     val commitAuthorize = Flipped(Decoupled(UInt(config.robTagWidth.W)))
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
+    val storeCommitInFlight = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -79,6 +80,7 @@ class MemoryQueueIngress(
   io.storeEffect.bits := queues.io.storeEffect.bits
   queues.io.storeEffect.ready := io.storeEffect.ready
   queues.io.storeEffectComplete := io.storeEffectComplete
+  io.storeCommitInFlight := queues.io.storeCommitInFlight
   io.loadCount := queues.io.loadCount
   io.storeCount := queues.io.storeCount
 
@@ -138,6 +140,7 @@ class MemoryQueueIngress(
       intakeRequest(lane).request.uop.writesInteger
     queues.io.allocate(lane).bits.m1Owner := intakeRequest(lane).m1Owner
     queues.io.allocate(lane).bits.isAtomic := intakeRequest(lane).address.isAtomic
+    queues.io.allocate(lane).bits.pmaKind := intakeRequest(lane).address.pmaKind
     queues.io.allocate(lane).bits.aq := intakeRequest(lane).address.aq
     queues.io.allocate(lane).bits.rl := intakeRequest(lane).address.rl
   }

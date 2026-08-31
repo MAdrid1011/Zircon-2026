@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with the partial M3 read-only L1D/data-AXI slice",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read and committed cacheable-store write slices",
   "completeness": "partial",
   "known_omissions": [
-    "the read-only L1D, load/store queue state, and data AXI read engine are inventoried, but commit-authorized stores, dirty/replacement state, writeback, L2, MMIO, atomics, and formal L1I are not implemented",
+    "the cacheable integer store AXI owner is inventoried, but dirty/replacement state, writeback, L2, MMIO, atomics, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -105,10 +105,10 @@
       "name": "sq_entries_current",
       "class": "register_control",
       "entries": 8,
-      "bits_per_entry": 196,
+      "bits_per_entry": 199,
       "instances": 1,
       "replication_factor": 1,
-      "source": "LoadStoreQueues SQ state including exact retire metadata"
+      "source": "LoadStoreQueues SQ state including PMA kind, effect fault, and exact retire metadata"
     },
     {
       "name": "axi_data_read_owner_line_buffers",
@@ -145,6 +145,24 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "AXIDataReadEngine responseValid and DataReadResponse hold register"
+    },
+    {
+      "name": "axi_data_store_owner_hold",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 84,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIDataStoreEngine active/effectBits (81 bits) plus independent AW/W sent state"
+    },
+    {
+      "name": "axi_data_store_result_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 40,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIDataStoreEngine resultValid and StoreWriteResult {robTag,address,accessFault}"
     },
     {
       "name": "top_axi_ar_arbiter_state",
@@ -197,6 +215,30 @@
       "width": 1,
       "fanin": 1,
       "source": "L1DLoadCache matching-MSHR line-address comparisons"
+    },
+    {
+      "name": "l1d_store_mshr_line_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache store-accept same-line MSHR exclusion"
+    },
+    {
+      "name": "l1d_active_store_line_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache active-store same-line request block"
+    },
+    {
+      "name": "axi_data_store_b_id_compare",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "AXIDataStoreEngine reserved AXI write-ID response check, conservatively charged as one 32-bit comparator"
     },
     {
       "name": "l1d_waiter_oldest_select",

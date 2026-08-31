@@ -36,6 +36,8 @@ class DualLSUIngress(
     val commitAuthorize = Flipped(Decoupled(UInt(config.robTagWidth.W)))
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
+    val storeWriteResult = Flipped(Decoupled(new StoreWriteResult(config)))
+    val storeCommitInFlight = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -96,6 +98,7 @@ class DualLSUIngress(
   io.loadComplete.ready := ingress.io.loadComplete.ready
   loadCompletion.io.loadResult <> ingress.io.loadResult
   loadCompletion.io.loadFault <> ingress.io.loadFault
+  loadCompletion.io.storeResult <> io.storeWriteResult
   loadCompletion.io.robHeadTag := io.robHeadTag
   loadCompletion.io.squash := io.squash
   loadCompletion.io.flush := io.flush
@@ -110,6 +113,7 @@ class DualLSUIngress(
   io.storeEffect.bits := ingress.io.storeEffect.bits
   ingress.io.storeEffect.ready := io.storeEffect.ready
   ingress.io.storeEffectComplete := io.storeEffectComplete
+  io.storeCommitInFlight := ingress.io.storeCommitInFlight
   for (lane <- 0 until config.commitWidth) {
     ingress.io.retire(lane) := io.retire(lane)
     io.retireMetadata(lane) := ingress.io.retireMetadata(lane)

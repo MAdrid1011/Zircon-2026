@@ -61,6 +61,7 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.storeEffect.ready.poke(false)
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
+    dut.io.storeEffectComplete.bits.accessFault.poke(false)
     dut.io.retire.foreach { lane =>
       lane.valid.poke(false)
       lane.bits.poke(0)
