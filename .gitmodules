@@ -1,0 +1,8 @@
+[submodule "RV-Software"]
+	path = RV-Software
+	url = https://github.com/MAdrid1011/RV-Software.git
+	branch = zircon-2026
+[submodule "ZirconSim"]
+	path = ZirconSim
+	url = https://github.com/MAdrid1011/ZirconSim.git
+	branch = zircon-2026

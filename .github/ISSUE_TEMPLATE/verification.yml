@@ -1,0 +1,27 @@
+name: Verification gap
+description: Record a missing coverpoint, assertion, test, or unexplained failure
+title: "[verify] "
+labels: [verification]
+body:
+  - type: textarea
+    id: feature
+    attributes:
+      label: Feature and contract
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: Missing evidence or observed failure
+    validations:
+      required: true
+  - type: input
+    id: seed
+    attributes:
+      label: Reproduction seed or test name
+  - type: textarea
+    id: closure
+    attributes:
+      label: Closure condition
+    validations:
+      required: true
