@@ -2,10 +2,11 @@ package zircon.memory
 
 import chisel3._
 import chisel3.util._
+import zircon.ZirconCoreConfig
 
-class OrderedIORequest extends Bundle {
+class OrderedIORequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val order = UInt(64.W)
-  val robTag = UInt(5.W)
+  val robTag = UInt(config.robTagWidth.W)
   val address = UInt(32.W)
   val write = Bool()
   val size = UInt(2.W)
@@ -15,9 +16,12 @@ class OrderedIORequest extends Bundle {
   val regionTag = UInt(8.W)
 }
 
-class OrderedIOGroup(val maxBeats: Int = 4) extends Bundle {
+class OrderedIOGroup(
+    val maxBeats: Int = 4,
+    config: ZirconCoreConfig = ZirconCoreConfig.default
+) extends Bundle {
   val count = UInt(log2Ceil(maxBeats + 1).W)
-  val requests = Vec(maxBeats, new OrderedIORequest)
+  val requests = Vec(maxBeats, new OrderedIORequest(config))
 }
 
 /** Collects adjacent, program-order device requests. The commit controller
@@ -25,16 +29,19 @@ class OrderedIOGroup(val maxBeats: Int = 4) extends Bundle {
   * An incompatible request remains backpressured until the current group has
   * been accepted, so device order cannot be inverted.
   */
-class OrderedIOCombiner(val maxBeats: Int = 4) extends Module {
+class OrderedIOCombiner(
+    val maxBeats: Int = 4,
+    config: ZirconCoreConfig = ZirconCoreConfig.default
+) extends Module {
   require(maxBeats == 4, "the architectural MMIO burst limit is four beats")
 
   val io = IO(new Bundle {
-    val in = Flipped(Decoupled(new OrderedIORequest))
+    val in = Flipped(Decoupled(new OrderedIORequest(config)))
     val forceFlush = Input(Bool())
-    val out = Decoupled(new OrderedIOGroup(maxBeats))
+    val out = Decoupled(new OrderedIOGroup(maxBeats, config))
   })
 
-  val entries = Reg(Vec(maxBeats, new OrderedIORequest))
+  val entries = Reg(Vec(maxBeats, new OrderedIORequest(config)))
   val count = RegInit(0.U(log2Ceil(maxBeats + 1).W))
   val nonEmpty = count =/= 0.U
   val full = count === maxBeats.U

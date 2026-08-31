@@ -2,6 +2,7 @@ package zircon.backend
 
 import chisel3._
 import chisel3.util._
+import zircon.ZirconCoreConfig
 
 object ExecutionEndpoint extends ChiselEnum {
   val E0IntCtrl, E1IntSimple, E2LongPipe, M0General, M1Load = Value
@@ -18,8 +19,8 @@ object SourceKind extends ChiselEnum {
 /** Compact issue-queue reference. PC, instruction bits, prediction metadata,
   * and complete architectural side effects reside in the ROB entry.
   */
-class UopRef extends Bundle {
-  val robTag = UInt(5.W)
+class UopRef(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
   val endpoint = ExecutionEndpoint()
   val uopClass = UopClass()
   val operation = UInt(7.W)
