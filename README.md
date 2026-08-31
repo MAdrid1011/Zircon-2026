@@ -6,7 +6,7 @@ four-instruction fetch frontend, a two-wide decode/commit backend, two memory
 pipelines, a non-blocking L1 data cache, and a dynamically shared L2 cache.
 
 The repository is the source of truth for RTL, architecture specifications,
-verification plans, and reproducible performance/PPA reports. Software and the
+verification plans, and reproducible performance/static-area reports. Software and the
 Verilator harness remain versioned in the `RV-Software` and `ZirconSim`
 submodules on their `zircon-2026` branches.
 

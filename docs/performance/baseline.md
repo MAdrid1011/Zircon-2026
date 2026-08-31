@@ -1,4 +1,4 @@
-# IPC 与 PPA 基线
+# IPC 与静态面积基线
 
 当前状态：正式数据尚未测量。固定提交的可运行性和非正式 smoke 已记录在
 [`zircon-2024-reproduction.md`](zircon-2024-reproduction.md)，静态面积预算见
@@ -16,6 +16,12 @@
 
 主比较使用 nominal profile：首 beat 30 cycles、0–15 cycles 确定性抖动、10% channel backpressure。fast/slow profile 只作敏感性分析。
 
-## PPA 报告字段
+## 静态面积报告字段
 
-Vivado 2026.1、`xc7a100tcsg324-1`、10 ns clock、debug/trace 关闭。记录 post-route LUT、FF、RAMB18 equivalent、DSP48E1、WNS、TNS、最大收敛频率、关键路径和分层资源。
+按 [ADR-0009](../decisions/0009-static-area-acceptance.md) 对两个固定配置使用同一脚本，
+记录 register-backed bit、memory-macro candidate bit、端口复制后的 storage bit、CAM
+compare-bit product、mux input-bit product、主要算术/迭代引擎数量和分层资源明细。
+debug/trace 在正式配置关闭，验证接口不进入账本。
+
+报告必须区分“精确源码/生成 RTL 位数”和“实现相关的保守代理”，不得把后者写成
+LUT、FF、BRAM、频率或功耗。Vivado/Yosys 报告只作为可选旁证，不是发布门槛。

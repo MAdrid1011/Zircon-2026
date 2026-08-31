@@ -23,8 +23,11 @@ ready/valid 延迟来自未记录的随机序列；旧程序还以非法指令�
 正式基线必须由新的确定性 AXI/device adapter 使用显式 seed、相同 ELF、
 相同 nominal/fast/slow profile 和 `tohost` 判定重新测量。
 
-## 未完成门槛
+## 未完成门槛与可选旁证
 
 - 确定性旧顶层 AXI adapter 与完整 stall breakdown 尚未接入。
-- 当前主机未安装 Vivado 2026.1，因此没有 post-route LUT/FF/BRAM/DSP/WNS。
-- 在上述两项完成前，M0 Issue 保持打开，不创建 `v0.1-baseline` release。
+- 静态面积基线仍需迁移到 ADR-0009 的 manifest/脚本并加入端口复制和组合代理。
+- 当前主机未安装 Vivado 2026.1，因此没有可选 post-route LUT/FF/BRAM/DSP/WNS 旁证；
+  这不再阻塞 M0 或发布。
+- 在确定性 IPC adapter 与静态面积脚本完成前，M0 Issue 保持打开，不创建
+  `v0.1-baseline` release。

@@ -14,7 +14,7 @@ body:
     id: problem
     attributes:
       label: Measured problem
-      description: Include trace, IPC, PPA, coverage, or failure evidence.
+      description: Include trace, IPC, static-area, coverage, or failure evidence.
     validations:
       required: true
   - type: textarea
