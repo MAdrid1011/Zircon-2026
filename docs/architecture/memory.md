@@ -98,6 +98,16 @@ ROB-owned atomic `aq/rl` bits in `MemoryAddressRequest`. A missing/mismatched
 context or global flush blocks the handshake. This ensures an LSU never rebuilds
 ordering metadata by re-decoding a current instruction stream.
 
+`DualLSUIngress` composes `MemoryOperandRead`, `DualLSUAdmission`,
+`M0RequestArbiter`, and `MemoryQueueIngress` as one module-level request path.
+It retains the two M0/M1 MemIQ inputs, four shared-PRF read signals, two exact
+ROB-context reads, two `FaultCandidate` outputs, and LSQ forwarding/retirement
+interfaces. An eligible cacheable load reaches LQ ownership through M1; a
+device, atomic, or alignment/PMA-rejected candidate follows the replay-to-M0
+path. The composition stops at LSQ ownership and forwarding: no completion,
+Cache, AXI, or irreversible store action is generated here, and it is not yet
+wired to the top-level PRF-port arbiter.
+
 ## PMA and precise exceptions
 
 `PMAClassifier` remains first-match by configuration order. Its default regions
