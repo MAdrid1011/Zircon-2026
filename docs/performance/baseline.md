@@ -2,7 +2,9 @@
 
 当前状态：正式数据尚未测量。固定提交的可运行性和非正式 smoke 已记录在
 [`zircon-2024-reproduction.md`](zircon-2024-reproduction.md)，静态面积预算见
-[`zircon-2024-static-inventory.md`](zircon-2024-static-inventory.md)。
+[`zircon-2024-static-inventory.md`](zircon-2024-static-inventory.md)。M2 的固定
+RV32M prefix 初始测量记录在 [`m2-rv32m-prefix.md`](m2-rv32m-prefix.md)；它不满足
+本页定义的正式 workload/profile 门槛。
 
 ## Zircon-2024 固定点
 
