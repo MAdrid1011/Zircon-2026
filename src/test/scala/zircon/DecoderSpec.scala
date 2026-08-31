@@ -2,8 +2,8 @@ package zircon
 
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
-import zircon.backend.UopClass
-import zircon.frontend.{EndpointMask, IntOperation, RV32IDecoder}
+import zircon.backend.{EndpointMask, UopClass}
+import zircon.frontend.{IntOperation, RV32IDecoder}
 
 class DecoderSpec extends AnyFunSpec with ChiselSim {
   private def rType(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =

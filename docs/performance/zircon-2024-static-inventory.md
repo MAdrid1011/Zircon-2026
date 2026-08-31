@@ -28,9 +28,9 @@ Zircon-2024 的每个 `IQEntry` 复制完整 `BackendPackage`。按冻结源码�
 - MemIQ：6 × (283+1+4) = 1728 bit。
 - 合计：6924 bit，不含 free-list、选择器和连线。
 
-Zircon-2026 的 `UopRef` elaborated width 为 84 bit，其中 6-bit ROB tag 包含
-wrap generation；三个队列仍合计 24 项，直接 payload 为 2016 bit。相对旧
-payload/state 下界减少 70.9%，超过
+Zircon-2026 的 `UopRef` elaborated width 为 86 bit，其中 6-bit ROB tag 包含
+wrap generation、5-bit mask 保留 endpoint 调度弹性；三个队列仍合计 24 项，
+直接 payload 为 2064 bit。相对旧 payload/state 下界减少 70.2%，超过
 “IQ 状态至少下降 30%”门槛。最终报告仍须用综合后的分层 LUT/FF/BRAM
 验证；本计算不能覆盖新增 wakeup、age、valid 和 replay 状态。
 

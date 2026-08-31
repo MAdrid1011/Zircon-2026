@@ -2,7 +2,7 @@ package zircon.frontend
 
 import chisel3._
 import chisel3.util._
-import zircon.backend.{ExecutionEndpoint, UopClass}
+import zircon.backend.{EndpointMask, ExecutionEndpoint, UopClass}
 
 object IntOperation extends ChiselEnum {
   val Invalid, Lui, Auipc = Value
@@ -11,18 +11,6 @@ object IntOperation extends ChiselEnum {
   val Lb, Lh, Lw, Lbu, Lhu, Sb, Sh, Sw = Value
   val Fence, FenceI, Ecall, Ebreak, Mret, Wfi = Value
   val Csrrw, Csrrs, Csrrc, Csrrwi, Csrrsi, Csrrci = Value
-}
-
-object EndpointMask {
-  val Width = 5
-  val None = 0
-  val E0 = 1 << 0
-  val E1 = 1 << 1
-  val E2 = 1 << 2
-  val M0 = 1 << 3
-  val M1 = 1 << 4
-  val IntegerSimple = E0 | E1
-  val CacheableLoadCandidate = M0 | M1
 }
 
 class DecodedInstruction extends Bundle {
