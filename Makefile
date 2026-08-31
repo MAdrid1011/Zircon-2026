@@ -1,4 +1,4 @@
-.PHONY: compile test verilog software sim-unit sim-smoke verify-m0 clean status
+.PHONY: compile test verilog trace-verilog software sim-unit sim-smoke verify-m0 clean status
 
 compile:
 	./scripts/sbtw compile
@@ -8,6 +8,9 @@ test:
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"
+
+trace-verilog:
+	./scripts/sbtw "runMain zircon.Elaborate --trace --target-dir generated-trace"
 
 software:
 	$(MAKE) -C RV-Software/picotest image

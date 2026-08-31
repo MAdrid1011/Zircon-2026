@@ -4,9 +4,11 @@ import circt.stage.ChiselStage
 import zircon.core.ZirconCore
 
 object Elaborate extends App {
+  val traceEnabled = args.contains("--trace")
+  val stageArgs = args.filterNot(_ == "--trace")
   ChiselStage.emitSystemVerilogFile(
-    new ZirconCore(ZirconCoreConfig.default),
-    args = args,
+    new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = traceEnabled)),
+    args = stageArgs,
     firtoolOpts = Array(
       "-disable-all-randomization",
       "-strip-debug-info",
