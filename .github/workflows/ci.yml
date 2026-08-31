@@ -12,7 +12,7 @@ permissions:
 jobs:
   rtl-unit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,14 +23,34 @@ jobs:
           java-version: "21"
           cache: sbt
       - uses: sbt/setup-sbt@v1
-      - name: Install simulation and RV32 build tools
+      - name: Install simulation build prerequisites and RV32 build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld llvm verilator
+          sudo apt-get install -y \
+            autoconf bison ccache clang flex g++ help2man libfl-dev lld llvm \
+            make perl python3 zlib1g-dev
+      - name: Restore pinned Verilator
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/verilator/5.050
+          key: ${{ runner.os }}-${{ runner.arch }}-verilator-848d926ebd4addacacd294dc84e35d9d4ae8078c-v1
+      - name: Build pinned Verilator when absent
+        run: |
+          ./scripts/setup-ci-verilator.sh \
+            "${RUNNER_TOOL_CACHE}/verilator/5.050" \
+            "${RUNNER_TEMP}/verilator-v5.050-src"
+          echo "${RUNNER_TOOL_CACHE}/verilator/5.050/bin" >> "${GITHUB_PATH}"
       - name: Tool versions
         run: |
           java -version
-          sbt --script-version
+          ./scripts/sbtw "show sbtVersion"
+          verilator --version
+          clang --version
+          ld.lld --version
+          case "$(verilator --version)" in
+            "Verilator 5.050 "*) ;;
+            *) echo "CI did not select the locked Verilator 5.050 binary" >&2; exit 1 ;;
+          esac
       - name: Unit tests
         run: ./scripts/sbtw test
       - name: Elaborate synthesizable top

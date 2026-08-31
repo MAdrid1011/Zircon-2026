@@ -12,6 +12,7 @@
     "fpgaPart": "xc7a100tcsg324-1"
   },
   "upstreams": {
+    "verilator": "848d926ebd4addacacd294dc84e35d9d4ae8078c",
     "riscvUnifiedDb": "45924b13080fa52cd6f2ff4d934332fa62ac77e0",
     "spike": "c09c0cce98696f52abe0fe8c11f93f9ed74dc2bb",
     "sailRiscv": "beaf44991eee362a062fcaaf6fcb78ca428ff710",
