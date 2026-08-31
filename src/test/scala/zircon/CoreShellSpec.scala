@@ -140,7 +140,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     events.take(trapIndices(count - 1) + 1)
   }
 
-  describe("ZirconCore executable M1 integration") {
+  describe("ZirconCore executable M1/M2 integration") {
     it("executes an AXI-fed RV32I dependency chain and emits precise retire events") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
@@ -427,17 +427,45 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("reports an unsupported encoding as an exact illegal-instruction trap") {
+    it("executes dependent RV32M operations through E2 and preserves retire trace data") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val events = throughFirstTrap(runProgram(dut, Map(
-          ResetVector -> BigInt("022081b3", 16) // mul x3,x1,x2: M is not M1
+          ResetVector -> BigInt("00700093", 16), // addi x1,x0,7
+          ResetVector + 4 -> BigInt("00300113", 16), // addi x2,x0,3
+          ResetVector + 8 -> BigInt("022081b3", 16), // mul x3,x1,x2
+          ResetVector + 12 -> BigInt("0221c233", 16), // div x4,x3,x2
+          ResetVector + 16 -> BigInt("00100073", 16) // ebreak
         )))
 
-        assert(events.size == 1)
-        assert(events.head.trap && !events.head.interrupt && events.head.cause == 2 &&
-          events.head.pc == ResetVector &&
-          events.head.instruction == BigInt("022081b3", 16))
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+          ResetVector + 8, ResetVector + 12, ResetVector + 16))
+        assert(events(2).gprWrite && events(2).gprAddress == 3 &&
+          events(2).gprData == 21)
+        assert(events(3).gprWrite && events(3).gprAddress == 4 &&
+          events(3).gprData == 7)
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("wakes an E1 consumer from an E2 integer completion") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("00500093", 16), // addi x1,x0,5
+          ResetVector + 4 -> BigInt("00600113", 16), // addi x2,x0,6
+          ResetVector + 8 -> BigInt("022081b3", 16), // mul x3,x1,x2
+          ResetVector + 12 -> BigInt("00b18213", 16), // addi x4,x3,11
+          ResetVector + 16 -> BigInt("00100073", 16) // ebreak
+        )))
+
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+          ResetVector + 8, ResetVector + 12, ResetVector + 16))
+        assert(events(2).gprWrite && events(2).gprAddress == 3 &&
+          events(2).gprData == 30)
+        assert(events(3).gprWrite && events(3).gprAddress == 4 &&
+          events(3).gprData == 41)
+        assert(events.last.trap && events.last.cause == 3)
       }
     }
 

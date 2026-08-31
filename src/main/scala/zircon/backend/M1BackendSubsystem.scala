@@ -50,6 +50,7 @@ class M1BackendSubsystem(
     val wfiCommit = Output(Bool())
     val frontendRecovery = Output(Valid(
       new BranchResolutionResult(config)))
+    val squash = Output(Valid(UInt(config.robTagWidth.W)))
     val branchTraining = Output(Valid(new BranchTrainingRecord(config)))
 
     val auxReadPhysical = Input(Vec(2, UInt(physicalWidth.W)))
@@ -127,6 +128,7 @@ class M1BackendSubsystem(
   io.fenceICommit := commit.io.fenceICommit
   io.wfiCommit := commit.io.wfiCommit
   io.frontendRecovery := backend.io.frontendRecovery
+  io.squash := backend.io.squash
   io.branchTraining := backend.io.branchTraining
   io.eligibleInterrupt := commit.io.eligibleInterrupt
   io.mstatusMie := commit.io.mstatusMie

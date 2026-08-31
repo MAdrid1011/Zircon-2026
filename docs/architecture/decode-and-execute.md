@@ -42,10 +42,12 @@ ROB context read tag 与四个 PRF read address；只有 context valid 且 tag �
 | LUI/AUIPC、整数立即数/寄存器运算 | E0、E1 | E1 只接收无控制副作用操作 |
 | Branch、JAL、JALR | E0 | 唯一 redirect source |
 | CSR、ECALL、EBREAK、MRET、WFI、FENCE、FENCE.I | E0 | 状态修改仍在 commit |
+| RV32M multiply/divide | E2 | M2 开始仅接受 `funct7=1` 的八条合法 OP encoding；ready/valid 可变延迟 |
 | Load | M0、M1 | M1 admission 还须检查对齐、PMA 和 cacheable |
 | Store | M0 | 提交前只写 SQ |
 
-M/A/F opcode 在对应里程碑到来前必须译为非法；不能把未知 `funct3/funct7` 当作
+M/A/F opcode 在对应里程碑到来前必须译为非法；M2 后只有八条 RV32M encoding 变为
+E2 legal，不能把未知 `funct3/funct7` 当作
 相近整数操作。保留的 shift immediate 高位、JALR 非零 `funct3`、未知 branch/
 load/store width、未知 system immediate 和保留 CSR funct3 都是 illegal。按基础
 ISA 的前向兼容要求，FENCE 的保留 mode/集合以及 FENCE/FENCE.I 的保留 rs1、rd、

@@ -1,6 +1,6 @@
 # 后端架构文档
 
-这一章记录由研发计划冻结的后端契约。当前 M1 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename、[IntIQ→E0/E1→completion 整数执行闭环](integer-execution-backend.md)、`FirstFaultTracker`、[BDB 与 lossless recovery 闭环](branch-recovery.md)、M-mode CSR 状态与 [commit controller](commit-control.md)。dispatch/recovery 域和 Commit/CSR 域已经由 [M1 Backend Subsystem](m1-backend-subsystem.md) 接成可运行的 RV32I/Zicsr/精确 trap 后端，并已通过 `M1Frontend`、AXI read 和 [retire trace](retire-trace.md) 接到顶层；LongPipe、LSU 与 FPU 仍未接入。
+这一章记录由研发计划冻结的后端契约。当前 M1/M2 partial 实现已有 `UopRef`、执行端点类型、组合译码/整数语义、[双路 dispatch](dispatch.md)、integer rename、[IntIQ→E0/E1→completion 整数执行闭环](integer-execution-backend.md)、`FirstFaultTracker`、[BDB 与 lossless recovery 闭环](branch-recovery.md)、M-mode CSR 状态与 [commit controller](commit-control.md)。dispatch/recovery 域和 Commit/CSR 域已经由 [M1 Backend Subsystem](m1-backend-subsystem.md) 接成可运行的 RV32I/Zicsr/精确 trap 后端，并已通过 `M1Frontend`、AXI read、E2 [LongPipe](long-pipe.md) 和 [retire trace](retire-trace.md) 接到顶层；LSU 与 FPU 仍未接入。
 
 <!-- 图：后端模块关系和数据通路 -->
 <!-- ![后端模块关系和数据通路](./assets/backend-overview.svg) -->
@@ -15,7 +15,8 @@
 
 - `E0IntCtrl`：整数、分支和 system/CSR，是唯一 redirect source。
 - `E1IntSimple`：无控制副作用的简单整数操作。
-- `E2LongPipe`：RV32M 与 RV32F compute。
+- `E2LongPipe`：RV32M 与后续 RV32F compute；M2 的 LongIQ/LongPipe 合同见
+  [LongPipe](long-pipe.md)。
 - `M0General`：load/store/atomic/MMIO。
 - `M1Load`：对齐、可缓存的整数或浮点 load。
 

@@ -14,8 +14,9 @@
 | execute | `IntegerShortPipes` | E0/E1 各 1 项 result slot |
 | completion/state | `IntegerBackendState` | 5→2 completion、24 ROB、56×32 6R2W PRF |
 
-PRF port 0/1 固定给 E0 两源，port 2/3 给 E1（M2 时在 E1/E2 admission 前共享），
-port 4/5 作为 `auxReadPhysical/Data` 暴露给后续 LSU/集成使用，不增加第七个读口。
+PRF port 0/1 固定给 E0 两源，port 2/3 给 E1；port 4/5 作为
+`auxReadPhysical/Data` 暴露给顶层集成。M2 在没有 trace GPR retirement 的周期将其用于
+E2 两源读取；有 trace retirement 时 trace 读取优先，E2 issue 停顿，不增加第七个读口。
 `otherCompletion[0..2]` 分别预留 E2、M0、M1，连同 E0/E1 组成冻结的五端点仲裁顺序。
 
 ## 外部接口

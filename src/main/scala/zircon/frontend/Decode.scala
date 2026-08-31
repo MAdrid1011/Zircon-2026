@@ -7,6 +7,7 @@ import zircon.backend.{EndpointMask, ExecutionEndpoint, UopClass}
 object IntOperation extends ChiselEnum {
   val Invalid, Lui, Auipc = Value
   val Add, Sub, Sll, Slt, Sltu, Xor, Srl, Sra, Or, And = Value
+  val Mul, Mulh, Mulhsu, Mulhu, Div, Divu, Rem, Remu = Value
   val Beq, Bne, Blt, Bge, Bltu, Bgeu, Jal, Jalr = Value
   val Lb, Lh, Lw, Lbu, Lhu, Sb, Sh, Sw = Value
   val Fence, FenceI, Ecall, Ebreak, Mret, Wfi = Value
@@ -210,7 +211,7 @@ class RV32IDecoder extends Module {
         }
       }
     }
-    is("b0110011".U) { // OP; funct7=1 (M) remains illegal until M2
+    is("b0110011".U) { // OP / RV32M
       when(funct7 === 0.U) {
         switch(funct3) {
           is("b000".U) { mark(IntOperation.Add, UopClass.Integer, EndpointMask.IntegerSimple,
@@ -237,6 +238,25 @@ class RV32IDecoder extends Module {
         }.elsewhen(funct3 === "b101".U) {
           mark(IntOperation.Sra, UopClass.Integer, EndpointMask.IntegerSimple,
             readsRs1 = true, readsRs2 = true, writesRd = true)
+        }
+      }.elsewhen(funct7 === "b0000001".U) {
+        switch(funct3) {
+          is("b000".U) { mark(IntOperation.Mul, UopClass.Multiply, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b001".U) { mark(IntOperation.Mulh, UopClass.Multiply, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b010".U) { mark(IntOperation.Mulhsu, UopClass.Multiply, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b011".U) { mark(IntOperation.Mulhu, UopClass.Multiply, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b100".U) { mark(IntOperation.Div, UopClass.Divide, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b101".U) { mark(IntOperation.Divu, UopClass.Divide, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b110".U) { mark(IntOperation.Rem, UopClass.Divide, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
+          is("b111".U) { mark(IntOperation.Remu, UopClass.Divide, EndpointMask.E2,
+            readsRs1 = true, readsRs2 = true, writesRd = true) }
         }
       }
     }

@@ -2,15 +2,16 @@ package zircon.core
 
 import chisel3._
 import zircon.ZirconCoreConfig
-import zircon.backend.{CompletionResult, FaultCandidate, M1BackendSubsystem}
+import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
+  M1BackendSubsystem}
 import zircon.frontend.M1Frontend
 import zircon.trace.RetireTraceFormatter
 
-/** Executable M1 integration of fetch, integer backend, and simulation trace.
+/** Executable M2 integration of fetch, integer backend, E2, and simulation trace.
   *
-  * LongPipe and both LSU endpoints deliberately advertise zero capacity. They
-  * cannot accept a uop or return a completion until their real M2/M3 paths are
-  * integrated, so the core never fabricates architectural progress.
+  * LongPipe is connected through the existing unified completion network. Both
+  * LSU endpoints deliberately advertise zero capacity until M3, so they cannot
+  * fabricate architectural progress.
   */
 class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Module {
   override val desiredName: String = "ZirconCore"
@@ -19,6 +20,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   val frontend = Module(new M1Frontend(cfg))
   val backend = Module(new M1BackendSubsystem(cfg))
+  val longQueue = Module(new LongIssueQueue(cfg))
+  val longPipe = Module(new LongPipe(cfg))
 
   frontend.io.enable := true.B
   for (lane <- 0 until cfg.decodeWidth) {
@@ -30,16 +33,39 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   frontend.io.executeRecovery := backend.io.frontendRecovery
   frontend.io.commitRedirect := backend.io.redirect
 
-  backend.io.longCapacity := 0.U
+  for (lane <- 0 until cfg.decodeWidth) {
+    longQueue.io.enqueue(lane) <> backend.io.longEnqueue(lane)
+  }
+  backend.io.longCapacity := longQueue.io.enqueueCapacity
+  longQueue.io.integerReady := backend.io.integerReady
+  longQueue.io.robHeadTag := backend.io.robHead.bits.robTag
+  longQueue.io.squash := backend.io.squash
+  longQueue.io.flush := backend.io.globalFlush
+  longPipe.io.robHeadTag := backend.io.robHead.bits.robTag
+  longPipe.io.squash := backend.io.squash
+  longPipe.io.flush := backend.io.globalFlush
+
+  val traceReadRequired = if (cfg.enableTrace) {
+    backend.io.retired.map(retired =>
+      retired.valid && retired.bits.entry.allocatesPhysical).reduce(_ || _)
+  } else false.B
+  longPipe.io.input.valid := longQueue.io.issue.valid && !traceReadRequired
+  longPipe.io.input.bits.uop := longQueue.io.issue.bits
+  longPipe.io.input.bits.lhs := backend.io.auxReadData(0)
+  longPipe.io.input.bits.rhs := backend.io.auxReadData(1)
+  longQueue.io.issue.ready := longPipe.io.input.ready && !traceReadRequired
+
   backend.io.memCapacity := 0.U
   for (lane <- 0 until cfg.decodeWidth) {
-    backend.io.longEnqueue(lane).ready := false.B
     backend.io.memEnqueue(lane).ready := false.B
   }
-  for (endpoint <- 0 until 3) {
+  backend.io.otherCompletion(0) <> longPipe.io.completion
+  for (endpoint <- 1 until 3) {
     backend.io.otherCompletion(endpoint).valid := false.B
     backend.io.otherCompletion(endpoint).bits :=
       0.U.asTypeOf(new CompletionResult(cfg))
+  }
+  for (endpoint <- 0 until 3) {
     backend.io.otherFault(endpoint) := 0.U.asTypeOf(new FaultCandidate(cfg))
   }
   backend.io.interrupts := io.interrupts
@@ -49,11 +75,13 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.fpCommit.bits.flags := 0.U
   backend.io.fpCommit.bits.dirty := false.B
   for (lane <- 0 until cfg.commitWidth) {
-    backend.io.auxReadPhysical(lane) := Mux(
+    val traceReadPhysical = Mux(
       backend.io.retired(lane).valid &&
         backend.io.retired(lane).bits.entry.allocatesPhysical,
       backend.io.retired(lane).bits.entry.newPhysicalDestination,
       0.U)
+    backend.io.auxReadPhysical(lane) := Mux(traceReadRequired,
+      traceReadPhysical, longQueue.io.issue.bits.sourcePhysical(lane))
   }
 
   io.axi.aw.valid := false.B

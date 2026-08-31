@@ -135,11 +135,36 @@ class DecoderSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("maps all RV32M OP encodings exclusively to E2") {
+      simulate(new RV32IDecoder) { dut =>
+        val operations = Seq(
+          0 -> (IntOperation.Mul, UopClass.Multiply),
+          1 -> (IntOperation.Mulh, UopClass.Multiply),
+          2 -> (IntOperation.Mulhsu, UopClass.Multiply),
+          3 -> (IntOperation.Mulhu, UopClass.Multiply),
+          4 -> (IntOperation.Div, UopClass.Divide),
+          5 -> (IntOperation.Divu, UopClass.Divide),
+          6 -> (IntOperation.Rem, UopClass.Divide),
+          7 -> (IntOperation.Remu, UopClass.Divide)
+        )
+        operations.foreach { case (funct3, (operation, uopClass)) =>
+          dut.io.instruction.poke(rType(0x01, 2, 1, funct3, 3))
+          dut.io.decoded.legal.expect(true)
+          dut.io.decoded.operation.expect(operation)
+          dut.io.decoded.uopClass.expect(uopClass)
+          dut.io.decoded.allowedEndpoints.expect(EndpointMask.E2)
+          dut.io.decoded.readsRs1.expect(true)
+          dut.io.decoded.readsRs2.expect(true)
+          dut.io.decoded.writesRd.expect(true)
+        }
+      }
+    }
+
     it("rejects reserved encodings and extensions that are not yet implemented") {
       simulate(new RV32IDecoder) { dut =>
         val illegal = Seq(
           BigInt(0),
-          rType(0x01, 2, 1, 0, 3), // MUL belongs to M2
+          rType(0x02, 2, 1, 0, 3), // unsupported OP funct7
           iType(0x401, 1, 1, 3, 0x13), // reserved SLLI funct7
           iType(0, 1, 1, 3, 0x67), // JALR funct3 must be zero
           iType(0, 1, 3, 3, 0x03), // reserved load width
