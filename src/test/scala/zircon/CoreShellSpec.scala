@@ -469,6 +469,31 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("recovers a taken E2-dependent branch without retiring its wrong-path divide") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("00700093", 16), // addi x1,x0,7
+          ResetVector + 4 -> BigInt("00300113", 16), // addi x2,x0,3
+          ResetVector + 8 -> BigInt("0220c1b3", 16), // div x3,x1,x2
+          ResetVector + 12 -> BigInt("00318663", 16), // beq x3,x3,+12
+          ResetVector + 16 -> BigInt("0220c233", 16), // wrong-path div x4,x1,x2
+          ResetVector + 20 -> BigInt("06300213", 16), // wrong-path addi x4,x0,99
+          ResetVector + 24 -> BigInt("00118293", 16), // addi x5,x3,1
+          ResetVector + 28 -> BigInt("00100073", 16) // ebreak
+        ), cycles = 192))
+
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+          ResetVector + 8, ResetVector + 12, ResetVector + 24, ResetVector + 28))
+        assert(events(2).gprWrite && events(2).gprAddress == 3 &&
+          events(2).gprData == 2)
+        assert(events(4).gprWrite && events(4).gprAddress == 5 &&
+          events(4).gprData == 3)
+        assert(!events.exists(_.instruction == BigInt("0220c233", 16)))
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
     it("blocks a legal LSU instruction until the M3 endpoint exists") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
