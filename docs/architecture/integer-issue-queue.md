@@ -21,6 +21,9 @@ endpoint mask，而不是在 dispatch 时静态绑定一个 endpoint。
 两个统一 completion physical-destination wakeup 在周期边界更新源 ready。入队项
 也观察同周期 wakeup，避免“完成与 consumer dispatch 同周期”丢失唤醒。满队列
 可用本周期 issue.fire 的空位接收同样数量的新项，不产生额外 full bubble。
+`enqueueCapacity` 将包含本周期 issue.fire 回收项的即时容量饱和报告为 0/1/2；
+selective squash 或 global flush 时固定为 0，供 dispatch 在产生任何子事务前选择
+最长可接受前缀。
 
 lane 1 enqueue valid 隐含 lane 0 valid；两个输入按原子 bundle 获得容量。global
 flush 清除全部项并禁止当周期 issue/enqueue。branch-selective `squash` 携带 resolving

@@ -20,6 +20,8 @@ tag，使已 kill 的 completion 不能命中新 stream 的同一 index。
 
 - lane 1 valid 隐含 lane 0 valid；两条按一个原子 bundle 获得容量。
 - full ROB 可在同周期退休两条并接收两条，count 保持 24。
+- `enqueueCapacity` 将计入同周期 commit.fire 后的可用项饱和报告为 0/1/2；flush、
+  rollback request 或 active tail walk 时为 0。
 - commit lane 1 只有在 lane 0 complete 时才 valid，consumer 也不得只 ready lane 1。
 - illegal/fetch-fault 等 dispatch-time fault 可用 `initiallyComplete` 入队，但 fault
   载荷只进入 FirstFaultRecord。
