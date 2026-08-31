@@ -164,6 +164,18 @@ read/write metadata composition, metadata lifetime, and ROB-wrap selective
 recovery. Dual-LSU conflict resolution, PMA,
 fault creation, cache access, and AXI drains remain the next integration layer.
 
+`MemoryQueueIngress` is the first live lifecycle layer above those queues. It
+accepts up to two already address-classified M0/M1 requests, emits an exact
+`FaultCandidate` for a misaligned/access-fault request without allocating queue
+state, then performs a two-stage handoff for each normal request: an atomic
+LQ/SQ allocation batch followed on a later cycle by load-address and/or
+store-address/store-data updates. It schedules each update channel by ROB age
+and holds the batch through LSQ backpressure. Selective recovery or global flush
+blocks every handoff and removes only killed ingress state while propagating the
+same signal to the queues. This module exposes forwarding and later
+completion/commit interfaces but does not yet produce a completion, Cache, AXI,
+or store side effect.
+
 ## Cache hierarchy
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
