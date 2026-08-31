@@ -80,8 +80,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
         backend.io.retired(lane).bits.entry.allocatesPhysical,
       backend.io.retired(lane).bits.entry.newPhysicalDestination,
       0.U)
+    // The PRF has no read-enable. An invalid LongIQ issue must therefore use
+    // p0 rather than exposing its don't-care source index to the PRF port.
+    val longReadPhysical = Mux(longQueue.io.issue.valid,
+      longQueue.io.issue.bits.sourcePhysical(lane), 0.U)
     backend.io.auxReadPhysical(lane) := Mux(traceReadRequired,
-      traceReadPhysical, longQueue.io.issue.bits.sourcePhysical(lane))
+      traceReadPhysical, longReadPhysical)
   }
 
   io.axi.aw.valid := false.B

@@ -10,6 +10,8 @@ object IntOperation extends ChiselEnum {
   val Mul, Mulh, Mulhsu, Mulhu, Div, Divu, Rem, Remu = Value
   val Beq, Bne, Blt, Bge, Bltu, Bgeu, Jal, Jalr = Value
   val Lb, Lh, Lw, Lbu, Lhu, Sb, Sh, Sw = Value
+  val LrW, ScW, AmoSwapW, AmoAddW, AmoXorW, AmoAndW, AmoOrW, AmoMinW,
+    AmoMaxW, AmoMinuW, AmoMaxuW = Value
   val Fence, FenceI, Ecall, Ebreak, Mret, Wfi = Value
   val Csrrw, Csrrs, Csrrc, Csrrwi, Csrrsi, Csrrci = Value
 }
@@ -37,6 +39,8 @@ class DecodedInstruction extends Bundle {
   val isControl = Bool()
   val isMemory = Bool()
   val isFenceI = Bool()
+  val atomicAq = Bool()
+  val atomicRl = Bool()
 }
 
 class RV32IDecoder extends Module {
@@ -175,6 +179,40 @@ class RV32IDecoder extends Module {
         is("b010".U) { mark(IntOperation.Sw, UopClass.Store, EndpointMask.M0,
           readsRs1 = true, readsRs2 = true, operandBImmediate = true,
           immediate = sImmediate, isMemory = true) }
+      }
+    }
+    is("b0101111".U) { // RV32A atomics
+      when(funct3 === "b010".U) {
+        decoded.atomicAq := instruction(26)
+        decoded.atomicRl := instruction(25)
+        switch(instruction(31, 27)) {
+          is("b00010".U) { // LR.W reserves a word and requires rs2 == x0.
+            when(decoded.rs2 === 0.U) {
+              mark(IntOperation.LrW, UopClass.Atomic, EndpointMask.M0,
+                readsRs1 = true, writesRd = true, isMemory = true)
+            }
+          }
+          is("b00011".U) { mark(IntOperation.ScW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b00001".U) { mark(IntOperation.AmoSwapW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b00000".U) { mark(IntOperation.AmoAddW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b00100".U) { mark(IntOperation.AmoXorW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b01100".U) { mark(IntOperation.AmoAndW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b01000".U) { mark(IntOperation.AmoOrW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b10000".U) { mark(IntOperation.AmoMinW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b10100".U) { mark(IntOperation.AmoMaxW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b11000".U) { mark(IntOperation.AmoMinuW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+          is("b11100".U) { mark(IntOperation.AmoMaxuW, UopClass.Atomic, EndpointMask.M0,
+            readsRs1 = true, readsRs2 = true, writesRd = true, isMemory = true) }
+        }
       }
     }
     is("b0010011".U) { // OP-IMM

@@ -102,5 +102,20 @@ class IntegerOperandReadSpec extends AnyFunSpec with ChiselSim {
         dut.io.issue.foreach(_.ready.expect(false))
       }
     }
+
+    it("uses p0 for an invalid issue lane instead of exposing its payload as a PRF address") {
+      simulate(new IntegerOperandRead) { dut =>
+        clearInputs(dut)
+        for (lane <- 0 until 2) {
+          dut.io.issue(lane).valid.poke(false)
+          dut.io.issue(lane).bits.sourcePhysical(0).poke(63)
+          dut.io.issue(lane).bits.sourcePhysical(1).poke(62)
+        }
+
+        dut.io.robRead.foreach(_.valid.expect(false))
+        dut.io.execute.foreach(_.valid.expect(false))
+        dut.io.prfReadPhysical.foreach(_.expect(0))
+      }
+    }
   }
 }

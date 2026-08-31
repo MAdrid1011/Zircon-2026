@@ -27,6 +27,19 @@ class DecoderSpec extends AnyFunSpec with ChiselSim {
       (((value >> 1) & 0xf).toLong << 8) | (((value >> 11) & 1).toLong << 7) | 0x63L)
   }
 
+  private def amoType(
+      funct5: Int,
+      aq: Boolean,
+      rl: Boolean,
+      rs2: Int,
+      rs1: Int,
+      rd: Int,
+      funct3: Int = 2
+  ): BigInt =
+    BigInt((funct5.toLong << 27) | ((if (aq) 1L else 0L) << 26) |
+      ((if (rl) 1L else 0L) << 25) | (rs2.toLong << 20) |
+      (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x2fL)
+
   describe("RV32IDecoder") {
     it("decodes every base register and immediate ALU operation") {
       simulate(new RV32IDecoder) { dut =>
@@ -156,6 +169,43 @@ class DecoderSpec extends AnyFunSpec with ChiselSim {
           dut.io.decoded.readsRs1.expect(true)
           dut.io.decoded.readsRs2.expect(true)
           dut.io.decoded.writesRd.expect(true)
+        }
+      }
+    }
+
+    it("maps all RV32A word atomics exclusively to M0 and rejects reserved encodings") {
+      simulate(new RV32IDecoder) { dut =>
+        val atomicFunct5 = Seq(0x02, 0x03, 0x01, 0x00, 0x04, 0x0c,
+          0x08, 0x10, 0x14, 0x18, 0x1c)
+        val decodedOperations = atomicFunct5.map { funct5 =>
+          val isLr = funct5 == 0x02
+          dut.io.instruction.poke(amoType(funct5, aq = true, rl = true,
+            rs2 = if (isLr) 0 else 2, rs1 = 1, rd = 3))
+          dut.io.decoded.legal.expect(true)
+          dut.io.decoded.uopClass.expect(UopClass.Atomic)
+          dut.io.decoded.allowedEndpoints.expect(EndpointMask.M0)
+          dut.io.decoded.readsRs1.expect(true)
+          dut.io.decoded.readsRs2.expect(!isLr)
+          dut.io.decoded.writesRd.expect(true)
+          dut.io.decoded.isMemory.expect(true)
+          dut.io.decoded.atomicAq.expect(true)
+          dut.io.decoded.atomicRl.expect(true)
+          assert(dut.io.decoded.operation.peek().litValue !=
+            IntOperation.Invalid.litValue, f"AMO funct5=0x$funct5%x decoded as Invalid")
+          dut.io.decoded.operation.peek().litValue
+        }
+        assert(decodedOperations.distinct.size == atomicFunct5.size,
+          "each RV32A funct5 must retain a distinct execution operation")
+
+        Seq(
+          amoType(0x02, aq = false, rl = false, rs2 = 1, rs1 = 1, rd = 3),
+          amoType(0x1f, aq = false, rl = false, rs2 = 2, rs1 = 1, rd = 3),
+          amoType(0x00, aq = false, rl = false, rs2 = 2, rs1 = 1, rd = 3,
+            funct3 = 0)
+        ).foreach { instruction =>
+          dut.io.instruction.poke(instruction)
+          dut.io.decoded.legal.expect(false)
+          dut.io.decoded.allowedEndpoints.expect(EndpointMask.None)
         }
       }
     }

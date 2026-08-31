@@ -1,4 +1,4 @@
-# RV32I 译码与整数执行
+# RV32I/M/A 译码与整数执行
 
 本规格对应 M1 Issue #7。译码器是组合逻辑；它不读取寄存器、不分配 ROB/IQ，
 也不直接产生 trap 或 redirect。非法编码以 `legal=false` 进入精确异常路径。
@@ -45,13 +45,17 @@ ROB context read tag 与四个 PRF read address；只有 context valid 且 tag �
 | RV32M multiply/divide | E2 | M2 开始仅接受 `funct7=1` 的八条合法 OP encoding；ready/valid 可变延迟 |
 | Load | M0、M1 | M1 admission 还须检查对齐、PMA 和 cacheable |
 | Store | M0 | 提交前只写 SQ |
+| LR.W, SC.W, AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU.W | M0 | M3 译码后唯一允许 M0；当前 M0 capacity 仍为零，因此不能执行或产生 completion |
 
-M/A/F opcode 在对应里程碑到来前必须译为非法；M2 后只有八条 RV32M encoding 变为
-E2 legal，不能把未知 `funct3/funct7` 当作
-相近整数操作。保留的 shift immediate 高位、JALR 非零 `funct3`、未知 branch/
-load/store width、未知 system immediate 和保留 CSR funct3 都是 illegal。按基础
-ISA 的前向兼容要求，FENCE 的保留 mode/集合以及 FENCE/FENCE.I 的保留 rs1、rd、
-immediate 字段例外：硬件忽略这些字段并执行保守的完整 fence。
+M2 后只有八条 RV32M encoding 变为 E2 legal。M3 的第一译码切片还将所有合法
+RV32A word atomic 编码标记为 `UopClass.Atomic`/M0：`LR.W` 要求 `rs2=x0`，其余
+十条都读取 `rs1/rs2` 且写 `rd`；`aq` 和 `rl` 原样进入 `DecodedInstruction` metadata。
+此时 MemIQ/M0/LSU 尚未实现，顶层继续以零 capacity 阻塞这些 legal uop，绝不制造
+atomic completion。F 和所有其他未实现扩展仍为 illegal，未知 `funct3/funct5/funct7`
+不能映射为相近操作。保留的 shift immediate 高位、JALR 非零 `funct3`、未知 branch/
+load/store width、未知 system immediate 和保留 CSR funct3 都是 illegal。按基础 ISA
+的前向兼容要求，FENCE 的保留 mode/集合以及 FENCE/FENCE.I 的保留 rs1、rd、immediate
+字段例外：硬件忽略这些字段并执行保守的完整 fence。
 
 ## 立即数
 
@@ -87,6 +91,9 @@ completion stall 计数。当前短流水线不在本地复制计数器。
 ## 验证映射
 
 - 每条 RV32I/Zicsr/Zifencei 指令至少一个合法 directed vector。
+- RV32A 的 11 条 word atomic encoding 全部为 M0-only；LR.W 非零 `rs2`、未知
+  `funct5` 和非 word `funct3` 必须 illegal，`aq/rl` metadata 保持原值。译码合法
+  不等于 endpoint 可执行，M3 LSU 接入前 CoreShell 必须继续观察 backpressure。
 - 每个保留 `funct3/funct7/system imm` 至少一个非法 vector。
 - 立即数最小/最大值、x0、同源、溢出、移位 0/31、signed/unsigned 比较边界。
 - 所有 branch taken/not-taken；JALR bit 0 清除；E1 admission 对 control/system

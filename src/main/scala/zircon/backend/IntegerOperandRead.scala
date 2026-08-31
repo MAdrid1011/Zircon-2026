@@ -49,8 +49,12 @@ class IntegerOperandRead(
 
     io.robRead(lane).valid := issue.valid && !io.flush
     io.robRead(lane).bits := issue.bits.robTag
-    io.prfReadPhysical(firstRead) := issue.bits.sourcePhysical(0)
-    io.prfReadPhysical(secondRead) := issue.bits.sourcePhysical(1)
+    // The PRF has no read-enable. Keep an invalid IntIQ payload from becoming
+    // an out-of-range physical address on an otherwise idle read port.
+    io.prfReadPhysical(firstRead) := Mux(issue.valid,
+      issue.bits.sourcePhysical(0), 0.U)
+    io.prfReadPhysical(secondRead) := Mux(issue.valid,
+      issue.bits.sourcePhysical(1), 0.U)
 
     execute.valid := issue.valid && context.valid && !io.flush
     execute.bits.uop := issue.bits
