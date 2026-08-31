@@ -2,8 +2,8 @@ package zircon
 
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
-import zircon.backend.{ReorderBuffer, UopClass}
-import zircon.frontend.{EndpointMask, IntOperation}
+import zircon.backend.{EndpointMask, ReorderBuffer, UopClass}
+import zircon.frontend.IntOperation
 
 class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
   private def clearInputs(dut: ReorderBuffer): Unit = {

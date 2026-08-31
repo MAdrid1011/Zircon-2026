@@ -8,6 +8,18 @@ object ExecutionEndpoint extends ChiselEnum {
   val E0IntCtrl, E1IntSimple, E2LongPipe, M0General, M1Load = Value
 }
 
+object EndpointMask {
+  val Width = 5
+  val None = 0
+  val E0 = 1 << 0
+  val E1 = 1 << 1
+  val E2 = 1 << 2
+  val M0 = 1 << 3
+  val M1 = 1 << 4
+  val IntegerSimple = E0 | E1
+  val CacheableLoadCandidate = M0 | M1
+}
+
 object UopClass extends ChiselEnum {
   val Integer, Branch, Multiply, Divide, Floating, Load, Store, Atomic, Csr, System = Value
 }
@@ -21,7 +33,7 @@ object SourceKind extends ChiselEnum {
   */
 class UopRef(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
-  val endpoint = ExecutionEndpoint()
+  val allowedEndpoints = UInt(EndpointMask.Width.W)
   val uopClass = UopClass()
   val operation = UInt(7.W)
   val sourceKind = Vec(3, SourceKind())
