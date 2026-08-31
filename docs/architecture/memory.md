@@ -2,9 +2,10 @@
 
 本章是 M3 双 LSU、PMA、Cache、AXI4、MMIO 和 RV32A 的实现合同，关联
 ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
-`OrderedIOCombiner`、独立的 8-entry `MemIssueQueue`，以及已单元验证的 8-entry
-`LoadStoreQueues`；`ZirconCore` 仍把 memory capacity 置零。LSU、Cache、AXI data
-engine 与 MMIO lifecycle 尚未接入，本规格不会把它们描述为已实现。
+`OrderedIOCombiner`、已接入顶层 dispatch/recovery 的 8-entry `MemIssueQueue`，以及
+已单元验证的 8-entry `LoadStoreQueues`。MemIQ 的 M0/M1 outputs 仍被显式
+backpressure，直到 live LSU 接收它们；LSU、Cache、AXI data engine 与 MMIO lifecycle
+尚未接入，本规格不会把它们描述为已实现。
 
 ## 参数和边界
 
@@ -51,6 +52,14 @@ load to M1, then lets M0 choose the oldest distinct M0-eligible uop; this permit
 an atomic/store beside a load and two independent loads on separate LSU paths. It
 drops only uops younger than a resolving branch and all local uops on global flush.
 The global three-start arbiter and live LSU handshakes remain integration work.
+
+Until the global three-start arbiter and live LSU operand path are connected,
+`ZirconCore` selects MemIQ's documented free-only admission mode: an issue in a
+full queue frees its dispatch credit on the following cycle rather than feeding
+same-cycle source wakeup back into backend dispatch capacity. The standalone
+queue retains its tested same-cycle recycle mode for the final integrated
+arbiter. In both modes M0/M1 issue is backpressured until a real LSU accepts the
+uop, so queue admission never creates a completion.
 
 M1 admission requires all of the following: load operation, naturally aligned
 address, readable Memory PMA, no atomic/ordering restriction, no older SQ entry

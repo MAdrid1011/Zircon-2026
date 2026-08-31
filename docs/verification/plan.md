@@ -64,7 +64,7 @@ required fail-to-pass set for Issue #47 and must exist before corresponding RTL:
 
 | Boundary | Required tests and properties |
 | --- | --- |
-| MemIQ/M0/M1 | two enqueue; one M0 plus one M1 issue; source wakeup; ROB-age selection; M1-to-M0 replay; selective squash/global flush; queue full; no false completion |
+| MemIQ/M0/M1 | `MemIssueQueueSpec` currently passes two enqueue, one M0 plus one M1 issue, source wakeup, ROB-age selection, same-cycle recycle, free-only top-level admission, selective squash/global flush, and full queue behavior. `CoreShellSpec` confirms a top-level legal load remains unretired while M0/M1 issue ports are backpressured. M1-to-M0 replay remains a live DualLSU requirement. |
 | LQ/SQ | `LoadStoreQueuesSpec` currently passes directed older unknown-address/data block, full byte forwarding, partial cache merge, same-address youngest winner, both queues full, commit-only store effects, metadata-to-retire, and ROB-wrap squash/flush. Dual-LSU conflict matrix remains required after the live LSU integration. |
 | PMA/fault | `MemoryAddressUnitSpec` currently passes byte-mask/data alignment, load/store misalignment priority, inaccessible and atomic-PMA denial causes, and M1 cacheable-load eligibility. All default-region permissions, AXI RRESP/BRESP exact-tag faults, and oldest-fault integration remain required. |
 | AXI data | four read IDs, one write; independent AR/AW/W/R/B backpressure; eight-beat refill; 1-4 beat device groups; 4 KiB edge; cross-ID reorder; unknown ID, duplicate/early/late beat and RLAST assertions; cancellation drain |

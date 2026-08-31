@@ -3,7 +3,7 @@ package zircon.core
 import chisel3._
 import zircon.ZirconCoreConfig
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
-  M1BackendSubsystem}
+  M1BackendSubsystem, MemIssueQueue}
 import zircon.frontend.M1Frontend
 import zircon.trace.RetireTraceFormatter
 
@@ -22,6 +22,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val backend = Module(new M1BackendSubsystem(cfg))
   val longQueue = Module(new LongIssueQueue(cfg))
   val longPipe = Module(new LongPipe(cfg))
+  val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
 
   frontend.io.enable := true.B
   for (lane <- 0 until cfg.decodeWidth) {
@@ -55,10 +56,19 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   longPipe.io.input.bits.rhs := backend.io.auxReadData(1)
   longQueue.io.issue.ready := longPipe.io.input.ready && !traceReadRequired
 
-  backend.io.memCapacity := 0.U
   for (lane <- 0 until cfg.decodeWidth) {
-    backend.io.memEnqueue(lane).ready := false.B
+    memQueue.io.enqueue(lane) <> backend.io.memEnqueue(lane)
   }
+  backend.io.memCapacity := memQueue.io.enqueueCapacity
+  memQueue.io.integerReady := backend.io.integerReady
+  memQueue.io.robHeadTag := backend.io.robHead.bits.robTag
+  memQueue.io.squash := backend.io.squash
+  memQueue.io.flush := backend.io.globalFlush
+  // M3 retains this queue at the top-level boundary before a live LSU exists.
+  // Backpressure here preserves the accepted uop and its ROB ownership; it does
+  // not invent a completion or let the request reach AXI/cache state.
+  memQueue.io.m0Issue.ready := false.B
+  memQueue.io.m1Issue.ready := false.B
   backend.io.otherCompletion(0) <> longPipe.io.completion
   for (endpoint <- 1 until 3) {
     backend.io.otherCompletion(endpoint).valid := false.B

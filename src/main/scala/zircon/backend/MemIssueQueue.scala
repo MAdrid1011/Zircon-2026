@@ -12,7 +12,8 @@ import zircon.ZirconCoreConfig
   * recovery ownership.
   */
 class MemIssueQueue(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    allowIssueRecycle: Boolean = true
 ) extends Module {
   private val entries = config.memIssueEntries
   private val indexWidth = log2Ceil(entries)
@@ -108,7 +109,15 @@ class MemIssueQueue(
 
   val issuedMask = Mux(io.m0Issue.fire, UIntToOH(m0SelectedIndex, entries), 0.U) |
     Mux(io.m1Issue.fire, UIntToOH(m1SelectedIndex, entries), 0.U)
-  val reusableMask = (~entryValid.asUInt).asUInt | issuedMask
+  // A direct dispatch-capacity loop through source wakeup is not admissible at
+  // an unfinished top-level integration boundary. The standalone/full LSU
+  // queue retains same-cycle recycle; an integration can deliberately use
+  // free-only admission until its global issue arbiter owns that dependency.
+  val reusableMask = if (allowIssueRecycle) {
+    (~entryValid.asUInt).asUInt | issuedMask
+  } else {
+    (~entryValid.asUInt).asUInt
+  }
   val immediateReusable = PopCount(reusableMask)
   io.enqueueCapacity := Mux(recoveryBlocked, 0.U,
     Mux(immediateReusable >= config.decodeWidth.U, config.decodeWidth.U,
