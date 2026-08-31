@@ -29,7 +29,8 @@ speculative free-list 分配；commit 按 lane 0、lane 1 程序序更新 commit
 分支误预测的 execute-time 恢复不能退回 committed snapshot。Rename 从 ROB tail
 walker 接收最多两项、newest→older 的 undo bundle，使用 ROB 已保存的 old/new
 physical destination 恢复 speculative map/free-list，不在每个 BDB 项复制整份状态。
-该接口与 IQ/completion selective kill 全部接入前，rename 仍为 M1 partial。
+该接口已有 directed tests；完整后端仍需把 dispatch、IQ、completion 与 recovery
+controller 接入同一顶层数据通路。
 
 ## 6R2W PRF
 
