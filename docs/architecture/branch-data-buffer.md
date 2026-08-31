@@ -22,7 +22,7 @@
 ## 接口与端口仲裁
 
 - `allocate`: dispatch 写入一项预测/checkpoint，返回 3-bit index。每周期最多分配一条控制指令；同一 decode bundle 出现两条控制指令时由 dispatch 保留第二条。
-- `resolve`: E0 携带 `{index, robTag, actualTaken, actualTarget}`；接受后读旧预测、写 actual 字段并输出 mispredict/recovery history。
+- `resolve`: E0 携带 `{index, robTag, actualTaken, actualTarget}`；接受后读旧预测、写 actual 字段并输出 mispredict、history 以及 RAS checkpoint/action。
 - `commit`: commit controller 携带 `{index, robTag}`；读取完整 training record，并只清 valid 位。
 - `flushAll`: trap、MRET、FENCE.I 或其他全局 rollback 清除所有未提交 BDB 项。
 
@@ -32,7 +32,7 @@ commit 请求必须命中 valid、相同 `robTag` 且已经 resolved 的项；re
 
 ## 错误恢复
 
-条件分支的恢复历史为 `{historyBefore[62:0], actualTaken}`；JAL/JALR 不写 GHR，恢复为原 checkpoint。RAS pointer/count 从预测前 checkpoint 出发：taken call 将 next-push pointer 加一并把 count 饱和到 8，taken return 将 pointer 减一并把 count 饱和到 0。溢出后被覆盖的 RAS 内容属于允许的预测近似，不影响 JALR 的架构执行结果。mispredict 条件为 direction 不同，或 actual taken 且 predicted/actual target 不同。not-taken 指令忽略 target 字段差异。
+条件分支的恢复历史为 `{historyBefore[62:0], actualTaken}`；JAL/JALR 不写 GHR，恢复为原 checkpoint。RAS pointer/count 从预测前 checkpoint 出发，先执行 taken return 的 pop，再执行 taken call 的 push：空栈 pop 不改变 pointer/count，push 将 count 饱和到 8，call/return 同时为真时按 coroutine pop-then-push 处理。resolution 同时输出原 pointer/count、push/pop 和 `pc+4`，供 RAS 恢复检查点并重做正确事件。溢出后被覆盖的 RAS 内容属于允许的预测近似，不影响 JALR 的架构执行结果。mispredict 条件为 direction 不同，或 actual taken 且 predicted/actual target 不同。not-taken 指令忽略 target 字段差异。
 
 resolve 检测到 mispredict 时，BDB 以当前 ROB head 的 modulo-24 age 清除所有比 resolving branch 更年轻的项，保留 resolving branch 和更老、尚未提交的分支。前端同周期使用 `recoveryHistory`，ROB/IQ/rename 的年轻项由 E0 全局恢复路径清除。trap/MRET/FENCE.I 不依赖年龄，直接 `flushAll`。
 
@@ -44,6 +44,6 @@ resolve 检测到 mispredict 时，BDB 以当前 ROB head 的 modulo-24 age 清�
 - stale `robTag` 不得修改任何项。
 - commit 训练只来自 resolved entry；错误路径项永不训练预测表。
 - mispredict 后不存在 ROB 年龄大于 resolving branch 的 valid BDB 项。
-- direction、taken-target、not-taken-target、RAS overflow/underflow 和 64-bit 历史边界均有定向测试。
+- direction、taken-target、not-taken-target、RAS overflow/underflow、coroutine pop-then-push 和 64-bit 历史边界均有定向测试。
 
-M1 先用 `provider=Base` 驱动 bimodal；M4 miniTAGE 增加 provider 选择、提交分配/老化和 RAS 状态机，但不改变 BDB 容量和外部事务。
+M1 先用 `provider=Base` 驱动 bimodal，并由独立 8 项 RAS 消费恢复事件；M4 miniTAGE 增加 provider 选择、提交分配和老化，但不改变 BDB 容量和外部事务。

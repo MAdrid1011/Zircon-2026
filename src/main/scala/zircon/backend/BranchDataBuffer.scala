@@ -47,6 +47,11 @@ class BranchResolutionResult(config: ZirconCoreConfig) extends Bundle {
   val recoveryHistory = UInt(64.W)
   val recoveryRasPointer = UInt(3.W)
   val recoveryRasCount = UInt(4.W)
+  val rasPointerBefore = UInt(3.W)
+  val rasCountBefore = UInt(4.W)
+  val rasPush = Bool()
+  val rasPop = Bool()
+  val rasReturnAddress = UInt(32.W)
   val actualTaken = Bool()
   val actualTarget = UInt(32.W)
 }
@@ -130,18 +135,19 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     resolveEntry.metadata.historyBefore)
   val rasCall = io.resolve.bits.actualTaken && resolveEntry.metadata.call
   val rasReturn = io.resolve.bits.actualTaken && resolveEntry.metadata.ret
+  val rasPointerAfterPop = Mux(rasReturn &&
+    resolveEntry.metadata.rasCountBefore =/= 0.U,
+    resolveEntry.metadata.rasPointerBefore -% 1.U,
+    resolveEntry.metadata.rasPointerBefore)
+  val rasCountAfterPop = Mux(rasReturn &&
+    resolveEntry.metadata.rasCountBefore =/= 0.U,
+    resolveEntry.metadata.rasCountBefore - 1.U,
+    resolveEntry.metadata.rasCountBefore)
   val recoveryRasPointer = Mux(rasCall,
-    resolveEntry.metadata.rasPointerBefore + 1.U,
-    Mux(rasReturn,
-      resolveEntry.metadata.rasPointerBefore - 1.U,
-      resolveEntry.metadata.rasPointerBefore))
+    rasPointerAfterPop +% 1.U, rasPointerAfterPop)
   val recoveryRasCount = Mux(rasCall,
-    Mux(resolveEntry.metadata.rasCountBefore < 8.U,
-      resolveEntry.metadata.rasCountBefore + 1.U, 8.U),
-    Mux(rasReturn,
-      Mux(resolveEntry.metadata.rasCountBefore =/= 0.U,
-        resolveEntry.metadata.rasCountBefore - 1.U, 0.U),
-      resolveEntry.metadata.rasCountBefore))
+    Mux(rasCountAfterPop < 8.U, rasCountAfterPop + 1.U, 8.U),
+    rasCountAfterPop)
 
   io.resolution.valid := resolveFire && resolveMatch
   io.resolution.bits.reference := io.resolve.bits.reference
@@ -149,6 +155,11 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   io.resolution.bits.recoveryHistory := recoveryHistory
   io.resolution.bits.recoveryRasPointer := recoveryRasPointer
   io.resolution.bits.recoveryRasCount := recoveryRasCount
+  io.resolution.bits.rasPointerBefore := resolveEntry.metadata.rasPointerBefore
+  io.resolution.bits.rasCountBefore := resolveEntry.metadata.rasCountBefore
+  io.resolution.bits.rasPush := rasCall
+  io.resolution.bits.rasPop := rasReturn
+  io.resolution.bits.rasReturnAddress := resolveEntry.metadata.pc + 4.U
   io.resolution.bits.actualTaken := io.resolve.bits.actualTaken
   io.resolution.bits.actualTarget := io.resolve.bits.actualTarget
 

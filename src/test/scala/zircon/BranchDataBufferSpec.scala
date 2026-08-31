@@ -224,7 +224,32 @@ class BranchDataBufferSpec extends AnyFunSpec with ChiselSim {
           rasPointer = 0, rasCount = 0)
         resolve(dut, 0, 1, actualTaken = true,
           actualTarget = BigInt("80000204", 16), expectedMispredict = true,
-          expectedHistory = 0, expectedRasPointer = 7, expectedRasCount = 0)
+          expectedHistory = 0, expectedRasPointer = 0, expectedRasCount = 0)
+      }
+    }
+
+    it("recovers a coroutine RAS hint as pop-then-push") {
+      simulate(new BranchDataBuffer) { dut =>
+        clearInputs(dut)
+        allocate(dut, 0, BigInt("80000020", 16),
+          predictedTaken = true, predictedTarget = BigInt("80000100", 16),
+          conditional = false, expectedIndex = 0, call = true, ret = true,
+          rasPointer = 5, rasCount = 3)
+
+        dut.io.resolve.valid.poke(true)
+        dut.io.resolve.bits.reference.index.poke(0)
+        dut.io.resolve.bits.reference.robTag.poke(0)
+        dut.io.resolve.bits.actualTaken.poke(true)
+        dut.io.resolve.bits.actualTarget.poke(BigInt("80000104", 16))
+        dut.io.resolve.ready.expect(true)
+        dut.io.resolution.valid.expect(true)
+        dut.io.resolution.bits.recoveryRasPointer.expect(5)
+        dut.io.resolution.bits.recoveryRasCount.expect(3)
+        dut.io.resolution.bits.rasPointerBefore.expect(5)
+        dut.io.resolution.bits.rasCountBefore.expect(3)
+        dut.io.resolution.bits.rasPush.expect(true)
+        dut.io.resolution.bits.rasPop.expect(true)
+        dut.io.resolution.bits.rasReturnAddress.expect(BigInt("80000024", 16))
       }
     }
 
