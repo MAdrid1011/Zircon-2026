@@ -8,11 +8,13 @@
     "chisel": "7.14.0",
     "verilator": "5.050",
     "llvm": "22.1.8",
+    "llvmAptPackage": "1:22.1.8~++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80",
     "vivado": "2026.1",
     "fpgaPart": "xc7a100tcsg324-1"
   },
   "upstreams": {
     "verilator": "848d926ebd4addacacd294dc84e35d9d4ae8078c",
+    "llvm": "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1",
     "riscvUnifiedDb": "45924b13080fa52cd6f2ff4d934332fa62ac77e0",
     "spike": "c09c0cce98696f52abe0fe8c11f93f9ed74dc2bb",
     "sailRiscv": "beaf44991eee362a062fcaaf6fcb78ca428ff710",
@@ -22,6 +24,13 @@
     "berkeleyTestFloat3": "a9c849f1b0eb0264b626d9686ffae167d996e3be",
     "riscvTests": "2ebecad997fa58cd9e5724340ba75aa4b59bd1d0",
     "embenchIot": "09c2ed8c3b7008c95d08b038de4a3f6dc103ed70"
+  },
+  "ciActions": {
+    "actionsCheckout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actionsSetupJava": "dd06d9cba3e5552c54d9f8ea23572deb30010f7c",
+    "actionsCache": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    "actionsUploadArtifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "sbtSetupSbt": "c7d2d6258b4bd0d3ec5129e6b3453199d3c79729"
   },
   "zircon2024Baseline": {
     "core": "65a3dd381f4c83a5844858a927dafdbc8263c35e",

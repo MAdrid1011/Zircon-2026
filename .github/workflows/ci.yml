@@ -14,23 +14,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           distribution: temurin
           java-version: "21"
           cache: sbt
-      - uses: sbt/setup-sbt@v1
-      - name: Install simulation build prerequisites and RV32 build tools
+      - uses: sbt/setup-sbt@c7d2d6258b4bd0d3ec5129e6b3453199d3c79729 # v1.5.8
+      - name: Install simulation and toolchain prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf bison ccache clang flex g++ help2man libfl-dev lld llvm \
-            make perl python3 zlib1g-dev
+            autoconf bison ca-certificates ccache curl flex g++ gnupg help2man \
+            libfl-dev make perl python3 zlib1g-dev
+      - name: Install pinned LLVM toolchain
+        run: |
+          ./scripts/setup-ci-llvm.sh "${RUNNER_TEMP}/llvm-snapshot.gpg.key"
+          echo "/usr/lib/llvm-22/bin" >> "${GITHUB_PATH}"
       - name: Restore pinned Verilator
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.tool_cache }}/verilator/5.050
           key: ${{ runner.os }}-${{ runner.arch }}-verilator-848d926ebd4addacacd294dc84e35d9d4ae8078c-v1
@@ -47,9 +51,19 @@ jobs:
           verilator --version
           clang --version
           ld.lld --version
+          llvm-config --version
           case "$(verilator --version)" in
             "Verilator 5.050 "*) ;;
             *) echo "CI did not select the locked Verilator 5.050 binary" >&2; exit 1 ;;
+          esac
+          test "$(llvm-config --version)" = "22.1.8"
+          case "$(clang --version | head -n 1)" in
+            *"clang version 22.1.8"*) ;;
+            *) echo "CI did not select the locked Clang 22.1.8 binary" >&2; exit 1 ;;
+          esac
+          case "$(ld.lld --version)" in
+            *"LLD 22.1.8"*) ;;
+            *) echo "CI did not select the locked LLD 22.1.8 binary" >&2; exit 1 ;;
           esac
       - name: Unit tests
         run: ./scripts/sbtw test
@@ -63,7 +77,7 @@ jobs:
           make sim-smoke
       - name: Preserve failing simulation artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: chiselsim-failure-${{ github.run_id }}
           path: build/chiselsim

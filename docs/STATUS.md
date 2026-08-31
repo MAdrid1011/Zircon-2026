@@ -5,7 +5,7 @@
 | 计划项 | 状态 | 当前证据 | 下一门槛 |
 |---|---|---|---|
 | M0 GitHub 主仓与子模块分支 | completed | 公开父仓和两个 `zircon-2026` 子模块分支已建立并启用禁止 force-push/PR required 保护；基线提交写入 `toolchain.lock.json` | 每个后续 submodule bump 继续链接子仓 PR 与测试证据 |
-| M0 固定工具链 | partially completed | Scala/sbt/Chisel/Verilator/LLVM/Vivado 与第三方 SHA 已锁定；CI 从固定 commit 构建并强制检查 Verilator 5.050 | CI 固定 LLVM 22.1.8；Vivado runner 保存版本与 post-route artifact |
+| M0 固定工具链 | partially completed | Scala/sbt/Chisel/Verilator/LLVM/Vivado 与第三方 SHA 已锁定；CI 从固定 commit 构建 Verilator 5.050，并从 release commit/package version 固定 LLVM 22.1.8；Actions 固定到 commit | Vivado runner 保存版本与 post-route artifact |
 | M0 2024 脏改动审计 | completed | `docs/migration/zircon-2024-audit.md` | 逐项决定是否移植 |
 | M0 2024 固定提交复现 | partially completed | 独立 clone 已完成 Java/LLVM/Verilator build 和 picotest smoke；静态资源差异已量化 | 接入确定性同构 AXI profile；安装 Vivado 2026.1 后测 post-route |
 | M0 可复现仿真底座 | partially completed | ZirconSim 已有显式 seed、ELF32 加载、`tohost` 判定、单元测试和有界 smoke；当前 M0 空闲顶层只允许显式 timeout | 接入 AXI memory/device model、退休 trace 与真实程序执行 |
