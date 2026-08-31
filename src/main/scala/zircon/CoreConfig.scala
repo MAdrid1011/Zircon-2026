@@ -71,7 +71,8 @@ final case class ZirconCoreConfig(
   require(l1i.bytes == 1024 && l1d.bytes == 1024)
   require(l2.bytes == 4096 || l2.bytes == 8192, "L2 is restricted to the measured 4/8 KiB points")
   require(resetVector >= 0 && resetVector < (BigInt(1) << 32))
-  require(hartId >= 0)
+  require(hartId >= 0 && BigInt(hartId) < (BigInt(1) << 32),
+    "hart ID must be representable by RV32 mhartid")
 
   val robIndexWidth: Int = log2Ceil(robEntries)
   val robTagWidth: Int = robIndexWidth + 1

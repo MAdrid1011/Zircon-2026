@@ -1,6 +1,6 @@
 # M-mode 特权态
 
-Zircon-2026 只实现 M-mode。当前顶层已有 `meip/msip/mtip` 输入和 trace 中的 trap 字段；CSR 与 commit trap controller 在 M1 里程碑实现。
+Zircon-2026 只实现 M-mode。当前实现已有 `MachineCSRFile`、六种 Zicsr 组合语义、`meip/msip/mtip` 仲裁和 trace 中的 trap 字段；冻结契约见 [CSR 与 trap 状态模块](csr-and-traps.md)，commit trap controller 在 M1 后续 PR 接入。
 
 <!-- 图：CSR、FFR、commit 和 redirect 关系 -->
 <!-- ![M-mode trap flow](./assets/privileged-flow.svg) -->
