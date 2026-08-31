@@ -14,6 +14,12 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadResult.bits.accessSize.poke(2)
     dut.io.loadResult.bits.unsignedLoad.poke(false)
     dut.io.loadResult.bits.data.poke(0)
+    dut.io.fault.foreach { fault =>
+      fault.valid.poke(false)
+      fault.bits.robTag.poke(0)
+      fault.bits.cause.poke(0)
+      fault.bits.trapValue.poke(0)
+    }
     dut.io.m0Completion.ready.poke(false)
     dut.io.m1Completion.ready.poke(false)
     dut.io.robHeadTag.poke(0)
@@ -73,6 +79,24 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
         dut.io.squash.valid.poke(true)
         dut.io.squash.bits.poke(0)
         dut.io.loadResult.ready.expect(false)
+      }
+    }
+
+    it("completes an accepted fault without fabricating an integer result") {
+      simulate(new DualMemoryLoadCompletion) { dut =>
+        clear(dut)
+        dut.io.fault(0).valid.poke(true)
+        dut.io.fault(0).bits.robTag.poke(5)
+        dut.io.fault(0).bits.cause.poke(5)
+        dut.io.fault(0).bits.trapValue.poke(0)
+        dut.io.fault(0).ready.expect(true)
+        dut.io.faultAccepted(0).valid.expect(true)
+        dut.clock.step()
+        dut.io.fault(0).valid.poke(false)
+        dut.io.m0Completion.valid.expect(true)
+        dut.io.m0Completion.bits.robTag.expect(5)
+        dut.io.m0Completion.bits.writesInteger.expect(false)
+        dut.io.m0Completion.bits.data.expect(0)
       }
     }
   }

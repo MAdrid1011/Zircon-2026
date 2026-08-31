@@ -3,7 +3,7 @@ package zircon.memory
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.backend.{CompletionBuffer, CompletionResult}
+import zircon.backend.{CompletionBuffer, CompletionResult, FirstFaultRecord, ROBTagOrder}
 
 /** Formats integer load data and retains it in one frozen two-entry LSU buffer.
   * The input is accepted only when the buffer has space, so its upstream LSQ
@@ -14,6 +14,7 @@ class MemoryLoadCompletion(
 ) extends Module {
   val io = IO(new Bundle {
     val loadResult = Flipped(Decoupled(new MemoryLoadResult(config)))
+    val fault = Flipped(Decoupled(new FirstFaultRecord(config)))
     val completion = Decoupled(new CompletionResult(config))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
@@ -35,12 +36,21 @@ class MemoryLoadCompletion(
       2.U -> io.loadResult.bits.data
     ))
 
-  buffer.io.enqueue.valid := io.loadResult.valid
-  buffer.io.enqueue.bits.robTag := io.loadResult.bits.robTag
-  buffer.io.enqueue.bits.writesInteger := io.loadResult.bits.writesInteger
-  buffer.io.enqueue.bits.destinationPhysical := io.loadResult.bits.destinationPhysical
-  buffer.io.enqueue.bits.data := formattedData
-  io.loadResult.ready := buffer.io.enqueue.ready
+  val loadAge = ROBTagOrder.ageFromHead(
+    io.loadResult.bits.robTag, io.robHeadTag, config)
+  val faultAge = ROBTagOrder.ageFromHead(io.fault.bits.robTag, io.robHeadTag, config)
+  val selectLoad = io.loadResult.valid &&
+    (!io.fault.valid || loadAge < faultAge)
+  val selectFault = io.fault.valid && !selectLoad
+  buffer.io.enqueue.valid := selectLoad || selectFault
+  buffer.io.enqueue.bits.robTag := Mux(selectLoad,
+    io.loadResult.bits.robTag, io.fault.bits.robTag)
+  buffer.io.enqueue.bits.writesInteger := selectLoad && io.loadResult.bits.writesInteger
+  buffer.io.enqueue.bits.destinationPhysical := Mux(selectLoad,
+    io.loadResult.bits.destinationPhysical, 0.U)
+  buffer.io.enqueue.bits.data := Mux(selectLoad, formattedData, 0.U)
+  io.loadResult.ready := selectLoad && buffer.io.enqueue.ready
+  io.fault.ready := selectFault && buffer.io.enqueue.ready
   io.completion <> buffer.io.dequeue
   buffer.io.robHeadTag := io.robHeadTag
   buffer.io.squash := io.squash
@@ -53,6 +63,14 @@ class MemoryLoadCompletion(
       assert(io.loadResult.bits.destinationPhysical =/= 0.U,
         "integer load completion attempted to write p0")
     }
+  }
+  when(io.fault.valid) {
+    assert(io.fault.bits.robTag(config.robIndexWidth - 1, 0) < config.robEntries.U,
+      "memory fault completion received an out-of-range ROB tag")
+  }
+  when(io.loadResult.valid && io.fault.valid) {
+    assert(io.loadResult.bits.robTag =/= io.fault.bits.robTag,
+      "a memory result and fault cannot complete the same ROB tag")
   }
   io.count := buffer.io.count
 }

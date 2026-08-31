@@ -176,6 +176,29 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("serves four distinct live execution-context views") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveEnqueue(dut, 0, BigInt("80000080", 16), initiallyComplete = false)
+        driveEnqueue(dut, 1, BigInt("80000084", 16), initiallyComplete = false)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+        driveEnqueue(dut, 0, BigInt("80000088", 16), initiallyComplete = false)
+        driveEnqueue(dut, 1, BigInt("8000008c", 16), initiallyComplete = false)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        for (port <- 0 until 4) {
+          dut.io.executionRead(port).valid.poke(true)
+          dut.io.executionRead(port).bits.poke(port)
+          dut.io.executionContext(port).valid.expect(true)
+          dut.io.executionContext(port).bits.robTag.expect(port)
+          dut.io.executionContext(port).bits.pc.expect(
+            BigInt("80000080", 16) + port * 4)
+        }
+      }
+    }
+
     it("reuses two retiring slots while full and flips generation on natural wrap") {
       simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)

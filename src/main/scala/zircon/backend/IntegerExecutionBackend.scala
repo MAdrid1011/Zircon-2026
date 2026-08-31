@@ -55,6 +55,10 @@ class IntegerExecutionBackend(
 
     val auxReadPhysical = Input(Vec(2, UInt(physicalWidth.W)))
     val auxReadData = Output(Vec(2, UInt(32.W)))
+    val memoryExecutionRead = Input(Vec(2,
+      Valid(UInt(config.robTagWidth.W))))
+    val memoryExecutionContext = Output(Vec(2,
+      Valid(new ROBExecutionContext(config))))
     val integerReady = Output(UInt(config.intPhysicalRegisters.W))
 
     val commit = Vec(config.commitWidth, Decoupled(new ROBCommit(config)))
@@ -101,6 +105,8 @@ class IntegerExecutionBackend(
   operandRead.io.issue(1) <> issue.io.issueE1
   operandRead.io.robContext := state.io.executionContext
   state.io.executionRead := operandRead.io.robRead
+  state.io.memoryExecutionRead := io.memoryExecutionRead
+  io.memoryExecutionContext := state.io.memoryExecutionContext
   operandRead.io.flush := io.flush
 
   for (port <- 0 until 4) {

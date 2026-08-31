@@ -17,6 +17,8 @@
 PRF port 0/1 固定给 E0 两源，port 2/3 给 E1；port 4/5 作为
 `auxReadPhysical/Data` 暴露给顶层集成。M2 在没有 trace GPR retirement 的周期将其用于
 E2 两源读取；有 trace retirement 时 trace 读取优先，E2 issue 停顿，不增加第七个读口。
+M3 继续保持该 6R2W 几何：端口 4/5 由全局 arbiter 在 E2 与 M0/M1 之间按 ROB 年龄和
+剩余三启动预算分配，M0/M1 不增加 PRF 端口；完整合同见 ADR-0013。
 `otherCompletion[0..2]` 分别预留 E2、M0、M1，连同 E0/E1 组成冻结的五端点仲裁顺序。
 
 ## 外部接口

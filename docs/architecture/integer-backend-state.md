@@ -29,6 +29,7 @@
 | `readPhysical[6]` / `readData[6]` | in/out | PRF 六个组合读端口，含同拍写转发 |
 | `integerReady[56]` | out | scoreboard 状态与同拍 completion forwarding |
 | `executionRead/Context[2]` | in/out | E0/E1 的 live ROB context read |
+| `memoryExecutionRead/Context[2]` | in/out | M0/M1 的 live ROB context read；不复制 ROB payload |
 | `commit[2]` | out, ready/valid | 已完成的 ROB head 前缀 |
 | `rollback` / `rollbackUndo` | in/out, ready/valid | branch tail walk 与 rename undo |
 | `squash` / `flush` | in | completion selective freeze 与全局清空 |
@@ -67,6 +68,7 @@ active 期间 accepted/discarded 均为零，surviving result 保持 payload；w
 - discarded result 不产生 PRF/ready/wakeup 副作用。
 - flush 当周期无 PRF write 或 wakeup；rollback block 期间无 disposition。
 - 双写目的寄存器不得相同，p0 永不写且恒 ready。
+- E0/E1/M0/M1 同周期 active context tag 两两不同，且都匹配 live generation。
 - 上层累计 `endpoint.valid && !ready` 为 completion stall，累计
   `completionAccepted`/`completionDiscarded` 分别为有效完成和晚到丢弃计数。
 

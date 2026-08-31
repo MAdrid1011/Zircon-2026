@@ -3,9 +3,9 @@
 本章是 M3 双 LSU、PMA、Cache、AXI4、MMIO 和 RV32A 的实现合同，关联
 ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
 `OrderedIOCombiner`、已接入顶层 dispatch/recovery 的 8-entry `MemIssueQueue`，以及
-已单元验证的 8-entry `LoadStoreQueues`。MemIQ 的 M0/M1 outputs 仍被显式
-backpressure，直到 live LSU 接收它们；LSU、Cache、AXI data engine 与 MMIO lifecycle
-尚未接入，本规格不会把它们描述为已实现。
+已单元验证的 8-entry `LoadStoreQueues`。`ZirconCore` 已通过全局 auxiliary-read
+arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache、AXI data engine、
+MMIO lifecycle 和 store effect 仍未实现，本规格不会把它们描述为已实现。
 
 ## 参数和边界
 
@@ -51,15 +51,16 @@ and can choose one M0 plus one M1 request per cycle. It gives the oldest M1-elig
 load to M1, then lets M0 choose the oldest distinct M0-eligible uop; this permits
 an atomic/store beside a load and two independent loads on separate LSU paths. It
 drops only uops younger than a resolving branch and all local uops on global flush.
-The global three-start arbiter and live LSU handshakes remain integration work.
+`ZirconCore` uses the frozen global three-start arbiter to pass these issue
+channels to `DualLSUIngress`; the ready/valid handshake remains live through
+operand read, admission, replay arbitration, and LQ/SQ ingress.
 
-Until the global three-start arbiter and live LSU operand path are connected,
 `ZirconCore` selects MemIQ's documented free-only admission mode: an issue in a
 full queue frees its dispatch credit on the following cycle rather than feeding
 same-cycle source wakeup back into backend dispatch capacity. The standalone
-queue retains its tested same-cycle recycle mode for the final integrated
-arbiter. In both modes M0/M1 issue is backpressured until a real LSU accepts the
-uop, so queue admission never creates a completion.
+queue retains its tested same-cycle recycle mode. M0/M1 issue is backpressured
+until the live LSU ingress accepts the uop, and Cache/data execution cannot
+create a completion until its transaction owners are implemented.
 
 M1 admission requires all of the following: load operation, naturally aligned
 address, readable Memory PMA, no atomic/ordering restriction, no older SQ entry
@@ -88,8 +89,11 @@ external effect.
 
 Both LSUs receive their PC/instruction/privilege context from the ROB and produce
 only ready/valid completions or `FaultCandidate`s indexed by their real ROB tag.
-Each endpoint has a two-entry completion buffer. Completion to a stale tag drains
-through the existing completion network without PRF or ready-table mutation.
+Each endpoint has one two-entry completion buffer shared by load results and
+classified no-write fault completions. A faulting ingress batch is accepted only
+when its endpoint buffer has credit, so `FirstFaultRecord` and the matching ROB
+completion cannot diverge. Completion to a stale tag drains through the existing
+completion network without PRF or ready-table mutation.
 
 `MemoryOperandRead` is the current bridge from MemIQ to that future LSU boundary.
 For each request it performs an exact-tag ROB context read, obtains base and
@@ -97,6 +101,20 @@ optional store operands from the shared integer PRF interface, and carries the
 ROB-owned atomic `aq/rl` bits in `MemoryAddressRequest`. A missing/mismatched
 context or global flush blocks the handshake. This ensures an LSU never rebuilds
 ordering metadata by re-decoding a current instruction stream.
+
+### Auxiliary PRF and start arbitration
+
+M0/M1 have four virtual operand positions but do not add integer PRF ports.
+E0/E1 retain ports 0-3; retirement trace has exclusive priority for auxiliary
+ports 4/5. On a non-trace cycle the global arbiter selects E2, M0, and M1 by
+ROB age subject to the remaining `3 - E0Starts - E1Starts` launch budget and
+two auxiliary physical reads. It compacts only integer-register sources onto
+those two ports. Thus an M0 store/atomic consumes both ports and serializes an
+M1 load, whereas M0/M1 loads can start together. An ungranted request remains
+in LongIQ or MemIQ with its original tag and never receives substituted data or
+a completion. The two LSU ROB context views are exact live-tag reads separate
+from the existing E0/E1 views; their mux cost is included in the M3 static-area
+ledger. ADR-0013 freezes this interface and arbitration rule.
 
 `DualLSUIngress` composes `MemoryOperandRead`, `DualLSUAdmission`,
 `M0RequestArbiter`, and `MemoryQueueIngress` as one module-level request path.
@@ -109,8 +127,9 @@ path. The selected owner bit is retained in the LQ until a later external
 to separate two-entry M0 or M1 completion buffers; backpressure is therefore
 per owner and recovery accepts no new result. This is only the response-to-
 completion ownership boundary: no Cache, AXI, or irreversible store action is
-generated here, and neither buffer is yet wired to the top-level completion
-router or PRF-port arbiter.
+generated here. `ZirconCore` wires the two buffers to frozen completion endpoints
+M0/M1 and shares their operand reads with E2 through the top-level PRF-port
+arbiter.
 
 ## PMA and precise exceptions
 
@@ -196,13 +215,19 @@ architectural byte/halfword/word value and retains it in one two-entry
 `m1Owner` is allocated with the LQ record rather than reconstructed from a bus
 response. `DualMemoryLoadCompletion` uses it to select one independent M0 or
 M1 two-entry buffer, so an M0 response cannot consume M1 capacity and vice
-versa. The two outputs are intentionally not connected to the top-level
-completion router until PRF-port integration is complete.
+versa. The same endpoint buffer also accepts an exact classified access fault
+as a non-writing `CompletionResult`; an older load result wins local admission
+when both contend, and the fault waits with its original ingress request for a
+credit. `ZirconCore` connects the two outputs to completion endpoints M0/M1 and
+connects the accepted fault candidates to the matching backend fault inputs;
+the top-level still has no Cache/data-AXI response producer.
 
 `MemoryQueueIngress` is the first live lifecycle layer above those queues. It
 accepts up to two already address-classified M0/M1 requests, emits an exact
 `FaultCandidate` for a misaligned/access-fault request without allocating queue
-state, then performs a two-stage handoff for each normal request: an atomic
+state, but keeps that request unaccepted until its M0/M1 completion owner has
+credit. The accepted fault simultaneously enters its endpoint buffer as a
+non-writing completion. Normal requests perform a two-stage handoff: an atomic
 LQ/SQ allocation batch followed on a later cycle by load-address and/or
 store-address/store-data updates. It schedules each update channel by ROB age
 and holds the batch through LSQ backpressure. Selective recovery or global flush

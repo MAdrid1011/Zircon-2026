@@ -69,6 +69,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   private val entries = config.robEntries
   private val indexWidth = config.robIndexWidth
   private val countWidth = log2Ceil(entries + 1)
+  private val executionContextPorts = 4
 
   val io = IO(new Bundle {
     val enqueue = Flipped(Vec(2, Decoupled(new ROBEnqueue(config))))
@@ -79,9 +80,9 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     val commit = Vec(2, Decoupled(new ROBCommit(config)))
     val flush = Input(Bool())
 
-    val executionRead = Input(Vec(2,
+    val executionRead = Input(Vec(executionContextPorts,
       Valid(UInt(config.robTagWidth.W))))
-    val executionContext = Output(Vec(2,
+    val executionContext = Output(Vec(executionContextPorts,
       Valid(new ROBExecutionContext(config))))
 
     val rollback = Flipped(Decoupled(UInt(config.robTagWidth.W)))
@@ -195,7 +196,7 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
     io.completion(0).robTag === io.completion(1).robTag),
     "completion ports must not carry the same ROB tag")
 
-  for (port <- 0 until 2) {
+  for (port <- 0 until executionContextPorts) {
     val rawIndex = io.executionRead(port).bits(indexWidth - 1, 0)
     val inRange = rawIndex < entries.U
     val safeIndex = Mux(inRange, rawIndex, 0.U)
@@ -224,9 +225,14 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
       assert(matches, "ROB execution-context tag did not match a live entry")
     }
   }
-  assert(!(io.executionRead(0).valid && io.executionRead(1).valid &&
-    io.executionRead(0).bits === io.executionRead(1).bits),
-    "execution-context ports requested the same ROB tag")
+  for {
+    first <- 0 until executionContextPorts
+    second <- first + 1 until executionContextPorts
+  } {
+    assert(!(io.executionRead(first).valid && io.executionRead(second).valid &&
+      io.executionRead(first).bits === io.executionRead(second).bits),
+      "execution-context ports requested the same ROB tag")
+  }
 
   val rollbackIndexRaw = io.rollback.bits(indexWidth - 1, 0)
   val rollbackIndexInRange = rollbackIndexRaw < entries.U

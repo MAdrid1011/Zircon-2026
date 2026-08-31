@@ -1,18 +1,21 @@
 package zircon.core
 
 import chisel3._
+import chisel3.util.PopCount
 import zircon.ZirconCoreConfig
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
-  M1BackendSubsystem, MemIssueQueue}
+  M1BackendSubsystem, MemIssueQueue, SourceKind}
 import zircon.frontend.M1Frontend
+import zircon.memory.DualLSUIngress
 import zircon.trace.RetireTraceFormatter
 
-/** Executable M2 integration of fetch, integer backend, E2, and simulation trace.
-  *
-  * LongPipe is connected through the existing unified completion network. Both
-  * LSU endpoints deliberately advertise zero capacity until M3, so they cannot
-  * fabricate architectural progress.
-  */
+/** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
+ *
+ * E2 and M0/M1 share the two auxiliary PRF read ports under the frozen global
+ * three-start limit. The LSU request/response ownership path is live through
+ * the completion network, but data-cache, AXI-data, and store-effect execution
+ * remain blocked until their M3 transaction owners exist.
+ */
 class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Module {
   override val desiredName: String = "ZirconCore"
 
@@ -23,6 +26,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val longQueue = Module(new LongIssueQueue(cfg))
   val longPipe = Module(new LongPipe(cfg))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
+  val lsuIngress = Module(new DualLSUIngress(cfg))
+  val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
 
   frontend.io.enable := true.B
   for (lane <- 0 until cfg.decodeWidth) {
@@ -42,19 +47,32 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   longQueue.io.robHeadTag := backend.io.robHead.bits.robTag
   longQueue.io.squash := backend.io.squash
   longQueue.io.flush := backend.io.globalFlush
-  longPipe.io.robHeadTag := backend.io.robHead.bits.robTag
-  longPipe.io.squash := backend.io.squash
-  longPipe.io.flush := backend.io.globalFlush
-
   val traceReadRequired = if (cfg.enableTrace) {
     backend.io.retired.map(retired =>
       retired.valid && retired.bits.entry.allocatesPhysical).reduce(_ || _)
   } else false.B
-  longPipe.io.input.valid := longQueue.io.issue.valid && !traceReadRequired
+  val integerStarts = PopCount(Seq(backend.io.e0Start, backend.io.e1Start))
+  auxiliaryRead.io.traceReadRequired := traceReadRequired
+  auxiliaryRead.io.startSlots := 3.U - integerStarts
+  auxiliaryRead.io.robHeadTag := backend.io.robHead.bits.robTag
+  auxiliaryRead.io.readData := backend.io.auxReadData
+
+  auxiliaryRead.io.candidate(0).valid := longQueue.io.issue.valid
+  auxiliaryRead.io.candidate(0).bits.robTag := longQueue.io.issue.bits.robTag
+  for (source <- 0 until 2) {
+    auxiliaryRead.io.candidate(0).bits.sourcePhysical(source) :=
+      longQueue.io.issue.bits.sourcePhysical(source)
+    auxiliaryRead.io.candidate(0).bits.sourceRequired(source) :=
+      longQueue.io.issue.bits.sourceKind(source) === SourceKind.IntegerRegister
+  }
+  longPipe.io.robHeadTag := backend.io.robHead.bits.robTag
+  longPipe.io.squash := backend.io.squash
+  longPipe.io.flush := backend.io.globalFlush
+  longPipe.io.input.valid := longQueue.io.issue.valid && auxiliaryRead.io.grant(0)
   longPipe.io.input.bits.uop := longQueue.io.issue.bits
-  longPipe.io.input.bits.lhs := backend.io.auxReadData(0)
-  longPipe.io.input.bits.rhs := backend.io.auxReadData(1)
-  longQueue.io.issue.ready := longPipe.io.input.ready && !traceReadRequired
+  longPipe.io.input.bits.lhs := auxiliaryRead.io.candidateData(0)(0)
+  longPipe.io.input.bits.rhs := auxiliaryRead.io.candidateData(0)(1)
+  longQueue.io.issue.ready := longPipe.io.input.ready && auxiliaryRead.io.grant(0)
 
   for (lane <- 0 until cfg.decodeWidth) {
     memQueue.io.enqueue(lane) <> backend.io.memEnqueue(lane)
@@ -64,20 +82,54 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   memQueue.io.robHeadTag := backend.io.robHead.bits.robTag
   memQueue.io.squash := backend.io.squash
   memQueue.io.flush := backend.io.globalFlush
-  // M3 retains this queue at the top-level boundary before a live LSU exists.
-  // Backpressure here preserves the accepted uop and its ROB ownership; it does
-  // not invent a completion or let the request reach AXI/cache state.
-  memQueue.io.m0Issue.ready := false.B
-  memQueue.io.m1Issue.ready := false.B
+
+  for ((queueIssue, candidate) <- Seq(
+      (memQueue.io.m0Issue, 1), (memQueue.io.m1Issue, 2))) {
+    auxiliaryRead.io.candidate(candidate).valid := queueIssue.valid
+    auxiliaryRead.io.candidate(candidate).bits.robTag := queueIssue.bits.robTag
+    for (source <- 0 until 2) {
+      auxiliaryRead.io.candidate(candidate).bits.sourcePhysical(source) :=
+        queueIssue.bits.sourcePhysical(source)
+      auxiliaryRead.io.candidate(candidate).bits.sourceRequired(source) :=
+        queueIssue.bits.sourceKind(source) === SourceKind.IntegerRegister
+    }
+  }
+
+  lsuIngress.io.m0Issue.valid := memQueue.io.m0Issue.valid && auxiliaryRead.io.grant(1)
+  lsuIngress.io.m0Issue.bits := memQueue.io.m0Issue.bits
+  memQueue.io.m0Issue.ready := lsuIngress.io.m0Issue.ready && auxiliaryRead.io.grant(1)
+  lsuIngress.io.m1Issue.valid := memQueue.io.m1Issue.valid && auxiliaryRead.io.grant(2)
+  lsuIngress.io.m1Issue.bits := memQueue.io.m1Issue.bits
+  memQueue.io.m1Issue.ready := lsuIngress.io.m1Issue.ready && auxiliaryRead.io.grant(2)
+  for (source <- 0 until 2) {
+    lsuIngress.io.prfReadData(source) := auxiliaryRead.io.candidateData(1)(source)
+    lsuIngress.io.prfReadData(source + 2) :=
+      auxiliaryRead.io.candidateData(2)(source)
+  }
+  backend.io.memoryExecutionRead := lsuIngress.io.robRead
+  lsuIngress.io.robContext := backend.io.memoryExecutionContext
+  lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag
+  lsuIngress.io.squash := backend.io.squash
+  lsuIngress.io.flush := backend.io.globalFlush
+  lsuIngress.io.loadComplete.valid := false.B
+  lsuIngress.io.loadComplete.bits := 0.U.asTypeOf(lsuIngress.io.loadComplete.bits)
+  lsuIngress.io.loadContextRead.valid := false.B
+  lsuIngress.io.loadContextRead.bits := 0.U
+  lsuIngress.io.commitAuthorize.valid := false.B
+  lsuIngress.io.commitAuthorize.bits := 0.U
+  lsuIngress.io.storeEffect.ready := false.B
+  lsuIngress.io.storeEffectComplete := 0.U.asTypeOf(lsuIngress.io.storeEffectComplete)
+  for (lane <- 0 until cfg.commitWidth) {
+    lsuIngress.io.retire(lane).valid := backend.io.retired(lane).valid
+    lsuIngress.io.retire(lane).bits := backend.io.retired(lane).bits.robTag
+  }
+
   backend.io.otherCompletion(0) <> longPipe.io.completion
-  for (endpoint <- 1 until 3) {
-    backend.io.otherCompletion(endpoint).valid := false.B
-    backend.io.otherCompletion(endpoint).bits :=
-      0.U.asTypeOf(new CompletionResult(cfg))
-  }
-  for (endpoint <- 0 until 3) {
-    backend.io.otherFault(endpoint) := 0.U.asTypeOf(new FaultCandidate(cfg))
-  }
+  backend.io.otherCompletion(1) <> lsuIngress.io.m0Completion
+  backend.io.otherCompletion(2) <> lsuIngress.io.m1Completion
+  backend.io.otherFault(0) := 0.U.asTypeOf(new FaultCandidate(cfg))
+  backend.io.otherFault(1) := lsuIngress.io.fault(0)
+  backend.io.otherFault(2) := lsuIngress.io.fault(1)
   backend.io.interrupts := io.interrupts
   backend.io.interruptBlocked := false.B
   backend.io.systemSerializingReady := true.B
@@ -90,12 +142,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
         backend.io.retired(lane).bits.entry.allocatesPhysical,
       backend.io.retired(lane).bits.entry.newPhysicalDestination,
       0.U)
-    // The PRF has no read-enable. An invalid LongIQ issue must therefore use
-    // p0 rather than exposing its don't-care source index to the PRF port.
-    val longReadPhysical = Mux(longQueue.io.issue.valid,
-      longQueue.io.issue.bits.sourcePhysical(lane), 0.U)
     backend.io.auxReadPhysical(lane) := Mux(traceReadRequired,
-      traceReadPhysical, longReadPhysical)
+      traceReadPhysical, auxiliaryRead.io.readPhysical(lane))
   }
 
   io.axi.aw.valid := false.B
@@ -128,5 +176,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     observation.e2Start := longPipe.io.input.fire
     observation.e1Completion := backend.io.e1Completion
     observation.e2Completion := backend.io.e2Completion
+    observation.m0Ingress := lsuIngress.io.m0Issue.fire
+    observation.m1Ingress := lsuIngress.io.m1Issue.fire
+    observation.m0Fault := lsuIngress.io.fault(0).valid
+    observation.m1Fault := lsuIngress.io.fault(1).valid
+    observation.m0FaultTag := lsuIngress.io.fault(0).record.robTag
+    observation.m1FaultTag := lsuIngress.io.fault(1).record.robTag
+    observation.robHeadTag := backend.io.robHead.bits.robTag
   }
 }

@@ -56,6 +56,10 @@ class IntegerDispatchRecoveryBackend(
 
     val auxReadPhysical = Input(Vec(2, UInt(physicalWidth.W)))
     val auxReadData = Output(Vec(2, UInt(32.W)))
+    val memoryExecutionRead = Input(Vec(2,
+      Valid(UInt(config.robTagWidth.W))))
+    val memoryExecutionContext = Output(Vec(2,
+      Valid(new ROBExecutionContext(config))))
     val integerReady = Output(UInt(config.intPhysicalRegisters.W))
     val speculativeMap = Output(Vec(32, UInt(physicalWidth.W)))
     val committedMap = Output(Vec(32, UInt(physicalWidth.W)))
@@ -145,6 +149,8 @@ class IntegerDispatchRecoveryBackend(
   }
   execution.io.auxReadPhysical := io.auxReadPhysical
   io.auxReadData := execution.io.auxReadData
+  execution.io.memoryExecutionRead := io.memoryExecutionRead
+  io.memoryExecutionContext := execution.io.memoryExecutionContext
   io.integerReady := execution.io.integerReady
   io.speculativeMap := rename.io.speculativeMap
   io.committedMap := rename.io.committedMap

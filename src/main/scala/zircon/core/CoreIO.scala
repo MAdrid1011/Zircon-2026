@@ -11,13 +11,20 @@ class InterruptInputs extends Bundle {
   val mtip = Bool()
 }
 
-/** Test-only M2 handshakes. This port is absent from every production config. */
+/** Test-only M2/M3 handshakes. This port is absent from every production config. */
 class M2Observation extends Bundle {
   val e0Start = Bool()
   val e1Start = Bool()
   val e2Start = Bool()
   val e1Completion = Bool()
   val e2Completion = Bool()
+  val m0Ingress = Bool()
+  val m1Ingress = Bool()
+  val m0Fault = Bool()
+  val m1Fault = Bool()
+  val m0FaultTag = UInt(6.W)
+  val m1FaultTag = UInt(6.W)
+  val robHeadTag = UInt(6.W)
 }
 
 class ZirconCoreIO(cfg: ZirconCoreConfig) extends Bundle {

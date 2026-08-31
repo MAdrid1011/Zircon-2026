@@ -23,6 +23,7 @@ class MemoryQueueIngress(
   val io = IO(new Bundle {
     val input = Flipped(Vec(batchWidth, Decoupled(new MemoryLSURequest(config))))
     val fault = Output(Vec(batchWidth, new FaultCandidate(config)))
+    val faultReady = Input(Vec(batchWidth, Bool()))
 
     val loadForward = Output(Valid(new LoadStoreForward(config)))
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
@@ -103,11 +104,17 @@ class MemoryQueueIngress(
     port.valid && !port.bits.address.faultValid))
   val normalCount = PopCount(incomingNormal)
   val intakeEmpty = !intakeValid.asUInt.orR
-  val acceptInputs = !recoveryBlocked && (normalCount === 0.U || intakeEmpty)
+  val faultCreditAvailable = VecInit(io.input.zipWithIndex.map {
+    case (port, lane) =>
+      !port.valid || !port.bits.address.faultValid || io.faultReady(lane)
+  })
+  val acceptInputs = !recoveryBlocked && (normalCount === 0.U || intakeEmpty) &&
+    faultCreditAvailable.asUInt.andR
   io.input.foreach(_.ready := acceptInputs)
 
   for (lane <- 0 until batchWidth) {
-    io.fault(lane).valid := io.input(lane).fire && io.input(lane).bits.address.faultValid
+    io.fault(lane).valid := io.input(lane).valid &&
+      io.input(lane).bits.address.faultValid && !recoveryBlocked
     io.fault(lane).record.robTag := io.input(lane).bits.address.robTag
     io.fault(lane).record.cause := io.input(lane).bits.address.faultCause
     io.fault(lane).record.trapValue := io.input(lane).bits.address.faultTval

@@ -82,7 +82,12 @@ class DualLSUIngress(
   ingress.io.robHeadTag := io.robHeadTag
   ingress.io.squash := io.squash
   ingress.io.flush := io.flush
-  io.fault := ingress.io.fault
+  for (lane <- 0 until 2) {
+    loadCompletion.io.fault(lane).valid := ingress.io.fault(lane).valid
+    loadCompletion.io.fault(lane).bits := ingress.io.fault(lane).record
+    ingress.io.faultReady(lane) := loadCompletion.io.fault(lane).ready
+    io.fault(lane) := loadCompletion.io.faultAccepted(lane)
+  }
   io.loadForward := ingress.io.loadForward
   ingress.io.loadComplete.valid := io.loadComplete.valid
   ingress.io.loadComplete.bits := io.loadComplete.bits

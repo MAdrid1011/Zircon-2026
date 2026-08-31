@@ -40,6 +40,10 @@ class IntegerBackendState(
       Valid(UInt(config.robTagWidth.W))))
     val executionContext = Output(Vec(2,
       Valid(new ROBExecutionContext(config))))
+    val memoryExecutionRead = Input(Vec(2,
+      Valid(UInt(config.robTagWidth.W))))
+    val memoryExecutionContext = Output(Vec(2,
+      Valid(new ROBExecutionContext(config))))
 
     val commit = Vec(config.commitWidth, Decoupled(new ROBCommit(config)))
     val rollback = Flipped(Decoupled(UInt(config.robTagWidth.W)))
@@ -63,8 +67,12 @@ class IntegerBackendState(
   io.enqueueTag := rob.io.enqueueTag
   io.enqueueCapacity := rob.io.enqueueCapacity
   rob.io.commit <> io.commit
-  rob.io.executionRead := io.executionRead
-  io.executionContext := rob.io.executionContext
+  for (port <- 0 until 2) {
+    rob.io.executionRead(port) := io.executionRead(port)
+    io.executionContext(port) := rob.io.executionContext(port)
+    rob.io.executionRead(port + 2) := io.memoryExecutionRead(port)
+    io.memoryExecutionContext(port) := rob.io.executionContext(port + 2)
+  }
   rob.io.rollback <> io.rollback
   rob.io.rollbackUndo <> io.rollbackUndo
   io.rollbackActive := rob.io.rollbackActive

@@ -174,7 +174,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     Files.writeString(directory.resolve(s"m2-recovery-backpressure-$seed.txt"), evidence)
   }
 
-  describe("ZirconCore executable M1/M2 integration") {
+  describe("ZirconCore executable M1-M3 integration") {
     it("executes an AXI-fed RV32I dependency chain and emits precise retire events") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
@@ -657,16 +657,47 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("blocks a legal LSU instruction until the M3 endpoint exists") {
+    it("takes an inaccessible load through the M0 replay fault path") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val activity = scala.collection.mutable.ArrayBuffer.empty[(Int, Boolean, Boolean,
+          Boolean, Boolean, BigInt, BigInt)]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("00002083", 16), // lw x1,0(x0)
+          ResetVector + 4 -> BigInt("00100073", 16)
+        ), cycles = 96, observeCycle = (core, cycle) => {
+          val observation = core.io.m2Observation.get
+          val m0Ingress = observation.m0Ingress.peek().litToBoolean
+          val m1Ingress = observation.m1Ingress.peek().litToBoolean
+          val m0Fault = observation.m0Fault.peek().litToBoolean
+          val m1Fault = observation.m1Fault.peek().litToBoolean
+          if (m0Ingress || m1Ingress || m0Fault || m1Fault) {
+            activity += ((cycle, m0Ingress, m1Ingress, m0Fault, m1Fault,
+              observation.m0FaultTag.peek().litValue,
+              observation.robHeadTag.peek().litValue))
+          }
+        }))
+
+        withClue(s"LSU activity=$activity, trace=$events") {
+          assert(events.size == 1)
+        }
+        assert(events.head.trap && events.head.cause == 5 &&
+          events.head.trapValue == 0 && events.head.pc == ResetVector)
+      }
+    }
+
+    it("blocks a cacheable load without a fabricated completion") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val events = runProgram(dut, Map(
-          ResetVector -> BigInt("00002083", 16), // lw x1,0(x0)
-          ResetVector + 4 -> BigInt("00100073", 16)
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 8 -> BigInt("00100073", 16)
         ), cycles = 96)
 
-        assert(events.isEmpty,
-          "a load reached retire before a real LSU completion path existed")
+        assert(events.map(_.pc) == Seq(ResetVector),
+          "a cacheable load retired before a real data response existed")
       }
     }
   }

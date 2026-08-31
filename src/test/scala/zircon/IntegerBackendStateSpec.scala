@@ -24,6 +24,10 @@ class IntegerBackendStateSpec extends AnyFunSpec with ChiselSim {
       read.valid.poke(false)
       read.bits.poke(0)
     }
+    dut.io.memoryExecutionRead.foreach { read =>
+      read.valid.poke(false)
+      read.bits.poke(0)
+    }
     dut.io.commit.foreach(_.ready.poke(false))
     dut.io.rollback.valid.poke(false)
     dut.io.rollback.bits.poke(0)

@@ -162,6 +162,26 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("replays an inaccessible M1 candidate to the exact M0 fault owner") {
+      simulate(new DualLSUIngress) { dut =>
+        clear(dut)
+        driveIssue(dut, m1 = true, tag = 8, IntOperation.Lw, UopClass.Load,
+          EndpointMask.CacheableLoadCandidate, basePhysical = 8)
+        context(dut, lane = 1, tag = 8)
+        dut.io.prfReadData(2).poke(0)
+        dut.io.m1Issue.ready.expect(true)
+        dut.clock.step()
+        clearIssues(dut)
+
+        dut.io.fault(0).valid.expect(true)
+        dut.io.fault(0).record.robTag.expect(8)
+        dut.io.fault(0).record.cause.expect(5)
+        dut.io.fault(0).record.trapValue.expect(0)
+        dut.clock.step()
+        dut.io.loadCount.expect(0)
+      }
+    }
+
     it("routes an M1 response through its own completion buffer") {
       simulate(new DualLSUIngress) { dut =>
         clear(dut)

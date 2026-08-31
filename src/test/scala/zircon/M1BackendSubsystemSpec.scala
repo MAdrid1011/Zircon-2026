@@ -66,6 +66,10 @@ class M1BackendSubsystemSpec extends AnyFunSpec with ChiselSim {
     dut.io.fpCommit.bits.flags.poke(0)
     dut.io.fpCommit.bits.dirty.poke(false)
     dut.io.auxReadPhysical.foreach(_.poke(0))
+    dut.io.memoryExecutionRead.foreach { read =>
+      read.valid.poke(false)
+      read.bits.poke(0)
+    }
   }
 
   private def driveInstruction(

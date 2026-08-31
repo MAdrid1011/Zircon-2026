@@ -26,6 +26,10 @@ class IntegerExecutionBackendSpec extends AnyFunSpec with ChiselSim {
     dut.io.csrAccessLegal.poke(false)
     dut.io.systemSerializingReady.poke(true)
     dut.io.auxReadPhysical.foreach(_.poke(0))
+    dut.io.memoryExecutionRead.foreach { read =>
+      read.valid.poke(false)
+      read.bits.poke(0)
+    }
     dut.io.commit.foreach(_.ready.poke(false))
     dut.io.rollback.valid.poke(false)
     dut.io.rollback.bits.poke(0)

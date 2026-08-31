@@ -48,6 +48,7 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadComplete.valid.poke(false)
     dut.io.loadComplete.bits.robTag.poke(0)
     dut.io.loadComplete.bits.cacheData.poke(0)
+    dut.io.faultReady.foreach(_.poke(true))
     dut.io.loadResult.ready.poke(true)
     dut.io.loadContextRead.valid.poke(false)
     dut.io.loadContextRead.bits.poke(0)
@@ -187,6 +188,24 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
         dut.io.loadCount.expect(0)
         dut.io.storeCount.expect(0)
         dut.io.intakeCount.expect(0)
+      }
+    }
+
+    it("holds a faulting batch until its completion owner has credit") {
+      simulate(new MemoryQueueIngress) { dut =>
+        clear(dut)
+        request(dut, 0, tag = 10, load = true, store = false,
+          address = BigInt("90000000", 16), fault = Some(5 -> BigInt("90000000", 16)))
+        dut.io.faultReady(0).poke(false)
+        dut.io.input(0).ready.expect(false)
+        dut.io.fault(0).valid.expect(true)
+
+        dut.io.faultReady(0).poke(true)
+        dut.io.input(0).ready.expect(true)
+        dut.clock.step()
+        clearRequests(dut)
+        dut.io.loadCount.expect(0)
+        dut.io.storeCount.expect(0)
       }
     }
 

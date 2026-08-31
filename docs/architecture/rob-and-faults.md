@@ -77,6 +77,7 @@ fault 不可能匹配可提交 ROB head。exception priority 先在每条指令�
 - completion tag index 合法，同周期两端口 tag 不重复。
 - accepted/discarded 互斥；不匹配 generation 的 completion 只返回 discarded，不修改 entry。
 - commit PC/instruction/tag 在 backpressure 下稳定。
-- execution-context read 只命中 live generation，双端口 tag 不重复。
+- execution-context read 只命中 live generation；E0/E1/M0/M1 的四个 active tag
+  两两不同。M0/M1 视图不复制 ROB payload，细节见 ADR-0013。
 - FirstFaultRecord 始终选择相对 head 最老的有效候选。
 - selective squash 后 IQ、completion buffer 和 FirstFaultRecord 不保留年轻 tag。
