@@ -1,24 +1,175 @@
 # 访存子系统架构文档
 
-这一章记录双 LSU、PMA、L1/L2 和 AXI4 的冻结契约。当前实现包含 PMA classifier 和 ordered IO combiner；Cache、LSQ、refill 与 writeback path 尚未接入。
+本章是 M3 双 LSU、PMA、Cache、AXI4、MMIO 和 RV32A 的实现合同，关联
+ADR-0012 与 Issue #47。当前 RTL 只有 `PMAClassifier` 和局部
+`OrderedIOCombiner`，`ZirconCore` 仍把 memory capacity 置零；本规格并不把
+尚未接入的模块描述为已实现。
 
-<!-- 图：M0/M1、LSQ、L1D、L2 与 AXI4 数据通路 -->
-<!-- ![访存子系统](./assets/memory-overview.svg) -->
+## 参数和边界
 
-M0 接收全部 load、store、atomic 和 device 请求，M1 只接收对齐且可缓存的 load。地址生成后先查询 PMA，再查询更老 SQ 地址和数据；device 或 atomic 在 M1 检出时重放到 M0。Cacheable load 在所有更老 store 地址已知后才能访问 L1D。
+| Structure | Frozen value | Notes |
+| --- | --- | --- |
+| MemIQ | 8 compact `UopRef` | two enqueue, one M0 plus one M1 start maximum |
+| LQ / SQ | 8 / 8 entries | tags identify live ROB owners |
+| M0 | all integer loads/stores, atomics, device | only source of store/AMO/device actions |
+| M1 | aligned cacheable integer loads | special candidates replay to M0 |
+| L1I / L1D | 1 KiB, 2-way, 32 B line | L1D has four word banks and four MSHRs |
+| L2 | 4 KiB default or 8 KiB comparison, 4-way, 32 B line | four MSHRs, dynamic I/D allocation |
+| AXI4 | 32-bit address/data, four-bit ID | four read bursts and one write burst maximum |
+| ordered device group | 1-4 beats | INCR only; never crosses 4 KiB |
 
-## PMA
+M3 adds no second SoC memory port. The single `AXI4MasterPort` is shared between
+L1I, refills, writebacks, and device groups by `AXIDataEngine`; no client drives a
+top-level channel directly.
 
-`PMAClassifier` 对 `address` 按配置顺序 first-match，输出 `kind/readable/writable/executable/atomic`。默认配置包括 `0x8000_0000–0x8fff_ffff` memory、`0xa000_0000–0xa000_ffff` strong device 和 `0xb000_0000–0xbfff_ffff` burstable device；未命中地址不可访问。
+## Request and ownership records
 
-## OrderedIOCombiner
+The implementation creates typed records for the following boundaries:
 
-每项 `OrderedIORequest` 保存 order、ROB tag、地址、方向、size、写数据/mask、burstable 和 region tag。combiner 仅合并 order 连续、地址按 size 相邻、方向/size/region 相同且不跨 4 KiB 的请求。`forceFlush` 结束当前 group；不兼容的年轻请求保持 backpressure，直到旧 group 完成输出。
+| Record | Required content | Owner and lifetime |
+| --- | --- | --- |
+| `MemoryRequest` | `robTag`, operation, address, size, masks, store data, aq/rl | MemIQ until an LSU accepts it |
+| `LoadQueueEntry` | `robTag`, address, width, destination, completion/forward state | allocation through retire, squash, or fault |
+| `StoreQueueEntry` | `robTag`, address/data readiness, mask, committed state | allocation through committed effect, squash, or fault |
+| `MemoryRetireMetadata` | `robTag`, address, read/write masks and data | LSQ/transaction state until exact retirement or kill |
+| `AxiReadOwner` | ID, owner kind, tag, expected/received beats, cancelled, fault state | accepted AR through final R handshake |
+| `AxiWriteOwner` | ID, owner kind, tag/group, expected W beats, response state | accepted AW through B handshake |
 
-## Cache 目标结构
+Ownership is exclusive. A request moves, rather than copies, between MemIQ,
+LSQ/MSHR, device group, and AXI owner state. Every allocation, response, recovery,
+and retirement path asserts credit conservation. An accepted AXI transaction always
+remains in an AXI owner slot until it drains, even when its architectural owner was
+killed.
 
-L1I/L1D 均为 1 KiB、2-way、32 B line。L1D 提供 4 个 MSHR 和四个 word bank。L2 默认 4 KiB、4-way、32 sets、4 个 MSHR，8 KiB 仅作为参数对照点。D block 在 L1D、L2 和 transfer buffer 中最多存在一份；I 侧 non-inclusive。
+## Dispatch, issue, and LSU routing
 
-## 异常和顺序
+`BackendDispatch` sends every legal memory uop to MemIQ. `MemIssueQueue` uses ROB
+age with source-ready wakeup and accepts two dispatch lanes. It may issue one M0
+and one M1 request in a cycle, subject to global three-start arbitration. It drops
+only uops younger than a resolving branch and all local uops on global flush.
 
-非对齐访问直接生成 misaligned exception。AXI error 生成 access fault。Store、AMO 和 MMIO 在提交或总线成功响应前不能修改不可回滚状态。FENCE、aq/rl 和 FENCE.I 通过排空对应队列建立顺序。
+M1 admission requires all of the following: load operation, naturally aligned
+address, readable Memory PMA, no atomic/ordering restriction, no older SQ entry
+with an unknown address, and an available LQ/cache resource. A failed admission
+does not complete: it replays to M0. M0 handles every store, LR/SC, AMO, device
+access, M1 replay, PMA access failure, and any load M1 cannot accept.
+
+Both LSUs receive their PC/instruction/privilege context from the ROB and produce
+only ready/valid completions or `FaultCandidate`s indexed by their real ROB tag.
+Each endpoint has a two-entry completion buffer. Completion to a stale tag drains
+through the existing completion network without PRF or ready-table mutation.
+
+## PMA and precise exceptions
+
+`PMAClassifier` remains first-match by configuration order. Its default regions
+are Memory `0x8000_0000-0x8fff_ffff`, DeviceStrong
+`0xa000_0000-0xa000_ffff`, and DeviceBurstable
+`0xb000_0000-0xbfff_ffff`; unmatched space is inaccessible. Read/write/atomic
+permission is checked after address generation and before LQ/SQ/cache/AXI
+allocation.
+
+All load/store/AMO addresses must be naturally aligned. A misaligned operation
+creates an exact load or store/AMO misaligned fault with its effective address as
+`tval`; it never splits across words or AXI beats. PMA denial and AXI RRESP/BRESP
+failure similarly create one exact access fault for the owning ROB entry. The
+`FirstFaultTracker` selects the oldest live fault and recovery removes younger
+metadata before any trap redirect.
+
+## LQ, SQ, forwarding, and commit effects
+
+Loads wait while any older store address is unresolved. After all are resolved,
+the youngest older same-byte store wins per byte lane. Full forwarding completes
+without a cache request; partial forwarding merges forwarded byte lanes with the
+returned cache word. A load never observes a younger store.
+
+Stores calculate address/data speculatively into SQ, but are not cache-visible
+until their ROB entry reaches commit authorization. A committed cacheable store
+may update L1D or allocate/write back according to the cache protocol; committed
+device writes wait for the B response. Stores, AMOs, and device operations block
+their retirement until their irreversible action succeeds. A squash deletes only
+uncommitted SQ/LQ entries and suppresses their completion, never a previously
+accepted AXI drain.
+
+`MemoryRetireMetadata` is populated by the true LSU/LSQ effect. The trace
+formatter reads it only when that tag retires, filling address, masks, and data;
+it must not infer effects from a current AXI response or fetch PC.
+
+## Cache hierarchy
+
+L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
+has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,
+and same-line secondary merge. Its two LSU requests define an explicit conflict
+matrix: dual hit may proceed when bank/port resources allow; hit/miss, dual miss,
+same bank/set/line/address, MSHR full, and victim-full cases either allocate their
+specified resource or backpressure/replay deterministically.
+
+L2 has four ways and four MSHRs. The 4 KiB (32-set) configuration is the default;
+8 KiB is solely the M5 A/B point. L2 dynamically serves I and D demand and does
+not reserve ways by client. I-side is non-inclusive. D-side is exclusive: each
+stable D line belongs to exactly one of L1D, L2, or a transfer buffer. L1D fill
+removes any L2 copy; L1D eviction transfers the line to L2. A two-entry
+victim/writeback queue owns dirty evictions until L2 or AXI accepts them.
+
+`FENCE.I` commit drains old stores/device actions, invalidates L1I and BTB, then
+uses the existing commit redirect. `FENCE`, `aq`, and `rl` prevent retirement or
+issue until their required LQ/SQ/device/outstanding-owner sets drain; no broad
+memory-dependence predictor is permitted.
+
+## AXI4 data engine
+
+The engine grants at most four outstanding accepted AR bursts and one AW/W/B burst.
+It assigns a unique live read ID, holds every channel payload stable while
+`valid && !ready`, and emits only aligned INCR bursts. Cache line refills are
+eight 32-bit beats; device groups are at most four; all obey the 4 KiB boundary.
+
+Each R beat is checked against its owner ID, expected beat count, and RLAST. An
+unknown ID, duplicate beat, early/late RLAST, response after owner release, or
+credit underflow is an immediate assertion. RRESP or BRESP errors are retained on
+the original owner until it yields its exact fault. Read responses may interleave
+across IDs; individual beats of one ID remain ordered. On selective squash/global
+flush, non-architectural accepted reads switch to `cancelled` and drain without
+completion; neither their IDs nor their MSHR credits are reused early.
+
+## Ordered MMIO
+
+Only M0 may create `OrderedIORequest`. `DeviceStrong` produces a one-beat group.
+`DeviceBurstable` groups one to four consecutive ROB orders with equal direction,
+size, and PMA region and exactly adjacent addresses, terminating at a direction,
+width, region, address, 4 KiB, or force-flush boundary. The next device request
+cannot overtake the active group. For reads, each returning beat updates its own
+ROB-tag metadata/completion; for writes, each member becomes irreversible only
+after the group B response. PMA boundaries and AMOs never join a group.
+
+## RV32A
+
+LR/SC and AMOs are M0-only, naturally aligned, and permitted only by atomic
+Memory PMA. Reservation is one 32-bit word. LR installs a reservation after a
+successful read. SC returns zero only if the matching reservation is live; it
+returns one otherwise and clears the reservation either way. A conflicting local
+store/AMO, trap, interrupt, or replacement invalidates it. AMOs serialize their
+read-modify-write effect and await any required AXI/cache response. Device space
+and non-atomic PMA generate precise faults rather than fake atomic completion.
+
+## Recovery, drain, and counters
+
+Selective recovery removes younger MemIQ/LQ/SQ/completion entries. Global flush
+removes all speculative state after preserving accepted AXI owner drains. A kill
+cannot write GPR state, cache state, device state, or trace data. Every MSHR,
+victim, queue, completion buffer, device group, and AXI owner has occupancy and
+credit-conservation assertions.
+
+M3 exposes counters for M0/M1 issue/replay, LQ/SQ/MemIQ occupancy, full stalls,
+forward full/partial hits, L1/L2 hit/miss, MSHR/victim occupancy, outstanding AXI
+read/write count, response errors, MMIO group size, and interrupted/blocked
+irreversible work. M5 reports these counters with IPC; their absence cannot be
+represented as zero activity.
+
+## Verification mapping
+
+`MemIssueQueueSpec`, `LoadStoreQueuesSpec`, `DualLSUSpec`, `AXIDataEngineSpec`,
+`L1DataCacheSpec`, `L2CacheSpec`, and `MemoryCoreIntegrationSpec` are required
+before M3 can advance from missing to implemented. They cover the full dual-LSU
+conflict matrix, byte forwarding, MSHR/victim pressure, exclusive ownership,
+AXI ID/beat/RLAST/error/drain behavior, MMIO 1-4 beat groups, every RV32A
+operation, and deterministic explicit-seed backpressure. ELF/Spike/Sail evidence
+must compare the committed memory fields in `RetireEvent`.

@@ -56,3 +56,23 @@ The local evidence command is `./scripts/sbtw test`; the current integration
 run completed 41 suites and 198 tests. `make verilog` elaborates the same
 configuration. New randomized tests must declare a seed and persist the ELF,
 trace, tool SHA, and waveform on failure.
+
+## M3 planned verification contract
+
+M3 implementation work is not yet evidence. The following named tests are the
+required fail-to-pass set for Issue #47 and must exist before corresponding RTL:
+
+| Boundary | Required tests and properties |
+| --- | --- |
+| MemIQ/M0/M1 | two enqueue; one M0 plus one M1 issue; source wakeup; ROB-age selection; M1-to-M0 replay; selective squash/global flush; queue full; no false completion |
+| LQ/SQ | older unknown-store-address block; byte forwarding; partial cache merge; same address; dual LSU conflict matrix; LQ/SQ full; commit-only stores; recovery ownership |
+| PMA/fault | all default regions; permissions; aligned/misaligned load/store/AMO; RRESP/BRESP to exact tag/cause/tval; oldest fault selection |
+| AXI data | four read IDs, one write; independent AR/AW/W/R/B backpressure; eight-beat refill; 1-4 beat device groups; 4 KiB edge; cross-ID reorder; unknown ID, duplicate/early/late beat and RLAST assertions; cancellation drain |
+| Cache | hit/hit, hit/miss, miss/miss, same bank/set/line/address; secondary merge; MSHR/victim full; dirty writeback; L1D/L2/transfer exclusive owner assertion; 4/8 KiB geometry |
+| MMIO/A | strong/burstable read/write groups; group break causes; per-beat read mapping; response-gated commit; LR/SC success and every failure cause; each AMO; aq/rl/FENCE ordering |
+| Core/differential | deterministic RV32IMA ELF including `tohost`; explicit-seed stress starting at `0x5eed3004`; trace memory fields; Spike and Sail committed-memory comparison; applicable ACT4 IMA smoke |
+
+Each random failure bundle contains the generator and memory seeds, ELF and
+SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
+path. No timeout increase, response filtering, or seed replacement is a valid
+fix for an unexplained mismatch.
