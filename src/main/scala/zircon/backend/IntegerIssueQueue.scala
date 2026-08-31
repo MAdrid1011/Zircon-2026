@@ -51,7 +51,17 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   private def allows(uop: UopRef, endpointBit: Int): Bool =
     uop.allowedEndpoints(endpointBit)
 
-  val ready = entryUop.map(allSourcesReady)
+  private def withWakeup(uop: UopRef): UopRef = {
+    val updated = WireDefault(uop)
+    for (source <- 0 until 2) {
+      val wakes = io.wakeup.map(wakeup =>
+        wakeup.valid && wakeup.physical === uop.sourcePhysical(source)).reduce(_ || _)
+      updated.sourceReady(source) := uop.sourceReady(source) || wakes
+    }
+    updated
+  }
+
+  val ready = entryUop.map(uop => allSourcesReady(withWakeup(uop)))
   val e0ExclusiveCandidates = (0 until entries).map(index =>
     entryValid(index) && ready(index) &&
       allows(entryUop(index), 0) && !allows(entryUop(index), 1))
@@ -78,9 +88,9 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
 
   val recoveryBlocked = io.flush || io.squash.valid
   io.issueE0.valid := selectedE0Valid && !recoveryBlocked
-  io.issueE0.bits := entryUop(selectedE0Index)
+  io.issueE0.bits := withWakeup(entryUop(selectedE0Index))
   io.issueE1.valid := selectedE1Valid && !recoveryBlocked
-  io.issueE1.bits := entryUop(selectedE1Index)
+  io.issueE1.bits := withWakeup(entryUop(selectedE1Index))
   when(io.issueE0.valid) {
     assert(io.issueE0.bits.allowedEndpoints(0), "IntIQ sent an ineligible uop to E0")
   }
@@ -112,16 +122,6 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val allocationIndex = VecInit(OHToUInt(allocation0OH), OHToUInt(allocation1OH))
   val enqueueCount = PopCount(io.enqueue.map(_.fire))
   val issueCount = PopCount(Seq(io.issueE0.fire, io.issueE1.fire))
-
-  private def withWakeup(uop: UopRef): UopRef = {
-    val updated = WireDefault(uop)
-    for (source <- 0 until 2) {
-      val wakes = io.wakeup.map(wakeup =>
-        wakeup.valid && wakeup.physical === uop.sourcePhysical(source)).reduce(_ || _)
-      updated.sourceReady(source) := uop.sourceReady(source) || wakes
-    }
-    updated
-  }
 
   val squashSurvivor = VecInit((0 until entries).map(index =>
     entryValid(index) && !ROBTagOrder.isYounger(
