@@ -2,9 +2,9 @@
 
 本章是 M3 双 LSU、PMA、Cache、AXI4、MMIO 和 RV32A 的实现合同，关联
 ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
-`OrderedIOCombiner` 和独立的 8-entry `MemIssueQueue`；`ZirconCore` 仍把 memory
-capacity 置零。LSQ、LSU、Cache、AXI data engine 与 MMIO lifecycle 尚未接入，本规格
-不会把它们描述为已实现。
+`OrderedIOCombiner`、独立的 8-entry `MemIssueQueue`，以及已单元验证的 8-entry
+`LoadStoreQueues`；`ZirconCore` 仍把 memory capacity 置零。LSU、Cache、AXI data
+engine 与 MMIO lifecycle 尚未接入，本规格不会把它们描述为已实现。
 
 ## 参数和边界
 
@@ -97,6 +97,33 @@ accepted AXI drain.
 `MemoryRetireMetadata` is populated by the true LSU/LSQ effect. The trace
 formatter reads it only when that tag retires, filling address, masks, and data;
 it must not infer effects from a current AXI response or fetch PC.
+
+### Current LSQ boundary
+
+`MemoryTypes.scala` and `LoadStoreQueues.scala` now define the local ownership
+boundary below MemIQ. The queue has two-wide `MemoryQueueAllocate` admission,
+but an allocation reserves only speculative LQ/SQ state and cannot perform an
+external memory action. Address and store data use separate ready/valid updates:
+this lets an older known-address store block a same-word load until its data is
+also available, rather than accidentally exposing stale cache data.
+
+| Interface | Rule implemented by the queue |
+| --- | --- |
+| `LoadAddressQuery` / `LoadStoreForward` | accepts only a live LQ owner after every older SQ address is known and every matching older store has data; selects the youngest older store independently for each byte lane |
+| `loadContextRead` / `LoadQueueContext` | reads the allocated width, signedness, integer destination, atomic and `aq/rl` ownership by exact ROB tag; this is the later LSU completion source, never reconstructed from a bus response |
+| `LoadCompletion` | merges the retained byte-forward mask/data with a cache word and creates the `MemoryRetireMetadata` record keyed by the real ROB tag |
+| `StoreAddressUpdate` / `StoreDataUpdate` | fill separate SQ readiness state; its retained access width, mask, data and atomic ordering are emitted only with a commit-authorized effect; no cache, AXI, or device interface is present at this point |
+| `commitAuthorize` / `StoreEffect` / `StoreEffectComplete` | only an address-and-data-ready exact tag can be authorized; only an authorized tag can issue an effect, and success is required before it may retire |
+| `retire`, `squash`, `flush` | retirement reads metadata before releasing its local owner; selective squash removes only younger, non-authorized work; a flush asserts that it cannot discard an authorized store |
+
+The module asserts queue depth, unique live ownership by ROB tag, legal two-wide
+allocation, no transfers during recovery, and no retirement before the relevant
+load or committed store effect completes. `LoadStoreQueuesSpec` currently covers
+unknown address/data blocking, full and partial byte forwarding, same-address
+youngest-store selection, both queues full, commit-only store effects, atomic
+read/write metadata composition, metadata lifetime, and ROB-wrap selective
+recovery. Dual-LSU conflict resolution, PMA,
+fault creation, cache access, and AXI drains remain the next integration layer.
 
 ## Cache hierarchy
 
