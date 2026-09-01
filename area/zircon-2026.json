@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, four L2 demand-read MSHRs, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; retained ID-5 dirty-victim writeback is executable, but L2 AXI MSHRs, targeted dirty-cache flush/tohost visibility, external coherency, and formal L1I are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable, but targeted dirty-cache flush/tohost visibility, external coherency, formal L1I, and active I-side demand admission are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -120,40 +120,40 @@
       "source": "LoadStoreQueues SQ state including retained RV32A operation/destination, PMA/effect fault, and exact retire metadata"
     },
     {
-      "name": "axi_data_read_owner_line_buffers",
+      "name": "l2_demand_read_owner_line_buffers",
       "class": "register_payload",
       "entries": 4,
       "bits_per_entry": 256,
       "instances": 1,
       "replication_factor": 1,
-      "source": "AXIDataReadEngine ownerWords: four eight-word line buffers"
+      "source": "AXIDataReadEngine ownerWords: four eight-word L2 demand line buffers"
     },
     {
-      "name": "axi_data_read_owner_control",
+      "name": "l2_demand_read_owner_control",
       "class": "register_control",
       "entries": 4,
-      "bits_per_entry": 6,
+      "bits_per_entry": 9,
       "instances": 1,
       "replication_factor": 1,
-      "source": "AXIDataReadEngine ownerValid, four-bit beat counter, and ownerFault"
+      "source": "AXIDataReadEngine ownerValid, client kind/token, four-bit beat counter, and ownerFault"
     },
     {
-      "name": "axi_data_ar_hold",
+      "name": "l2_demand_ar_hold",
       "class": "register_control",
       "entries": 1,
-      "bits_per_entry": 35,
+      "bits_per_entry": 38,
       "instances": 1,
       "replication_factor": 1,
-      "source": "AXIDataReadEngine arPending and DataReadRequest hold register"
+      "source": "AXIDataReadEngine arPending, L2DemandRequest, and physical L2 MSHR hold registers"
     },
     {
-      "name": "axi_data_response_hold",
+      "name": "l2_demand_response_hold",
       "class": "register_payload",
       "entries": 1,
-      "bits_per_entry": 260,
+      "bits_per_entry": 261,
       "instances": 1,
       "replication_factor": 1,
-      "source": "AXIDataReadEngine responseValid and DataReadResponse hold register"
+      "source": "AXIDataReadEngine responseValid and L2DemandResponse hold register"
     },
     {
       "name": "l1d_store_result_hold",
@@ -532,12 +532,20 @@
       "source": "L1DLoadCache oldest filled-MSHR waiter selector"
     },
     {
-      "name": "axi_data_line_response_mux_inputs",
+      "name": "l2_demand_line_response_mux_inputs",
       "metric": "mux_input_bits",
       "units": 1,
       "width": 256,
       "fanin": 4,
-      "source": "AXIDataReadEngine selected-owner line response assembly"
+      "source": "AXIDataReadEngine selected L2-owner line response assembly"
+    },
+    {
+      "name": "l2_demand_response_client_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 3,
+      "fanin": 4,
+      "source": "AXIDataReadEngine selected L2-owner client kind and client-MSHR response metadata"
     },
     {
       "name": "top_axi_ar_mux_inputs",
@@ -545,7 +553,7 @@
       "units": 1,
       "width": 64,
       "fanin": 4,
-      "source": "ZirconCore locked fetch/L1D/device/atomic AXI address mux, conservatively rounded to 64 bits"
+      "source": "ZirconCore locked fetch/L2-demand/device/atomic AXI address mux, conservatively rounded to 64 bits"
     },
     {
       "name": "top_axi_write_mux_inputs",
@@ -626,6 +634,14 @@
       "width": 2,
       "fanin": 4,
       "source": "L1DLoadCache oldest unresolved L2-probe MSHR selector"
+    },
+    {
+      "name": "l2_demand_free_owner_select_bits",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 2,
+      "fanin": 4,
+      "source": "AXIDataReadEngine free physical L2 demand-MSHR selector"
     }
   ]
 }

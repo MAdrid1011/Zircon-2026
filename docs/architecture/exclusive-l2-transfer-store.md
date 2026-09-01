@@ -3,8 +3,9 @@
 `ExclusiveL2TransferStore` is the first state-owning L2 component under
 ADR-0012 and Issue #47. It implements the frozen four-way, 32-byte-line,
 4 KiB or 8 KiB D-side L2 geometry and the exclusive transfer boundary. Its
-dirty victim boundary is connected to the ID-5 AXI writeback owner; it still
-does not allocate L2 read MSHRs or serve I-side requests.
+dirty victim boundary is connected to the ID-5 AXI writeback owner; an L2
+lookup miss hands demand ownership to `AXIDataReadEngine`, while an L2 hit
+transfers the sole D copy locally.
 
 ## Parameters and interfaces
 
@@ -37,9 +38,9 @@ architectural completion.
 
 The surrounding hierarchy feeds L1D dirty evictions to `insert`, sends an L1D
 miss to `lookup`, routes a hit response directly to the L1D fill owner, and
-sends `victim` to `AXIL2WritebackEngine`. An L2 lookup miss remains blocked
-until an L2 MSHR and AXI refill exist; this component never fabricates cache
-data or an architectural load completion.
+sends `victim` to `AXIL2WritebackEngine`. On an L2 lookup miss, L1D allocates
+one `AXIDataReadEngine` L2 demand owner before issuing its eight-beat refill;
+this component never fabricates cache data or an architectural load completion.
 
 ## Invariants and counters
 

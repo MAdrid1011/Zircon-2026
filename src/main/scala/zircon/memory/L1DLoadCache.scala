@@ -36,8 +36,10 @@ class L1DLoadCache(
   val io = IO(new Bundle {
     val request = Flipped(Decoupled(new LoadStoreForward(config)))
     val completion = Decoupled(new LoadCompletion(config))
-    val dataRequest = Decoupled(new DataReadRequest(config))
-    val dataResponse = Flipped(Decoupled(new DataReadResponse(config)))
+    /** L2 owns physical AXI demand slots; L1D carries only its local MSHR
+      * token across this boundary. */
+    val dataRequest = Decoupled(new L2DemandRequest(config))
+    val dataResponse = Flipped(Decoupled(new L2DemandResponse(config)))
     /** Exclusive L1D<->L2 line moves. A new L1D miss first transfers any
       * resident victim, then probes L2 before issuing its AXI fallback. */
     val l2Insert = Decoupled(new CacheLineTransfer(config))
@@ -261,16 +263,21 @@ class L1DLoadCache(
   val hasUnissued = unissued.asUInt.orR
   val unissuedIndex = PriorityEncoder(unissued.asUInt)
   io.dataRequest.valid := hasUnissued && !recoveryBlocked
-  io.dataRequest.bits.mshr := unissuedIndex
+  io.dataRequest.bits.client := L2DemandClient.Data.U
+  io.dataRequest.bits.clientMshr := unissuedIndex
   io.dataRequest.bits.lineAddress := mshrLineAddress(unissuedIndex)
 
-  val responseMshrInRange = io.dataResponse.bits.mshr < mshrCount.U
+  val responseClientIsData = io.dataResponse.bits.client === L2DemandClient.Data.U
+  val responseMshrInRange = responseClientIsData &&
+    io.dataResponse.bits.clientMshr < mshrCount.U
   val responseMshrValid = responseMshrInRange &&
-    mshrValid(io.dataResponse.bits.mshr) &&
-    mshrIssued(io.dataResponse.bits.mshr) &&
-    !mshrFilled(io.dataResponse.bits.mshr)
+    mshrValid(io.dataResponse.bits.clientMshr) &&
+    mshrIssued(io.dataResponse.bits.clientMshr) &&
+    !mshrFilled(io.dataResponse.bits.clientMshr)
   io.dataResponse.ready := responseMshrValid
   when(io.dataResponse.valid) {
+    assert(responseClientIsData,
+      "L1D received an L2 demand response for another client")
     assert(responseMshrInRange, "L1D received an out-of-range data MSHR response")
     assert(responseMshrValid, "L1D received a response without a live MSHR owner")
   }
@@ -454,7 +461,7 @@ class L1DLoadCache(
     mshrIssued(unissuedIndex) := true.B
   }
   when(io.dataResponse.fire) {
-    val responseMshr = io.dataResponse.bits.mshr
+    val responseMshr = io.dataResponse.bits.clientMshr
     val responseHasStore = mshrStorePending(responseMshr)
     val responseStore = mshrStoreEffect(responseMshr)
     mshrFilled(responseMshr) := true.B

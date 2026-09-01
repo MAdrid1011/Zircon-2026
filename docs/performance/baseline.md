@@ -41,6 +41,7 @@ manifest 为 `partial` 时报告必须显示 `PARTIAL`，缺失结构不得按�
 当前 M3 L1D dirty/write-allocate、L1D-L2 exclusive transfer、ID-5 retained dirty
 writeback、data-AXI read、device/atomic owner 已将实际 LQ/SQ、L1D tag/data/dirty/MSHR
 store state、L2 transfer/victim state、AXI owner/line buffer、held request/response 与
-顶层 AW/W ownership lock 录入 candidate。该工作树记录为 67,038 storage bit、27,758
-mux-input-bit proxy、129 个 32-bit compare proxy 和 80 priority-select bit；Zircon-2024 manifest 同样仍有
+顶层 AW/W ownership lock 录入 candidate。四个 L2 demand-read owner 的 client token、
+physical-slot selector 和返回 metadata mux 也录入 candidate。该工作树记录为 67,054 storage bit、
+27,770 mux-input-bit proxy、129 个 32-bit compare proxy 和 88 priority-select bit；Zircon-2024 manifest 同样仍有
 缺项，因此这只是 `PARTIAL` 进度证据，不能比较作最终面积结论。

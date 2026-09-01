@@ -269,8 +269,11 @@ Dirty L1D victims enter L2 with their dirty bit; L2's two-entry dirty-victim
 FIFO transfers each replacement to `AXIL2WritebackEngine`, which retains one
 line and drains it through an ID-5 eight-beat AXI burst. A failing B response
 retries the retained line rather than discarding it. This is not yet final
-memory visibility: targeted dirty `tohost` eviction/flush, L2 AXI MSHRs, formal
-L1I, and coherent external atomic handling remain unfinished.
+memory visibility: targeted dirty `tohost` eviction/flush, formal L1I and its
+active demand admission, and coherent external atomic handling remain
+unfinished. `AXIDataReadEngine` now owns the four physical L2 demand slots and
+returns an exact client token rather than treating an L1D-local MSHR as an AXI
+ID; the current client is D-side only.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,

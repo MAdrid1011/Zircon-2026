@@ -178,16 +178,27 @@ class StoreWriteResult(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val accessFault = Bool()
 }
 
-/** A line-fill request from L1D to the sole data-side AXI read engine. */
-class DataReadRequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
-  val mshr = UInt(log2Ceil(config.l1d.mshrs).W)
+/** L2 demand clients share physical read MSHRs without reserving slots by
+  * cache. The current integration only drives `Data`; `Instruction` is the
+  * retained L1I contract rather than an implemented L1I request path.
+  */
+object L2DemandClient {
+  val Instruction = 0
+  val Data = 1
+}
+
+/** A line-fill request from a local cache MSHR to the L2 demand AXI owner. */
+class L2DemandRequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val client = UInt(1.W)
+  val clientMshr = UInt(log2Ceil(config.l2.mshrs).W)
   val lineAddress = UInt(32.W)
 }
 
-/** One fully drained eight-word cache-line response for its exact MSHR owner. */
-class DataReadResponse(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
-  val mshr = UInt(log2Ceil(config.l1d.mshrs).W)
-  val lineData = Vec(config.l1d.lineBytes / 4, UInt(32.W))
+/** One fully drained line response returned to the original local cache MSHR. */
+class L2DemandResponse(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val client = UInt(1.W)
+  val clientMshr = UInt(log2Ceil(config.l2.mshrs).W)
+  val lineData = Vec(config.l2.lineBytes / 4, UInt(32.W))
   val accessFault = Bool()
 }
 

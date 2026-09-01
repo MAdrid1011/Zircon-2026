@@ -35,7 +35,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
-  val dataReadEngine = Module(new AXIDataReadEngine(cfg))
+  val l2DemandEngine = Module(new AXIDataReadEngine(cfg))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
   val atomicEngine = Module(new AtomicMemoryEngine(cfg))
   val orderedIOCombiner = Module(new OrderedIOCombiner(config = cfg))
@@ -145,8 +145,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid &&
     cacheableLoadForward
   l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
-  l1dLoadCache.io.dataRequest <> dataReadEngine.io.request
-  l1dLoadCache.io.dataResponse <> dataReadEngine.io.response
+  l1dLoadCache.io.dataRequest <> l2DemandEngine.io.request
+  l1dLoadCache.io.dataResponse <> l2DemandEngine.io.response
   l1dLoadCache.io.l2Insert <> l2TransferStore.io.insert
   l1dLoadCache.io.l2Lookup <> l2TransferStore.io.lookup
   l1dLoadCache.io.l2Response <> l2TransferStore.io.response
@@ -377,7 +377,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val arTurn = RegInit(0.U(2.W)) // 0 fetch, 1 L1D refill, 2 ordered device, 3 atomic.
   val arClientValid = Wire(Vec(4, Bool()))
   arClientValid(0) := frontend.io.ar.valid
-  arClientValid(1) := dataReadEngine.io.ar.valid
+  arClientValid(1) := l2DemandEngine.io.ar.valid
   arClientValid(2) := orderedIOEngine.io.ar.valid
   arClientValid(3) := atomicEngine.io.ar.valid
   val arTurnNext = Mux(arTurn === 3.U, 0.U(2.W), arTurn + 1.U)
@@ -389,15 +389,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       Mux(arClientValid(arTurnAfterNext), arTurnAfterNext, arTurnAfterAfterNext)))
   val selectedArOwner = Mux(arLockValid, arLockOwner, unlockedArOwner)
   io.axi.ar.valid := Mux(selectedArOwner === 0.U, frontend.io.ar.valid,
-    Mux(selectedArOwner === 1.U, dataReadEngine.io.ar.valid,
+    Mux(selectedArOwner === 1.U, l2DemandEngine.io.ar.valid,
       Mux(selectedArOwner === 2.U, orderedIOEngine.io.ar.valid,
         atomicEngine.io.ar.valid)))
   io.axi.ar.bits := Mux(selectedArOwner === 0.U, frontend.io.ar.bits,
-    Mux(selectedArOwner === 1.U, dataReadEngine.io.ar.bits,
+    Mux(selectedArOwner === 1.U, l2DemandEngine.io.ar.bits,
       Mux(selectedArOwner === 2.U, orderedIOEngine.io.ar.bits,
         atomicEngine.io.ar.bits)))
   frontend.io.ar.ready := io.axi.ar.ready && selectedArOwner === 0.U
-  dataReadEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 1.U
+  l2DemandEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 1.U
   orderedIOEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 2.U
   atomicEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 3.U
   when(!arLockValid && io.axi.ar.valid && !io.axi.ar.ready) {
@@ -415,14 +415,14 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val rToAtomic = io.axi.r.bits.id === 7.U
   frontend.io.r.valid := io.axi.r.valid && rToFetch
   frontend.io.r.bits := io.axi.r.bits
-  dataReadEngine.io.r.valid := io.axi.r.valid && rToData
-  dataReadEngine.io.r.bits := io.axi.r.bits
+  l2DemandEngine.io.r.valid := io.axi.r.valid && rToData
+  l2DemandEngine.io.r.bits := io.axi.r.bits
   orderedIOEngine.io.r.valid := io.axi.r.valid && rToOrderedIO
   orderedIOEngine.io.r.bits := io.axi.r.bits
   atomicEngine.io.r.valid := io.axi.r.valid && rToAtomic
   atomicEngine.io.r.bits := io.axi.r.bits
   io.axi.r.ready := Mux(rToFetch, frontend.io.r.ready,
-    Mux(rToData, dataReadEngine.io.r.ready,
+    Mux(rToData, l2DemandEngine.io.r.ready,
       Mux(rToOrderedIO, orderedIOEngine.io.r.ready,
         Mux(rToAtomic, atomicEngine.io.r.ready, false.B))))
   when(io.axi.r.valid) {

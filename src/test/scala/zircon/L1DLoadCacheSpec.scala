@@ -2,7 +2,7 @@ package zircon
 
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
-import zircon.memory.L1DLoadCache
+import zircon.memory.{L1DLoadCache, L2DemandClient}
 
 class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
   private def clear(dut: L1DLoadCache): Unit = {
@@ -17,7 +17,8 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.completion.ready.poke(false)
     dut.io.dataRequest.ready.poke(false)
     dut.io.dataResponse.valid.poke(false)
-    dut.io.dataResponse.bits.mshr.poke(0)
+    dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+    dut.io.dataResponse.bits.clientMshr.poke(0)
     dut.io.dataResponse.bits.lineData.foreach(_.poke(0))
     dut.io.dataResponse.bits.accessFault.poke(false)
     dut.io.l2Insert.ready.poke(true)
@@ -133,12 +134,15 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.clock.step()
     dut.io.l2Response.valid.poke(false)
     dut.io.dataRequest.valid.expect(true)
+    dut.io.dataRequest.bits.client.expect(L2DemandClient.Data)
+    dut.io.dataRequest.bits.clientMshr.expect(0)
     dut.io.dataRequest.bits.lineAddress.expect(lineAddress)
     dut.io.dataRequest.ready.poke(true)
     dut.clock.step()
     dut.io.dataRequest.ready.poke(false)
     dut.io.dataResponse.valid.poke(true)
-    dut.io.dataResponse.bits.mshr.poke(0)
+    dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+    dut.io.dataResponse.bits.clientMshr.poke(0)
     dut.io.dataResponse.bits.accessFault.poke(fault)
     for ((word, index) <- words.zipWithIndex) {
       dut.io.dataResponse.bits.lineData(index).poke(word)
@@ -163,6 +167,8 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.clock.step()
     dut.io.l2Response.valid.poke(false)
     dut.io.dataRequest.valid.expect(true)
+    dut.io.dataRequest.bits.client.expect(L2DemandClient.Data)
+    dut.io.dataRequest.bits.clientMshr.expect(0)
     dut.io.dataRequest.bits.lineAddress.expect(lineAddress)
     dut.io.dataRequest.ready.poke(true)
     dut.clock.step()

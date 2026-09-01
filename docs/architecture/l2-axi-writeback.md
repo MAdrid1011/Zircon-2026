@@ -41,8 +41,9 @@ count, and a 4 KiB-crossing burst are assertions.
 The owner makes evicted dirty lines externally visible, including a line whose
 first word is a `tohost` value after it has reached L2 replacement. It does not
 yet provide a targeted cache flush, so a dirty resident L1D/L2 line is not
-forced out merely by `tohost` or `FENCE`. L2 AXI MSHRs, I-side allocation, and
-external coherent atomics remain later M3 work.
+forced out merely by `tohost` or `FENCE`. `AXIDataReadEngine` separately owns
+the four L2 demand-read MSHRs; active I-side allocation and external coherent
+atomics remain later M3 work.
 
 ## Verification Mapping
 

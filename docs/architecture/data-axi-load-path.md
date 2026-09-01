@@ -1,4 +1,4 @@
-# M3 data AXI and L1D load-path architecture
+# M3 L2 demand AXI and L1D load-path architecture
 
 This document defines the first executable cacheable-load slice of the frozen
 M3 memory contract in ADR-0012 and Issue #47. It does not relax the final L1D,
@@ -11,12 +11,15 @@ owners are implemented.
 
 `L1DLoadCache` uses the frozen 1 KiB, two-way, 32-byte-line L1D geometry:
 16 sets, eight 32-bit words per line, and four independently owned miss slots.
-The initial slice remains read-only for L1D data. Commit-authorized stores,
-AMOs, dirty state, writeback, and device traffic are not accepted by this
-module and remain blocked at their existing legal boundaries. A later clean
-exclusive transfer stage now probes `ExclusiveL2TransferStore` before the AXI
+The initial load slice was read-only; the current module additionally accepts
+commit-authorized cacheable stores, performs dirty write-allocate, and transfers
+dirty victims to the exclusive L2/ID-5 writeback path. AMOs and device traffic
+retain their separate M0 owners. The exclusive transfer stage probes
+`ExclusiveL2TransferStore` before the AXI
 fallback: L1D victims move into L2 and an L2 hit moves its sole copy back to
-L1D. That stage does not yet provide dirty write-back or L2 AXI MSHRs.
+L1D. Dirty write-back has a retained ID-5 owner and an L2 miss allocates a
+separate L2 demand AXI owner rather than treating the L1D-local MSHR as an AXI
+ID.
 
 The cache accepts a `LoadStoreForward` only when its retained LQ owner marks it
 cacheable, and it has either an immediate response slot or a free miss-waiter
@@ -34,20 +37,22 @@ accepted. The refill installs the line and returns pending waiters one at a
 time through `LoadCompletion`. The LQ controls response backpressure, so a
 completion buffer full condition never loses a cache response.
 
-## Data AXI read engine
+## L2 demand AXI read engine
 
-`AXIDataReadEngine` is the only data-side AXI read client. It accepts line-read
-requests from L1D and reserves IDs 1 through 4; instruction fetch retains ID 0.
-For every accepted request it emits one 8-beat, 32-bit, aligned INCR burst with
-`len=7` and `size=2`. It may own four accepted bursts and one held AR payload.
+`AXIDataReadEngine` owns L2 demand slots rather than L1D-local MSHRs. It accepts
+an `L2DemandRequest` carrying a client kind and client-local token, allocates
+one of four physical L2 owners, and reserves IDs 1 through 4; instruction fetch
+retains ID 0. For every accepted request it emits one 8-beat, 32-bit, aligned
+INCR burst with `len=7` and `size=2`. It may own four accepted bursts and one
+held AR payload.
 
-An owner record contains the MSHR index, line address, received-beat count,
-accumulated line words, and a sticky response-error bit. R beats may interleave
-by ID. The engine checks that every beat belongs to a live owner, has the exact
-expected count, and asserts `last` only on beat seven. A non-OKAY/non-EXOKAY
-response becomes a sticky line error returned to the original MSHR. Unknown ID,
-duplicate/extra beat, early/late `last`, and a 4 KiB-crossing request are
-immediate assertions.
+An owner record contains the L2 slot, requesting client/token, line address,
+received-beat count, accumulated line words, and a sticky response-error bit.
+R beats may interleave by ID. The engine checks that every beat belongs to a
+live owner, has the exact expected count, and asserts `last` only on beat seven.
+A non-OKAY/non-EXOKAY response becomes a sticky line error returned to the
+original client token. Unknown ID, duplicate/extra beat, early/late `last`, and
+a 4 KiB-crossing request are immediate assertions.
 
 An accepted AR is never retracted. On recovery, L1D removes only killed waiter
 records. Its owning MSHR and the data engine keep the AXI transaction alive
@@ -79,9 +84,10 @@ can be interpreted as a fetch or data result.
 - Selective recovery/global flush creates no architectural completion for a
   killed load and never drops an accepted AXI read.
 
-`AXIDataReadEngineSpec` covers AR/R backpressure, four owners, ID interleaving,
-response errors, and beat/`last` assertions. `L1DLoadCacheSpec` covers hit,
-miss, same-line secondary merge, four-MSHR backpressure, refill response
+`AXIDataReadEngineSpec` covers client-token preservation, AR/R backpressure,
+four L2 owners, ID interleaving, response errors, and beat/`last` assertions.
+`L1DLoadCacheSpec` covers hit, miss, same-line secondary merge, four-MSHR
+backpressure, refill response
 backpressure, forwarding-only completion, non-cacheable rejection, and recovery
 drain. `CoreShellSpec` adds an AXI-fed cacheable RV32I load that writes the real
 returned value and retires exactly once, plus DeviceStrong, DeviceBurstable, and
