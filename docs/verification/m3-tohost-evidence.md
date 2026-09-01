@@ -1,16 +1,18 @@
-# M3 Deterministic `tohost` Evidence
+# M3 Deterministic `tohost` and Bounded Spike Evidence
 
-This record binds the first deterministic, `tohost`-completing M3 ELF runs to
-the exact local source revisions and generated artifacts. It is execution
-evidence, not a Spike/Sail committed-memory differential result and not an M3
-release claim.
+This record binds deterministic, `tohost`-completing M3 ELF runs and the first
+bounded committed-memory comparisons to the exact local source revisions and
+generated artifacts. It is local execution evidence, not an M3 release claim
+and not Sail committed-memory evidence.
 
 ## Revisions and invocation
 
-The parent source was `88b6a278ccbb7dcaecca7c5702c5ce784ded3b06`; the
-ZirconSim submodule was `cdb4786dc8b31e1cafcad770ea4ba943a477bc6a`; and the
-RV-Software submodule was `11d6eae150d47aab32aca3340e30ba61ddcbb2f0`.
-All runs used the locked toolchain and deterministic AXI seed `1`:
+The first completion pass used parent source
+`88b6a278ccbb7dcaecca7c5702c5ce784ded3b06`; the committed-memory comparison
+below used parent source `fe35bbb32e08f1d23445107780c58e64f4a1b5e5`. Both use
+ZirconSim `2bce488562b756a572be9a9004d720a5eb4bab42` and RV-Software
+`11d6eae150d47aab32aca3340e30ba61ddcbb2f0`. All runs used deterministic AXI
+seed `1` and the locked toolchain:
 
 ```bash
 make -C ZirconSim tohost
@@ -33,12 +35,13 @@ that the trace metadata and backing memory agree before reporting success.
 
 ## Remaining proof obligations
 
-`CommitTraceDiff` intentionally rejects events with memory metadata, traps,
-interrupts, and FPR state. These four passes therefore do not establish ISA
-equivalence of their loads, stores, or atomics. The next verification change
-must compare committed load/store/atomic metadata and final backing-memory
-state against locked Spike and Sail, then add error and backpressure stress
-with explicit seeds.
+The earlier M1/M2 prefix comparator intentionally rejected memory metadata.
+The M3 `diff-memory-spike` path used below does compare memory metadata and
+final backing-memory state against locked Spike. It still rejects traps,
+interrupts, floating state, unsupported memory encodings, and Sail logs; it
+does not establish full ISA equivalence of loads, stores, atomics, or cache
+ordering. The next verification change must add a Sail memory adapter and
+error/backpressure stress with explicit seeds.
 
 ## Committed-memory differential harness status
 
@@ -57,8 +60,32 @@ make -C ZirconSim tohost
 ```
 
 The latter reproduced the table's four seed-1 completions and produced a
-backing-memory snapshot for each run. No locked Spike executable was available
-for a complete `diff-memory-spike` invocation, so this is harness and local
-completion evidence only. It must not be read as a successful Spike
-committed-memory differential; a Sail memory trace adapter also remains
-required.
+backing-memory snapshot for each run.
+
+On 2026-09-01, an isolated checkout of
+`riscv-software-src/riscv-isa-sim` at the locked source SHA
+`c09c0cce98696f52abe0fe8c11f93f9ed74dc2bb` was configured and built locally.
+Its `Spike RISC-V ISA Simulator 1.1.1-dev` binary ran:
+
+```bash
+make -C ZirconSim diff-memory-spike \
+  SPIKE=/home/madrid/.cache/zircon-2026-spike-c09c0cce/build/spike
+```
+
+All four bounded comparisons passed: RV32I CSR prefix `19` ordered
+retirements, RV32I ALU/branch prefix `34`, RV32M prefix `19`, and RV32A
+AMO/LR/SC prefix `12`. For every case `CommitTraceDiff` matched the ordered
+retire fields, committed memory address/masks/read/write data, and all touched
+words in the deterministic AXI backing-memory snapshot against Spike.
+
+| ELF | Spike log SHA256 | Backing-memory SHA256 |
+| --- | --- | --- |
+| `rv32i-commit-prefix.elf` | `12442ec45c455dda9b7d726c5bad817128b3dabc608d8f1134fed785f7e05ece` | `799b638079395e494dcabf864a0f34478b17d0d51b8680e6ae882b1e56ba2444` |
+| `rv32i-alu-branch-prefix.elf` | `9281adf96724b536b6fd645fb45aa57d0502a3a4b3f60c5c0dbaa1d58a5d5064` | `32742d6c5d31b82db209a695f66065ca1beb088927dedbee5b50441dc779a411` |
+| `rv32m-commit-prefix.elf` | `5017a789b5f38771a065152b74b182bafe2f54d93d59ecfd5e05c30dfd546977` | `f59164e11cf286b691649dad57479455d701ef3483c0ccb827bc10424cf00a91` |
+| `rv32a-tohost.elf` | `ad6e0bce0c695896484efc8a6ae13554d6fe0fe8e3665278b17e86bd40d869d2` | `e5123413fd054435036ee98d7356c29de14101ba14ad0dac7878002b3b05028b` |
+
+The comparison is deliberately bounded to these four directed ELFs. A Sail
+memory-trace adapter, cache-global FENCE/I-D coherence, explicit-seed random
+AXI error/backpressure stress, full dual-LSU conflict coverage, and broader
+Spike/Sail/ACT4 campaigns remain required.
