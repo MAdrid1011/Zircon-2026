@@ -26,3 +26,11 @@ valid 在握手前必须保持，ready 可独立回压。R channel 可在不同 
 - `trap/interrupt/cause/trapValue/fflags`
 
 `order` 是跨双退休 lane 单调递增的 64-bit 指令序号。事件直接使用 retired ROB entry 或 trap 的真实 faulting/interrupted ROB entry；lane-1 exception 保留 older lane-0 retirement 后的 trap 顺序。综合配置不生成 trace 端口、formatter 或 order counter，避免验证状态进入面积结果。
+
+## Trace host flush
+
+仅当 `enableTrace=true` 且 `enableHostFlush=true` 时，`ZirconCoreIO` 额外生成输入
+`hostFlush { enable, address }`。它允许 ZirconSim 在解析 ELF `tohost` 符号后选择一个
+精确地址；命中的 committed cacheable store 必须等其 dirty line 经 ID-5 成功 B response
+外部可见才退休。默认综合配置没有该端口、控制器或任何相关状态，因此它不进入生产面积或
+ISA 行为。完整协议见 [`trace-host-flush.md`](trace-host-flush.md)。

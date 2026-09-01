@@ -7,7 +7,8 @@ object Elaborate extends App {
   val traceEnabled = args.contains("--trace")
   val stageArgs = args.filterNot(_ == "--trace")
   ChiselStage.emitSystemVerilogFile(
-    new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = traceEnabled)),
+    new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = traceEnabled,
+      enableHostFlush = traceEnabled)),
     args = stageArgs,
     firtoolOpts = Array(
       "-disable-all-randomization",

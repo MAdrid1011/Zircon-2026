@@ -10,9 +10,10 @@ test:
 # Fast, focused M3 cacheable-store regression. Each invocation is intentionally
 # bounded well below the five-minute component-simulation target.
 test-m3-store:
-	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a cacheable store"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "cacheable store BRESP error"'
+	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.AXIL2WritebackEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.ExclusiveL2TransferStoreSpec zircon.HostStoreFlushSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "write-allocates a cacheable store"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps a cacheable store local"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "delays a trace-selected cacheable store retirement"'
 
 # Fast, focused M3 M0/M1 load-admission regression. It verifies that the
 # unfinished M0 device/atomic owner cannot leak through the executable L1D

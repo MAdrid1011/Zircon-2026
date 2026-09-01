@@ -268,10 +268,12 @@ resident or newly allocated line, marks it dirty, and retains its exact result.
 Dirty L1D victims enter L2 with their dirty bit; L2's two-entry dirty-victim
 FIFO transfers each replacement to `AXIL2WritebackEngine`, which retains one
 line and drains it through an ID-5 eight-beat AXI burst. A failing B response
-retries the retained line rather than discarding it. This is not yet final
-memory visibility: targeted dirty `tohost` eviction/flush, formal L1I and its
-active demand admission, and coherent external atomic handling remain
-unfinished. `AXIDataReadEngine` now owns the four physical L2 demand slots and
+retries the retained line rather than discarding it. Trace elaborations provide
+a targeted dirty `tohost` bridge that transfers the exact L1D line to L2,
+evicts it, and holds the committed store until its ID-5 B response; it is not a
+general `FENCE` implementation or production hardware. Formal L1I and its
+active demand admission, coherent external atomic handling, and general cache
+ordering remain unfinished. `AXIDataReadEngine` now owns the four physical L2 demand slots and
 returns an exact client token rather than treating an L1D-local MSHR as an AXI
 ID; the current client is D-side only.
 

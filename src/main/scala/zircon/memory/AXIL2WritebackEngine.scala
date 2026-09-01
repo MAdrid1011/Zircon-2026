@@ -32,6 +32,8 @@ class AXIL2WritebackEngine(
     val w = Decoupled(new AXI4WriteData(dataWidth = 32))
     val b = Flipped(Decoupled(new AXI4WriteResponse(idWidth = 4)))
     val busy = Output(Bool())
+    /** Pulses only after the retained line receives an OKAY/EXOKAY B response. */
+    val completed = Output(Valid(UInt(32.W)))
     /** Sticks once an AXI B error has caused a retained-line retry. */
     val retryObserved = Output(Bool())
   })
@@ -65,6 +67,8 @@ class AXIL2WritebackEngine(
 
   io.b.ready := active && awSent && writeComplete
   io.busy := active
+  io.completed.valid := false.B
+  io.completed.bits := line.lineAddress
   io.retryObserved := retryObserved
 
   when(io.victim.fire) {
@@ -95,6 +99,7 @@ class AXIL2WritebackEngine(
   }
   when(io.b.fire) {
     when(success(io.b.bits.resp)) {
+      io.completed.valid := true.B
       active := false.B
       awSent := false.B
       wordsSent := 0.U

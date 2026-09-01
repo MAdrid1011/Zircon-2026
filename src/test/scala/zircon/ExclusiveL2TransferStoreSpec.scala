@@ -13,6 +13,8 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     dut.io.lookup.valid.poke(false)
     dut.io.lookup.bits.lineAddress.poke(0)
     dut.io.response.ready.poke(false)
+    dut.io.flushLine.valid.poke(false)
+    dut.io.flushLine.bits.poke(0)
     dut.io.invalidate.valid.poke(false)
     dut.io.invalidate.bits.poke(0)
     dut.io.victim.ready.poke(false)
@@ -122,6 +124,40 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         lookup(dut, line)
         dut.io.response.valid.expect(true)
         dut.io.response.bits.hit.expect(false)
+      }
+    }
+
+    it("moves an exact dirty L2 line into the retained victim FIFO") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val line = BigInt("80002800", 16)
+        val words = Seq.tabulate(8)(word => BigInt("babe0000", 16) + word)
+        insert(dut, line, words, dirty = true)
+
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(line)
+        dut.io.flushLine.ready.expect(true)
+        dut.clock.step()
+        dut.io.flushLine.valid.poke(false)
+        dut.io.residentLineCount.expect(0)
+        dut.io.victim.valid.expect(true)
+        dut.io.victim.bits.lineAddress.expect(line)
+        dut.io.victim.bits.dirty.expect(true)
+        words.zipWithIndex.foreach { case (word, index) =>
+          dut.io.victim.bits.lineData(index).expect(word)
+        }
+      }
+    }
+
+    it("does not accept a targeted flush for a clean L2 line") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val line = BigInt("80002c00", 16)
+        insert(dut, line, Seq.fill(8)(BigInt("1badb002", 16)), dirty = false)
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(line)
+        dut.io.flushLine.ready.expect(false)
+        dut.io.victim.valid.expect(false)
       }
     }
 

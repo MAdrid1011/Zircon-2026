@@ -46,6 +46,7 @@ final case class ZirconCoreConfig(
     hartId: Int = 0,
     enableTrace: Boolean = false,
     enableM2Observation: Boolean = false,
+    enableHostFlush: Boolean = false,
     fetchWidth: Int = 4,
     decodeWidth: Int = 2,
     commitWidth: Int = 2,
@@ -71,6 +72,8 @@ final case class ZirconCoreConfig(
   require(intPhysicalRegisters == 56)
   require(l1i.bytes == 1024 && l1d.bytes == 1024)
   require(l2.bytes == 4096 || l2.bytes == 8192, "L2 is restricted to the measured 4/8 KiB points")
+  require(!enableHostFlush || enableTrace,
+    "the trace-only host flush control cannot exist in a production configuration")
   require(resetVector >= 0 && resetVector < (BigInt(1) << 32))
   require((resetVector & 3) == 0, "reset vector must satisfy IALIGN=32")
   require(hartId >= 0 && BigInt(hartId) < (BigInt(1) << 32),

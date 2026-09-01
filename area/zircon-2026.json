@@ -5,7 +5,7 @@
   "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, four L2 demand-read MSHRs, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable, but targeted dirty-cache flush/tohost visibility, external coherency, formal L1I, and active I-side demand admission are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger; general dirty-cache flush/FENCE semantics, external coherency, formal L1I, and active I-side demand admission are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"

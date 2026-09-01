@@ -11,6 +11,13 @@ class InterruptInputs extends Bundle {
   val mtip = Bool()
 }
 
+/** Simulation-only host address that must become externally visible before its
+  * matching cacheable store can retire. This port exists only with trace. */
+class HostFlushControl extends Bundle {
+  val enable = Bool()
+  val address = UInt(32.W)
+}
+
 /** Test-only M2/M3 handshakes. This port is absent from every production config. */
 class M2Observation extends Bundle {
   val e0Start = Bool()
@@ -36,4 +43,5 @@ class ZirconCoreIO(cfg: ZirconCoreConfig) extends Bundle {
   val interrupts = Input(new InterruptInputs)
   val trace = if (cfg.enableTrace) Some(Output(Vec(cfg.commitWidth, new RetireEvent))) else None
   val m2Observation = if (cfg.enableM2Observation) Some(Output(new M2Observation)) else None
+  val hostFlush = if (cfg.enableHostFlush) Some(Input(new HostFlushControl)) else None
 }

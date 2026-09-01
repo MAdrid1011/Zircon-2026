@@ -48,6 +48,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     dut.io.axi.r.bits.data.poke(0)
     dut.io.axi.r.bits.resp.poke(0)
     dut.io.axi.r.bits.last.poke(false)
+    dut.io.hostFlush.foreach { control =>
+      control.enable.poke(false)
+      control.address.poke(0)
+    }
   }
 
   private def sendInstructionPacket(dut: ZirconCore, words: Seq[BigInt],
@@ -350,6 +354,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         clearInputs(dut)
         assert(dut.io.trace.isEmpty)
         assert(dut.io.m2Observation.isEmpty)
+        assert(dut.io.hostFlush.isEmpty)
       }
     }
 
@@ -426,6 +431,57 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         assert(!externalWrite, "cacheable store unexpectedly reached the write channel")
         assert(events.exists(event => event.pc == ResetVector + 8 && !event.trap),
           s"cacheable store did not retire locally: $events")
+      }
+    }
+
+    it("delays a trace-selected cacheable store retirement until its ID-5 writeback") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableHostFlush = true))) { dut =>
+        clearInputs(dut)
+        val storeAddress = BigInt("80000100", 16)
+        dut.io.hostFlush.get.enable.poke(true)
+        dut.io.hostFlush.get.address.poke(storeAddress)
+        val writebackAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val writebackWords = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        var id5BSeen = false
+        var storeRetiredBeforeB = false
+        val program = Map[BigInt, BigInt](
+          ResetVector -> BigInt("00000097", 16), // auipc x1,0
+          ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+          ResetVector + 8 -> BigInt("1020a023", 16), // sw x2,256(x1)
+          ResetVector + 12 -> BigInt("00100073", 16) // ebreak
+        )
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 384,
+          writeResponse = Some(0), observeCycle = (core, _) => {
+            val storeRetired = core.io.trace.get.exists(lane =>
+              lane.valid.peek().litToBoolean && lane.pc.peek().litValue == ResetVector + 8)
+            storeRetiredBeforeB ||= storeRetired && !id5BSeen
+            val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+              core.io.axi.aw.ready.peek().litToBoolean
+            val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+              core.io.axi.w.ready.peek().litToBoolean
+            if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+              writebackAddresses += core.io.axi.aw.bits.addr.peek().litValue
+              core.io.axi.aw.bits.len.expect(7)
+            }
+            if (wFire && writebackAddresses.nonEmpty) {
+              writebackWords += core.io.axi.w.bits.data.peek().litValue
+            }
+            val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+              core.io.axi.b.ready.peek().litToBoolean &&
+              core.io.axi.b.bits.id.peek().litValue == 5
+            id5BSeen ||= bFire
+          }))
+
+        withClue(s"host-flush trace=$events writes=$writebackAddresses/$writebackWords") {
+          assert(writebackAddresses.toSeq == Seq(storeAddress))
+          assert(writebackWords.toSeq == Seq(BigInt(90)) ++ Seq.fill(7)(Nop))
+          assert(id5BSeen)
+          assert(!storeRetiredBeforeB, "store retired before its successful ID-5 B response")
+          assert(events.exists(event => event.pc == ResetVector + 8 &&
+            event.memoryAddress == storeAddress && event.memoryWriteMask == 15 &&
+            event.memoryWriteData == 90 && !event.trap))
+        }
       }
     }
 

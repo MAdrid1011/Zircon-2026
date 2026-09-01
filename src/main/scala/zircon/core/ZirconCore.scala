@@ -8,8 +8,8 @@ import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPip
 import zircon.frontend.M1Frontend
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
-  LoadCompletion, OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer,
-  StoreWriteResult}
+  HostStoreFlush, LoadCompletion, OrderedIOCombiner, OrderedIOGroup,
+  OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -274,7 +274,23 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.loadComplete <> loadCompletionArbiter.io.out
 
   val storeResultArbiter = Module(new Arbiter(new StoreWriteResult(cfg), 2))
-  storeResultArbiter.io.in(0) <> l1dLoadCache.io.storeResult
+  if (cfg.enableHostFlush) {
+    val hostStoreFlush = Module(new HostStoreFlush(cfg))
+    val hostControl = io.hostFlush.get
+    hostStoreFlush.io.enabled := hostControl.enable
+    hostStoreFlush.io.address := hostControl.address
+    hostStoreFlush.io.l1dFlush <> l1dLoadCache.io.flushLine
+    hostStoreFlush.io.l2Flush <> l2TransferStore.io.flushLine
+    hostStoreFlush.io.writebackComplete := l2WritebackEngine.io.completed
+    hostStoreFlush.io.input <> l1dLoadCache.io.storeResult
+    storeResultArbiter.io.in(0) <> hostStoreFlush.io.output
+  } else {
+    l1dLoadCache.io.flushLine.valid := false.B
+    l1dLoadCache.io.flushLine.bits := 0.U
+    l2TransferStore.io.flushLine.valid := false.B
+    l2TransferStore.io.flushLine.bits := 0.U
+    storeResultArbiter.io.in(0) <> l1dLoadCache.io.storeResult
+  }
   storeResultArbiter.io.in(1) <> deviceStoreResult
   lsuIngress.io.loadContextRead.valid := false.B
   lsuIngress.io.loadContextRead.bits := 0.U

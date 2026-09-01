@@ -60,9 +60,12 @@ recovery without removing the store owner. The implementation asserts:
 ## Verification mapping
 
 `L1DLoadCacheSpec` covers byte-masked store hits, store-miss write allocation,
-exact fault/result retention, and dirty victim transfer. `CoreShellSpec` runs a
-real RV32I store from AXI-fed instructions, verifies its retire metadata, and
-proves no per-store external write occurs. `AXIL2WritebackEngineSpec` now adds
-the ID-5 burst and B-error retry evidence, while `CoreShellSpec` forces a dirty
-L2 replacement and observes its merged writeback payload. Targeted dirty
-`tohost` eviction/flush visibility remains required.
+exact fault/result retention, dirty victim transfer, and trace-selected exact
+dirty-line transfer. `CoreShellSpec` runs a real RV32I store from AXI-fed
+instructions, verifies its retire metadata, and proves no per-store external
+write occurs. `AXIL2WritebackEngineSpec` adds the ID-5 burst and B-error retry
+evidence, while `CoreShellSpec` forces a dirty L2 replacement and observes its
+merged writeback payload. In trace elaborations, `HostStoreFlush` adds directed
+evidence that a selected `tohost` store does not retire until its exact ID-5 B
+response; ZirconSim still needs to drive the control from an ELF symbol and
+gate host exit on observed backing memory.

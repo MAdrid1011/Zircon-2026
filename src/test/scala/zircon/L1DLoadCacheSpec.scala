@@ -28,6 +28,8 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.bits.transfer.lineAddress.poke(0)
     dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
     dut.io.l2Response.bits.transfer.dirty.poke(false)
+    dut.io.flushLine.valid.poke(false)
+    dut.io.flushLine.bits.poke(0)
     dut.io.storeRequest.valid.poke(false)
     dut.io.storeRequest.bits.robTag.poke(0)
     dut.io.storeRequest.bits.address.poke(0)
@@ -455,6 +457,52 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.l2Insert.bits.lineData(0).expect(BigInt("decafbad", 16))
         dut.clock.step()
         dut.io.request.valid.poke(false)
+      }
+    }
+
+    it("flushes only an exact resident dirty line through the L2 transfer boundary") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80004800", 16)
+        val words = Seq.tabulate(8)(word => BigInt("33000000", 16) + word)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 2, line, mask = 15, data = BigInt("decafbad", 16))
+        consumeStoreResult(dut, tag = 2, line)
+
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(line)
+        dut.io.flushLine.ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(line)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(0).expect(BigInt("decafbad", 16))
+        dut.clock.step()
+        dut.io.flushLine.valid.poke(false)
+
+        submit(dut, tag = 3, line)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
+    it("does not accept a targeted flush for a clean resident line") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80004c00", 16)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, Seq.fill(8)(BigInt("12345678", 16)), lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(line)
+        dut.io.flushLine.ready.expect(false)
+        dut.io.l2Insert.valid.expect(false)
       }
     }
 
