@@ -140,6 +140,13 @@ generated here. `ZirconCore` wires the two buffers to frozen completion endpoint
 M0/M1 and shares their operand reads with E2 through the top-level PRF-port
 arbiter.
 
+A normal non-atomic `Memory`-PMA load reaches the executable L1D slice whether
+MemIQ issued it through M0 or M1; the retained `m1Owner` bit routes its real
+L1D completion to the matching endpoint. Device and atomic M0 owners do not
+enter that path. The current LQ-to-L1D forwarding boundary remains one request
+wide, so it serializes two ready cacheable loads. This restores M0 load
+correctness but does not claim the frozen dual-port hit/miss matrix.
+
 ## PMA and precise exceptions
 
 `PMAClassifier` remains first-match by configuration order. Its default regions
@@ -295,6 +302,10 @@ and same-line secondary merge. Its two LSU requests define an explicit conflict
 matrix: dual hit may proceed when bank/port resources allow; hit/miss, dual miss,
 same bank/set/line/address, MSHR full, and victim-full cases either allocate their
 specified resource or backpressure/replay deterministically.
+The executable slice currently preserves both M0 and M1 cacheable-load
+ownership but has one LQ-forward/L1D request port, so it deterministically
+serializes the pair. It cannot close this matrix until the request, bank, MSHR,
+and completion paths are widened with directed conflict evidence.
 
 L2 has four ways and four MSHRs. The 4 KiB (32-set) configuration is the default;
 8 KiB is solely the M5 A/B point. L2 dynamically serves I and D demand and does

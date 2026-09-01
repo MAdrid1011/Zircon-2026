@@ -140,8 +140,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.squash := backend.io.squash
   lsuIngress.io.flush := backend.io.globalFlush
   val cacheableLoadForward = lsuIngress.io.loadForward.bits.cacheable
-  // Device/atomic candidates must still record their LQ address. Only the
-  // cacheable M1 record consumes L1D ready; M0 execution owns the other path.
+  // Device and atomic candidates retain their ordered M0 owner. Any normal
+  // Memory-PMA load, whether dispatched through M0 or M1, consumes L1D ready;
+  // its retained LQ owner bit routes the real completion back to M0 or M1.
   lsuIngress.io.loadForwardReady := Mux(cacheableLoadForward,
     l1dLoadCache.io.request.ready, true.B)
   l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid &&

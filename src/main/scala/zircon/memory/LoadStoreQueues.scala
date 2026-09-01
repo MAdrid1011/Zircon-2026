@@ -234,8 +234,8 @@ class LoadStoreQueues(
   io.loadForward.bits.forwardMask := requestedForwardMask
   io.loadForward.bits.forwardData := forwardData
   io.loadForward.bits.requiresCache := requestedForwardMask =/= io.loadAddress.bits.readMask
-  io.loadForward.bits.cacheable := lqM1Owner(loadAddressIndex) &&
-    !lqIsAtomic(loadAddressIndex)
+  io.loadForward.bits.cacheable := lqPmaKind(loadAddressIndex) ===
+    PMARegionKind.Memory.code.U && !lqIsAtomic(loadAddressIndex)
 
   val (loadCompleteMatch, loadCompleteIndex) = findMatch(
     lqValid, lqTag, io.loadComplete.bits.robTag, lqEntries, lqIndexWidth)

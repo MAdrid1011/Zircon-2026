@@ -1799,6 +1799,46 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("executes independent cacheable loads through both M0 and M1 ownership") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        var m0Ingress = false
+        var m1Ingress = false
+        val firstLine = BigInt("80001000", 16)
+        val secondLine = BigInt("80002000", 16)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("80002237", 16), // lui x4,0x80002
+          ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 12 -> BigInt("00022183", 16), // lw x3,0(x4)
+          ResetVector + 16 -> BigInt("00100073", 16),
+          firstLine -> BigInt("11223344", 16),
+          secondLine -> BigInt("55667788", 16)
+        ), cycles = 384, observeCycle = (core, _) => {
+          val observation = core.io.m2Observation.get
+          m0Ingress ||= observation.m0Ingress.peek().litToBoolean
+          m1Ingress ||= observation.m1Ingress.peek().litToBoolean
+        }))
+
+        assert(m0Ingress && m1Ingress,
+          s"independent loads did not enter both LSU owners: $events")
+        val firstLoad = events.find(_.pc == ResetVector + 8).getOrElse(
+          fail(s"M1-owned load did not retire: $events"))
+        val secondLoad = events.find(_.pc == ResetVector + 12).getOrElse(
+          fail(s"M0-owned load did not retire: $events"))
+        assert(firstLoad.gprWrite && firstLoad.gprAddress == 2 &&
+          firstLoad.gprData == BigInt("11223344", 16) &&
+          firstLoad.memoryAddress == firstLine && firstLoad.memoryReadData ==
+            BigInt("11223344", 16))
+        assert(secondLoad.gprWrite && secondLoad.gprAddress == 3 &&
+          secondLoad.gprData == BigInt("55667788", 16) &&
+          secondLoad.memoryAddress == secondLine && secondLoad.memoryReadData ==
+            BigInt("55667788", 16))
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
     it("serves an evicted L1D line from the exclusive L2 without another AXI refill") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

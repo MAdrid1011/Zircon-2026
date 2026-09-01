@@ -286,7 +286,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("marks only M1 non-atomic load forwards cacheable") {
+    it("forwards normal Memory loads from either LSU owner to the cache") {
       simulate(new LoadStoreQueues) { dut =>
         clear(dut)
         allocate(dut, 0, tag = 1, load = true, store = false, m1Owner = true)
@@ -302,10 +302,24 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.io.flush.poke(true)
         dut.clock.step()
         dut.io.flush.poke(false)
-        allocate(dut, 0, tag = 2, load = true, store = false)
+        allocate(dut, 0, tag = 2, load = true, store = false, m1Owner = false)
         dut.clock.step()
         noAllocations(dut)
-        queryLoad(dut, 2, BigInt("a0000000", 16), 15)
+        queryLoad(dut, 2, BigInt("80002000", 16), 15)
+        dut.io.loadAddress.ready.expect(true)
+        dut.io.loadForward.valid.expect(true)
+        dut.io.loadForward.bits.cacheable.expect(true)
+
+        dut.clock.step()
+        dut.io.loadAddress.valid.poke(false)
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        allocate(dut, 0, tag = 3, load = true, store = false,
+          pmaKind = PMARegionKind.DeviceStrong)
+        dut.clock.step()
+        noAllocations(dut)
+        queryLoad(dut, 3, BigInt("a0000000", 16), 15)
         dut.io.loadAddress.ready.expect(true)
         dut.io.loadForward.valid.expect(true)
         dut.io.loadForward.bits.cacheable.expect(false)

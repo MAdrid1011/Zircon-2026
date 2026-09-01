@@ -54,9 +54,10 @@ class LoadStoreForward(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val forwardMask = UInt(4.W)
   val forwardData = UInt(32.W)
   val requiresCache = Bool()
-  /** Only an M1-owned non-atomic load may enter the executable L1D slice.
-    * M0 device and atomic owners keep their LQ state pending for their later
-    * ordered-MMIO/RV32A transaction engines.
+  /** A normal non-atomic Memory-PMA load may enter the executable L1D slice.
+    * The retained `m1Owner` bit remains solely a completion-routing decision:
+    * M0 device and atomic owners stay with their ordered-MMIO/RV32A engines,
+    * while an M0 general load must never be stranded after LQ allocation.
     */
   val cacheable = Bool()
 }
