@@ -58,8 +58,10 @@ test-m3-atomic:
 # Fast FENCE/aq/rl ordering tier. It covers pre-LSQ atomic gating, age-tagged
 # LQ/SQ FENCE drain, and the executable FENCE/aq pressure cases below five minutes.
 test-m3-ordering:
-	./scripts/sbtw "testOnly zircon.MemIssueQueueSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec"
+	./scripts/sbtw "testOnly zircon.CacheFenceDrainControllerSpec zircon.MemIssueQueueSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.ExclusiveL2TransferStoreSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "allows FENCE to retire while a younger cacheable load owns LQ state"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "does not retire a dirty cache-global FENCE before the ID-5 B response"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "writes back dirty code before FENCE.I invalidates the I-side and refetches it"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "holds a younger cacheable load behind an aq atomic until its read response"'
 
 verilog:

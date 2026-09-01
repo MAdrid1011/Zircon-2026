@@ -49,6 +49,10 @@ class ExclusiveL2TransferStore(
     val instructionResponse = Decoupled(new L2InstructionLookupResponse(config))
     /** Trace-only exact dirty-line eviction into the retained victim FIFO. */
     val flushLine = Flipped(Decoupled(UInt(32.W)))
+    /** Cache-global FENCE drain. Dirty resident lines enter the retained
+      * victim FIFO one at a time; the top level waits for ID-5 completion. */
+    val fenceDrain = Input(Bool())
+    val fenceDrained = Output(Bool())
     /** A direct external write must remove a matching clean L2 copy before it
       * can become architecturally visible. Dirty lines wait for writeback. */
     val invalidate = Input(Valid(UInt(32.W)))
@@ -98,7 +102,7 @@ class ExclusiveL2TransferStore(
   val canInsert = !insertHit && (!replacingDirty || victimQueue.io.enq.ready)
   // First version is a single array port: an insertion owns the cycle over a
   // lookup, including while a dirty victim is waiting for FIFO credit.
-  io.insert.ready := !responseValid && !instructionResponseValid &&
+  io.insert.ready := !io.fenceDrain && !responseValid && !instructionResponseValid &&
     !io.invalidate.valid && !io.flushLine.valid && canInsert
 
   val instructionInsertSet = io.instructionInsert.bits.lineAddress(
@@ -120,7 +124,7 @@ class ExclusiveL2TransferStore(
     lineDirty(instructionInsertWay)(instructionInsertSet)
   val canInstructionInsert = instructionInsertHit || !instructionReplacingDirty ||
     victimQueue.io.enq.ready
-  io.instructionInsert.ready := !io.insert.valid && !responseValid &&
+  io.instructionInsert.ready := !io.fenceDrain && !io.insert.valid && !responseValid &&
     !instructionResponseValid && !io.invalidate.valid && !io.flushLine.valid &&
     canInstructionInsert
   io.instructionInsertHit := instructionInsertHit
@@ -137,7 +141,7 @@ class ExclusiveL2TransferStore(
     lineValid(way)(lookupSet) && lineTag(way)(lookupSet) === lookupTag))
   val lookupHit = lookupHits.asUInt.orR
   val lookupWay = PriorityEncoder(lookupHits.asUInt)
-  io.lookup.ready := !io.invalidate.valid && !io.insert.valid &&
+  io.lookup.ready := !io.fenceDrain && !io.invalidate.valid && !io.insert.valid &&
     !io.instructionInsert.valid && !io.flushLine.valid && !responseValid &&
     !instructionResponseValid
 
@@ -152,7 +156,7 @@ class ExclusiveL2TransferStore(
   val instructionLookupWay = PriorityEncoder(instructionLookupHits.asUInt)
   // One Reg-backed L2 array port is shared deterministically: D insertion
   // wins, then clean I fill, then exclusive D transfer, then I probe.
-  io.instructionLookup.ready := !io.invalidate.valid && !io.insert.valid &&
+  io.instructionLookup.ready := !io.fenceDrain && !io.invalidate.valid && !io.insert.valid &&
     !io.instructionInsert.valid && !io.lookup.valid && !io.flushLine.valid && !responseValid &&
     !instructionResponseValid
 
@@ -164,7 +168,7 @@ class ExclusiveL2TransferStore(
   val flushHit = flushHits.asUInt.orR
   val flushWay = PriorityEncoder(flushHits.asUInt)
   val flushDirty = flushHit && lineDirty(flushWay)(flushSet)
-  io.flushLine.ready := !responseValid && flushDirty && victimQueue.io.enq.ready
+  io.flushLine.ready := !io.fenceDrain && !responseValid && flushDirty && victimQueue.io.enq.ready
 
   val invalidateSet = io.invalidate.bits(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -178,7 +182,22 @@ class ExclusiveL2TransferStore(
   // address. It must not depend on this cycle's insert/lookup valid or on an
   // upstream effect fire, otherwise a store-ready to invalidation-valid loop
   // can cross the top-level LSU/cache boundary.
-  io.invalidateReady := !responseValid && !io.flushLine.valid && !invalidateDirty
+  io.invalidateReady := !io.fenceDrain && !responseValid && !io.flushLine.valid && !invalidateDirty
+
+  var fenceDirtyFound: Bool = false.B
+  var fenceDirtyWay: UInt = 0.U(wayWidth.W)
+  var fenceDirtySet: UInt = 0.U(setWidth.W)
+  for (set <- 0 until sets; way <- 0 until ways) {
+    val dirty = lineValid(way)(set) && lineDirty(way)(set)
+    val take = dirty && !fenceDirtyFound
+    fenceDirtyWay = Mux(take, way.U, fenceDirtyWay)
+    fenceDirtySet = Mux(take, set.U, fenceDirtySet)
+    fenceDirtyFound = fenceDirtyFound || dirty
+  }
+  val fenceEvict = io.fenceDrain && !responseValid && !instructionResponseValid &&
+    fenceDirtyFound && victimQueue.io.enq.ready
+  io.fenceDrained := !responseValid && !instructionResponseValid &&
+    !fenceDirtyFound && victimQueue.io.count === 0.U
 
   when(io.insert.valid) {
     assert(io.insert.bits.lineAddress(lineOffsetWidth - 1, 0) === 0.U,
@@ -216,7 +235,21 @@ class ExclusiveL2TransferStore(
   when(io.instructionResponse.fire) {
     instructionResponseValid := false.B
   }
-  when(io.flushLine.fire) {
+  when(fenceEvict) {
+    victimQueue.io.enq.valid := true.B
+    victimQueue.io.enq.bits.lineAddress := Cat(lineTag(fenceDirtyWay)(fenceDirtySet),
+      fenceDirtySet, 0.U(lineOffsetWidth.W))
+    victimQueue.io.enq.bits.dirty := true.B
+    for (word <- 0 until wordsPerLine) {
+      victimQueue.io.enq.bits.lineData(word) := lineData(fenceDirtyWay)(fenceDirtySet)(word)
+    }
+    for (way <- 0 until ways) {
+      when(fenceDirtyWay === way.U) {
+        lineValid(way)(fenceDirtySet) := false.B
+        lineDirty(way)(fenceDirtySet) := false.B
+      }
+    }
+  }.elsewhen(io.flushLine.fire) {
     victimQueue.io.enq.valid := true.B
     victimQueue.io.enq.bits.lineAddress := Cat(lineTag(flushWay)(flushSet), flushSet,
       0.U(lineOffsetWidth.W))

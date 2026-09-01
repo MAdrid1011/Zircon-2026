@@ -112,6 +112,39 @@ touched backing-memory word was matched against the deterministic AXI snapshot.
 | `rv32a-tohost.elf` | `6e1048db60259e0097ff07b1c2e03489912a68ab638d6968e7b56e608c61ae70` | `e5123413fd054435036ee98d7356c29de14101ba14ad0dac7878002b3b05028b` |
 
 The comparisons are deliberately bounded to these four directed ELFs.
-Cache-global FENCE/I-D coherence, explicit-seed random AXI error/backpressure
-stress, full dual-LSU conflict coverage, formal properties, and broader
+
+## Cache-global FENCE/I-D coherence
+
+On 2026-09-01, the parent working tree added ADR-0019 production
+`CacheFenceDrainController`. It first waits for the exact-age LSQ barrier, then
+sweeps dirty L1D into L2, sweeps dirty L2 into ID-5, and waits for the retained
+writeback owner's successful B response before `FENCE` or `FENCE.I` may retire.
+This is separate from the trace-only host flush bridge.
+
+The following local directed command passed in approximately four minutes and
+fifteen seconds, within the five-minute component regression budget:
+
+```bash
+make test-m3-ordering
+```
+
+It completed 65 module tests plus four top-level cases. In addition to the
+existing age-tagged and `aq` checks, the new cases prove all of the following:
+
+- a dirty `FENCE` has issued the complete ID-5 AW/W burst but neither it nor its
+  successor retires while B is withheld;
+- `FENCE.I` writes a dirty replacement instruction through ID-5, invalidates
+  L1I/BTB at commit redirect, and refetches that instruction from mutable
+  deterministic AXI backing memory;
+- the local L1D and L2 sweeps retain exclusive ownership and backpressure new
+  cache ingress until their dirty state reaches the next owner;
+- the controller reports serializing completion only after L1D, L2 victim FIFO,
+  and ID-5 B completion have all drained.
+
+The deterministic top-level memory model was also corrected to capture AW/W
+payloads on the pre-edge handshake. This prevents a test-only one-beat write
+shift and makes its backing-memory observations faithful to AXI timing.
+
+Explicit-seed random AXI error/backpressure stress, full dual-LSU conflict
+coverage, formal properties, external coherency, and broader
 Spike/Sail/ACT4 campaigns remain required.

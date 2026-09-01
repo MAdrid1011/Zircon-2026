@@ -49,6 +49,10 @@ class L1DLoadCache(
       * uses this path to move its sole L1D copy into L2 before ID-5 writeback.
       */
     val flushLine = Flipped(Decoupled(UInt(32.W)))
+    /** Cache-global FENCE drain. Existing demand owners continue to drain;
+      * new L1D ingress stalls until every dirty resident line reaches L2. */
+    val fenceDrain = Input(Bool())
+    val fenceDrained = Output(Bool())
     /** A commit-authorized cacheable store. It becomes irreversible only on
       * this handshake, and its result remains owned until the SQ consumes it.
       */
@@ -180,6 +184,22 @@ class L1DLoadCache(
   val flushHasMshr = VecInit((0 until mshrCount).map(index =>
     mshrValid(index) && mshrLineAddress(index) === flushLineAddress)).asUInt.orR
   val flushL2Insert = io.flushLine.valid && flushDirty && !flushHasMshr
+  val anyMshrValid = mshrValid.asUInt.orR
+  val fenceCanTransfer = io.fenceDrain && !anyMshrValid && !storeResultValid &&
+    !immediateValid && !l2ProbeActive
+  var fenceDirtyFound: Bool = false.B
+  var fenceDirtyWay: UInt = 0.U(log2Ceil(ways).W)
+  var fenceDirtySet: UInt = 0.U(setWidth.W)
+  for (set <- 0 until sets; way <- 0 until ways) {
+    val dirty = cacheValid(way)(set) && cacheDirty(way)(set)
+    val take = dirty && !fenceDirtyFound
+    fenceDirtyWay = Mux(take, way.U, fenceDirtyWay)
+    fenceDirtySet = Mux(take, set.U, fenceDirtySet)
+    fenceDirtyFound = fenceDirtyFound || dirty
+  }
+  val fenceL2Insert = fenceCanTransfer && !io.flushLine.valid && fenceDirtyFound
+  io.fenceDrained := !anyMshrValid && !storeResultValid && !immediateValid &&
+    !l2ProbeActive && !fenceDirtyFound
   // An external atomic cannot observe a dirty L1D line until its later L2
   // writeback owner exists. Blocking preserves coherent memory semantics.
   io.atomicAcceptReady := !recoveryBlocked && (!io.atomicRequiresExternal ||
@@ -224,18 +244,18 @@ class L1DLoadCache(
   val storeNewMissNeedsL2Insert = !anyStoreLineMshr && anyFreeMshr &&
     storeHasVictimWay && storeVictimValid
   val loadL2Insert = io.request.valid && io.request.bits.cacheable &&
-    !io.storeRequest.valid && !io.flushLine.valid && !recoveryBlocked && !immediateRequest &&
+    !io.storeRequest.valid && !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked && !immediateRequest &&
     anyFreeWaiter && newMissNeedsL2Insert
   val storeL2Insert = io.storeRequest.valid && storeOwnerAvailable &&
-    !io.flushLine.valid && !recoveryBlocked &&
+    !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked &&
     !anyStoreCacheHit && !anyStoreLineMshr && anyFreeMshr &&
     storeHasVictimWay && storeNewMissNeedsL2Insert
-  val l2InsertForStore = !flushL2Insert && storeL2Insert
+  val l2InsertForStore = !flushL2Insert && !fenceL2Insert && storeL2Insert
   val l2InsertWay = Mux(flushL2Insert, flushWay,
-    Mux(l2InsertForStore, storeVictimWay, victimWay))
+    Mux(fenceL2Insert, fenceDirtyWay, Mux(l2InsertForStore, storeVictimWay, victimWay)))
   val l2InsertSet = Mux(flushL2Insert, flushSet,
-    Mux(l2InsertForStore, storeSet, requestSet))
-  io.l2Insert.valid := flushL2Insert || loadL2Insert || storeL2Insert
+    Mux(fenceL2Insert, fenceDirtySet, Mux(l2InsertForStore, storeSet, requestSet)))
+  io.l2Insert.valid := flushL2Insert || fenceL2Insert || loadL2Insert || storeL2Insert
   io.l2Insert.bits.lineAddress := Cat(cacheTag(l2InsertWay)(l2InsertSet), l2InsertSet,
     0.U(lineOffsetWidth.W))
   io.l2Insert.bits.dirty := cacheDirty(l2InsertWay)(l2InsertSet)
@@ -250,10 +270,10 @@ class L1DLoadCache(
       (!storeNewMissNeedsL2Insert || io.l2Insert.ready))
   // Device and atomic requests retain their ordered M0 owner. Only a
   // commit-authorized cacheable non-atomic store may change L1D state.
-  io.request.ready := io.request.bits.cacheable && !recoveryBlocked &&
+  io.request.ready := io.request.bits.cacheable && !io.fenceDrain && !recoveryBlocked &&
     !io.storeRequest.valid && !io.flushLine.valid &&
     Mux(immediateRequest, immediateAvailable, missResources)
-  io.storeRequest.ready := !recoveryBlocked && !io.flushLine.valid && storeOwnerAvailable &&
+  io.storeRequest.ready := !io.fenceDrain && !recoveryBlocked && !io.flushLine.valid && storeOwnerAvailable &&
     !io.storeRequest.bits.isAtomic &&
     (anyStoreCacheHit || storeMissResources)
   io.storeResult.valid := storeResultValid
@@ -563,13 +583,17 @@ class L1DLoadCache(
       }
     }
   }
-  when(io.flushLine.fire) {
-    assert(io.flushLine.bits(lineOffsetWidth - 1, 0) === 0.U,
+  when(io.flushLine.fire || (fenceL2Insert && io.l2Insert.fire)) {
+    val selectedFlushWay = Mux(fenceL2Insert, fenceDirtyWay, flushWay)
+    val selectedFlushSet = Mux(fenceL2Insert, fenceDirtySet, flushSet)
+    val selectedFlushAddress = Cat(cacheTag(selectedFlushWay)(selectedFlushSet),
+      selectedFlushSet, 0.U(lineOffsetWidth.W))
+    assert(selectedFlushAddress(lineOffsetWidth - 1, 0) === 0.U,
       "L1D exact-line flush must use a line-aligned address")
     for (way <- 0 until ways) {
-      when(flushWay === way.U) {
-        cacheValid(way)(flushSet) := false.B
-        cacheDirty(way)(flushSet) := false.B
+      when(selectedFlushWay === way.U) {
+        cacheValid(way)(selectedFlushSet) := false.B
+        cacheDirty(way)(selectedFlushSet) := false.B
       }
     }
   }

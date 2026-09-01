@@ -19,6 +19,7 @@ four MSHRs in the surrounding hierarchy, and either 4 KiB (32 sets) or 8 KiB
 | `instructionInsert` | L1I to L2 | A successful AXI instruction refill inserts a clean non-inclusive line. An exact resident line is retained and returned to L1I instead of being duplicated or overwritten. |
 | `lookup` / `response` | L1D refill path | A lookup hit removes the L2 line on the request handshake and retains it in the response register, which is the transfer buffer until L1D accepts it. A miss has no line payload or ownership. |
 | `victim` | L2 to `AXIL2WritebackEngine` | A displaced dirty L2 line enters the two-entry FIFO, then transfers to the retained ID-5 owner. A full FIFO backpressures an insertion that would need another dirty eviction. |
+| `fenceDrain` / `fenceDrained` | controller to L2 | During a production FENCE sweep, normal array ingress stalls and each dirty resident line moves to the victim FIFO. `fenceDrained` requires no dirty resident or queued victim; the controller separately waits for ID-5 B completion. |
 
 L2 never duplicates a D line. D-side insertion requires that the line is absent
 from L2. Instruction insertion may merge with an exact resident line; it does
@@ -45,6 +46,10 @@ miss to `lookup`, routes a hit response directly to the L1D fill owner, and
 sends `victim` to `AXIL2WritebackEngine`. On an L2 lookup miss, L1D allocates
 one `AXIDataReadEngine` L2 demand owner before issuing its eight-beat refill;
 this component never fabricates cache data or an architectural load completion.
+During an ADR-0019 global drain, the single port scans dirty residents in stable
+set/way order. It accepts a line only with victim-FIFO credit, removes the L2
+copy on that enqueue, and resumes normal ingress only after the controller
+finishes the drain.
 
 ## Invariants and counters
 
@@ -64,7 +69,8 @@ recording unimplemented activity as zero.
 
 `ExclusiveL2TransferStoreSpec` covers hit removal, miss behavior, exact line
 payload/dirty-bit transfer, clean instruction allocation and merge, dirty victim
-FIFO ordering and full backpressure, and the 8 KiB configuration.
+FIFO ordering and full backpressure, the global-FENCE dirty sweep, and the 8 KiB
+configuration.
 `AXIL2WritebackEngineSpec` and `CoreShellSpec`
 cover retained ID-5 drain and a real dirty replacement. L1D/L2 integration
 still needs L2 MSHR pressure and the global single-owner assertion across L1D,

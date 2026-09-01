@@ -7,7 +7,7 @@ import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPip
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
-  AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
+  AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
   HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
   OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
@@ -35,6 +35,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
+  val cacheFenceDrain = Module(new CacheFenceDrainController)
   val l2DemandEngine = Module(new AXIDataReadEngine(cfg))
   val l2DemandArbiter = Module(new RRArbiter(new L2DemandRequest(cfg), 2))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
@@ -177,6 +178,11 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // A retained dirty L2 victim transfers to the ID-5 AXI owner. The owner only
   // releases it after a successful B response, including across error retries.
   l2TransferStore.io.victim <> l2WritebackEngine.io.victim
+  l1dLoadCache.io.fenceDrain := cacheFenceDrain.io.l1dDrain
+  l2TransferStore.io.fenceDrain := cacheFenceDrain.io.l2Drain
+  cacheFenceDrain.io.l1dDrained := l1dLoadCache.io.fenceDrained
+  cacheFenceDrain.io.l2Drained := l2TransferStore.io.fenceDrained
+  cacheFenceDrain.io.writebackBusy := l2WritebackEngine.io.busy
   l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
@@ -344,15 +350,17 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.interruptBlocked := lsuIngress.io.storeCommitInFlight ||
     lsuIngress.io.deviceLoadInFlight || lsuIngress.io.atomicInFlight ||
     atomicEngine.io.busy
-  // FENCE/FENCE.I execute only at the ROB head. Querying the LSQ with that
-  // exact tag drains older owners while allowing younger speculative loads to
-  // keep making progress; a global queue-empty condition would deadlock here.
+  // FENCE/FENCE.I execute only at the ROB head. The LSQ exact-age query first
+  // drains older owners; the cache controller then writes every older dirty
+  // L1D/L2 line through ID-5 before commit may retire the serializing uop.
   val headFence = backend.io.robHead.valid &&
     (backend.io.robHead.bits.entry.decoded.operation === IntOperation.Fence ||
       backend.io.robHead.bits.entry.decoded.operation === IntOperation.FenceI)
   lsuIngress.io.orderingBarrier.valid := headFence
   lsuIngress.io.orderingBarrier.bits := backend.io.robHead.bits.robTag
-  backend.io.systemSerializingReady := !headFence || lsuIngress.io.orderingReady
+  cacheFenceDrain.io.request := headFence && lsuIngress.io.orderingReady
+  backend.io.systemSerializingReady := !headFence ||
+    (lsuIngress.io.orderingReady && cacheFenceDrain.io.complete)
   backend.io.fpCommit.valid := false.B
   backend.io.fpCommit.bits.flags := 0.U
   backend.io.fpCommit.bits.dirty := false.B

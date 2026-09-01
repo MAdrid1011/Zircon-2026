@@ -279,7 +279,7 @@ line and drains it through an ID-5 eight-beat AXI burst. A failing B response
 retries the retained line rather than discarding it. Trace elaborations provide
 a targeted dirty `tohost` bridge that transfers the exact L1D line to L2,
 evicts it, and holds the committed store until its ID-5 B response; it is not a
-general `FENCE` implementation or production hardware. The active
+replacement for production `FENCE` hardware. The active
 [L1I demand slice](l1-instruction-cache.md) now owns the 1 KiB, two-way
 instruction cache and uses the retained `Instruction` token through the same
 four physical L2 demand slots. It probes resident L2 lines before AXI and
@@ -303,10 +303,15 @@ stable D line belongs to exactly one of L1D, L2, or a transfer buffer. L1D fill
 removes any L2 copy; L1D eviction transfers the line to L2. A two-entry
 victim/writeback queue owns dirty evictions until L2 or AXI accepts them.
 
-`FENCE.I` commit drains old stores/device actions, invalidates L1I and BTB, then
-uses the existing commit redirect. `FENCE`, `aq`, and `rl` prevent retirement or
-issue until their required LQ/SQ/device/outstanding-owner sets drain; no broad
-memory-dependence predictor is permitted.
+`FENCE` and `FENCE.I` first use their exact ROB tag to drain only older
+LQ/SQ/device/atomic owners. `CacheFenceDrainController` then blocks new cache
+ingress, drains dirty L1D lines into exclusive L2, drains dirty L2 lines through
+the victim FIFO and ID-5, and waits for the final successful B response. Only
+then may the serializing uop retire. `FENCE.I` subsequently invalidates L1I and
+BTB and uses the existing commit redirect, so self-modifying code refetches
+after its data writeback. See [Cache-global FENCE Drain](cache-fence-drain.md).
+`aq` and `rl` retain their LSQ ordering rule; no broad memory-dependence
+predictor is permitted.
 
 ## AXI4 data engine
 
@@ -371,10 +376,12 @@ full coherent atomic integration remains unfinished M3 work.
 ## Recovery, drain, and counters
 
 Selective recovery removes younger MemIQ/LQ/SQ/completion entries. Global flush
-removes all speculative state after preserving accepted AXI owner drains. A kill
-cannot write GPR state, cache state, device state, or trace data. Every MSHR,
-victim, queue, completion buffer, device group, and AXI owner has occupancy and
-credit-conservation assertions.
+removes all speculative state after preserving accepted AXI owner drains. A
+removed FENCE stops future cache-sweep actions but does not discard an L2
+transfer, victim, or retained ID-5 line. A kill cannot write GPR state, cache
+state, device state, or trace data. Every MSHR, victim, queue, completion
+buffer, device group, and AXI owner has occupancy and credit-conservation
+assertions.
 
 M3 exposes counters for M0/M1 issue/replay, LQ/SQ/MemIQ occupancy, full stalls,
 forward full/partial hits, L1/L2 hit/miss, MSHR/victim occupancy, outstanding AXI

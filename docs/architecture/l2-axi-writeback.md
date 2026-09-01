@@ -41,8 +41,9 @@ count, and a 4 KiB-crossing burst are assertions.
 The owner makes evicted dirty lines externally visible, including a line whose
 first word is a `tohost` value after it has reached L2 replacement. Trace-only
 `HostStoreFlush` can request an exact L1D-to-L2 transfer and then an exact L2
-victim, but this is not a general `tohost` region, cache flush, or `FENCE`
-semantic. `AXIDataReadEngine` separately owns
+victim. Production `CacheFenceDrainController` can instead sweep every dirty
+L1D/L2 line and waits for this owner's final B completion before a FENCE retires.
+`AXIDataReadEngine` separately owns
 the four L2 demand-read MSHRs; active I-side allocation and external coherent
 atomics remain later M3 work.
 

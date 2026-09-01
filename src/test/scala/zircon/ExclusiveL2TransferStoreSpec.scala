@@ -22,6 +22,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     dut.io.instructionResponse.ready.poke(false)
     dut.io.flushLine.valid.poke(false)
     dut.io.flushLine.bits.poke(0)
+    dut.io.fenceDrain.poke(false)
     dut.io.invalidate.valid.poke(false)
     dut.io.invalidate.bits.poke(0)
     dut.io.victim.ready.poke(false)
@@ -290,6 +291,29 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         words.zipWithIndex.foreach { case (word, index) =>
           dut.io.victim.bits.lineData(index).expect(word)
         }
+      }
+    }
+
+    it("drains dirty residents into the victim FIFO for a cache-global FENCE") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val line = BigInt("80002a00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("cafe0000", 16) + word)
+        insert(dut, line, words, dirty = true)
+        dut.io.fenceDrain.poke(true)
+        dut.io.insert.valid.poke(true)
+        dut.io.insert.ready.expect(false)
+        dut.io.insert.valid.poke(false)
+        dut.io.fenceDrained.expect(false)
+        dut.clock.step()
+        dut.io.residentLineCount.expect(0)
+        dut.io.victim.valid.expect(true)
+        dut.io.victim.bits.lineAddress.expect(line)
+        dut.io.fenceDrained.expect(false)
+        dut.io.victim.ready.poke(true)
+        dut.clock.step()
+        dut.io.victim.ready.poke(false)
+        dut.io.fenceDrained.expect(true)
       }
     }
 

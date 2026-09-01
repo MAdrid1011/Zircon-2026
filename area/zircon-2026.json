@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, four L2 demand-read MSHRs, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 L1D dirty/write-allocate, cache-global FENCE drain through exclusive L1D-L2 transfer and ID-5, four L2 demand-read MSHRs, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof, cache-global FENCE semantics, and I/D/external coherency remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger; general dirty-cache flush/FENCE semantics and external coherency are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof and external coherency remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; cache-global FENCE drains dirty L1D/L2 state through retained ID-5 writeback. Four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -397,6 +397,15 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "AXIL2WritebackEngine active, AW-sent, four-bit word count, and sticky retry flag"
+    },
+    {
+      "name": "cache_fence_drain_controller_state",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 2,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "CacheFenceDrainController four-state L1D/L2/ID-5 completion sequencer"
     }
   ],
   "logic": [
@@ -783,6 +792,22 @@
       "width": 2,
       "fanin": 4,
       "source": "AXIDataReadEngine free physical L2 demand-MSHR selector"
+    },
+    {
+      "name": "l1d_fence_dirty_scan_select_bits",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 5,
+      "fanin": 32,
+      "source": "L1DLoadCache global FENCE first-dirty selector across two ways x sixteen sets"
+    },
+    {
+      "name": "l2_fence_dirty_scan_select_bits",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 7,
+      "fanin": 128,
+      "source": "ExclusiveL2TransferStore default-4-KiB global FENCE first-dirty selector across four ways x thirty-two sets"
     }
   ]
 }

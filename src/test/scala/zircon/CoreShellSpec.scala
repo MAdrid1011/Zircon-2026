@@ -100,6 +100,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       bValidForCycle: Int => Boolean = _ => true
   ): Seq[TraceSample] = {
     val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, BigInt, BigInt, Boolean)]
+    val backingMemory = scala.collection.mutable.Map.empty[BigInt, BigInt] ++ program
     val events = scala.collection.mutable.ArrayBuffer.empty[TraceSample]
     var rHeld = false
     var awSeen = false
@@ -107,6 +108,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     var bQueued = false
     var bHeld = false
     var writeId = BigInt(5)
+    var writeAddress = BigInt(0)
+    var writeBeat = 0
 
     dut.clock.step(128) // Deterministic bimodal/BTB scrubs.
     for (cycle <- 0 until cycles) {
@@ -165,9 +168,12 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val awFire = dut.io.axi.aw.valid.peek().litToBoolean &&
         dut.io.axi.aw.ready.peek().litToBoolean
       val awId = dut.io.axi.aw.bits.id.peek().litValue
+      val awAddress = dut.io.axi.aw.bits.addr.peek().litValue
       val wFire = dut.io.axi.w.valid.peek().litToBoolean &&
         dut.io.axi.w.ready.peek().litToBoolean
       val wLast = dut.io.axi.w.bits.last.peek().litToBoolean
+      val wData = dut.io.axi.w.bits.data.peek().litValue
+      val wMask = dut.io.axi.w.bits.strb.peek().litValue
       val bFire = bOffered &&
         dut.io.axi.b.ready.peek().litToBoolean
 
@@ -183,15 +189,29 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       if (arFire) {
         for (beat <- 0 until arBeats) {
           val address = arAddress + beat * 4
-          pendingReads.enqueue((arId, address, program.getOrElse(address, Nop),
+          pendingReads.enqueue((arId, address, backingMemory.getOrElse(address, Nop),
             beat == arBeats - 1))
         }
       }
       if (awFire) {
         awSeen = true
         writeId = awId
+        writeAddress = awAddress
+        writeBeat = 0
       }
-      if (wFire && wLast) wLastSeen = true
+      if (wFire) {
+        val address = writeAddress + writeBeat * 4
+        val oldData = backingMemory.getOrElse(address, Nop)
+        val merged = (0 until 4).foldLeft(oldData) { (value, byte) =>
+          if (((wMask >> byte) & 1) != 0) {
+            val laneMask = BigInt(0xff) << (byte * 8)
+            (value & ~laneMask) | (wData & laneMask)
+          } else value
+        }
+        backingMemory.update(address, merged)
+        writeBeat += 1
+        if (wLast) wLastSeen = true
+      }
       if (writeResponse.nonEmpty && !bQueued && awSeen && wLastSeen) {
         bQueued = true
       }
@@ -774,6 +794,80 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         val load = events(loadIndex)
         assert(load.gprWrite && load.gprAddress == 2 &&
           load.gprData == BigInt("44332211", 16))
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("does not retire a dirty cache-global FENCE before the ID-5 B response") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        var writebackIssued = false
+        var finalWriteBeatIssued = false
+        val events = runProgram(dut, Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("00100113", 16), // addi x2,x0,1
+          ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 12 -> BigInt("0000000f", 16), // fence
+          ResetVector + 16 -> BigInt("00100073", 16) // ebreak
+        ), cycles = 384, writeResponse = Some(0), bValidForCycle = _ => false,
+          observeCycle = (core, _) => {
+            val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+              core.io.axi.aw.ready.peek().litToBoolean
+            writebackIssued ||= awFire && core.io.axi.aw.bits.id.peek().litValue == 5 &&
+              core.io.axi.aw.bits.len.peek().litValue == 7
+            val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+              core.io.axi.w.ready.peek().litToBoolean
+            finalWriteBeatIssued ||= wFire && core.io.axi.w.bits.last.peek().litToBoolean
+          })
+
+        assert(writebackIssued && finalWriteBeatIssued,
+          s"dirty FENCE never reached a complete retained ID-5 writeback: $events")
+        assert(!events.exists(_.instruction == BigInt("0000000f", 16)),
+          s"FENCE retired before its dirty writeback B response: $events")
+        assert(!events.exists(_.instruction == BigInt("00100073", 16)),
+          s"post-FENCE instruction retired without the dirty writeback B response: $events")
+      }
+    }
+
+    it("writes back dirty code before FENCE.I invalidates the I-side and refetches it") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val writebacks = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+        val writebackWords = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val target = ResetVector + 28
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("01c08093", 16), // addi x1,x1,28
+          ResetVector + 8 -> BigInt("00100137", 16), // lui x2,0x00100
+          ResetVector + 12 -> BigInt("19310113", 16), // addi x2,x2,0x193
+          ResetVector + 16 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 20 -> BigInt("0000100f", 16), // fence.i
+          ResetVector + 24 -> BigInt("0040006f", 16), // jal x0,target
+          target -> Nop,
+          ResetVector + 32 -> BigInt("00100073", 16) // ebreak
+        ), cycles = 512, writeResponse = Some(0), observeCycle = (core, _) => {
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
+          if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+            writebacks += ((core.io.axi.aw.bits.addr.peek().litValue,
+              core.io.axi.aw.bits.len.peek().litValue))
+          }
+          val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+            core.io.axi.w.ready.peek().litToBoolean
+          if (wFire) writebackWords += core.io.axi.w.bits.data.peek().litValue
+        }))
+
+        val fenceIndex = events.indexWhere(_.instruction == BigInt("0000100f", 16))
+        val rewritten = events.find(_.pc == target).getOrElse(
+          fail(s"FENCE.I did not refetch the rewritten target: $events"))
+        assert(writebacks.toSeq == Seq((ResetVector, BigInt(7))),
+          s"expected one eight-beat dirty-code ID-5 writeback, got $writebacks")
+        assert(fenceIndex >= 0 && events.indexOf(rewritten) > fenceIndex,
+          s"rewritten instruction executed before FENCE.I retired: $events")
+        assert(rewritten.instruction == BigInt("00100193", 16) &&
+          rewritten.gprWrite && rewritten.gprAddress == 3 && rewritten.gprData == 1,
+          s"stale I-side word survived FENCE.I: rewritten=$rewritten " +
+            s"writebackWords=$writebackWords events=$events")
         assert(events.last.trap && events.last.cause == 3)
       }
     }

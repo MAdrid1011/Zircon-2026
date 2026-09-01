@@ -30,6 +30,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.bits.transfer.dirty.poke(false)
     dut.io.flushLine.valid.poke(false)
     dut.io.flushLine.bits.poke(0)
+    dut.io.fenceDrain.poke(false)
     dut.io.storeRequest.valid.poke(false)
     dut.io.storeRequest.bits.robTag.poke(0)
     dut.io.storeRequest.bits.address.poke(0)
@@ -248,6 +249,38 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.valid.expect(true)
         dut.io.completion.bits.robTag.expect(2)
         dut.io.completion.bits.cacheData.expect(words(2))
+      }
+    }
+
+    it("moves every dirty resident line into L2 during a cache-global FENCE drain") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80001800", 16)
+        val words = Seq.tabulate(8)(word => BigInt("12340000", 16) + word)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.io.completion.valid.expect(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.clock.step()
+
+        submitStore(dut, tag = 2, line + 12, mask = 15, data = BigInt("deadbeef", 16))
+        consumeStoreResult(dut, tag = 2, line + 12)
+
+        dut.io.fenceDrain.poke(true)
+        dut.io.request.valid.poke(true)
+        dut.io.request.bits.cacheable.poke(true)
+        dut.io.request.ready.expect(false)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(line)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(3).expect(BigInt("deadbeef", 16))
+        dut.io.fenceDrained.expect(false)
+        dut.clock.step()
+        dut.io.request.valid.poke(false)
+        dut.io.fenceDrained.expect(true)
+        dut.io.l2Insert.valid.expect(false)
       }
     }
 
