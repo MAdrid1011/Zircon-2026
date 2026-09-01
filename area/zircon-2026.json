@@ -5,7 +5,7 @@
   "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read and committed cacheable-store write slices",
   "completeness": "partial",
   "known_omissions": [
-    "the cacheable integer store AXI owner is inventoried, but dirty/replacement state, writeback, L2, MMIO, atomics, and formal L1I are not implemented",
+    "the standalone ordered-device AXI owner is inventoried, but its LSQ/ROB integration, dirty/replacement state, writeback, L2, atomics, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -165,6 +165,33 @@
       "source": "AXIDataStoreEngine resultValid and StoreWriteResult {robTag,address,accessFault}"
     },
     {
+      "name": "axi_ordered_io_group_owner",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 600,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIOrderedIOEngine activeGroup: four OrderedIORequest records at 150 bits each"
+    },
+    {
+      "name": "axi_ordered_io_group_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 10,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIOrderedIOEngine active, count, addressSent, beat, write-response mode, and sticky B fault"
+    },
+    {
+      "name": "axi_ordered_io_response_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 73,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIOrderedIOEngine responseValid and OrderedIOResponse record"
+    },
+    {
       "name": "top_axi_ar_arbiter_state",
       "class": "register_control",
       "entries": 1,
@@ -239,6 +266,22 @@
       "width": 1,
       "fanin": 1,
       "source": "AXIDataStoreEngine reserved AXI write-ID response check, conservatively charged as one 32-bit comparator"
+    },
+    {
+      "name": "axi_ordered_io_response_id_compare",
+      "metric": "comparator32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "AXIOrderedIOEngine ID 6 checks on independent R and B response channels"
+    },
+    {
+      "name": "axi_ordered_io_group_request_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 3,
+      "width": 32,
+      "fanin": 4,
+      "source": "AXIOrderedIOEngine dynamic four-entry W payload and response-member request selection"
     },
     {
       "name": "l1d_waiter_oldest_select",

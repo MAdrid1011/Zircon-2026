@@ -47,6 +47,10 @@ and LR.W no-L1D/no-data-AXI/no-false-retirement checks. New feature work should
 add an equivalent focused target instead of requiring the complete test corpus
 for every edit.
 
+`make test-m3-ordered-io` exercises the standalone 1--4 beat ordered-device
+AXI owner and combiner in seconds. Its eventual LSQ/ROB integration needs a
+separate focused top-level target because it carries exact retirement behavior.
+
 ZirconSim full-core measurements must record wall time, retired instructions,
 retired instructions per second, ELF hash, seed, RTL/submodule/tool SHA, and
 whether tracing was enabled. The normal long run must use an optimized

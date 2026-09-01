@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-ordered-io verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -20,6 +20,11 @@ test-m3-store:
 test-m3-load-boundary:
 	./scripts/sbtw "testOnly zircon.DualLSUIngressSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "without L1D"'
+
+# Fast, focused device-group AXI transport regression. LSQ/ROB integration is
+# covered separately once the ordered M0 owner becomes executable.
+test-m3-ordered-io:
+	./scripts/sbtw "testOnly zircon.OrderedIOCombinerSpec zircon.AXIOrderedIOEngineSpec"
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

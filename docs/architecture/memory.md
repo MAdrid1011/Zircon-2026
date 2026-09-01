@@ -4,8 +4,9 @@
 ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
 `OrderedIOCombiner`、已接入顶层 dispatch/recovery 的 8-entry `MemIssueQueue`，以及
 已单元验证的 8-entry `LoadStoreQueues`。`ZirconCore` 已通过全局 auxiliary-read
-arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache、AXI data engine、
-MMIO lifecycle 和 store effect 仍未实现，本规格不会把它们描述为已实现。
+arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache/data AXI 和
+cacheable-store slices 已可执行，`AXIOrderedIOEngine` 已完成独立 device-group AXI
+ownership，但 MMIO 的 LSQ/ROB lifecycle 尚未接入，本规格不会把它描述为已实现。
 
 ## 参数和边界
 
@@ -296,6 +297,14 @@ width, region, address, 4 KiB, or force-flush boundary. The next device request
 cannot overtake the active group. For reads, each returning beat updates its own
 ROB-tag metadata/completion; for writes, each member becomes irreversible only
 after the group B response. PMA boundaries and AMOs never join a group.
+
+`AXIOrderedIOEngine` now provides the standalone transport owner for one
+already-authorized group. It owns device AXI ID 6 through AR/R or AW/W/B drain,
+holds one exact response per group member, preserves independent AW/W
+backpressure, and checks group shape, ID, RLAST, and responses. It is documented
+in [`ordered-io-axi-engine.md`](ordered-io-axi-engine.md). The current top-level
+still sends no group to it, so device uops remain legally blocked until the LSQ
+head authorization and precise completion bridge are connected.
 
 ## RV32A
 
