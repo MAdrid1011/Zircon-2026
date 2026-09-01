@@ -150,6 +150,39 @@ class AtomicMemoryEngineSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("accepts AW before a separately scheduled W beat") {
+      simulate(new AtomicMemoryEngine) { dut =>
+        clear(dut)
+        offer(dut, IntOperation.LrW, tag = 1)
+        acceptRead(dut, BigInt("01020304", 16))
+        consumeResult(dut, tag = 1, data = BigInt("01020304", 16))
+
+        // AXI4 has no WID. The top-level scheduler can legitimately accept
+        // AW first, then grant the matching W beat in the following cycle.
+        dut.io.w.ready.poke(false)
+        offer(dut, IntOperation.ScW, tag = 2, writeData = BigInt("cafebabe", 16),
+          destination = 33)
+        dut.io.aw.valid.expect(true)
+        dut.io.w.valid.expect(true)
+        dut.io.aw.ready.expect(true)
+        dut.clock.step()
+        dut.io.aw.valid.expect(false)
+        dut.io.w.valid.expect(true)
+        dut.io.w.bits.data.expect(BigInt("cafebabe", 16))
+        dut.io.w.ready.poke(true)
+        dut.clock.step()
+        dut.clock.step()
+
+        dut.io.b.valid.poke(true)
+        dut.io.b.bits.id.poke(7)
+        dut.io.b.bits.resp.poke(0)
+        dut.io.b.ready.expect(true)
+        dut.clock.step()
+        dut.io.b.valid.poke(false)
+        consumeResult(dut, tag = 2, data = 0, storePerformed = true)
+      }
+    }
+
     it("computes every AMO word result before issuing its response-gated write") {
       val oldValue = BigInt("80000003", 16)
       val operand = BigInt("00000005", 16)

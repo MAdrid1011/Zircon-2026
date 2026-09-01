@@ -38,9 +38,9 @@ make static-area
 前一命令验证 manifest/schema 和计算器单元测试；后一命令输出 Markdown 对照。任一
 manifest 为 `partial` 时报告必须显示 `PARTIAL`，缺失结构不得按零面积计入优势。
 
-当前 M3 L1D dirty/write-allocate、L1D-L2 exclusive transfer、data-AXI read、
-device/atomic owner 已将实际 LQ/SQ、L1D tag/data/dirty/MSHR/store state、L2
-transfer/victim state、AXI owner/line buffer、held request/response 与顶层仲裁状态
-录入 candidate。该工作树记录为 66,739 storage bit、27,374 mux-input-bit proxy、128
-个 32-bit compare proxy 和 80 priority-select bit；Zircon-2024 manifest 同样仍有
+当前 M3 L1D dirty/write-allocate、L1D-L2 exclusive transfer、ID-5 retained dirty
+writeback、data-AXI read、device/atomic owner 已将实际 LQ/SQ、L1D tag/data/dirty/MSHR
+store state、L2 transfer/victim state、AXI owner/line buffer、held request/response 与
+顶层 AW/W ownership lock 录入 candidate。该工作树记录为 67,038 storage bit、27,758
+mux-input-bit proxy、129 个 32-bit compare proxy 和 80 priority-select bit；Zircon-2024 manifest 同样仍有
 缺项，因此这只是 `PARTIAL` 进度证据，不能比较作最终面积结论。

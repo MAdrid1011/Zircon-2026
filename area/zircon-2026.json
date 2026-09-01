@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer store, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store, but L2 AXI MSHRs/writeback ownership, external coherency, and formal L1I are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; retained ID-5 dirty-victim writeback is executable, but L2 AXI MSHRs, targeted dirty-cache flush/tohost visibility, external coherency, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -273,6 +273,15 @@
       "source": "ZirconCore arLockValid, two-bit arLockOwner, and two-bit four-client arTurn"
     },
     {
+      "name": "top_axi_write_scheduler_state",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 3,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ZirconCore writeLockValid and two-bit ID-5/6/7 W-channel owner"
+    },
+    {
       "name": "l2_data_transfer_store",
       "class": "memory_data",
       "entries": 4096,
@@ -325,6 +334,24 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "two-entry Chisel Queue enqueue/dequeue pointers and occupancy count"
+    },
+    {
+      "name": "axi_l2_writeback_retained_line",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 289,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIL2WritebackEngine retained CacheLineTransfer {line address, eight words, dirty}"
+    },
+    {
+      "name": "axi_l2_writeback_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 7,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AXIL2WritebackEngine active, AW-sent, four-bit word count, and sticky retry flag"
     }
   ],
   "logic": [
@@ -525,16 +552,24 @@
       "metric": "mux_input_bits",
       "units": 2,
       "width": 64,
-      "fanin": 2,
-      "source": "ZirconCore ordered-device and atomic AW/W muxes; cacheable stores remain inside dirty L1D"
+      "fanin": 3,
+      "source": "ZirconCore ID-5 writeback, ID-6 device, and ID-7 atomic AW/W muxes with W-channel ownership lock"
     },
     {
       "name": "top_axi_response_id_demux_compare_units",
       "metric": "comparator32_units",
-      "units": 7,
+      "units": 8,
       "width": 1,
       "fanin": 1,
-      "source": "ZirconCore B and R response ID demultiplexing across fetch, L1D, ordered-device, and atomic owners"
+      "source": "ZirconCore B and R response ID demultiplexing across fetch, L1D, writeback, ordered-device, and atomic owners"
+    },
+    {
+      "name": "axi_l2_writeback_word_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 32,
+      "fanin": 8,
+      "source": "AXIL2WritebackEngine dynamic eight-word retained-line W payload selection"
     },
     {
       "name": "top_ordered_io_source_mux_inputs",

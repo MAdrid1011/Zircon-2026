@@ -38,10 +38,11 @@ An L2 hit removes the L2 copy, preserving its dirty bit in L1D before any store
 bytes are merged. An AXI fill starts clean unless the waiting store updates it.
 
 There is no ordinary cacheable `AW/W/B` transaction in this slice. AXI ID 5 is
-reserved for the next M3 owner, which drains dirty L2 victims as burst writeback.
-Until that owner exists, a same-line external atomic is backpressured when L1D
-or L2 holds dirty data; it cannot observe stale backing memory or discard dirty
-state. Device stores remain on ID 6 and atomic transactions remain on ID 7.
+owned by `AXIL2WritebackEngine`, which drains a dirty L2 victim as one retained
+eight-beat burst and retries after a B error. Until later coherent-atomic work,
+a same-line external atomic is backpressured when L1D or L2 holds dirty data; it
+cannot observe stale backing memory or discard dirty state. Device stores remain
+on ID 6 and atomic transactions remain on ID 7.
 
 ## Recovery and invariants
 
@@ -61,6 +62,7 @@ recovery without removing the store owner. The implementation asserts:
 `L1DLoadCacheSpec` covers byte-masked store hits, store-miss write allocation,
 exact fault/result retention, and dirty victim transfer. `CoreShellSpec` runs a
 real RV32I store from AXI-fed instructions, verifies its retire metadata, and
-proves no per-store external write occurs. The following L2 writeback slice
-must add AXI ID-5 burst, B-error, victim-full, and dirty `tohost` visibility
-tests before memory ELF completion can be claimed.
+proves no per-store external write occurs. `AXIL2WritebackEngineSpec` now adds
+the ID-5 burst and B-error retry evidence, while `CoreShellSpec` forces a dirty
+L2 replacement and observes its merged writeback payload. Targeted dirty
+`tohost` eviction/flush visibility remains required.

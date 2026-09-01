@@ -106,8 +106,9 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
 
   assert(!io.request(1).valid || io.request(0).valid,
     "rename lane 1 cannot be valid when lane 0 is a bubble")
-  assert(!io.commit(1).valid || io.commit(0).valid,
-    "commit lane 1 cannot update rename state when lane 0 is a bubble")
+  // `RenameCommit.valid` means this retirement changes an integer mapping, not
+  // that the retirement lane itself is occupied. A legal lane-0 store paired
+  // with a lane-1 integer writer therefore has only commit(1) valid.
   assert(!io.accept || io.canAllocate,
     "rename state cannot advance without enough free physical registers")
 

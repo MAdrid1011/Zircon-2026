@@ -266,9 +266,11 @@ removes the L2 copy into an L1D response transfer buffer. `L1DLoadCache` also
 accepts only commit-authorized cacheable stores, merges their byte lanes into a
 resident or newly allocated line, marks it dirty, and retains its exact result.
 Dirty L1D victims enter L2 with their dirty bit; L2's two-entry dirty-victim
-FIFO backpressures replacement until the still-missing AXI writeback owner
-drains it. This is not yet final memory visibility: ID-5 writeback, L2 AXI
-MSHRs, formal L1I, and coherent external atomic handling remain unfinished.
+FIFO transfers each replacement to `AXIL2WritebackEngine`, which retains one
+line and drains it through an ID-5 eight-beat AXI burst. A failing B response
+retries the retained line rather than discarding it. This is not yet final
+memory visibility: targeted dirty `tohost` eviction/flush, L2 AXI MSHRs, formal
+L1I, and coherent external atomic handling remain unfinished.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,
@@ -291,9 +293,10 @@ memory-dependence predictor is permitted.
 
 ## AXI4 data engine
 
-The engine grants at most four outstanding accepted AR bursts and one AW/W/B burst.
-It assigns a unique live read ID, holds every channel payload stable while
-`valid && !ready`, and emits only aligned INCR bursts. Cache line refills are
+The engine grants at most four outstanding accepted AR bursts and serializes W
+data to the owner of the earliest accepted AW until its final beat. It assigns a
+unique live read ID, holds every channel payload stable while `valid && !ready`,
+and emits only aligned INCR bursts. Cache line refills and L2 writebacks are
 eight 32-bit beats; device groups are at most four; all obey the 4 KiB boundary.
 
 Each R beat is checked against its owner ID, expected beat count, and RLAST. An
@@ -342,12 +345,11 @@ interrupt, or LR replacement invalidates it. All nine AMO word functions read
 the old word, compute the retained write value, wait for B, then complete once
 with the old value. Device space and non-atomic PMA generate precise faults
 rather than fake atomic completion. Same-line L1D refills drain before atomic
-launch. An atomic is backpressured if the matching L1D or L2 line is dirty,
-because the absent ID-5 writeback owner must not let it read stale backing
-memory or discard dirty data. Externally attempted atomic writes invalidate only
-a clean L1D line. The exact protocol is
-[`atomic-axi-engine.md`](atomic-axi-engine.md); L2 writeback and full coherent
-atomic integration remain unfinished M3 work.
+launch. An atomic is backpressured if the matching L1D or L2 line is dirty until
+ID-5 drains the exclusive dirty copy, so it cannot read stale backing memory or
+discard dirty data. Externally attempted atomic writes invalidate only a clean
+L1D line. The exact protocol is [`atomic-axi-engine.md`](atomic-axi-engine.md);
+full coherent atomic integration remains unfinished M3 work.
 
 ## Recovery, drain, and counters
 

@@ -173,6 +173,24 @@ class RenameSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("accepts a lane-1 mapping update after a lane-0 non-writing retirement") {
+      simulate(new IntegerRename(ZirconCoreConfig.default)) { dut =>
+        clearRequests(dut)
+        clearCommit(dut)
+
+        // The surrounding two-wide commit controller retired a store in lane
+        // 0 and an integer writer in lane 1. Only the latter changes the RAT.
+        dut.io.commit(1).valid.poke(true)
+        dut.io.commit(1).architectural.poke(6)
+        dut.io.commit(1).oldPhysical.poke(6)
+        dut.io.commit(1).newPhysical.poke(32)
+        dut.clock.step()
+        dut.io.committedMap(6).expect(32)
+        assert(dut.io.committedFree.peek().litValue.testBit(6))
+        assert(!dut.io.committedFree.peek().litValue.testBit(32))
+      }
+    }
+
     it("undoes dual WAW allocations newest-first without a RAT checkpoint") {
       simulate(new IntegerRename(ZirconCoreConfig.default)) { dut =>
         clearRequests(dut)

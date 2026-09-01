@@ -429,6 +429,57 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("writes back a dirty L2 victim through one eight-beat ID-5 burst") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val firstAddress = BigInt("80000100", 16)
+        val writebackAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val writebackWords = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val program = Map[BigInt, BigInt](
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+          ResetVector + 8 -> BigInt("10008193", 16), // addi x3,x1,256
+          ResetVector + 12 -> BigInt("0021a023", 16), // sw x2,0(x3)
+          ResetVector + 16 -> BigInt("40018193", 16), // addi x3,x3,1024
+          ResetVector + 20 -> BigInt("0021a023", 16),
+          ResetVector + 24 -> BigInt("40018193", 16),
+          ResetVector + 28 -> BigInt("0021a023", 16),
+          ResetVector + 32 -> BigInt("40018193", 16),
+          ResetVector + 36 -> BigInt("0021a023", 16),
+          ResetVector + 40 -> BigInt("40018193", 16),
+          ResetVector + 44 -> BigInt("0021a023", 16),
+          ResetVector + 48 -> BigInt("40018193", 16),
+          ResetVector + 52 -> BigInt("0021a023", 16),
+          ResetVector + 56 -> BigInt("40018193", 16),
+          ResetVector + 60 -> BigInt("0021a023", 16),
+          ResetVector + 64 -> BigInt("00100073", 16)
+        )
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 1024,
+          writeResponse = Some(0), observeCycle = (core, _) => {
+            val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+              core.io.axi.aw.ready.peek().litToBoolean
+            val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+              core.io.axi.w.ready.peek().litToBoolean
+            if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+              writebackAddresses += core.io.axi.aw.bits.addr.peek().litValue
+              core.io.axi.aw.bits.len.expect(7)
+              core.io.axi.aw.bits.size.expect(2)
+            }
+            if (wFire && writebackAddresses.nonEmpty) {
+              writebackWords += core.io.axi.w.bits.data.peek().litValue
+            }
+          }))
+
+        assert(writebackAddresses.toSeq == Seq(firstAddress),
+          s"dirty L2 replacement did not issue exactly one ID-5 writeback: $writebackAddresses")
+        assert(writebackWords.toSeq == Seq(BigInt(90)) ++ Seq.fill(7)(Nop),
+          s"ID-5 burst did not preserve the dirty L1D word and refill payload: $writebackWords")
+        assert(events.count(_.memoryWriteMask == 15) == 7,
+          s"not every committed store retained exact retire metadata: $events")
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
     it("flushes a cold not-taken branch's wrong path before retire") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
@@ -1230,16 +1281,31 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val atomicWriteData = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        var activeWriteOwner = Option.empty[BigInt]
         val events = throughFirstTrap(runProgram(dut, Map(
           ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
           ResetVector + 4 -> BigInt("00500113", 16), // addi x2,x0,5
           ResetVector + 8 -> BigInt("0020a1af", 16), // amoadd.w x3,x2,(x1)
           ResetVector + 12 -> BigInt("00100073", 16)
         ), cycles = 256, writeResponse = Some(0), observeCycle = (core, _) => {
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
           val wFire = core.io.axi.w.valid.peek().litToBoolean &&
             core.io.axi.w.ready.peek().litToBoolean
-          if (wFire && core.io.axi.aw.bits.id.peek().litValue == 7) {
-            atomicWriteData += core.io.axi.w.bits.data.peek().litValue
+          if (awFire) {
+            assert(activeWriteOwner.isEmpty,
+              s"a second AW arrived before WLAST for $activeWriteOwner")
+            activeWriteOwner = Some(core.io.axi.aw.bits.id.peek().litValue)
+          }
+          if (wFire) {
+            val owner = activeWriteOwner.getOrElse(
+              fail("W handshake arrived without a preceding accepted AW"))
+            if (owner == 7) {
+              atomicWriteData += core.io.axi.w.bits.data.peek().litValue
+            }
+            if (core.io.axi.w.bits.last.peek().litToBoolean) {
+              activeWriteOwner = None
+            }
           }
         }))
 

@@ -30,12 +30,12 @@ marks every participating LQ/SQ entry effect-issued. A flush or squash before
 that fire cancels the local streamer/combiner state. Once the AXI owner accepts
 the group, normal response drain is irreversible.
 
-The engine reserves AXI ID 6. IDs 0, 1--4, and 5 remain fetch, L1D refill, and
-the reserved L2 dirty-writeback owner respectively. `ZirconCore` locks the
-shared AR owner across backpressure, demultiplexes R/B by live owners, and
-serializes an ID-6 group against any active atomic or later writeback owner. It
-emits only 32-bit INCR bursts with device `cache=0`, `lock=0`, `prot=001`, and
-`qos=0`.
+The engine reserves AXI ID 6. IDs 0, 1--4, and 5 belong to fetch, L1D refill,
+and the executable L2 dirty-writeback owner respectively. `ZirconCore` locks
+the shared AR owner across backpressure, demultiplexes R/B by live owners, and
+locks the shared W channel from any accepted AW through its matching WLAST so
+ID-5/6/7 data cannot interleave without WID. It emits only 32-bit INCR bursts
+with device `cache=0`, `lock=0`, `prot=001`, and `qos=0`.
 
 ## State machine and drain rules
 

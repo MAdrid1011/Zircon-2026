@@ -6,7 +6,7 @@ import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
-import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine,
+import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
   LoadCompletion, OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer,
   StoreWriteResult}
@@ -18,8 +18,8 @@ import zircon.trace.RetireTraceFormatter
  * three-start limit. The LSU request/response ownership path is live through
  * the completion network. Cacheable integer loads and commit-authorized
  * cacheable stores own the exclusive dirty L1D copy; exact-head MMIO and
- * atomics own real AXI transactions. L2 writeback, burst collection, and the
- * final dual-LSU conflict policy remain later M3 work.
+ * atomics and dirty L2 victims own real AXI transactions. Burst collection and
+ * the final dual-LSU conflict policy remain later M3 work.
  */
 class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Module {
   override val desiredName: String = "ZirconCore"
@@ -34,6 +34,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val lsuIngress = Module(new DualLSUIngress(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
+  val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
   val atomicEngine = Module(new AtomicMemoryEngine(cfg))
@@ -149,9 +150,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.l2Insert <> l2TransferStore.io.insert
   l1dLoadCache.io.l2Lookup <> l2TransferStore.io.lookup
   l1dLoadCache.io.l2Response <> l2TransferStore.io.response
-  // Dirty L2 victims are impossible until the later L1D write-back owner marks
-  // lines dirty. Keep the queue explicitly stalled instead of dropping it.
-  l2TransferStore.io.victim.ready := false.B
+  // A retained dirty L2 victim transfers to the ID-5 AXI owner. The owner only
+  // releases it after a successful B response, including across error retries.
+  l2TransferStore.io.victim <> l2WritebackEngine.io.victim
   l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
@@ -317,31 +318,58 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       traceReadPhysical, auxiliaryRead.io.readPhysical(lane))
   }
 
+  // AXI4 omits WID, so W beats must stay in AW acceptance order. Lock the W
+  // channel from an AW handshake through its final beat; responses still route
+  // independently by ID and may return in another legal order.
+  val writeLockValid = RegInit(false.B)
+  val writeLockOwner = RegInit(0.U(2.W)) // 0 L2 writeback, 1 device, 2 atomic.
+  val writebackAwSelected = !orderedIOEngine.io.aw.valid && !atomicEngine.io.aw.valid &&
+    l2WritebackEngine.io.aw.valid
   val orderedAwSelected = orderedIOEngine.io.aw.valid
   val atomicAwSelected = !orderedAwSelected && atomicEngine.io.aw.valid
-  io.axi.aw.valid := orderedAwSelected || atomicAwSelected
+  val selectedAwOwner = Mux(orderedAwSelected, 1.U,
+    Mux(atomicAwSelected, 2.U, 0.U))
+  io.axi.aw.valid := !writeLockValid && (orderedAwSelected || atomicAwSelected ||
+    writebackAwSelected)
   io.axi.aw.bits := Mux(orderedAwSelected, orderedIOEngine.io.aw.bits,
-    atomicEngine.io.aw.bits)
-  orderedIOEngine.io.aw.ready := io.axi.aw.ready && orderedAwSelected
-  atomicEngine.io.aw.ready := io.axi.aw.ready && atomicAwSelected
-  val orderedWSelected = orderedIOEngine.io.w.valid
-  val atomicWSelected = !orderedWSelected && atomicEngine.io.w.valid
-  io.axi.w.valid := orderedWSelected || atomicWSelected
-  io.axi.w.bits := Mux(orderedWSelected, orderedIOEngine.io.w.bits,
-    atomicEngine.io.w.bits)
+    Mux(atomicAwSelected, atomicEngine.io.aw.bits, l2WritebackEngine.io.aw.bits))
+  orderedIOEngine.io.aw.ready := io.axi.aw.ready && !writeLockValid && orderedAwSelected
+  atomicEngine.io.aw.ready := io.axi.aw.ready && !writeLockValid && atomicAwSelected
+  l2WritebackEngine.io.aw.ready := io.axi.aw.ready && !writeLockValid && writebackAwSelected
+  when(io.axi.aw.fire) {
+    writeLockValid := true.B
+    writeLockOwner := selectedAwOwner
+  }
+
+  val writebackWSelected = writeLockValid && writeLockOwner === 0.U
+  val orderedWSelected = writeLockValid && writeLockOwner === 1.U
+  val atomicWSelected = writeLockValid && writeLockOwner === 2.U
+  io.axi.w.valid := writeLockValid && Mux(writebackWSelected, l2WritebackEngine.io.w.valid,
+    Mux(orderedWSelected, orderedIOEngine.io.w.valid, atomicEngine.io.w.valid))
+  io.axi.w.bits := Mux(writebackWSelected, l2WritebackEngine.io.w.bits,
+    Mux(orderedWSelected, orderedIOEngine.io.w.bits, atomicEngine.io.w.bits))
+  l2WritebackEngine.io.w.ready := io.axi.w.ready && writebackWSelected
   orderedIOEngine.io.w.ready := io.axi.w.ready && orderedWSelected
   atomicEngine.io.w.ready := io.axi.w.ready && atomicWSelected
+  when(io.axi.w.fire && io.axi.w.bits.last) {
+    writeLockValid := false.B
+  }
+
+  val bToWriteback = io.axi.b.bits.id === 5.U
   val bToOrderedIO = io.axi.b.bits.id === 6.U
   val bToAtomic = io.axi.b.bits.id === 7.U
+  l2WritebackEngine.io.b.valid := io.axi.b.valid && bToWriteback
+  l2WritebackEngine.io.b.bits := io.axi.b.bits
   orderedIOEngine.io.b.valid := io.axi.b.valid && bToOrderedIO
   orderedIOEngine.io.b.bits := io.axi.b.bits
   atomicEngine.io.b.valid := io.axi.b.valid && bToAtomic
   atomicEngine.io.b.bits := io.axi.b.bits
-  io.axi.b.ready := Mux(bToOrderedIO, orderedIOEngine.io.b.ready,
-    Mux(bToAtomic, atomicEngine.io.b.ready, false.B))
+  io.axi.b.ready := Mux(bToWriteback, l2WritebackEngine.io.b.ready,
+    Mux(bToOrderedIO, orderedIOEngine.io.b.ready,
+      Mux(bToAtomic, atomicEngine.io.b.ready, false.B)))
   when(io.axi.b.valid) {
-    assert(bToOrderedIO || bToAtomic,
-      "top-level AXI B used an ID outside ordered-device and atomic owners")
+    assert(bToWriteback || bToOrderedIO || bToAtomic,
+      "top-level AXI B used an ID outside writeback, ordered-device, and atomic owners")
   }
 
   val arLockValid = RegInit(false.B)
