@@ -169,6 +169,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.l2Insert <> l2TransferStore.io.insert
   l1dLoadCache.io.l2Lookup <> l2TransferStore.io.lookup
   l1dLoadCache.io.l2Response <> l2TransferStore.io.response
+  frontend.io.l2Lookup <> l2TransferStore.io.instructionLookup
+  frontend.io.l2LookupResponse <> l2TransferStore.io.instructionResponse
   // A retained dirty L2 victim transfers to the ID-5 AXI owner. The owner only
   // releases it after a successful B response, including across error retries.
   l2TransferStore.io.victim <> l2WritebackEngine.io.victim

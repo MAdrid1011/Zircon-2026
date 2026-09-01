@@ -310,7 +310,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         dut.io.trace.get.foreach(_.valid.expect(false))
 
         dut.clock.step(128)
-        dut.clock.step(3)
+        var arWaitCycles = 0
+        while (!dut.io.axi.ar.valid.peek().litToBoolean && arWaitCycles < 8) {
+          dut.clock.step()
+          arWaitCycles += 1
+        }
         dut.io.axi.ar.valid.expect(true)
         dut.io.axi.ar.bits.id.expect(1)
         dut.io.axi.ar.bits.addr.expect(ResetVector)

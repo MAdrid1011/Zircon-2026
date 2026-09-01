@@ -15,6 +15,11 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
 
   private def clearInputs(dut: M1Frontend): Unit = {
     dut.io.enable.poke(false)
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2LookupResponse.valid.poke(false)
+    dut.io.l2LookupResponse.bits.hit.poke(false)
+    dut.io.l2LookupResponse.bits.lineAddress.poke(0)
+    dut.io.l2LookupResponse.bits.lineData.foreach(_.poke(0))
     dut.io.l2Request.ready.poke(false)
     dut.io.l2Response.valid.poke(false)
     dut.io.l2Response.bits.client.poke(L2DemandClient.Instruction)
@@ -77,13 +82,24 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
     dut.io.enable.poke(true)
     dut.clock.step()
     dut.clock.step()
-    dut.io.l2Request.valid.expect(true)
-    dut.io.l2Request.bits.client.expect(L2DemandClient.Instruction)
-    dut.io.l2Request.bits.clientMshr.expect(0)
-    dut.io.l2Request.bits.lineAddress.expect(base & ~BigInt(31))
+    dut.io.l2Lookup.valid.expect(true)
+    dut.io.l2Lookup.bits.expect(base & ~BigInt(31))
   }
 
   private def acceptRequest(dut: M1Frontend): Unit = {
+    dut.io.l2Lookup.ready.poke(true)
+    dut.clock.step()
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2LookupResponse.valid.poke(true)
+    dut.io.l2LookupResponse.bits.hit.poke(false)
+    dut.io.l2LookupResponse.bits.lineAddress.poke(0)
+    dut.io.l2LookupResponse.bits.lineData.foreach(_.poke(0))
+    dut.io.l2LookupResponse.ready.expect(true)
+    dut.clock.step()
+    dut.io.l2LookupResponse.valid.poke(false)
+    dut.io.l2Request.valid.expect(true)
+    dut.io.l2Request.bits.client.expect(L2DemandClient.Instruction)
+    dut.io.l2Request.bits.clientMshr.expect(0)
     dut.io.l2Request.ready.poke(true)
     dut.clock.step()
     dut.io.l2Request.ready.poke(false)
@@ -177,8 +193,8 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         dut.io.unresolvedIndirect.expect(false)
         dut.io.currentPc.expect(recoveredTarget)
         dut.clock.step(2)
-        dut.io.l2Request.valid.expect(true)
-        dut.io.l2Request.bits.lineAddress.expect(recoveredTarget)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.expect(recoveredTarget)
       }
     }
 
@@ -224,8 +240,8 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         sendPacket(dut, Seq.tabulate(4)(BigInt(_)), expectPacket = false)
         dut.io.decode.foreach(_.valid.expect(false))
         dut.clock.step(2)
-        dut.io.l2Request.valid.expect(true)
-        dut.io.l2Request.bits.lineAddress.expect(commitTarget)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.expect(commitTarget)
       }
     }
   }

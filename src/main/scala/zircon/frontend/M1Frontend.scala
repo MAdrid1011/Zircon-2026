@@ -16,6 +16,8 @@ class M1Frontend(
 ) extends Module {
   val io = IO(new Bundle {
     val enable = Input(Bool())
+    val l2Lookup = Decoupled(UInt(32.W))
+    val l2LookupResponse = Flipped(Decoupled(new zircon.memory.L2InstructionLookupResponse(config)))
     val l2Request = Decoupled(new L2DemandRequest(config))
     val l2Response = Flipped(Decoupled(new L2DemandResponse(config)))
     val decode = Vec(config.decodeWidth, Decoupled(new FetchQueueEntry(config)))
@@ -157,6 +159,8 @@ class M1Frontend(
     !unresolvedIndirect && !frontendRedirect &&
     !control.io.unresolvedIndirect.valid && !control.io.redirect.valid &&
     !responseHasFetchFault
+  io.l2Lookup <> fetch.io.l2Lookup
+  fetch.io.l2LookupResponse <> io.l2LookupResponse
   io.l2Request <> fetch.io.l2Request
   fetch.io.l2Response <> io.l2Response
 

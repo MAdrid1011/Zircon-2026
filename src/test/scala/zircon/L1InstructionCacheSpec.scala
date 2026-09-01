@@ -16,6 +16,11 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.responseNextPc.poke(nextPc)
     dut.io.continueAfterResponse.poke(false)
     dut.io.lookaheadEnable.poke(false)
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2LookupResponse.valid.poke(false)
+    dut.io.l2LookupResponse.bits.hit.poke(false)
+    dut.io.l2LookupResponse.bits.lineAddress.poke(0)
+    for (word <- 0 until 8) dut.io.l2LookupResponse.bits.lineData(word).poke(0)
     dut.io.l2Request.ready.poke(false)
     dut.io.l2Response.valid.poke(false)
     dut.io.l2Response.bits.client.poke(L2DemandClient.Instruction)
@@ -32,7 +37,23 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
     dut.clock.step()
   }
 
+  private def acceptL2Miss(dut: L1InstructionCache, line: BigInt): Unit = {
+    dut.io.l2Lookup.valid.expect(true)
+    dut.io.l2Lookup.bits.expect(line)
+    dut.io.l2Lookup.ready.poke(true)
+    dut.clock.step()
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2LookupResponse.ready.expect(true)
+    dut.io.l2LookupResponse.valid.poke(true)
+    dut.io.l2LookupResponse.bits.hit.poke(false)
+    dut.io.l2LookupResponse.bits.lineAddress.poke(line)
+    dut.io.l2LookupResponse.bits.lineData.foreach(_.poke(0))
+    dut.clock.step()
+    dut.io.l2LookupResponse.valid.poke(false)
+  }
+
   private def acceptDemand(dut: L1InstructionCache, line: BigInt): Unit = {
+    acceptL2Miss(dut, line)
     dut.io.l2Request.valid.expect(true)
     dut.io.l2Request.bits.client.expect(L2DemandClient.Instruction)
     dut.io.l2Request.bits.clientMshr.expect(0)
@@ -86,6 +107,30 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("L1InstructionCache") {
+    it("fills L1I from a resident L2 instruction probe without an AXI demand") {
+      simulate(new L1InstructionCache) { dut =>
+        clear(dut)
+        val line = Seq.tabulate(8)(index => BigInt("11000000", 16) + index)
+        start(dut, ResetVector)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.expect(ResetVector)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+        dut.io.l2LookupResponse.valid.poke(true)
+        dut.io.l2LookupResponse.bits.hit.poke(true)
+        dut.io.l2LookupResponse.bits.lineAddress.poke(ResetVector)
+        line.zipWithIndex.foreach { case (word, index) =>
+          dut.io.l2LookupResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.l2LookupResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2LookupResponse.valid.poke(false)
+        dut.io.l2Request.valid.expect(false)
+        acceptPacket(dut, ResetVector, line.take(4), ResetVector + 16)
+      }
+    }
+
     it("fills a line through the instruction client and serves a later hit locally") {
       simulate(new L1InstructionCache) { dut =>
         clear(dut)
@@ -192,8 +237,8 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
         returnLine(dut, Seq.tabulate(8)(index => BigInt("25000000", 16) + index))
         dut.io.response.valid.expect(false)
         start(dut, target)
-        dut.io.l2Request.valid.expect(true)
-        dut.io.l2Request.bits.lineAddress.expect(target)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.expect(target)
       }
     }
 
@@ -216,7 +261,7 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
 
         redirect(dut, ResetVector)
         start(dut, ResetVector)
-        dut.io.l2Request.valid.expect(true)
+        dut.io.l2Lookup.valid.expect(true)
       }
     }
 
@@ -225,6 +270,7 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
       simulate(new L1InstructionCache) { dut =>
         clear(dut)
         start(dut, ResetVector)
+        acceptL2Miss(dut, ResetVector)
         dut.io.l2Request.valid.expect(true)
         dut.io.l2Request.bits.lineAddress.expect(ResetVector)
         dut.clock.step(2)
@@ -234,8 +280,8 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
         redirect(dut, target)
         dut.io.l2Request.valid.expect(false)
         start(dut, target)
-        dut.io.l2Request.valid.expect(true)
-        dut.io.l2Request.bits.lineAddress.expect(target)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.expect(target)
       }
     }
 
@@ -250,8 +296,8 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
         returnLine(dut, Seq.tabulate(8)(BigInt(_)))
         dut.io.response.valid.expect(false)
         start(dut, target)
-        dut.io.l2Request.valid.expect(true)
-        dut.io.l2Request.bits.lineAddress.expect(target)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.expect(target)
       }
     }
 
@@ -266,7 +312,7 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
 
         redirect(dut, ResetVector, invalidate = true)
         start(dut, ResetVector)
-        dut.io.l2Request.valid.expect(true)
+        dut.io.l2Lookup.valid.expect(true)
       }
     }
   }

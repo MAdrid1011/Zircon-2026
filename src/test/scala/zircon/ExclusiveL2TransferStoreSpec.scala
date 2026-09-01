@@ -13,6 +13,9 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     dut.io.lookup.valid.poke(false)
     dut.io.lookup.bits.lineAddress.poke(0)
     dut.io.response.ready.poke(false)
+    dut.io.instructionLookup.valid.poke(false)
+    dut.io.instructionLookup.bits.poke(0)
+    dut.io.instructionResponse.ready.poke(false)
     dut.io.flushLine.valid.poke(false)
     dut.io.flushLine.bits.poke(0)
     dut.io.invalidate.valid.poke(false)
@@ -46,6 +49,36 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("ExclusiveL2TransferStore") {
+    it("serves an instruction probe without transferring the resident D-side line") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val line = BigInt("80001200", 16)
+        val words = Seq.tabulate(8)(word => BigInt("ca110000", 16) + word)
+        insert(dut, line, words, dirty = true)
+
+        dut.io.instructionLookup.valid.poke(true)
+        dut.io.instructionLookup.bits.poke(line)
+        dut.io.instructionLookup.ready.expect(true)
+        dut.clock.step()
+        dut.io.instructionLookup.valid.poke(false)
+        dut.io.instructionResponse.valid.expect(true)
+        dut.io.instructionResponse.bits.hit.expect(true)
+        dut.io.instructionResponse.bits.lineAddress.expect(line)
+        words.zipWithIndex.foreach { case (word, index) =>
+          dut.io.instructionResponse.bits.lineData(index).expect(word)
+        }
+        dut.io.residentLineCount.expect(1)
+        dut.io.instructionResponse.ready.poke(true)
+        dut.clock.step()
+        dut.io.instructionResponse.ready.poke(false)
+
+        lookup(dut, line)
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.hit.expect(true)
+        dut.io.response.bits.transfer.dirty.expect(true)
+      }
+    }
+
     it("moves an L2 hit into the sole response transfer buffer") {
       simulate(new ExclusiveL2TransferStore) { dut =>
         clear(dut)

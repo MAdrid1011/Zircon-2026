@@ -24,8 +24,10 @@ D copy to L1D. On an L2 miss, L1D sends a `Data` client request and later
 matches the response with `clientMshr`. `L1InstructionCache` is an active
 `Instruction` client with local token zero; it shares these four physical
 owners fairly with L1D and receives only the complete response for its retained
-owner. The executable slice does not yet implement an I-side resident L2 hit
-or dynamic I/D allocation.
+owner. Before consuming an AXI owner, L1I probes an existing resident L2 line
+through a non-destructive read-only port. The executable slice does not yet
+allocate AXI-refilled instruction lines into L2 or implement final dynamic I/D
+allocation.
 
 ## Recovery and verification
 

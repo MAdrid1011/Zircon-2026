@@ -224,6 +224,16 @@ class L2LookupResponse(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val transfer = new CacheLineTransfer(config)
 }
 
+/** A non-destructive instruction-side probe of a resident L2 line. The line
+  * remains owned by L2, unlike a D-side exclusive lookup transfer. */
+class L2InstructionLookupResponse(
+    config: ZirconCoreConfig = ZirconCoreConfig.default
+) extends Bundle {
+  val hit = Bool()
+  val lineAddress = UInt(32.W)
+  val lineData = Vec(config.l2.lineBytes / 4, UInt(32.W))
+}
+
 /** Exact architectural memory information kept until the owning ROB entry
   * retires. This is the sole LSQ source for retire tracing.
   */

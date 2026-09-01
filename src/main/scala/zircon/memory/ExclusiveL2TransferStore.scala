@@ -38,6 +38,9 @@ class ExclusiveL2TransferStore(
     /** Hit requests move the only L2 copy into the response transfer buffer. */
     val lookup = Flipped(Decoupled(new L2LookupRequest(config)))
     val response = Decoupled(new L2LookupResponse(config))
+    /** I-side probes retain the L2 copy and return a read-only line snapshot. */
+    val instructionLookup = Flipped(Decoupled(UInt(32.W)))
+    val instructionResponse = Decoupled(new L2InstructionLookupResponse(config))
     /** Trace-only exact dirty-line eviction into the retained victim FIFO. */
     val flushLine = Flipped(Decoupled(UInt(32.W)))
     /** A direct external write must remove a matching clean L2 copy before it
@@ -63,6 +66,11 @@ class ExclusiveL2TransferStore(
   io.response.bits := responseBits
   io.transferBusy := responseValid
 
+  val instructionResponseValid = RegInit(false.B)
+  val instructionResponseBits = Reg(new L2InstructionLookupResponse(config))
+  io.instructionResponse.valid := instructionResponseValid
+  io.instructionResponse.bits := instructionResponseBits
+
   val victimQueue = Module(new Queue(new CacheLineTransfer(config), entries = 2))
   io.victim <> victimQueue.io.deq
   io.victimCount := victimQueue.io.count
@@ -84,7 +92,8 @@ class ExclusiveL2TransferStore(
   val canInsert = !insertHit && (!replacingDirty || victimQueue.io.enq.ready)
   // First version is a single array port: an insertion owns the cycle over a
   // lookup, including while a dirty victim is waiting for FIFO credit.
-  io.insert.ready := !responseValid && !io.invalidate.valid && !io.flushLine.valid && canInsert
+  io.insert.ready := !responseValid && !instructionResponseValid &&
+    !io.invalidate.valid && !io.flushLine.valid && canInsert
 
   val lookupSet = io.lookup.bits.lineAddress(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -93,7 +102,23 @@ class ExclusiveL2TransferStore(
     lineValid(way)(lookupSet) && lineTag(way)(lookupSet) === lookupTag))
   val lookupHit = lookupHits.asUInt.orR
   val lookupWay = PriorityEncoder(lookupHits.asUInt)
-  io.lookup.ready := !io.invalidate.valid && !io.insert.valid && !io.flushLine.valid && !responseValid
+  io.lookup.ready := !io.invalidate.valid && !io.insert.valid && !io.flushLine.valid &&
+    !responseValid && !instructionResponseValid
+
+  val instructionLookupSet = io.instructionLookup.bits(
+    lineOffsetWidth + setWidth - 1, lineOffsetWidth)
+  val instructionLookupTag = io.instructionLookup.bits(31,
+    lineOffsetWidth + setWidth)
+  val instructionLookupHits = VecInit((0 until ways).map(way =>
+    lineValid(way)(instructionLookupSet) &&
+      lineTag(way)(instructionLookupSet) === instructionLookupTag))
+  val instructionLookupHit = instructionLookupHits.asUInt.orR
+  val instructionLookupWay = PriorityEncoder(instructionLookupHits.asUInt)
+  // One Reg-backed L2 array port is shared deterministically: a mutating D
+  // action wins, then exclusive D transfer, then read-only I probe.
+  io.instructionLookup.ready := !io.invalidate.valid && !io.insert.valid &&
+    !io.lookup.valid && !io.flushLine.valid && !responseValid &&
+    !instructionResponseValid
 
   val flushSet = io.flushLine.bits(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -128,6 +153,10 @@ class ExclusiveL2TransferStore(
     assert(io.lookup.bits.lineAddress(lineOffsetWidth - 1, 0) === 0.U,
       "L2 lookup must use a line-aligned address")
   }
+  when(io.instructionLookup.fire) {
+    assert(io.instructionLookup.bits(lineOffsetWidth - 1, 0) === 0.U,
+      "L2 instruction lookup must use a line-aligned address")
+  }
   when(io.invalidate.valid) {
     assert(io.invalidateReady,
       "L2 invalidation attempted to discard a dirty or otherwise busy line")
@@ -141,6 +170,9 @@ class ExclusiveL2TransferStore(
 
   when(io.response.fire) {
     responseValid := false.B
+  }
+  when(io.instructionResponse.fire) {
+    instructionResponseValid := false.B
   }
   when(io.flushLine.fire) {
     victimQueue.io.enq.valid := true.B
@@ -204,6 +236,25 @@ class ExclusiveL2TransferStore(
             lookupSet, 0.U(lineOffsetWidth.W))
           for (word <- 0 until wordsPerLine) {
             responseBits.transfer.lineData(word) := lineData(way)(lookupSet)(word)
+          }
+        }
+      }
+    }
+  }.elsewhen(io.instructionLookup.fire) {
+    instructionResponseValid := true.B
+    instructionResponseBits.hit := instructionLookupHit
+    instructionResponseBits.lineAddress := io.instructionLookup.bits
+    for (word <- 0 until wordsPerLine) {
+      instructionResponseBits.lineData(word) := 0.U
+    }
+    when(instructionLookupHit) {
+      for (way <- 0 until ways) {
+        when(instructionLookupWay === way.U) {
+          instructionResponseBits.lineAddress := Cat(lineTag(way)(instructionLookupSet),
+            instructionLookupSet, 0.U(lineOffsetWidth.W))
+          for (word <- 0 until wordsPerLine) {
+            instructionResponseBits.lineData(word) :=
+              lineData(way)(instructionLookupSet)(word)
           }
         }
       }

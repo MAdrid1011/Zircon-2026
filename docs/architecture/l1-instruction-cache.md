@@ -28,8 +28,10 @@ request at word six returns two words rather than constructing a cross-line
 packet. `responseNextPc` changes the next idle PC only when the packet is
 accepted by the frontend.
 
-A tag hit copies the captured prefix into a held packet. A miss chooses an
-invalid way first, then the one-bit replacement way, and emits exactly one
+A tag hit copies the captured prefix into a held packet. A local miss first
+issues a read-only probe to the resident L2 store. An L2 hit copies the line
+into L1I without removing the L2 D-side owner. An L2 miss chooses an invalid
+way first, then the one-bit replacement way, and emits exactly one
 `L2DemandRequest` with `client=Instruction`, `clientMshr=0`, and a line-aligned
 address. After the request handshake, the cache waits for the complete retained
 `L2DemandResponse`. A successful response fills the selected line and creates
@@ -49,11 +51,12 @@ an instruction access fault; precise fault dispatch owns the next control flow.
 
 ## Redirect, invalidation, and drain
 
-Redirect has priority over normal progress. Before the local demand request
-handshakes it cancels the request without touching shared ownership. After it
-handshakes, L1I remains ready for its exact complete response, enters `Drain`,
-and discards the returned line and packet. A held packet is suppressed by the
-redirect. The latest redirect target becomes the next request PC.
+Redirect has priority over normal progress. Before a resident-L2 probe or local
+demand request handshakes it cancels that request. After a probe handshakes it
+drains its held response without changing L1I; after a demand handshakes, L1I
+remains ready for its exact complete response, enters `Drain`, and discards the
+returned line and packet. A held packet is suppressed by the redirect. The
+latest redirect target becomes the next request PC.
 
 The same rule applies to an accepted lookahead: a redirect suppresses its held
 packet, drains the retained response, and does not install the speculative line.
@@ -66,7 +69,9 @@ redirect.
 
 ## Shared demand interface
 
-L1I and L1D arbitrate into `AXIDataReadEngine`. The request arbiter has no
+L1I first probes `ExclusiveL2TransferStore` through a read-only port; the probe
+never transfers or invalidates a resident D line. L1I and L1D arbitrate into
+`AXIDataReadEngine` on an L2 miss. The request arbiter has no
 cache-reserved physical slots: the engine selects one free owner, retains the
 client/token until the eighth R beat, then returns one complete response.
 `ZirconCore` routes the response only to the retained `Instruction` or `Data`
@@ -75,7 +80,7 @@ beats and cannot reclaim an ID before the engine has fully drained it.
 
 ## Verification mapping
 
-`L1InstructionCacheSpec` covers cache hit/miss, refill data, replacement,
+`L1InstructionCacheSpec` covers cache hit/miss, resident-L2 hit, refill data, replacement,
 line-end packet clipping, response faults, held demand backpressure, sequential
 lookahead, redirect before and after accepted normal/lookahead demand, and
 invalidation. `M1FrontendSpec` covers

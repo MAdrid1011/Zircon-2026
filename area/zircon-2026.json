@@ -5,7 +5,7 @@
   "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice, partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, four L2 demand-read MSHRs, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client, but it has no resident I-side L2 lookup, formal proof, or I/D coherence. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger; general dirty-cache flush/FENCE semantics and external coherency are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client and first probes resident L2 lines without changing D ownership, but AXI-refilled I lines do not allocate into L2 and formal proof/I-D coherence are unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger; general dirty-cache flush/FENCE semantics and external coherency are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -78,7 +78,7 @@
       "name": "l1i_mshr_and_control_shared_demand_slice",
       "class": "register_control",
       "entries": 1,
-      "bits_per_entry": 165,
+      "bits_per_entry": 166,
       "instances": 1,
       "replication_factor": 1,
       "source": "L1InstructionCache state, PC/request registers, miss way, and retained sequential-lookahead owner metadata"
@@ -352,6 +352,15 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "ExclusiveL2TransferStore responseValid plus L2LookupResponse {hit, line address, eight words, dirty}"
+    },
+    {
+      "name": "l2_instruction_probe_response_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 290,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExclusiveL2TransferStore instructionResponseValid plus L2InstructionLookupResponse {hit, line address, eight words}"
     },
     {
       "name": "l2_dirty_victim_payload",
@@ -672,12 +681,28 @@
       "source": "ExclusiveL2TransferStore four-way insert, lookup, and external-write invalidation tag checks"
     },
     {
+      "name": "l2_instruction_probe_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "ExclusiveL2TransferStore four-way read-only instruction probe tags, conservatively charged as 32-bit compares"
+    },
+    {
       "name": "l2_way_data_mux_inputs",
       "metric": "mux_input_bits",
       "units": 2,
       "width": 256,
       "fanin": 4,
       "source": "ExclusiveL2TransferStore dynamic four-way victim and lookup-response line-data selections"
+    },
+    {
+      "name": "l2_instruction_probe_data_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 256,
+      "fanin": 4,
+      "source": "ExclusiveL2TransferStore four-way instruction-probe line-data snapshot"
     },
     {
       "name": "l2_way_select_priority_bits",

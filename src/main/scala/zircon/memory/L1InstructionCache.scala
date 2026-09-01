@@ -6,7 +6,8 @@ import zircon.ZirconCoreConfig
 import zircon.frontend.{FetchFault, InstructionFetchPacket, InstructionFetchWord}
 
 object L1InstructionCacheState extends ChiselEnum {
-  val Idle, Lookup, Demand, Refill, Present, Drain = Value
+  val Idle, Lookup, L2Lookup, L2Response, Demand, Refill, Present, Drain,
+    L2Drain = Value
 }
 
 /** One-MSHR, non-inclusive instruction cache for the executable M3 frontend.
@@ -43,6 +44,9 @@ class L1InstructionCache(
     val continueAfterResponse = Input(Bool())
     /** Allows a sequential next-line lookahead while the current packet waits. */
     val lookaheadEnable = Input(Bool())
+    /** Read-only resident-L2 probe before a demand AXI refill. */
+    val l2Lookup = Decoupled(UInt(32.W))
+    val l2LookupResponse = Flipped(Decoupled(new L2InstructionLookupResponse(config)))
     val l2Request = Decoupled(new L2DemandRequest(config))
     val l2Response = Flipped(Decoupled(new L2DemandResponse(config)))
     val currentPc = Output(UInt(32.W))
@@ -108,6 +112,11 @@ class L1InstructionCache(
     !sequentialLookaheadHitWays.asUInt.orR
 
   val normalDemand = state === L1InstructionCacheState.Demand
+  io.l2Lookup.valid := state === L1InstructionCacheState.L2Lookup &&
+    !io.redirect.valid
+  io.l2Lookup.bits := requestLine
+  io.l2LookupResponse.ready := state === L1InstructionCacheState.L2Response ||
+    state === L1InstructionCacheState.L2Drain
   io.l2Request.valid := (normalDemand || sequentialLookaheadNeeded) &&
     !io.redirect.valid
   io.l2Request.bits.client := L2DemandClient.Instruction.U
@@ -134,6 +143,10 @@ class L1InstructionCache(
       "L1I sent an unaligned line demand")
     assert(io.l2Request.bits.lineAddress(11, 0) <= (4096 - cache.lineBytes).U,
       "L1I demand crossed an AXI 4 KiB boundary")
+  }
+  when(io.l2Lookup.fire) {
+    assert(io.l2Lookup.bits(4, 0) === 0.U,
+      "L1I issued an unaligned resident-L2 lookup")
   }
   when(io.l2Response.fire) {
     assert(io.l2Response.bits.client === L2DemandClient.Instruction.U,
@@ -180,7 +193,10 @@ class L1InstructionCache(
   when(io.redirect.valid) {
     pc := io.redirect.bits
     lookaheadIssued := false.B
-    when(state === L1InstructionCacheState.Refill || lookaheadInFlight) {
+    when(state === L1InstructionCacheState.L2Response) {
+      state := Mux(io.l2LookupResponse.fire, L1InstructionCacheState.Idle,
+        L1InstructionCacheState.L2Drain)
+    }.elsewhen(state === L1InstructionCacheState.Refill || lookaheadInFlight) {
       state := Mux(io.l2Response.fire, L1InstructionCacheState.Idle,
         L1InstructionCacheState.Drain)
       lookaheadInFlight := false.B
@@ -218,7 +234,38 @@ class L1InstructionCache(
           // another line waits here until that AXI-owned response drains.
         }.otherwise {
           missWay := victimWay
-          state := L1InstructionCacheState.Demand
+          state := L1InstructionCacheState.L2Lookup
+        }
+      }
+      is(L1InstructionCacheState.L2Lookup) {
+        when(io.l2Lookup.fire) {
+          state := L1InstructionCacheState.L2Response
+        }
+      }
+      is(L1InstructionCacheState.L2Response) {
+        when(io.l2LookupResponse.fire) {
+          when(io.l2LookupResponse.bits.hit) {
+            for (slot <- 0 until config.fetchWidth) {
+              val wordIndex = requestWord + slot.U
+              packetWords(slot).instruction := Mux(slot.U < requestCount,
+                io.l2LookupResponse.bits.lineData(wordIndex), 0.U)
+              packetWords(slot).fault.valid := false.B
+              packetWords(slot).fault.cause := 0.U
+              packetWords(slot).fault.tval := 0.U
+            }
+            when(!io.invalidate) {
+              cacheValid(missWay)(requestSet) := true.B
+              cacheTag(missWay)(requestSet) := requestTag
+              for (word <- 0 until wordsPerLine) {
+                cacheData(missWay)(requestSet)(word) :=
+                  io.l2LookupResponse.bits.lineData(word)
+              }
+              replacement(requestSet) := !missWay.asBool
+            }
+            state := L1InstructionCacheState.Present
+          }.otherwise {
+            state := L1InstructionCacheState.Demand
+          }
         }
       }
       is(L1InstructionCacheState.Demand) {
@@ -266,6 +313,11 @@ class L1InstructionCache(
       }
       is(L1InstructionCacheState.Drain) {
         when(io.l2Response.fire) {
+          state := L1InstructionCacheState.Idle
+        }
+      }
+      is(L1InstructionCacheState.L2Drain) {
+        when(io.l2LookupResponse.fire) {
           state := L1InstructionCacheState.Idle
         }
       }
