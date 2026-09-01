@@ -1,9 +1,8 @@
-# M3 Deterministic `tohost` and Bounded Spike Evidence
+# M3 Deterministic `tohost`, Bounded Spike, and Sail Evidence
 
 This record binds deterministic, `tohost`-completing M3 ELF runs and the first
 bounded committed-memory comparisons to the exact local source revisions and
-generated artifacts. It is local execution evidence, not an M3 release claim
-and not Sail committed-memory evidence.
+generated artifacts. It is local execution evidence, not an M3 release claim.
 
 ## Revisions and invocation
 
@@ -36,21 +35,22 @@ that the trace metadata and backing memory agree before reporting success.
 ## Remaining proof obligations
 
 The earlier M1/M2 prefix comparator intentionally rejected memory metadata.
-The M3 `diff-memory-spike` path used below does compare memory metadata and
-final backing-memory state against locked Spike. It still rejects traps,
-interrupts, floating state, unsupported memory encodings, and Sail logs; it
-does not establish full ISA equivalence of loads, stores, atomics, or cache
-ordering. The next verification change must add a Sail memory adapter and
-error/backpressure stress with explicit seeds.
+The M3 committed-memory paths below compare memory metadata and final
+backing-memory state against locked Spike and Sail. They still reject traps,
+interrupts, floating state, and unsupported memory encodings; they do not
+establish full ISA equivalence of loads, stores, atomics, or cache ordering.
+The next verification changes are explicit-seed AXI error/backpressure stress
+and the remaining cache/LSU proof obligations.
 
 ## Committed-memory differential harness status
 
 ZirconSim commit `2bce488562b756a572be9a9004d720a5eb4bab42` adds the bounded
 Spike committed-memory comparison and exact sorted AXI backing-memory snapshots.
-It covers the four ELFs above through `make -C ZirconSim diff-memory-spike
-SPIKE=/path/to/locked/spike`, including their trailing `tohost` store. The
-comparator checks committed load/store/AMO metadata and every touched backing
-word reconstructed from the ELF image and reference committed stores.
+Commit `b22137e40c8331608930acc6494197bc72054840` adds the independently
+parsed Sail committed-memory path. Both cover the four ELFs above through
+their trailing `tohost` store. The comparator checks committed load/store/AMO
+metadata and every touched backing word reconstructed from the ELF image and
+reference committed stores.
 
 At this revision the following local prerequisites passed:
 
@@ -85,7 +85,33 @@ words in the deterministic AXI backing-memory snapshot against Spike.
 | `rv32m-commit-prefix.elf` | `5017a789b5f38771a065152b74b182bafe2f54d93d59ecfd5e05c30dfd546977` | `f59164e11cf286b691649dad57479455d701ef3483c0ccb827bc10424cf00a91` |
 | `rv32a-tohost.elf` | `ad6e0bce0c695896484efc8a6ae13554d6fe0fe8e3665278b17e86bd40d869d2` | `e5123413fd054435036ee98d7356c29de14101ba14ad0dac7878002b3b05028b` |
 
-The comparison is deliberately bounded to these four directed ELFs. A Sail
-memory-trace adapter, cache-global FENCE/I-D coherence, explicit-seed random
-AXI error/backpressure stress, full dual-LSU conflict coverage, and broader
+On 2026-09-01, parent source `8702e3fd132653d072554824bce8be4225baf815`,
+ZirconSim `b22137e40c8331608930acc6494197bc72054840`, and the same
+RV-Software revision ran the locked Sail-RISC-V source
+`beaf44991eee362a062fcaaf6fcb78ca428ff710`. The model binary was built with
+Sail compiler `0.20.2` (binary SHA256
+`26b59bcab2d66e9f220d317dfe45f8b09170ed70e59a824553d6f525134d1ff6`) and
+was invoked as follows:
+
+```bash
+make -C ZirconSim diff-memory-sail \
+  SAIL=/home/madrid/.cache/zircon-2026-sail-riscv-beaf4499/build/c_emulator/sail_riscv_sim
+```
+
+All four bounded Sail comparisons passed: RV32I CSR prefix `19` ordered
+retirements, RV32I ALU/branch prefix `34`, RV32M prefix `19`, and RV32A
+AMO/LR/SC prefix `12`. `mem[X,...]` instruction fetches were excluded; Sail
+`R/W/RW` records were compared as committed load/store/AMO metadata and every
+touched backing-memory word was matched against the deterministic AXI snapshot.
+
+| ELF | Sail memory log SHA256 | Backing-memory SHA256 |
+| --- | --- | --- |
+| `rv32i-commit-prefix.elf` | `f69ec9a316697531adb9ac25574a819edebf1ee8ce53b990c40b9216870f87cc` | `799b638079395e494dcabf864a0f34478b17d0d51b8680e6ae882b1e56ba2444` |
+| `rv32i-alu-branch-prefix.elf` | `16ad8c7ca2b54c18bcec05c475e957b4ee10400f13990dffab4d88f3c7d976f6` | `32742d6c5d31b82db209a695f66065ca1beb088927dedbee5b50441dc779a411` |
+| `rv32m-commit-prefix.elf` | `e8dc51e1ce8b3149cc2f58d13eb04c03bb817da170feb37fb2e2f9769b9e55c8` | `f59164e11cf286b691649dad57479455d701ef3483c0ccb827bc10424cf00a91` |
+| `rv32a-tohost.elf` | `6e1048db60259e0097ff07b1c2e03489912a68ab638d6968e7b56e608c61ae70` | `e5123413fd054435036ee98d7356c29de14101ba14ad0dac7878002b3b05028b` |
+
+The comparisons are deliberately bounded to these four directed ELFs.
+Cache-global FENCE/I-D coherence, explicit-seed random AXI error/backpressure
+stress, full dual-LSU conflict coverage, formal properties, and broader
 Spike/Sail/ACT4 campaigns remain required.
