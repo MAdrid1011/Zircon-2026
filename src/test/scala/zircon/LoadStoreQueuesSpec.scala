@@ -45,6 +45,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     dut.io.commitAuthorize.valid.poke(false)
     dut.io.commitAuthorize.bits.poke(0)
     dut.io.storeEffect.ready.poke(false)
+    dut.io.deviceLoadEffect.ready.poke(false)
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
     dut.io.storeEffectComplete.bits.accessFault.poke(false)
@@ -65,7 +66,8 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       load: Boolean,
       store: Boolean,
       atomic: Boolean = false,
-      m1Owner: Boolean = false
+      m1Owner: Boolean = false,
+      pmaKind: PMARegionKind = PMARegionKind.Memory
   ): Unit = {
     val port = dut.io.allocate(lane)
     port.valid.poke(true)
@@ -78,7 +80,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     port.bits.writesInteger.poke(true)
     port.bits.m1Owner.poke(m1Owner)
     port.bits.isAtomic.poke(atomic)
-    port.bits.pmaKind.poke(PMARegionKind.Memory.code)
+    port.bits.pmaKind.poke(pmaKind.code)
     port.bits.aq.poke(false)
     port.bits.rl.poke(false)
   }
@@ -123,6 +125,50 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("LoadStoreQueues") {
+    it("issues an exact-head device load once and waits for its real completion") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        val address = BigInt("a00003f8", 16)
+        allocate(dut, 0, tag = 6, load = true, store = false,
+          pmaKind = PMARegionKind.DeviceStrong)
+        dut.clock.step()
+        noAllocations(dut)
+        queryLoad(dut, 6, address, 15)
+        dut.io.loadAddress.ready.expect(true)
+        dut.clock.step()
+        dut.io.loadAddress.valid.poke(false)
+
+        dut.io.robHeadTag.poke(5)
+        dut.io.deviceLoadEffect.valid.expect(false)
+        dut.io.robHeadTag.poke(6)
+        dut.io.deviceLoadEffect.valid.expect(true)
+        dut.io.deviceLoadEffect.bits.robTag.expect(6)
+        dut.io.deviceLoadEffect.bits.address.expect(address)
+        dut.io.deviceLoadEffect.bits.accessSize.expect(2)
+        dut.io.deviceLoadEffect.bits.pmaKind.expect(PMARegionKind.DeviceStrong.code)
+        dut.io.deviceLoadEffect.ready.poke(true)
+        dut.clock.step()
+        dut.io.deviceLoadEffect.ready.poke(false)
+        dut.io.deviceLoadEffect.valid.expect(false)
+        dut.io.deviceLoadInFlight.expect(true)
+
+        dut.io.loadComplete.valid.poke(true)
+        dut.io.loadComplete.bits.robTag.poke(6)
+        dut.io.loadComplete.bits.cacheData.poke(BigInt("11223344", 16))
+        dut.io.loadComplete.bits.accessFault.poke(false)
+        dut.io.loadComplete.bits.faultAddress.poke(address)
+        dut.io.loadComplete.ready.expect(true)
+        dut.clock.step()
+        dut.io.loadComplete.valid.poke(false)
+        dut.io.deviceLoadInFlight.expect(true)
+        dut.io.retire(0).valid.poke(true)
+        dut.io.retire(0).bits.poke(6)
+        dut.clock.step()
+        dut.io.retire(0).valid.poke(false)
+        dut.io.deviceLoadInFlight.expect(false)
+      }
+    }
+
     it("marks only M1 non-atomic load forwards cacheable") {
       simulate(new LoadStoreQueues) { dut =>
         clear(dut)

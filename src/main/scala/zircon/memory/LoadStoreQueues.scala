@@ -43,6 +43,8 @@ class LoadStoreQueues(
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
     val storeCommitInFlight = Output(Bool())
+    val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
+    val deviceLoadInFlight = Output(Bool())
 
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
@@ -68,6 +70,7 @@ class LoadStoreQueues(
   val lqWritesInteger = Reg(Vec(lqEntries, Bool()))
   val lqM1Owner = Reg(Vec(lqEntries, Bool()))
   val lqIsAtomic = Reg(Vec(lqEntries, Bool()))
+  val lqPmaKind = Reg(Vec(lqEntries, UInt(2.W)))
   val lqAq = Reg(Vec(lqEntries, Bool()))
   val lqRl = Reg(Vec(lqEntries, Bool()))
   val lqAddressValid = RegInit(VecInit.fill(lqEntries)(false.B))
@@ -76,6 +79,7 @@ class LoadStoreQueues(
   val lqForwardMask = Reg(Vec(lqEntries, UInt(4.W)))
   val lqForwardData = Reg(Vec(lqEntries, UInt(32.W)))
   val lqCompleted = RegInit(VecInit.fill(lqEntries)(false.B))
+  val lqEffectIssued = RegInit(VecInit.fill(lqEntries)(false.B))
   val lqMetadataValid = RegInit(VecInit.fill(lqEntries)(false.B))
   val lqMetadata = Reg(Vec(lqEntries, new MemoryRetireMetadata(config)))
 
@@ -238,12 +242,16 @@ class LoadStoreQueues(
   io.loadContext.bits.aq := lqAq(loadContextIndex)
   io.loadContext.bits.rl := lqRl(loadContextIndex)
 
+  private def isDevicePma(kind: UInt): Bool = kind === PMARegionKind.DeviceStrong.code.U ||
+    kind === PMARegionKind.DeviceBurstable.code.U
+
   val (commitMatch, commitIndex) = findMatch(
     sqValid, sqTag, io.commitAuthorize.bits, sqEntries, sqIndexWidth)
   val commitEligible = commitMatch && sqAddressValid(commitIndex) &&
     sqDataValid(commitIndex) && !sqCommitAuthorized(commitIndex) &&
     !sqIsAtomic(commitIndex) &&
-    sqPmaKind(commitIndex) === PMARegionKind.Memory.code.U
+    (sqPmaKind(commitIndex) === PMARegionKind.Memory.code.U ||
+      isDevicePma(sqPmaKind(commitIndex)))
   io.commitAuthorize.ready := !recoveryBlocked && commitEligible
 
   var selectedStoreValid: Bool = false.B
@@ -268,6 +276,18 @@ class LoadStoreQueues(
   io.storeEffect.bits.pmaKind := sqPmaKind(selectedStoreIndex)
   io.storeEffect.bits.aq := sqAq(selectedStoreIndex)
   io.storeEffect.bits.rl := sqRl(selectedStoreIndex)
+
+  val (headLoadMatch, headLoadIndex) = findMatch(
+    lqValid, lqTag, io.robHeadTag, lqEntries, lqIndexWidth)
+  val deviceLoadEligible = headLoadMatch && lqAddressValid(headLoadIndex) &&
+    !lqM1Owner(headLoadIndex) && !lqIsAtomic(headLoadIndex) &&
+    isDevicePma(lqPmaKind(headLoadIndex)) && !lqEffectIssued(headLoadIndex) &&
+    !lqCompleted(headLoadIndex)
+  io.deviceLoadEffect.valid := deviceLoadEligible && !recoveryBlocked
+  io.deviceLoadEffect.bits.robTag := lqTag(headLoadIndex)
+  io.deviceLoadEffect.bits.address := lqAddress(headLoadIndex)
+  io.deviceLoadEffect.bits.accessSize := lqAccessSize(headLoadIndex)
+  io.deviceLoadEffect.bits.pmaKind := lqPmaKind(headLoadIndex)
 
   val (effectCompleteMatch, effectCompleteIndex) = findMatch(
     sqValid, sqTag, io.storeEffectComplete.bits.robTag, sqEntries, sqIndexWidth)
@@ -366,10 +386,12 @@ class LoadStoreQueues(
           lqWritesInteger(index) := io.allocate(lane).bits.writesInteger
           lqM1Owner(index) := io.allocate(lane).bits.m1Owner
           lqIsAtomic(index) := io.allocate(lane).bits.isAtomic
+          lqPmaKind(index) := io.allocate(lane).bits.pmaKind
           lqAq(index) := io.allocate(lane).bits.aq
           lqRl(index) := io.allocate(lane).bits.rl
           lqAddressValid(index) := false.B
           lqCompleted(index) := false.B
+          lqEffectIssued(index) := false.B
           lqMetadataValid(index) := false.B
         }
         when(io.allocate(lane).bits.allocateStore) {
@@ -419,6 +441,9 @@ class LoadStoreQueues(
         lqMetadata(loadCompleteIndex).readData := completedLoadData
         lqMetadata(loadCompleteIndex).writeData := 0.U
       }
+    }
+    when(io.deviceLoadEffect.fire) {
+      lqEffectIssued(headLoadIndex) := true.B
     }
     when(io.commitAuthorize.fire) {
       sqCommitAuthorized(commitIndex) := true.B
@@ -471,4 +496,9 @@ class LoadStoreQueues(
   io.storeCount := PopCount(sqValid)
   io.storeCommitInFlight := VecInit((0 until sqEntries).map(index =>
     sqValid(index) && sqCommitAuthorized(index) && !sqEffectFault(index))).asUInt.orR
+  // A completed device read remains irreversible until its real ROB entry
+  // retires. Taking an interrupt earlier would flush its completion and make
+  // MRET repeat the external read.
+  io.deviceLoadInFlight := VecInit((0 until lqEntries).map(index =>
+    lqValid(index) && lqEffectIssued(index))).asUInt.orR
 }

@@ -121,6 +121,17 @@ class StoreEffectComplete(config: ZirconCoreConfig = ZirconCoreConfig.default) e
   val accessFault = Bool()
 }
 
+/** A legal non-atomic device load whose address is retained by the LQ and whose
+  * exact ROB head now owns an ordered external read. The ordered-device engine
+  * returns a normal `LoadCompletion`; no result is invented at this boundary.
+  */
+class OrderedLoadEffect(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val address = UInt(32.W)
+  val accessSize = UInt(2.W)
+  val pmaKind = UInt(2.W)
+}
+
 /** One exact response for a commit-authorized cacheable store AXI write. */
 class StoreWriteResult(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)

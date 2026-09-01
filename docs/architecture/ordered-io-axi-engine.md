@@ -1,10 +1,13 @@
 # M3 ordered-device AXI owner
 
 `AXIOrderedIOEngine` is the transport owner below `OrderedIOCombiner` for the
-frozen M3 ordered-MMIO contract in ADR-0012 and Issue #47. This module is an
-independently verified AXI lifecycle boundary. It is not yet connected to the
-LSQ/ROB in this revision, so device instructions remain blocked by the core
-until the following integration change.
+frozen M3 ordered-MMIO contract in ADR-0012 and Issue #47. It is independently
+verified and its one-member path is now connected to `ZirconCore`: an exact-head
+non-atomic device load is retained by the LQ until its ID-6 response reaches the
+real `LoadCompletion`, while an exact-head authorized device store waits for its
+B response before the SQ effect completes. The `DeviceBurstable` 1--4 member
+collector is still not connected; the current core intentionally emits one
+member per device transaction.
 
 ## Parameters and interface
 
@@ -21,7 +24,9 @@ maps read responses to LQ completion and writes to SQ effect completion; it
 must never reconstruct metadata from a current ROB head.
 
 The engine reserves AXI ID 6. IDs 0, 1--4, and 5 remain fetch, L1D refill, and
-cacheable-store ownership respectively. It emits only 32-bit INCR bursts with
+cacheable-store ownership respectively. `ZirconCore` locks the shared AR owner
+across backpressure, demultiplexes R/B by these IDs, and serializes an ID-6
+group against the cacheable-store owner. It emits only 32-bit INCR bursts with
 device `cache=0`, `lock=0`, `prot=001`, and `qos=0`.
 
 ## State machine and drain rules
@@ -43,9 +48,10 @@ retire before the irreversible transaction has a B response.
 Unknown ID, read/write direction mismatch, premature B, incorrect RLAST,
 zero/oversized group count, mixed group properties, non-contiguity, 4 KiB
 crossing, or empty write masks trigger assertions. An accepted group has no
-recovery cancel path: future LSQ integration may suppress architectural
-completion for a killed speculative record only if it first guarantees the
-group was never externally authorized.
+recovery cancel path. The current core makes a device load externally eligible
+only for its live ROB head and a device store only after commit authorization;
+it blocks interrupts from group acceptance through the load retirement or store
+effect completion.
 
 ## Verification and area mapping
 
@@ -53,7 +59,10 @@ group was never externally authorized.
 W-before-AW and B-error fanout, three-beat read AR backpressure with per-beat
 RRESP attribution and response holding, plus one-beat DeviceStrong traffic.
 `OrderedIOCombinerSpec` covers adjacency, force flush, strong-order groups, and
-the 4 KiB split. The focused command is `make test-m3-ordered-io`.
+the 4 KiB split. `LoadStoreQueuesSpec` and `CoreShellSpec` cover exact-head
+single-beat load/store ownership, response-gated retirement metadata, and RRESP/
+BRESP precise faults through the top-level ID-6 demultiplexer. The focused
+commands are `make test-m3-ordered-io` and `make test-m3-device-io`.
 
 The static ledger explicitly charges the retained four-request group, group
 control, response hold, ID comparisons, and dynamic request muxes. This does

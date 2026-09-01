@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-ordered-io verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-ordered-io test-m3-device-io verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -25,6 +25,12 @@ test-m3-load-boundary:
 # covered separately once the ordered M0 owner becomes executable.
 test-m3-ordered-io:
 	./scripts/sbtw "testOnly zircon.OrderedIOCombinerSpec zircon.AXIOrderedIOEngineSpec"
+
+# Fast, focused device ownership regression. It covers the exact-head LQ/SQ
+# bridge through ID 6 and stays below the five-minute component-simulation gate.
+test-m3-device-io:
+	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.AXIOrderedIOEngineSpec zircon.OrderedIOCombinerSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "Device"'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

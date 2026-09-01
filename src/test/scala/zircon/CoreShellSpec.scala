@@ -28,7 +28,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       trapValue: BigInt,
       memoryAddress: BigInt,
       memoryReadMask: BigInt,
-      memoryReadData: BigInt
+      memoryReadData: BigInt,
+      memoryWriteMask: BigInt,
+      memoryWriteData: BigInt
   )
 
   private def clearInputs(dut: ZirconCore): Unit = {
@@ -85,6 +87,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     var wSeen = false
     var bQueued = false
     var bCompleted = false
+    var writeId = BigInt(5)
 
     dut.clock.step(128) // Deterministic bimodal/BTB scrubs.
     for (cycle <- 0 until cycles) {
@@ -104,7 +107,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         dut.io.axi.r.valid.poke(false)
       }
       dut.io.axi.b.valid.poke(writeResponse.nonEmpty && bQueued)
-      dut.io.axi.b.bits.id.poke(5)
+      dut.io.axi.b.bits.id.poke(writeId)
       dut.io.axi.b.bits.resp.poke(writeResponse.getOrElse(0))
 
       dut.io.trace.get.foreach { event =>
@@ -125,7 +128,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             trapValue = event.trapValue.peek().litValue,
             memoryAddress = event.memoryAddress.peek().litValue,
             memoryReadMask = event.memoryReadMask.peek().litValue,
-            memoryReadData = event.memoryReadData.peek().litValue
+            memoryReadData = event.memoryReadData.peek().litValue,
+            memoryWriteMask = event.memoryWriteMask.peek().litValue,
+            memoryWriteData = event.memoryWriteData.peek().litValue
           )
         }
       }
@@ -138,6 +143,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val rFire = rOffered && dut.io.axi.r.ready.peek().litToBoolean
       val awFire = dut.io.axi.aw.valid.peek().litToBoolean &&
         dut.io.axi.aw.ready.peek().litToBoolean
+      val awId = dut.io.axi.aw.bits.id.peek().litValue
       val wFire = dut.io.axi.w.valid.peek().litToBoolean &&
         dut.io.axi.w.ready.peek().litToBoolean
       val bFire = writeResponse.nonEmpty && bQueued &&
@@ -156,7 +162,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             beat == arBeats - 1))
         }
       }
-      if (awFire) awSeen = true
+      if (awFire) {
+        awSeen = true
+        writeId = awId
+      }
       if (wFire) wSeen = true
       if (writeResponse.nonEmpty && !bQueued && !bCompleted && awSeen && wSeen) {
         bQueued = true
@@ -208,10 +217,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     Files.writeString(directory.resolve(s"m2-recovery-backpressure-$seed.txt"), evidence)
   }
 
-  /** Until the dedicated M0 MMIO/A owner exists, an accepted legal M0 load
-    * must retain LQ ownership without using the L1D/AXI read slice or retiring.
+  /** RV32A remains outside the current M0 slice and must not borrow the device
+    * or L1D owner while its reservation/read-modify-write lifecycle is absent.
     */
-  private def assertBlockedM0Load(
+  private def assertBlockedAtomicLoad(
       dut: ZirconCore,
       baseInstruction: BigInt,
       memoryInstruction: BigInt,
@@ -236,9 +245,50 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
 
     withClue(s"$name trace=$events") {
       assert(lsuIngress, s"$name never reached the dual-LSU ownership path")
-      assert(!dataReadAddress, s"$name incorrectly issued an L1D data AXI read")
+      assert(!dataReadAddress, s"$name incorrectly issued a data AXI read")
       assert(events.map(_.instruction) == Seq(baseInstruction),
         s"$name created a false memory or following-instruction retirement")
+    }
+  }
+
+  private def assertDeviceLoad(
+      dut: ZirconCore,
+      baseInstruction: BigInt,
+      deviceAddress: BigInt,
+      name: String
+  ): Unit = {
+    clearInputs(dut)
+    val deviceData = BigInt("44332211", 16)
+    val deviceReads = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+    var cacheReadSeen = false
+    val loadInstruction = BigInt("0000a103", 16) // lw x2,0(x1)
+    val events = throughFirstTrap(runProgram(dut, Map(
+      ResetVector -> baseInstruction,
+      ResetVector + 4 -> loadInstruction,
+      ResetVector + 8 -> BigInt("00100073", 16),
+      deviceAddress -> deviceData
+    ), cycles = 128, observeCycle = (core, _) => {
+      val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+        core.io.axi.ar.ready.peek().litToBoolean
+      if (arFire && core.io.axi.ar.bits.id.peek().litValue == 6) {
+        deviceReads += ((core.io.axi.ar.bits.addr.peek().litValue,
+          core.io.axi.ar.bits.len.peek().litValue))
+      }
+      cacheReadSeen ||= arFire && core.io.axi.ar.bits.id.peek().litValue >= 1 &&
+        core.io.axi.ar.bits.id.peek().litValue <= 4
+    }))
+
+    withClue(s"$name trace=$events deviceReads=$deviceReads") {
+      assert(deviceReads.toSeq == Seq((deviceAddress, BigInt(0))),
+        s"$name did not issue exactly one ID-6 single-beat read")
+      assert(!cacheReadSeen, s"$name incorrectly issued an L1D refill")
+      assert(events.map(_.instruction) == Seq(baseInstruction, loadInstruction,
+        BigInt("00100073", 16)))
+      assert(events(1).gprWrite && events(1).gprAddress == 2 &&
+        events(1).gprData == deviceData)
+      assert(events(1).memoryAddress == deviceAddress &&
+        events(1).memoryReadMask == 15 && events(1).memoryReadData == deviceData)
+      assert(events.last.trap && events.last.cause == 3)
     }
   }
 
@@ -873,30 +923,203 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("blocks a DeviceStrong load without L1D, AXI data, or false retirement") {
-      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
-        enableM2Observation = true))) { dut =>
-        assertBlockedM0Load(dut,
+    it("executes a DeviceStrong load on ID 6 without an L1D refill") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        assertDeviceLoad(dut,
           baseInstruction = BigInt("a00000b7", 16), // lui x1,0xa0000
-          memoryInstruction = BigInt("0000a103", 16), // lw x2,0(x1)
+          deviceAddress = BigInt("a0000000", 16),
           name = "DeviceStrong load")
       }
     }
 
-    it("blocks a DeviceBurstable load without L1D, AXI data, or false retirement") {
-      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
-        enableM2Observation = true))) { dut =>
-        assertBlockedM0Load(dut,
+    it("executes a DeviceBurstable load on ID 6 without an L1D refill") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        assertDeviceLoad(dut,
           baseInstruction = BigInt("b00000b7", 16), // lui x1,0xb0000
-          memoryInstruction = BigInt("0000a103", 16), // lw x2,0(x1)
+          deviceAddress = BigInt("b0000000", 16),
           name = "DeviceBurstable load")
+      }
+    }
+
+    it("turns a DeviceStrong RRESP error into an exact cause-5 trap") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val deviceAddress = BigInt("a0000000", 16)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("a00000b7", 16), // lui x1,0xa0000
+          ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 8 -> BigInt("00100073", 16)
+        ), cycles = 128, rResponse = (id, _) => if (id == 6) 2 else 0))
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4))
+        assert(events(1).trap && !events(1).gprWrite && events(1).cause == 5 &&
+          events(1).trapValue == deviceAddress)
+      }
+    }
+
+    it("executes a DeviceStrong store through ID 6 and retires exact metadata") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val deviceAddress = BigInt("a0000000", 16)
+        var awSeen = false
+        var wSeen = false
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("a00000b7", 16), // lui x1,0xa0000
+          ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+          ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 12 -> BigInt("00100073", 16)
+        ), cycles = 192, writeResponse = Some(0), observeCycle = (core, _) => {
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
+          val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+            core.io.axi.w.ready.peek().litToBoolean
+          if (awFire) {
+            core.io.axi.aw.bits.id.expect(6)
+            core.io.axi.aw.bits.addr.expect(deviceAddress)
+            core.io.axi.aw.bits.len.expect(0)
+            core.io.axi.aw.bits.cache.expect(0)
+            awSeen = true
+          }
+          if (wFire) {
+            core.io.axi.w.bits.data.expect(90)
+            core.io.axi.w.bits.strb.expect(15)
+            core.io.axi.w.bits.last.expect(true)
+            wSeen = true
+          }
+        }))
+
+        withClue(s"device-store trace=$events") {
+          assert(awSeen && wSeen)
+          assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+            ResetVector + 8, ResetVector + 12))
+          assert(events(2).memoryAddress == deviceAddress &&
+            events(2).memoryWriteMask == 15 && events(2).memoryWriteData == 90)
+          assert(events.last.trap && events.last.cause == 3)
+        }
+      }
+    }
+
+    it("turns a DeviceBurstable store BRESP error into an exact cause-7 trap") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val deviceAddress = BigInt("b0000000", 16)
+        val events = runProgram(dut, Map(
+          ResetVector -> BigInt("b00000b7", 16), // lui x1,0xb0000
+          ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+          ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 12 -> BigInt("00100073", 16)
+        ), cycles = 192, writeResponse = Some(2))
+        val trap = events.find(event => event.trap && event.pc == ResetVector + 8)
+        assert(trap.exists(event => event.cause == 7 &&
+          event.trapValue == deviceAddress), s"missing device BRESP trap in $events")
+      }
+    }
+
+    it("takes an interrupt before an unaccepted device load, then reexecutes it") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val handler = ResetVector + 64
+        var interruptArmed = false
+        var interruptTaken = false
+        var id6BeforeInterrupt = 0
+        var id6Requests = 0
+        val events = throughTrap(runProgram(
+          dut,
+          Map(
+            ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+            ResetVector + 4 -> BigInt("04008093", 16), // addi x1,x1,64
+            ResetVector + 8 -> BigInt("30509073", 16), // csrw mtvec,x1
+            ResetVector + 12 -> BigInt("30445073", 16), // csrrwi x0,mie,8
+            ResetVector + 16 -> BigInt("30045073", 16), // csrrwi x0,mstatus,8
+            ResetVector + 20 -> BigInt("a00000b7", 16), // lui x1,0xa0000
+            ResetVector + 24 -> BigInt("0000a103", 16), // lw x2,0(x1)
+            ResetVector + 28 -> BigInt("00100073", 16), // ebreak
+            BigInt("a0000000", 16) -> BigInt("55667788", 16),
+            handler -> BigInt("30200073", 16) // mret
+          ),
+          cycles = 256,
+          driveInterrupts = (core, observed) => {
+            interruptArmed = interruptArmed || observed.exists(_.pc == ResetVector + 20)
+            interruptTaken = interruptTaken || observed.exists(event => event.trap && event.interrupt)
+            core.io.interrupts.msip.poke(interruptArmed && !interruptTaken)
+          },
+          observeCycle = (core, _) => {
+            val id6Ar = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean &&
+              core.io.axi.ar.bits.id.peek().litValue == 6
+            if (id6Ar) {
+              id6Requests += 1
+              if (interruptArmed && !interruptTaken) id6BeforeInterrupt += 1
+            }
+          }
+        ), count = 2)
+
+        val interrupt = events.find(event => event.trap && event.interrupt).get
+        val mretIndex = events.indexWhere(_.instruction == BigInt("30200073", 16))
+        val reexecutedLoad = events.indexWhere(event => event.pc == ResetVector + 24 &&
+          event.gprWrite && event.gprAddress == 2 && event.gprData == BigInt("55667788", 16))
+        assert(interrupt.pc == ResetVector + 24 &&
+          interrupt.cause == BigInt("80000003", 16))
+        assert(id6BeforeInterrupt == 0,
+          s"device AR escaped before pending interrupt: events=$events")
+        assert(id6Requests == 1, s"expected one post-MRET device read: events=$events")
+        assert(mretIndex >= 0 && reexecutedLoad > mretIndex,
+          s"device load did not reexecute after MRET: events=$events")
+      }
+    }
+
+    it("defers an interrupt until an accepted device load retires") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val handler = ResetVector + 64
+        var deviceReadAccepted = false
+        var interruptTaken = false
+        var id6Requests = 0
+        val events = throughTrap(runProgram(
+          dut,
+          Map(
+            ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+            ResetVector + 4 -> BigInt("04008093", 16), // addi x1,x1,64
+            ResetVector + 8 -> BigInt("30509073", 16), // csrw mtvec,x1
+            ResetVector + 12 -> BigInt("30445073", 16), // csrrwi x0,mie,8
+            ResetVector + 16 -> BigInt("30045073", 16), // csrrwi x0,mstatus,8
+            ResetVector + 20 -> BigInt("a00000b7", 16), // lui x1,0xa0000
+            ResetVector + 24 -> BigInt("0000a103", 16), // lw x2,0(x1)
+            ResetVector + 28 -> BigInt("00100073", 16), // ebreak
+            BigInt("a0000000", 16) -> BigInt("10203040", 16),
+            handler -> BigInt("30200073", 16) // mret
+          ),
+          cycles = 256,
+          driveInterrupts = (core, observed) => {
+            interruptTaken = interruptTaken || observed.exists(event => event.trap && event.interrupt)
+            core.io.interrupts.msip.poke(deviceReadAccepted && !interruptTaken)
+          },
+          observeCycle = (core, _) => {
+            val id6Ar = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean &&
+              core.io.axi.ar.bits.id.peek().litValue == 6
+            if (id6Ar) {
+              deviceReadAccepted = true
+              id6Requests += 1
+            }
+          }
+        ), count = 2)
+
+        val interruptIndex = events.indexWhere(event => event.trap && event.interrupt)
+        val interrupt = events(interruptIndex)
+        val loadIndex = events.indexWhere(event => event.pc == ResetVector + 24 &&
+          event.gprWrite && event.gprAddress == 2 && event.gprData == BigInt("10203040", 16))
+        assert(interrupt.pc == ResetVector + 28 &&
+          interrupt.cause == BigInt("80000003", 16))
+        assert(loadIndex >= 0 && loadIndex < interruptIndex,
+          s"interrupt preempted accepted device read: events=$events")
+        assert(id6Requests == 1, s"accepted device read was repeated: events=$events")
       }
     }
 
     it("blocks an atomic load without L1D, AXI data, or false retirement") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
         enableM2Observation = true))) { dut =>
-        assertBlockedM0Load(dut,
+        assertBlockedAtomicLoad(dut,
           baseInstruction = BigInt("800000b7", 16), // lui x1,0x80000
           memoryInstruction = BigInt("1000a12f", 16), // lr.w x2,(x1)
           name = "LR.W")

@@ -37,6 +37,8 @@ class MemoryQueueIngress(
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
     val storeCommitInFlight = Output(Bool())
+    val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
+    val deviceLoadInFlight = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -81,6 +83,8 @@ class MemoryQueueIngress(
   queues.io.storeEffect.ready := io.storeEffect.ready
   queues.io.storeEffectComplete := io.storeEffectComplete
   io.storeCommitInFlight := queues.io.storeCommitInFlight
+  io.deviceLoadEffect <> queues.io.deviceLoadEffect
+  io.deviceLoadInFlight := queues.io.deviceLoadInFlight
   io.loadCount := queues.io.loadCount
   io.storeCount := queues.io.storeCount
 

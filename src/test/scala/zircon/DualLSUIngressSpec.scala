@@ -51,6 +51,7 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.commitAuthorize.valid.poke(false)
     dut.io.commitAuthorize.bits.poke(0)
     dut.io.storeEffect.ready.poke(false)
+    dut.io.deviceLoadEffect.ready.poke(false)
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
     dut.io.storeEffectComplete.bits.accessFault.poke(false)

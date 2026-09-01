@@ -1,12 +1,13 @@
 package zircon.core
 
 import chisel3._
-import chisel3.util.PopCount
-import zircon.ZirconCoreConfig
+import chisel3.util.{Arbiter, Decoupled, PopCount}
+import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
-import zircon.memory.{AXIDataReadEngine, AXIDataStoreEngine, DualLSUIngress, L1DLoadCache}
+import zircon.memory.{AXIDataReadEngine, AXIDataStoreEngine, AXIOrderedIOEngine,
+  DualLSUIngress, L1DLoadCache, LoadCompletion, OrderedIOGroup, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -14,8 +15,9 @@ import zircon.trace.RetireTraceFormatter
  * E2 and M0/M1 share the two auxiliary PRF read ports under the frozen global
  * three-start limit. The LSU request/response ownership path is live through
  * the completion network. Cacheable integer loads and commit-authorized
- * cacheable stores own real AXI transactions; MMIO, atomics, writeback, L2,
- * and the final dual-LSU conflict policy remain later M3 work.
+ * cacheable stores and exact-head single-beat MMIO accesses own real AXI
+ * transactions; atomic, writeback, L2, burst collection, and the final
+ * dual-LSU conflict policy remain later M3 work.
  */
 class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Module {
   override val desiredName: String = "ZirconCore"
@@ -31,6 +33,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
   val dataStoreEngine = Module(new AXIDataStoreEngine(cfg))
+  val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
 
   frontend.io.enable := true.B
@@ -116,26 +119,97 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.squash := backend.io.squash
   lsuIngress.io.flush := backend.io.globalFlush
   val cacheableLoadForward = lsuIngress.io.loadForward.bits.cacheable
-  lsuIngress.io.loadForwardReady := cacheableLoadForward &&
-    l1dLoadCache.io.request.ready
+  // Device/atomic candidates must still record their LQ address. Only the
+  // cacheable M1 record consumes L1D ready; M0 execution owns the other path.
+  lsuIngress.io.loadForwardReady := Mux(cacheableLoadForward,
+    l1dLoadCache.io.request.ready, true.B)
   l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid &&
     cacheableLoadForward
   l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
-  lsuIngress.io.loadComplete <> l1dLoadCache.io.completion
   l1dLoadCache.io.dataRequest <> dataReadEngine.io.request
   l1dLoadCache.io.dataResponse <> dataReadEngine.io.response
   l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
-  l1dLoadCache.io.storeAccept.valid := lsuIngress.io.storeEffect.valid
+
+  val cacheStoreEffect = lsuIngress.io.storeEffect.valid &&
+    lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.Memory.code.U
+  val deviceStoreEffect = lsuIngress.io.storeEffect.valid &&
+    (lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceStrong.code.U ||
+      lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceBurstable.code.U)
+  val deviceLoadEffect = lsuIngress.io.deviceLoadEffect
+  val deviceLoadAtLiveHead = deviceLoadEffect.valid && backend.io.robHead.valid &&
+    backend.io.robHead.bits.entry.decoded.uopClass === UopClass.Load
+  val deviceGroupFromLoad = deviceLoadAtLiveHead
+  val deviceGroupFromStore = !deviceGroupFromLoad && deviceStoreEffect
+  val deviceGroupValid = (deviceGroupFromLoad || deviceGroupFromStore) &&
+    !dataStoreEngine.io.busy
+  val deviceGroup = Wire(new OrderedIOGroup(config = cfg))
+  deviceGroup := 0.U.asTypeOf(deviceGroup)
+  deviceGroup.count := 1.U
+  val deviceRequest = deviceGroup.requests(0)
+  val selectedDeviceTag = Mux(deviceGroupFromLoad,
+    deviceLoadEffect.bits.robTag, lsuIngress.io.storeEffect.bits.robTag)
+  val selectedDeviceAddress = Mux(deviceGroupFromLoad,
+    deviceLoadEffect.bits.address, lsuIngress.io.storeEffect.bits.address)
+  val selectedDeviceSize = Mux(deviceGroupFromLoad,
+    deviceLoadEffect.bits.accessSize, lsuIngress.io.storeEffect.bits.accessSize)
+  val selectedDevicePma = Mux(deviceGroupFromLoad,
+    deviceLoadEffect.bits.pmaKind, lsuIngress.io.storeEffect.bits.pmaKind)
+  deviceRequest.order := selectedDeviceTag
+  deviceRequest.robTag := selectedDeviceTag
+  deviceRequest.address := selectedDeviceAddress
+  deviceRequest.write := deviceGroupFromStore
+  deviceRequest.size := selectedDeviceSize
+  deviceRequest.writeData := Mux(deviceGroupFromStore,
+    lsuIngress.io.storeEffect.bits.writeData, 0.U)
+  deviceRequest.writeMask := Mux(deviceGroupFromStore,
+    lsuIngress.io.storeEffect.bits.writeMask, 0.U)
+  deviceRequest.burstable := selectedDevicePma === PMARegionKind.DeviceBurstable.code.U
+  deviceRequest.regionTag := selectedDevicePma
+  orderedIOEngine.io.group.valid := deviceGroupValid
+  orderedIOEngine.io.group.bits := deviceGroup
+  deviceLoadEffect.ready := deviceGroupFromLoad && orderedIOEngine.io.group.ready &&
+    !dataStoreEngine.io.busy
+
+  l1dLoadCache.io.storeAccept.valid := cacheStoreEffect
   l1dLoadCache.io.storeAccept.bits := lsuIngress.io.storeEffect.bits
   dataStoreEngine.io.invalidateReady := l1dLoadCache.io.storeAcceptReady
-  dataStoreEngine.io.effect.valid := lsuIngress.io.storeEffect.valid
+  dataStoreEngine.io.effect.valid := cacheStoreEffect && !orderedIOEngine.io.busy
   dataStoreEngine.io.effect.bits := lsuIngress.io.storeEffect.bits
-  lsuIngress.io.storeEffect.ready := dataStoreEngine.io.effect.ready
+  lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
+    dataStoreEngine.io.effect.ready && !orderedIOEngine.io.busy,
+    Mux(deviceStoreEffect,
+      !deviceGroupFromLoad && orderedIOEngine.io.group.ready && !dataStoreEngine.io.busy,
+      false.B))
   l1dLoadCache.io.storeCommit.valid := dataStoreEngine.io.effect.fire
   l1dLoadCache.io.storeCommit.bits := dataStoreEngine.io.effect.bits
   l1dLoadCache.io.activeStore := dataStoreEngine.io.activeStore
+
+  val deviceLoadCompletion = Wire(Decoupled(new LoadCompletion(cfg)))
+  val deviceStoreResult = Wire(Decoupled(new StoreWriteResult(cfg)))
+  deviceLoadCompletion.valid := orderedIOEngine.io.response.valid &&
+    !orderedIOEngine.io.response.bits.write
+  deviceLoadCompletion.bits.robTag := orderedIOEngine.io.response.bits.robTag
+  deviceLoadCompletion.bits.cacheData := orderedIOEngine.io.response.bits.readData
+  deviceLoadCompletion.bits.accessFault := orderedIOEngine.io.response.bits.accessFault
+  deviceLoadCompletion.bits.faultAddress := orderedIOEngine.io.response.bits.address
+  deviceStoreResult.valid := orderedIOEngine.io.response.valid &&
+    orderedIOEngine.io.response.bits.write
+  deviceStoreResult.bits.robTag := orderedIOEngine.io.response.bits.robTag
+  deviceStoreResult.bits.address := orderedIOEngine.io.response.bits.address
+  deviceStoreResult.bits.accessFault := orderedIOEngine.io.response.bits.accessFault
+  orderedIOEngine.io.response.ready := Mux(orderedIOEngine.io.response.bits.write,
+    deviceStoreResult.ready, deviceLoadCompletion.ready)
+
+  val loadCompletionArbiter = Module(new Arbiter(new LoadCompletion(cfg), 2))
+  loadCompletionArbiter.io.in(0) <> l1dLoadCache.io.completion
+  loadCompletionArbiter.io.in(1) <> deviceLoadCompletion
+  lsuIngress.io.loadComplete <> loadCompletionArbiter.io.out
+
+  val storeResultArbiter = Module(new Arbiter(new StoreWriteResult(cfg), 2))
+  storeResultArbiter.io.in(0) <> dataStoreEngine.io.result
+  storeResultArbiter.io.in(1) <> deviceStoreResult
   lsuIngress.io.loadContextRead.valid := false.B
   lsuIngress.io.loadContextRead.bits := 0.U
   val robHeadIsStore = backend.io.robHead.valid &&
@@ -144,11 +218,11 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // record. It remains incomplete until the exact B response reaches M0.
   lsuIngress.io.commitAuthorize.valid := robHeadIsStore
   lsuIngress.io.commitAuthorize.bits := backend.io.robHead.bits.robTag
-  lsuIngress.io.storeWriteResult <> dataStoreEngine.io.result
-  lsuIngress.io.storeEffectComplete.valid := dataStoreEngine.io.result.fire
-  lsuIngress.io.storeEffectComplete.bits.robTag := dataStoreEngine.io.result.bits.robTag
+  lsuIngress.io.storeWriteResult <> storeResultArbiter.io.out
+  lsuIngress.io.storeEffectComplete.valid := storeResultArbiter.io.out.fire
+  lsuIngress.io.storeEffectComplete.bits.robTag := storeResultArbiter.io.out.bits.robTag
   lsuIngress.io.storeEffectComplete.bits.accessFault :=
-    dataStoreEngine.io.result.bits.accessFault
+    storeResultArbiter.io.out.bits.accessFault
   for (lane <- 0 until cfg.commitWidth) {
     lsuIngress.io.retire(lane).valid := backend.io.retired(lane).valid
     lsuIngress.io.retire(lane).bits := backend.io.retired(lane).bits.robTag
@@ -161,7 +235,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.otherFault(1) := lsuIngress.io.fault(0)
   backend.io.otherFault(2) := lsuIngress.io.fault(1)
   backend.io.interrupts := io.interrupts
-  backend.io.interruptBlocked := lsuIngress.io.storeCommitInFlight
+  backend.io.interruptBlocked := lsuIngress.io.storeCommitInFlight ||
+    lsuIngress.io.deviceLoadInFlight
   backend.io.systemSerializingReady := true.B
   backend.io.fpCommit.valid := false.B
   backend.io.fpCommit.bits.flags := 0.U
@@ -176,46 +251,76 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       traceReadPhysical, auxiliaryRead.io.readPhysical(lane))
   }
 
-  io.axi.aw.valid := dataStoreEngine.io.aw.valid
-  io.axi.aw.bits := dataStoreEngine.io.aw.bits
-  dataStoreEngine.io.aw.ready := io.axi.aw.ready
-  io.axi.w.valid := dataStoreEngine.io.w.valid
-  io.axi.w.bits := dataStoreEngine.io.w.bits
-  dataStoreEngine.io.w.ready := io.axi.w.ready
-  dataStoreEngine.io.b.valid := io.axi.b.valid
+  val orderedAwSelected = orderedIOEngine.io.aw.valid
+  io.axi.aw.valid := orderedAwSelected || dataStoreEngine.io.aw.valid
+  io.axi.aw.bits := Mux(orderedAwSelected, orderedIOEngine.io.aw.bits,
+    dataStoreEngine.io.aw.bits)
+  orderedIOEngine.io.aw.ready := io.axi.aw.ready && orderedAwSelected
+  dataStoreEngine.io.aw.ready := io.axi.aw.ready && !orderedAwSelected
+  val orderedWSelected = orderedIOEngine.io.w.valid
+  io.axi.w.valid := orderedWSelected || dataStoreEngine.io.w.valid
+  io.axi.w.bits := Mux(orderedWSelected, orderedIOEngine.io.w.bits,
+    dataStoreEngine.io.w.bits)
+  orderedIOEngine.io.w.ready := io.axi.w.ready && orderedWSelected
+  dataStoreEngine.io.w.ready := io.axi.w.ready && !orderedWSelected
+  val bToCacheStore = io.axi.b.bits.id === 5.U
+  val bToOrderedIO = io.axi.b.bits.id === 6.U
+  dataStoreEngine.io.b.valid := io.axi.b.valid && bToCacheStore
   dataStoreEngine.io.b.bits := io.axi.b.bits
-  io.axi.b.ready := dataStoreEngine.io.b.ready
+  orderedIOEngine.io.b.valid := io.axi.b.valid && bToOrderedIO
+  orderedIOEngine.io.b.bits := io.axi.b.bits
+  io.axi.b.ready := Mux(bToCacheStore, dataStoreEngine.io.b.ready,
+    Mux(bToOrderedIO, orderedIOEngine.io.b.ready, false.B))
+  when(io.axi.b.valid) {
+    assert(bToCacheStore || bToOrderedIO,
+      "top-level AXI B used an ID outside cache-store and ordered-device owners")
+  }
+
   val arLockValid = RegInit(false.B)
-  val arLockData = RegInit(false.B)
-  val dataArTurn = RegInit(false.B)
-  val unlockedDataSelection = Mux(frontend.io.ar.valid && dataReadEngine.io.ar.valid,
-    dataArTurn, dataReadEngine.io.ar.valid)
-  val selectDataAr = Mux(arLockValid, arLockData, unlockedDataSelection)
-  io.axi.ar.valid := Mux(selectDataAr, dataReadEngine.io.ar.valid,
-    frontend.io.ar.valid)
-  io.axi.ar.bits := Mux(selectDataAr, dataReadEngine.io.ar.bits,
-    frontend.io.ar.bits)
-  frontend.io.ar.ready := io.axi.ar.ready && !selectDataAr
-  dataReadEngine.io.ar.ready := io.axi.ar.ready && selectDataAr
+  val arLockOwner = RegInit(0.U(2.W))
+  val arTurn = RegInit(0.U(2.W)) // 0 fetch, 1 L1D refill, 2 ordered device.
+  val arClientValid = Wire(Vec(3, Bool()))
+  arClientValid(0) := frontend.io.ar.valid
+  arClientValid(1) := dataReadEngine.io.ar.valid
+  arClientValid(2) := orderedIOEngine.io.ar.valid
+  val arTurnNext = Mux(arTurn === 2.U, 0.U(2.W), arTurn + 1.U)
+  val arTurnAfterNext = Mux(arTurnNext === 2.U, 0.U(2.W), arTurnNext + 1.U)
+  val unlockedArOwner = Mux(arClientValid(arTurn), arTurn,
+    Mux(arClientValid(arTurnNext), arTurnNext, arTurnAfterNext))
+  val selectedArOwner = Mux(arLockValid, arLockOwner, unlockedArOwner)
+  io.axi.ar.valid := Mux(selectedArOwner === 0.U, frontend.io.ar.valid,
+    Mux(selectedArOwner === 1.U, dataReadEngine.io.ar.valid,
+      orderedIOEngine.io.ar.valid))
+  io.axi.ar.bits := Mux(selectedArOwner === 0.U, frontend.io.ar.bits,
+    Mux(selectedArOwner === 1.U, dataReadEngine.io.ar.bits,
+      orderedIOEngine.io.ar.bits))
+  frontend.io.ar.ready := io.axi.ar.ready && selectedArOwner === 0.U
+  dataReadEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 1.U
+  orderedIOEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 2.U
   when(!arLockValid && io.axi.ar.valid && !io.axi.ar.ready) {
     arLockValid := true.B
-    arLockData := selectDataAr
+    arLockOwner := selectedArOwner
   }
   when(io.axi.ar.fire) {
     arLockValid := false.B
-    dataArTurn := !selectDataAr
+    arTurn := Mux(selectedArOwner === 2.U, 0.U(2.W), selectedArOwner + 1.U)
   }
 
   val rToFetch = io.axi.r.bits.id === 0.U
+  val rToData = io.axi.r.bits.id >= 1.U && io.axi.r.bits.id <= 4.U
+  val rToOrderedIO = io.axi.r.bits.id === 6.U
   frontend.io.r.valid := io.axi.r.valid && rToFetch
   frontend.io.r.bits := io.axi.r.bits
-  dataReadEngine.io.r.valid := io.axi.r.valid && !rToFetch
+  dataReadEngine.io.r.valid := io.axi.r.valid && rToData
   dataReadEngine.io.r.bits := io.axi.r.bits
+  orderedIOEngine.io.r.valid := io.axi.r.valid && rToOrderedIO
+  orderedIOEngine.io.r.bits := io.axi.r.bits
   io.axi.r.ready := Mux(rToFetch, frontend.io.r.ready,
-    dataReadEngine.io.r.ready)
+    Mux(rToData, dataReadEngine.io.r.ready,
+      Mux(rToOrderedIO, orderedIOEngine.io.r.ready, false.B)))
   when(io.axi.r.valid) {
-    assert(io.axi.r.bits.id <= 4.U,
-      "top-level AXI R used an ID outside fetch and four data owners")
+    assert(rToFetch || rToData || rToOrderedIO,
+      "top-level AXI R used an ID outside fetch, data, and ordered-device owners")
   }
 
   io.trace.foreach { trace =>

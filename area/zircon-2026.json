@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read and committed cacheable-store write slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, committed cacheable-store, and exact-head single-beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "the standalone ordered-device AXI owner is inventoried, but its LSQ/ROB integration, dirty/replacement state, writeback, L2, atomics, and formal L1I are not implemented",
+    "single-beat device loads and stores are connected through the LSQ/ROB and AXI ID 6, but DeviceBurstable collection, dirty/replacement state, writeback, L2, atomics, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -96,10 +96,10 @@
       "name": "lq_entries_current",
       "class": "register_control",
       "entries": 8,
-      "bits_per_entry": 206,
+      "bits_per_entry": 209,
       "instances": 1,
       "replication_factor": 1,
-      "source": "LoadStoreQueues LQ state including exact retire metadata"
+      "source": "LoadStoreQueues LQ state including PMA kind, device-effect issued state, and exact retire metadata"
     },
     {
       "name": "sq_entries_current",
@@ -195,10 +195,10 @@
       "name": "top_axi_ar_arbiter_state",
       "class": "register_control",
       "entries": 1,
-      "bits_per_entry": 3,
+      "bits_per_entry": 5,
       "instances": 1,
       "replication_factor": 1,
-      "source": "ZirconCore arLockValid, arLockData, and dataArTurn"
+      "source": "ZirconCore arLockValid, two-bit arLockOwner, and two-bit three-client arTurn"
     },
     {
       "name": "l2_data_default_planned",
@@ -304,8 +304,48 @@
       "metric": "mux_input_bits",
       "units": 1,
       "width": 64,
+      "fanin": 3,
+      "source": "ZirconCore locked fetch/L1D/device AXI address mux, conservatively rounded to 64 bits"
+    },
+    {
+      "name": "top_axi_write_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 2,
+      "width": 64,
       "fanin": 2,
-      "source": "ZirconCore locked fetch/data AXI address mux, conservatively rounded to 64 bits"
+      "source": "ZirconCore ordered-device versus cacheable-store AW and W channel muxes, conservatively rounded to 64 bits each"
+    },
+    {
+      "name": "top_axi_response_id_demux_compare_units",
+      "metric": "comparator32_units",
+      "units": 6,
+      "width": 1,
+      "fanin": 1,
+      "source": "ZirconCore B and R response ID demultiplexing across cache-store, fetch, L1D, and ordered-device owners"
+    },
+    {
+      "name": "top_ordered_io_source_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 80,
+      "fanin": 2,
+      "source": "ZirconCore exact-head device-load versus authorized-device-store group record selection"
+    },
+    {
+      "name": "top_memory_completion_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 70,
+      "fanin": 2,
+      "source": "ZirconCore L1D and ordered-device LoadCompletion arbitration"
+    },
+    {
+      "name": "top_store_result_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 38,
+      "fanin": 2,
+      "source": "ZirconCore cacheable-store and ordered-device StoreWriteResult arbitration"
     }
   ]
 }

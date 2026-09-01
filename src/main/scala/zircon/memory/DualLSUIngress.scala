@@ -38,6 +38,8 @@ class DualLSUIngress(
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
     val storeWriteResult = Flipped(Decoupled(new StoreWriteResult(config)))
     val storeCommitInFlight = Output(Bool())
+    val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
+    val deviceLoadInFlight = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -114,6 +116,8 @@ class DualLSUIngress(
   ingress.io.storeEffect.ready := io.storeEffect.ready
   ingress.io.storeEffectComplete := io.storeEffectComplete
   io.storeCommitInFlight := ingress.io.storeCommitInFlight
+  io.deviceLoadEffect <> ingress.io.deviceLoadEffect
+  io.deviceLoadInFlight := ingress.io.deviceLoadInFlight
   for (lane <- 0 until config.commitWidth) {
     ingress.io.retire(lane) := io.retire(lane)
     io.retireMetadata(lane) := ingress.io.retireMetadata(lane)
