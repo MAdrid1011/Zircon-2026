@@ -25,9 +25,10 @@ matches the response with `clientMshr`. `L1InstructionCache` is an active
 `Instruction` client with local token zero; it shares these four physical
 owners fairly with L1D and receives only the complete response for its retained
 owner. Before consuming an AXI owner, L1I probes an existing resident L2 line
-through a non-destructive read-only port. The executable slice does not yet
-allocate AXI-refilled instruction lines into L2 or implement final dynamic I/D
-allocation.
+through a non-destructive read-only port. A non-faulting complete instruction
+response remains retained until L2 accepts a clean dynamic instruction fill;
+an exact resident-line collision returns the L2 line to L1I. The slice still
+does not implement final I/D coherency or cache-global FENCE proof.
 
 ## Recovery and verification
 

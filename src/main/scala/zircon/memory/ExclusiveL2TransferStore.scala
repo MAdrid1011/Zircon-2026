@@ -35,6 +35,12 @@ class ExclusiveL2TransferStore(
   val io = IO(new Bundle {
     /** Transfer from L1D eviction or an earlier transfer owner into L2. */
     val insert = Flipped(Decoupled(new CacheLineTransfer(config)))
+    /** A non-faulting L1I AXI refill allocates a clean non-inclusive copy.
+      * A resident D line wins an exact collision and its current data is
+      * returned to L1I, so an old external refill cannot overwrite it. */
+    val instructionInsert = Flipped(Decoupled(new CacheLineTransfer(config)))
+    val instructionInsertHit = Output(Bool())
+    val instructionInsertData = Output(Vec(config.l2.lineBytes / 4, UInt(32.W)))
     /** Hit requests move the only L2 copy into the response transfer buffer. */
     val lookup = Flipped(Decoupled(new L2LookupRequest(config)))
     val response = Decoupled(new L2LookupResponse(config))
@@ -95,6 +101,35 @@ class ExclusiveL2TransferStore(
   io.insert.ready := !responseValid && !instructionResponseValid &&
     !io.invalidate.valid && !io.flushLine.valid && canInsert
 
+  val instructionInsertSet = io.instructionInsert.bits.lineAddress(
+    lineOffsetWidth + setWidth - 1, lineOffsetWidth)
+  val instructionInsertTag = io.instructionInsert.bits.lineAddress(31,
+    lineOffsetWidth + setWidth)
+  val instructionInsertHits = VecInit((0 until ways).map(way =>
+    lineValid(way)(instructionInsertSet) &&
+      lineTag(way)(instructionInsertSet) === instructionInsertTag))
+  val instructionInsertHit = instructionInsertHits.asUInt.orR
+  val instructionInsertHitWay = PriorityEncoder(instructionInsertHits.asUInt)
+  val instructionInsertInvalidWays = VecInit((0 until ways).map(way =>
+    !lineValid(way)(instructionInsertSet)))
+  val instructionInsertWay = Mux(instructionInsertInvalidWays.asUInt.orR,
+    PriorityEncoder(instructionInsertInvalidWays.asUInt),
+    replacementWay(instructionInsertSet))
+  val instructionReplacingValid = lineValid(instructionInsertWay)(instructionInsertSet)
+  val instructionReplacingDirty = instructionReplacingValid &&
+    lineDirty(instructionInsertWay)(instructionInsertSet)
+  val canInstructionInsert = instructionInsertHit || !instructionReplacingDirty ||
+    victimQueue.io.enq.ready
+  io.instructionInsert.ready := !io.insert.valid && !responseValid &&
+    !instructionResponseValid && !io.invalidate.valid && !io.flushLine.valid &&
+    canInstructionInsert
+  io.instructionInsertHit := instructionInsertHit
+  for (word <- 0 until wordsPerLine) {
+    io.instructionInsertData(word) := Mux(instructionInsertHit,
+      lineData(instructionInsertHitWay)(instructionInsertSet)(word),
+      io.instructionInsert.bits.lineData(word))
+  }
+
   val lookupSet = io.lookup.bits.lineAddress(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
   val lookupTag = io.lookup.bits.lineAddress(31, lineOffsetWidth + setWidth)
@@ -102,8 +137,9 @@ class ExclusiveL2TransferStore(
     lineValid(way)(lookupSet) && lineTag(way)(lookupSet) === lookupTag))
   val lookupHit = lookupHits.asUInt.orR
   val lookupWay = PriorityEncoder(lookupHits.asUInt)
-  io.lookup.ready := !io.invalidate.valid && !io.insert.valid && !io.flushLine.valid &&
-    !responseValid && !instructionResponseValid
+  io.lookup.ready := !io.invalidate.valid && !io.insert.valid &&
+    !io.instructionInsert.valid && !io.flushLine.valid && !responseValid &&
+    !instructionResponseValid
 
   val instructionLookupSet = io.instructionLookup.bits(
     lineOffsetWidth + setWidth - 1, lineOffsetWidth)
@@ -114,10 +150,10 @@ class ExclusiveL2TransferStore(
       lineTag(way)(instructionLookupSet) === instructionLookupTag))
   val instructionLookupHit = instructionLookupHits.asUInt.orR
   val instructionLookupWay = PriorityEncoder(instructionLookupHits.asUInt)
-  // One Reg-backed L2 array port is shared deterministically: a mutating D
-  // action wins, then exclusive D transfer, then read-only I probe.
+  // One Reg-backed L2 array port is shared deterministically: D insertion
+  // wins, then clean I fill, then exclusive D transfer, then I probe.
   io.instructionLookup.ready := !io.invalidate.valid && !io.insert.valid &&
-    !io.lookup.valid && !io.flushLine.valid && !responseValid &&
+    !io.instructionInsert.valid && !io.lookup.valid && !io.flushLine.valid && !responseValid &&
     !instructionResponseValid
 
   val flushSet = io.flushLine.bits(lineOffsetWidth + setWidth - 1,
@@ -148,6 +184,12 @@ class ExclusiveL2TransferStore(
     assert(io.insert.bits.lineAddress(lineOffsetWidth - 1, 0) === 0.U,
       "L2 insertion must transfer a line-aligned address")
     assert(!insertHit, "L2 insert would duplicate a stable D-side line")
+  }
+  when(io.instructionInsert.fire) {
+    assert(io.instructionInsert.bits.lineAddress(lineOffsetWidth - 1, 0) === 0.U,
+      "L2 instruction insertion must transfer a line-aligned address")
+    assert(!io.instructionInsert.bits.dirty,
+      "L2 instruction insertion must remain clean")
   }
   when(io.lookup.fire) {
     assert(io.lookup.bits.lineAddress(lineOffsetWidth - 1, 0) === 0.U,
@@ -219,6 +261,33 @@ class ExclusiveL2TransferStore(
     }
     replacementWay(insertSet) := Mux(insertWay === (ways - 1).U,
       0.U(wayWidth.W), insertWay + 1.U)
+  }.elsewhen(io.instructionInsert.fire) {
+    when(!instructionInsertHit) {
+      when(instructionReplacingDirty) {
+        victimQueue.io.enq.valid := true.B
+        victimQueue.io.enq.bits.lineAddress := Cat(
+          lineTag(instructionInsertWay)(instructionInsertSet), instructionInsertSet,
+          0.U(lineOffsetWidth.W))
+        victimQueue.io.enq.bits.dirty := true.B
+        for (word <- 0 until wordsPerLine) {
+          victimQueue.io.enq.bits.lineData(word) :=
+            lineData(instructionInsertWay)(instructionInsertSet)(word)
+        }
+      }
+      for (way <- 0 until ways) {
+        when(instructionInsertWay === way.U) {
+          lineValid(way)(instructionInsertSet) := true.B
+          lineDirty(way)(instructionInsertSet) := false.B
+          lineTag(way)(instructionInsertSet) := instructionInsertTag
+          for (word <- 0 until wordsPerLine) {
+            lineData(way)(instructionInsertSet)(word) :=
+              io.instructionInsert.bits.lineData(word)
+          }
+        }
+      }
+      replacementWay(instructionInsertSet) := Mux(instructionInsertWay ===
+        (ways - 1).U, 0.U(wayWidth.W), instructionInsertWay + 1.U)
+    }
   }.elsewhen(io.lookup.fire) {
     responseValid := true.B
     responseBits.hit := lookupHit

@@ -26,6 +26,9 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.bits.clientMshr.poke(0)
     dut.io.l2Response.bits.accessFault.poke(false)
     for (word <- 0 until 8) dut.io.l2Response.bits.lineData(word).poke(0)
+    dut.io.l2Insert.ready.poke(false)
+    dut.io.l2InsertHit.poke(false)
+    dut.io.l2InsertData.foreach(_.poke(0))
     dut.io.decode.foreach(_.ready.poke(false))
 
     dut.io.branchTraining.valid.poke(false)
@@ -115,9 +118,12 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
     for (index <- 0 until 8) {
       dut.io.l2Response.bits.lineData(index).poke(words.lift(index).getOrElse(Nop))
     }
+    dut.io.l2Insert.ready.poke(expectPacket)
+    dut.io.l2Insert.valid.expect(expectPacket)
     dut.io.l2Response.ready.expect(true)
     dut.clock.step()
     dut.io.l2Response.valid.poke(false)
+    dut.io.l2Insert.ready.poke(false)
     dut.io.fetchBusy.expect(expectPacket)
     if (expectPacket) dut.clock.step()
   }

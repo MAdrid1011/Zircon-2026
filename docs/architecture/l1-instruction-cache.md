@@ -16,9 +16,10 @@ four-wide packet contract while replacing M1's direct AXI ID-0 transport.
 | external refill owner | one shared ID 1--4 L2-demand slot |
 
 L1I holds clean instruction lines only and is non-inclusive with D-side
-ownership. A line returned to L1I may be retained locally after its L2 demand
-slot has been released. This executable slice does not implement an L2
-resident I-side lookup, an I-side L2 fill array, or I/D coherence.
+ownership. A line returned to L1I is first allocated or merged through the
+shared L2 instruction-fill port, then retained locally after its L2 demand slot
+has been released. L1I also probes resident L2 lines before it consumes an AXI
+owner. This is dynamic I/D allocation, not complete I/D coherence.
 
 ## Request and packet lifecycle
 
@@ -34,9 +35,12 @@ into L1I without removing the L2 D-side owner. An L2 miss chooses an invalid
 way first, then the one-bit replacement way, and emits exactly one
 `L2DemandRequest` with `client=Instruction`, `clientMshr=0`, and a line-aligned
 address. After the request handshake, the cache waits for the complete retained
-`L2DemandResponse`. A successful response fills the selected line and creates
-the packet. Any response fault creates exact instruction-access faults at each
-selected word address and never marks the line valid.
+`L2DemandResponse`. A successful response must handshake as a clean
+`instructionInsert` before it fills the selected L1I line and creates the
+packet. If L2 acquired that exact line after the earlier probe miss, the insert
+returns the resident L2 data and L1I uses it instead of the stale AXI line. Any
+response fault creates exact instruction-access faults at each selected word
+address and never marks either line valid.
 
 While a first-half, sequential packet is held, the single local MSHR may issue
 one lookahead for the next 32-byte line. `M1Frontend` permits this only when
@@ -70,7 +74,9 @@ redirect.
 ## Shared demand interface
 
 L1I first probes `ExclusiveL2TransferStore` through a read-only port; the probe
-never transfers or invalidates a resident D line. L1I and L1D arbitrate into
+never transfers or invalidates a resident D line. A successful AXI refill then
+uses the clean instruction-insert port, which has lower priority than a D-side
+insertion and returns any colliding resident line. L1I and L1D arbitrate into
 `AXIDataReadEngine` on an L2 miss. The request arbiter has no
 cache-reserved physical slots: the engine selects one free owner, retains the
 client/token until the eighth R beat, then returns one complete response.
@@ -80,8 +86,9 @@ beats and cannot reclaim an ID before the engine has fully drained it.
 
 ## Verification mapping
 
-`L1InstructionCacheSpec` covers cache hit/miss, resident-L2 hit, refill data, replacement,
-line-end packet clipping, response faults, held demand backpressure, sequential
+`L1InstructionCacheSpec` covers cache hit/miss, resident-L2 hit, AXI-to-L2 clean
+allocation and collision data selection, refill data, replacement, line-end
+packet clipping, response faults, held demand backpressure, sequential
 lookahead, redirect before and after accepted normal/lookahead demand, and
 invalidation. `M1FrontendSpec` covers
 prediction and decode behavior using complete L2 line responses. `CoreShellSpec`

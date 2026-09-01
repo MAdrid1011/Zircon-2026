@@ -23,8 +23,8 @@ probe responses drain on redirect before L1I accepts another request.
 
 - D-side exclusive transfer remains unchanged: only D lookup removes an L2
   line, and a probe never exposes an AXI ID.
-- This is not final dynamic I/D allocation: AXI-refilled I lines do not yet
-  allocate into L2, and resident I fill/coherence/formal proof remain M3 work.
+- ADR-0018 extends this probe with clean AXI-refilled I-line allocation into
+  the same L2 ways. I/D coherence and formal proof remain M3 work.
 - The static ledger charges the extra L2 response hold, tag comparisons, and
   line snapshot mux. Directed L1I, L2, frontend, and top-level tests cover the
   new boundary.

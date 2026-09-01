@@ -282,8 +282,10 @@ evicts it, and holds the committed store until its ID-5 B response; it is not a
 general `FENCE` implementation or production hardware. The active
 [L1I demand slice](l1-instruction-cache.md) now owns the 1 KiB, two-way
 instruction cache and uses the retained `Instruction` token through the same
-four physical L2 demand slots. It has no resident L2 I-hit array or final I/D
-coherence. Formal L1I proof, coherent external atomic handling, and general
+four physical L2 demand slots. It probes resident L2 lines before AXI and
+cleanly allocates every non-faulting AXI I-fill into the same dynamic L2 ways;
+an exact refill collision returns the resident L2 data to L1I. Final I/D
+coherence, formal L1I proof, coherent external atomic handling, and general
 cache ordering remain unfinished. `AXIDataReadEngine` returns the exact client
 token rather than treating an L1D-local MSHR as an AXI ID.
 

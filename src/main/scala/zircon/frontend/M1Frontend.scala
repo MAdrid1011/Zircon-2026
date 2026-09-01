@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
 import zircon.backend.{BranchProvider, BranchResolutionResult, BranchTrainingRecord, CommitRedirect, CommitRedirectReason}
-import zircon.memory.{L1InstructionCache, L2DemandRequest, L2DemandResponse}
+import zircon.memory.{CacheLineTransfer, L1InstructionCache, L2DemandRequest, L2DemandResponse}
 
 /** Executable-M1 frontend from the temporary AXI transport to two-wide decode.
   *
@@ -20,6 +20,9 @@ class M1Frontend(
     val l2LookupResponse = Flipped(Decoupled(new zircon.memory.L2InstructionLookupResponse(config)))
     val l2Request = Decoupled(new L2DemandRequest(config))
     val l2Response = Flipped(Decoupled(new L2DemandResponse(config)))
+    val l2Insert = Decoupled(new CacheLineTransfer(config))
+    val l2InsertHit = Input(Bool())
+    val l2InsertData = Input(Vec(config.l2.lineBytes / 4, UInt(32.W)))
     val decode = Vec(config.decodeWidth, Decoupled(new FetchQueueEntry(config)))
 
     val branchTraining = Input(Valid(new BranchTrainingRecord(config)))
@@ -163,6 +166,9 @@ class M1Frontend(
   fetch.io.l2LookupResponse <> io.l2LookupResponse
   io.l2Request <> fetch.io.l2Request
   fetch.io.l2Response <> io.l2Response
+  io.l2Insert <> fetch.io.l2Insert
+  fetch.io.l2InsertHit := io.l2InsertHit
+  fetch.io.l2InsertData := io.l2InsertData
 
   when(frontendRedirect) {
     unresolvedIndirect := false.B

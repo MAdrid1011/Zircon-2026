@@ -49,6 +49,11 @@ class L1InstructionCache(
     val l2LookupResponse = Flipped(Decoupled(new L2InstructionLookupResponse(config)))
     val l2Request = Decoupled(new L2DemandRequest(config))
     val l2Response = Flipped(Decoupled(new L2DemandResponse(config)))
+    /** Successful AXI refills must allocate or merge in L2 before L1I can
+      * install them. A merge returns the newer resident L2 line. */
+    val l2Insert = Decoupled(new CacheLineTransfer(config))
+    val l2InsertHit = Input(Bool())
+    val l2InsertData = Input(Vec(config.l2.lineBytes / 4, UInt(32.W)))
     val currentPc = Output(UInt(32.W))
     val busy = Output(Bool())
     val draining = Output(Bool())
@@ -112,6 +117,10 @@ class L1InstructionCache(
     !sequentialLookaheadHitWays.asUInt.orR
 
   val normalDemand = state === L1InstructionCacheState.Demand
+  val responseOwnsRefill = state === L1InstructionCacheState.Refill ||
+    lookaheadInFlight
+  val responseNeedsL2Insert = responseOwnsRefill && io.l2Response.valid &&
+    !io.redirect.valid && !io.l2Response.bits.accessFault
   io.l2Lookup.valid := state === L1InstructionCacheState.L2Lookup &&
     !io.redirect.valid
   io.l2Lookup.bits := requestLine
@@ -123,8 +132,21 @@ class L1InstructionCache(
   io.l2Request.bits.clientMshr := 0.U
   io.l2Request.bits.lineAddress := Mux(normalDemand, requestLine,
     sequentialLookaheadLine)
-  io.l2Response.ready := state === L1InstructionCacheState.Refill ||
-    state === L1InstructionCacheState.Drain || lookaheadInFlight
+  io.l2Insert.valid := responseNeedsL2Insert
+  io.l2Insert.bits.lineAddress := Mux(state === L1InstructionCacheState.Refill,
+    requestLine, lookaheadLine)
+  io.l2Insert.bits.dirty := false.B
+  for (word <- 0 until wordsPerLine) {
+    io.l2Insert.bits.lineData(word) := io.l2Response.bits.lineData(word)
+  }
+  io.l2Response.ready := (state === L1InstructionCacheState.Refill ||
+    state === L1InstructionCacheState.Drain || lookaheadInFlight) &&
+    (!responseNeedsL2Insert || io.l2Insert.ready)
+  val refillLineData = Wire(Vec(wordsPerLine, UInt(32.W)))
+  for (word <- 0 until wordsPerLine) {
+    refillLineData(word) := Mux(io.l2InsertHit, io.l2InsertData(word),
+      io.l2Response.bits.lineData(word))
+  }
 
   io.response.valid := state === L1InstructionCacheState.Present && !io.redirect.valid
   io.response.bits.base := requestBase
@@ -154,6 +176,14 @@ class L1InstructionCache(
     assert(io.l2Response.bits.clientMshr === 0.U,
       "L1I received a response for an unknown local MSHR")
   }
+  when(io.l2Response.fire && responseNeedsL2Insert) {
+    assert(io.l2Insert.fire,
+      "L1I consumed a successful AXI refill without dynamic L2 allocation")
+  }
+  when(io.l2Insert.fire) {
+    assert(!io.l2Insert.bits.dirty,
+      "L1I attempted to allocate a dirty instruction line")
+  }
   when(io.l2Request.fire && sequentialLookaheadNeeded) {
     lookaheadIssued := true.B
     lookaheadInFlight := true.B
@@ -167,7 +197,7 @@ class L1InstructionCache(
       cacheValid(lookaheadWay)(lookaheadSet) := true.B
       cacheTag(lookaheadWay)(lookaheadSet) := lookaheadTag
       for (word <- 0 until wordsPerLine) {
-        cacheData(lookaheadWay)(lookaheadSet)(word) := io.l2Response.bits.lineData(word)
+        cacheData(lookaheadWay)(lookaheadSet)(word) := refillLineData(word)
       }
       replacement(lookaheadSet) := !lookaheadWay.asBool
     }
@@ -279,7 +309,7 @@ class L1InstructionCache(
             val wordIndex = requestWord + slot.U
             packetWords(slot).instruction := Mux(slot.U < requestCount &&
               !io.l2Response.bits.accessFault,
-              io.l2Response.bits.lineData(wordIndex), 0.U)
+              refillLineData(wordIndex), 0.U)
             packetWords(slot).fault.valid := slot.U < requestCount &&
               io.l2Response.bits.accessFault
             packetWords(slot).fault.cause := 1.U
@@ -289,7 +319,7 @@ class L1InstructionCache(
             cacheValid(missWay)(requestSet) := true.B
             cacheTag(missWay)(requestSet) := requestTag
             for (word <- 0 until wordsPerLine) {
-              cacheData(missWay)(requestSet)(word) := io.l2Response.bits.lineData(word)
+              cacheData(missWay)(requestSet)(word) := refillLineData(word)
             }
             replacement(requestSet) := !missWay.asBool
           }

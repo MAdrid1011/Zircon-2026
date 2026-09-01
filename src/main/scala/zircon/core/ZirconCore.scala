@@ -167,6 +167,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       "L2 demand response named an unsupported top-level client")
   }
   l1dLoadCache.io.l2Insert <> l2TransferStore.io.insert
+  frontend.io.l2Insert <> l2TransferStore.io.instructionInsert
+  frontend.io.l2InsertHit := l2TransferStore.io.instructionInsertHit
+  frontend.io.l2InsertData := l2TransferStore.io.instructionInsertData
   l1dLoadCache.io.l2Lookup <> l2TransferStore.io.lookup
   l1dLoadCache.io.l2Response <> l2TransferStore.io.response
   frontend.io.l2Lookup <> l2TransferStore.io.instructionLookup

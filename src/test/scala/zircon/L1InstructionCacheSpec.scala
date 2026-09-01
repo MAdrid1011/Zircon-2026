@@ -27,6 +27,9 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.bits.clientMshr.poke(0)
     dut.io.l2Response.bits.accessFault.poke(false)
     for (word <- 0 until 8) dut.io.l2Response.bits.lineData(word).poke(0)
+    dut.io.l2Insert.ready.poke(false)
+    dut.io.l2InsertHit.poke(false)
+    dut.io.l2InsertData.foreach(_.poke(0))
   }
 
   private def start(dut: L1InstructionCache, pc: BigInt): Unit = {
@@ -65,7 +68,7 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
   }
 
   private def returnLine(dut: L1InstructionCache, words: Seq[BigInt],
-      accessFault: Boolean = false): Unit = {
+      accessFault: Boolean = false, allocate: Boolean = true): Unit = {
     require(words.length == 8)
     dut.io.l2Response.valid.poke(true)
     dut.io.l2Response.bits.client.poke(L2DemandClient.Instruction)
@@ -74,9 +77,18 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
     words.zipWithIndex.foreach { case (word, index) =>
       dut.io.l2Response.bits.lineData(index).poke(word)
     }
+    dut.io.l2Insert.ready.poke(!accessFault && allocate)
+    dut.io.l2Insert.valid.expect(!accessFault && allocate)
+    if (!accessFault && allocate) {
+      dut.io.l2Insert.bits.dirty.expect(false)
+      words.zipWithIndex.foreach { case (word, index) =>
+        dut.io.l2Insert.bits.lineData(index).expect(word)
+      }
+    }
     dut.io.l2Response.ready.expect(true)
     dut.clock.step()
     dut.io.l2Response.valid.poke(false)
+    dut.io.l2Insert.ready.poke(false)
   }
 
   private def acceptPacket(dut: L1InstructionCache, base: BigInt,
@@ -145,6 +157,42 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.l2Request.valid.expect(false)
         dut.io.response.valid.expect(true)
         acceptPacket(dut, ResetVector, line.take(4), ResetVector + 16)
+      }
+    }
+
+    it("holds a successful AXI line until L2 accepts it and uses merged resident data") {
+      simulate(new L1InstructionCache) { dut =>
+        clear(dut)
+        val axiLine = Seq.tabulate(8)(index => BigInt("31000000", 16) + index)
+        val residentLine = Seq.tabulate(8)(index => BigInt("32000000", 16) + index)
+        start(dut, ResetVector)
+        acceptDemand(dut, ResetVector)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.client.poke(L2DemandClient.Instruction)
+        dut.io.l2Response.bits.clientMshr.poke(0)
+        dut.io.l2Response.bits.accessFault.poke(false)
+        axiLine.zipWithIndex.foreach { case (word, index) =>
+          dut.io.l2Response.bits.lineData(index).poke(word)
+        }
+        dut.io.l2Insert.ready.poke(false)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Response.ready.expect(false)
+        dut.clock.step(2)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Response.ready.expect(false)
+
+        dut.io.l2InsertHit.poke(true)
+        residentLine.zipWithIndex.foreach { case (word, index) =>
+          dut.io.l2InsertData(index).poke(word)
+        }
+        dut.io.l2Insert.ready.poke(true)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.io.l2Insert.ready.poke(false)
+        dut.io.l2InsertHit.poke(false)
+        dut.io.l2InsertData.foreach(_.poke(0))
+        acceptPacket(dut, ResetVector, residentLine.take(4), ResetVector + 16)
       }
     }
 
@@ -234,7 +282,8 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
 
         redirect(dut, target)
         dut.io.draining.expect(true)
-        returnLine(dut, Seq.tabulate(8)(index => BigInt("25000000", 16) + index))
+        returnLine(dut, Seq.tabulate(8)(index => BigInt("25000000", 16) + index),
+          allocate = false)
         dut.io.response.valid.expect(false)
         start(dut, target)
         dut.io.l2Lookup.valid.expect(true)
@@ -293,7 +342,7 @@ class L1InstructionCacheSpec extends AnyFunSpec with ChiselSim {
         acceptDemand(dut, ResetVector)
         redirect(dut, target)
         dut.io.draining.expect(true)
-        returnLine(dut, Seq.tabulate(8)(BigInt(_)))
+        returnLine(dut, Seq.tabulate(8)(BigInt(_)), allocate = false)
         dut.io.response.valid.expect(false)
         start(dut, target)
         dut.io.l2Lookup.valid.expect(true)

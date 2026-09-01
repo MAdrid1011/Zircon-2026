@@ -10,6 +10,10 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     dut.io.insert.bits.lineAddress.poke(0)
     dut.io.insert.bits.lineData.foreach(_.poke(0))
     dut.io.insert.bits.dirty.poke(false)
+    dut.io.instructionInsert.valid.poke(false)
+    dut.io.instructionInsert.bits.lineAddress.poke(0)
+    dut.io.instructionInsert.bits.lineData.foreach(_.poke(0))
+    dut.io.instructionInsert.bits.dirty.poke(false)
     dut.io.lookup.valid.poke(false)
     dut.io.lookup.bits.lineAddress.poke(0)
     dut.io.response.ready.poke(false)
@@ -48,7 +52,114 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     dut.io.lookup.valid.poke(false)
   }
 
+  private def instructionInsert(
+      dut: ExclusiveL2TransferStore,
+      address: BigInt,
+      words: Seq[BigInt]
+  ): Unit = {
+    dut.io.instructionInsert.valid.poke(true)
+    dut.io.instructionInsert.bits.lineAddress.poke(address)
+    dut.io.instructionInsert.bits.dirty.poke(false)
+    words.zipWithIndex.foreach { case (word, index) =>
+      dut.io.instructionInsert.bits.lineData(index).poke(word)
+    }
+    dut.io.instructionInsert.ready.expect(true)
+    dut.clock.step()
+    dut.io.instructionInsert.valid.poke(false)
+  }
+
   describe("ExclusiveL2TransferStore") {
+    it("dynamically allocates a clean instruction refill and merges a later exact collision") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val instructionLine = BigInt("80000800", 16)
+        val instructionWords = Seq.tabulate(8)(word => BigInt("f00d0000", 16) + word)
+        instructionInsert(dut, instructionLine, instructionWords)
+        dut.io.residentLineCount.expect(1)
+
+        dut.io.instructionLookup.valid.poke(true)
+        dut.io.instructionLookup.bits.poke(instructionLine)
+        dut.io.instructionLookup.ready.expect(true)
+        dut.clock.step()
+        dut.io.instructionLookup.valid.poke(false)
+        dut.io.instructionResponse.valid.expect(true)
+        dut.io.instructionResponse.bits.hit.expect(true)
+        instructionWords.zipWithIndex.foreach { case (word, index) =>
+          dut.io.instructionResponse.bits.lineData(index).expect(word)
+        }
+        dut.io.instructionResponse.ready.poke(true)
+        dut.clock.step()
+        dut.io.instructionResponse.ready.poke(false)
+
+        val residentLine = BigInt("80000c00", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("d00d0000", 16) + word)
+        insert(dut, residentLine, residentWords, dirty = true)
+        dut.io.instructionInsert.valid.poke(true)
+        dut.io.instructionInsert.bits.lineAddress.poke(residentLine)
+        dut.io.instructionInsert.bits.dirty.poke(false)
+        dut.io.instructionInsert.bits.lineData.foreach(_.poke(BigInt("aaaaaaaa", 16)))
+        dut.io.instructionInsertHit.expect(true)
+        residentWords.zipWithIndex.foreach { case (word, index) =>
+          dut.io.instructionInsertData(index).expect(word)
+        }
+        dut.io.instructionInsert.ready.expect(true)
+        dut.clock.step()
+        dut.io.instructionInsert.valid.poke(false)
+        dut.io.residentLineCount.expect(2)
+      }
+    }
+
+    it("gives a D-side insertion priority over a simultaneous instruction refill") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val dataLine = BigInt("80003000", 16)
+        val instructionLine = BigInt("80003400", 16)
+        dut.io.insert.valid.poke(true)
+        dut.io.insert.bits.lineAddress.poke(dataLine)
+        dut.io.insert.bits.dirty.poke(true)
+        dut.io.insert.bits.lineData.foreach(_.poke(BigInt("11111111", 16)))
+        dut.io.instructionInsert.valid.poke(true)
+        dut.io.instructionInsert.bits.lineAddress.poke(instructionLine)
+        dut.io.instructionInsert.bits.dirty.poke(false)
+        dut.io.instructionInsert.bits.lineData.foreach(_.poke(BigInt("22222222", 16)))
+        dut.io.insert.ready.expect(true)
+        dut.io.instructionInsert.ready.expect(false)
+        dut.clock.step()
+        dut.io.insert.valid.poke(false)
+        dut.io.instructionInsert.ready.expect(true)
+        dut.clock.step()
+        dut.io.instructionInsert.valid.poke(false)
+        dut.io.residentLineCount.expect(2)
+      }
+    }
+
+    it("backpressures a clean instruction fill when its dirty victim FIFO is full") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val base = BigInt("80004000", 16)
+        val stride = BigInt("400", 16) // 32 L2 sets times one 32-byte line.
+        (0 until 4).foreach { index =>
+          insert(dut, base + stride * index, Seq.fill(8)(BigInt(index + 1)), dirty = true)
+        }
+        instructionInsert(dut, base + stride * 4, Seq.fill(8)(BigInt("10", 16)))
+        instructionInsert(dut, base + stride * 5, Seq.fill(8)(BigInt("20", 16)))
+        dut.io.victimCount.expect(2)
+
+        dut.io.instructionInsert.valid.poke(true)
+        dut.io.instructionInsert.bits.lineAddress.poke(base + stride * 6)
+        dut.io.instructionInsert.bits.dirty.poke(false)
+        dut.io.instructionInsert.bits.lineData.foreach(_.poke(BigInt("30", 16)))
+        dut.io.instructionInsert.ready.expect(false)
+
+        dut.io.victim.ready.poke(true)
+        dut.clock.step()
+        dut.io.victim.ready.poke(false)
+        dut.io.instructionInsert.ready.expect(true)
+        dut.clock.step()
+        dut.io.instructionInsert.valid.poke(false)
+      }
+    }
+
     it("serves an instruction probe without transferring the resident D-side line") {
       simulate(new ExclusiveL2TransferStore) { dut =>
         clear(dut)

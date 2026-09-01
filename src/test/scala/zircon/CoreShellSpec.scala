@@ -368,7 +368,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         dut.clock.step(128)
-        dut.clock.step(3)
+        var arWaitCycles = 0
+        while (!dut.io.axi.ar.valid.peek().litToBoolean && arWaitCycles < 8) {
+          dut.clock.step()
+          arWaitCycles += 1
+        }
         dut.io.axi.ar.valid.expect(true)
         dut.io.axi.ar.ready.poke(true)
         dut.clock.step()
@@ -491,12 +495,13 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("writes back a dirty L2 victim through one eight-beat ID-5 burst") {
+    it("writes back the selected dirty L2 victim through one eight-beat ID-5 burst") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val firstAddress = BigInt("80000100", 16)
         val writebackAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
         val writebackWords = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        var activeWritebackAddress = Option.empty[BigInt]
         val program = Map[BigInt, BigInt](
           ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
           ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
@@ -523,17 +528,19 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             val wFire = core.io.axi.w.valid.peek().litToBoolean &&
               core.io.axi.w.ready.peek().litToBoolean
             if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
-              writebackAddresses += core.io.axi.aw.bits.addr.peek().litValue
+              val address = core.io.axi.aw.bits.addr.peek().litValue
+              writebackAddresses += address
+              activeWritebackAddress = Some(address)
               core.io.axi.aw.bits.len.expect(7)
               core.io.axi.aw.bits.size.expect(2)
             }
-            if (wFire && writebackAddresses.nonEmpty) {
+            if (wFire && activeWritebackAddress.contains(firstAddress)) {
               writebackWords += core.io.axi.w.bits.data.peek().litValue
             }
           }))
 
-        assert(writebackAddresses.toSeq == Seq(firstAddress),
-          s"dirty L2 replacement did not issue exactly one ID-5 writeback: $writebackAddresses")
+        assert(writebackAddresses.count(_ == firstAddress) == 1,
+          s"selected dirty L2 line did not issue exactly one ID-5 writeback: $writebackAddresses")
         assert(writebackWords.toSeq == Seq(BigInt(90)) ++ Seq.fill(7)(Nop),
           s"ID-5 burst did not preserve the dirty L1D word and refill payload: $writebackWords")
         assert(events.count(_.memoryWriteMask == 15) == 7,

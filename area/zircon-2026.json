@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice, partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, four L2 demand-read MSHRs, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer, four L2 demand-read MSHRs, ID-5 dirty-victim writeback, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client and first probes resident L2 lines without changing D ownership, but AXI-refilled I lines do not allocate into L2 and formal proof/I-D coherence are unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger; general dirty-cache flush/FENCE semantics and external coherency are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof, cache-global FENCE semantics, and I/D/external coherency remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger; general dirty-cache flush/FENCE semantics and external coherency are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -324,7 +324,7 @@
       "bits_per_entry": 8,
       "instances": 1,
       "replication_factor": 1,
-      "source": "ExclusiveL2TransferStore.lineData for the default 4 KiB L2"
+      "source": "ExclusiveL2TransferStore.lineData for the default 4 KiB dynamically shared I/D L2"
     },
     {
       "name": "l2_tag_valid_dirty_transfer_store",
@@ -333,7 +333,7 @@
       "bits_per_entry": 24,
       "instances": 1,
       "replication_factor": 1,
-      "source": "ExclusiveL2TransferStore 128 default-config lines: 22-bit tag, valid, and dirty"
+      "source": "ExclusiveL2TransferStore 128 default-config dynamically shared I/D lines: 22-bit tag, valid, and dirty"
     },
     {
       "name": "l2_replacement_control_transfer_store",
@@ -407,6 +407,14 @@
       "width": 32,
       "fanin": 128,
       "source": "L1InstructionCache four packet-word reads across two Reg-backed 128-word ways"
+    },
+    {
+      "name": "l1i_l2_collision_data_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 8,
+      "width": 32,
+      "fanin": 2,
+      "source": "L1InstructionCache eight-word AXI refill selects returned resident L2 data on an exact dynamic I-fill collision"
     },
     {
       "name": "l1i_tag_compare_units",
@@ -713,6 +721,14 @@
       "source": "ExclusiveL2TransferStore four-way read-only instruction probe tags, conservatively charged as 32-bit compares"
     },
     {
+      "name": "l2_instruction_insert_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "ExclusiveL2TransferStore four-way clean instruction-fill tags, conservatively charged as 32-bit compares"
+    },
+    {
       "name": "l2_way_data_mux_inputs",
       "metric": "mux_input_bits",
       "units": 2,
@@ -729,12 +745,28 @@
       "source": "ExclusiveL2TransferStore four-way instruction-probe line-data snapshot"
     },
     {
+      "name": "l2_instruction_insert_data_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 256,
+      "fanin": 4,
+      "source": "ExclusiveL2TransferStore four-way resident line-data return for an exact clean instruction-fill collision"
+    },
+    {
       "name": "l2_way_select_priority_bits",
       "metric": "priority_select_bits",
       "units": 3,
       "width": 2,
       "fanin": 4,
       "source": "ExclusiveL2TransferStore insert-invalid, lookup-hit, and invalidation-hit four-way selectors"
+    },
+    {
+      "name": "l2_instruction_insert_select_priority_bits",
+      "metric": "priority_select_bits",
+      "units": 2,
+      "width": 2,
+      "fanin": 4,
+      "source": "ExclusiveL2TransferStore clean instruction-fill hit and invalid/victim four-way selectors"
     },
     {
       "name": "l1d_l2_probe_select_bits",
