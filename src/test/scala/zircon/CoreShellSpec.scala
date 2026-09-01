@@ -383,7 +383,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("executes a cacheable store through AW/W/B and retires its true memory trace") {
+    it("write-allocates a cacheable store without an external single-beat write") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val storeAddress = BigInt("80000100", 16)
@@ -393,98 +393,22 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           ResetVector + 8 -> BigInt("1020a023", 16), // sw x2,256(x1)
           ResetVector + 12 -> BigInt("00100073", 16) // ebreak
         )
-        val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, BigInt, BigInt, Boolean)]
-        val retiredStores = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt, BigInt, BigInt)]
-        var awSeen = false
-        var wSeen = false
-        var bQueued = false
-        var bCompleted = false
-        var bHandshakes = 0
-
-        dut.clock.step(128) // Deterministic predictor scrub.
-        for (cycle <- 0 until 192) {
-          dut.io.axi.ar.ready.poke(true)
-          dut.io.axi.aw.ready.poke(cycle % 3 != 0)
-          dut.io.axi.w.ready.poke(cycle % 4 != 0)
-          if (pendingReads.nonEmpty) {
-            val (id, address, data, last) = pendingReads.front
-            dut.io.axi.r.valid.poke(true)
-            dut.io.axi.r.bits.id.poke(id)
-            dut.io.axi.r.bits.data.poke(data)
-            dut.io.axi.r.bits.resp.poke(0)
-            dut.io.axi.r.bits.last.poke(last)
-          } else {
-            dut.io.axi.r.valid.poke(false)
-          }
-          dut.io.axi.b.valid.poke(bQueued)
-          dut.io.axi.b.bits.id.poke(5)
-          dut.io.axi.b.bits.resp.poke(0)
-
-          for (lane <- 0 until 2) {
-            val event = dut.io.trace.get(lane)
-            if (event.valid.peek().litToBoolean &&
-              event.memoryWriteMask.peek().litValue != 0) {
-              retiredStores += ((
-                event.pc.peek().litValue,
-                event.memoryAddress.peek().litValue,
-                event.memoryWriteMask.peek().litValue,
-                event.memoryWriteData.peek().litValue
-              ))
-            }
-          }
-
-          val arFire = dut.io.axi.ar.valid.peek().litToBoolean &&
-            dut.io.axi.ar.ready.peek().litToBoolean
-          val rFire = pendingReads.nonEmpty && dut.io.axi.r.ready.peek().litToBoolean
-          val awFire = dut.io.axi.aw.valid.peek().litToBoolean &&
-            dut.io.axi.aw.ready.peek().litToBoolean
-          val wFire = dut.io.axi.w.valid.peek().litToBoolean &&
-            dut.io.axi.w.ready.peek().litToBoolean
-          val bFire = bQueued && dut.io.axi.b.ready.peek().litToBoolean
-          val arAddress = dut.io.axi.ar.bits.addr.peek().litValue
-          val arId = dut.io.axi.ar.bits.id.peek().litValue
-          val arBeats = dut.io.axi.ar.bits.len.peek().litValue.toInt + 1
-          if (awFire) {
-            dut.io.axi.aw.bits.id.expect(5)
-            dut.io.axi.aw.bits.addr.expect(storeAddress)
-            dut.io.axi.aw.bits.len.expect(0)
-            dut.io.axi.aw.bits.size.expect(2)
-            awSeen = true
-          }
-          if (wFire) {
-            dut.io.axi.w.bits.data.expect(90)
-            dut.io.axi.w.bits.strb.expect(15)
-            dut.io.axi.w.bits.last.expect(true)
-            wSeen = true
-          }
-
-          dut.clock.step()
-          if (rFire) pendingReads.dequeue()
-          if (arFire) {
-            for (beat <- 0 until arBeats) {
-              val address = arAddress + beat * 4
-              pendingReads.enqueue((arId, address, program.getOrElse(address, Nop),
-                beat == arBeats - 1))
-            }
-          }
-          if (!bQueued && !bCompleted && awSeen && wSeen) {
-            bQueued = true
-          }
-          if (bFire) {
-            bQueued = false
-            bCompleted = true
-            bHandshakes += 1
-          }
-        }
-
-        assert(awSeen && wSeen && bHandshakes == 1,
-          "the committed store did not complete one AW/W/B transaction")
-        assert(retiredStores.contains((ResetVector + 8, storeAddress, BigInt(15), BigInt(90))),
-          s"missing exact store retire trace: $retiredStores")
+        var externalWrite = false
+        val events = runProgram(dut, program, cycles = 192,
+          observeCycle = (core, _) => {
+            externalWrite ||= core.io.axi.aw.valid.peek().litToBoolean ||
+              core.io.axi.w.valid.peek().litToBoolean
+          })
+        assert(!externalWrite,
+          "a cacheable store must retain dirty ownership in L1D, not issue ID 5")
+        assert(events.exists(event => event.pc == ResetVector + 8 &&
+          event.memoryAddress == storeAddress && event.memoryWriteMask == 15 &&
+          event.memoryWriteData == 90 && !event.trap),
+          s"missing exact store retire trace: $events")
       }
     }
 
-    it("turns a cacheable store BRESP error into a precise cause-7 trap") {
+    it("keeps a cacheable store local when the AXI model would fail a write") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val program = Map[BigInt, BigInt](
@@ -493,11 +417,15 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           ResetVector + 8 -> BigInt("1020a023", 16), // sw x2,256(x1)
           ResetVector + 12 -> BigInt("00100073", 16)
         )
-        val events = runProgram(dut, program, cycles = 192, writeResponse = Some(2))
-        val trap = events.find(event => event.trap && event.pc == ResetVector + 8)
-        assert(trap.exists(event => event.cause == 7 &&
-          event.trapValue == BigInt("80000100", 16)),
-          s"missing precise store-access trap in $events")
+        var externalWrite = false
+        val events = runProgram(dut, program, cycles = 192, writeResponse = Some(2),
+          observeCycle = (core, _) => {
+            externalWrite ||= core.io.axi.aw.valid.peek().litToBoolean ||
+              core.io.axi.w.valid.peek().litToBoolean
+          })
+        assert(!externalWrite, "cacheable store unexpectedly reached the write channel")
+        assert(events.exists(event => event.pc == ResetVector + 8 && !event.trap),
+          s"cacheable store did not retire locally: $events")
       }
     }
 
@@ -1290,8 +1218,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           if (awFire) writeIds += core.io.axi.aw.bits.id.peek().litValue
         }))
 
-        assert(writeIds.toSeq == Seq(BigInt(5)),
-          s"failed SC incorrectly issued an atomic write: $writeIds")
+        assert(writeIds.isEmpty,
+          s"reservation-clearing local store or failed SC issued an external write: $writeIds")
         assert(events(3).gprWrite && events(3).gprAddress == 3 &&
           events(3).gprData == 1 && events(3).memoryWriteMask == 0,
           s"SC failure did not preserve no-write retire metadata: ${events(3)}")

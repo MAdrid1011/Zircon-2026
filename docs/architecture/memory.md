@@ -4,8 +4,9 @@
 ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
 `OrderedIOCombiner`、已接入顶层 dispatch/recovery 的 8-entry `MemIssueQueue`，以及
 已单元验证的 8-entry `LoadStoreQueues`。`ZirconCore` 已通过全局 auxiliary-read
-arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache/data AXI 和
-cacheable-store slices 已可执行。`AXIOrderedIOEngine` 的 device-group AXI owner
+arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache/data AXI、L1D
+dirty/write-allocate store 和 clean/dirty L1D-L2 transfer slices 已可执行。
+`AXIOrderedIOEngine` 的 device-group AXI owner
 已接入 LQ/SQ、ROB 和顶层 AXI；`DeviceBurstable` 已通过 LSQ preview、streamer 和
 combiner 形成连续 1--4 beat group，不能与未实现的 write-back/L2/A 路径混同。
 `AtomicMemoryEngine` 现已执行 M0 RV32A 的 ID-7 LR/SC/AMO lifecycle；其精确
@@ -258,15 +259,16 @@ store-forwarding completes through the LQ without a bus transaction. The slice
 uses IDs 1-4, eight-beat line refills, owner-local response backpressure,
 RRESP-to-exact-load-fault conversion, and recovery drain.
 
-`ExclusiveL2TransferStore` now forms the first executable exclusive boundary:
-a clean resident L1D victim transfers into the four-way 4 KiB/8 KiB L2 store
-when a new L1D miss claims its way; each miss probes L2 before issuing AXI; and
-an L2 hit removes the L2 copy into an L1D response transfer buffer. The store
-has a two-entry dirty victim FIFO and backpressures dirty displacement, but no
-L1D line is dirty yet and no L2 AXI MSHR/writeback owner exists. The current
-write-through store/atomic paths therefore invalidate a matching clean L2 line
-before their external effect. This is an executable clean-transfer stage, not
-the final write-back/write-allocate hierarchy.
+`ExclusiveL2TransferStore` now forms the executable D-side exclusive boundary:
+an L1D victim transfers into the four-way 4 KiB/8 KiB L2 store when a new L1D
+miss claims its way; each miss probes L2 before issuing AXI; and an L2 hit
+removes the L2 copy into an L1D response transfer buffer. `L1DLoadCache` also
+accepts only commit-authorized cacheable stores, merges their byte lanes into a
+resident or newly allocated line, marks it dirty, and retains its exact result.
+Dirty L1D victims enter L2 with their dirty bit; L2's two-entry dirty-victim
+FIFO backpressures replacement until the still-missing AXI writeback owner
+drains it. This is not yet final memory visibility: ID-5 writeback, L2 AXI
+MSHRs, formal L1I, and coherent external atomic handling remain unfinished.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,
@@ -340,10 +342,12 @@ interrupt, or LR replacement invalidates it. All nine AMO word functions read
 the old word, compute the retained write value, wait for B, then complete once
 with the old value. Device space and non-atomic PMA generate precise faults
 rather than fake atomic completion. Same-line L1D refills drain before atomic
-launch and externally attempted atomic writes invalidate the temporary
-write-through L1D line. The exact protocol is
-[`atomic-axi-engine.md`](atomic-axi-engine.md); write-back/L2 exclusivity remains
-unfinished M3 work.
+launch. An atomic is backpressured if the matching L1D or L2 line is dirty,
+because the absent ID-5 writeback owner must not let it read stale backing
+memory or discard dirty data. Externally attempted atomic writes invalidate only
+a clean L1D line. The exact protocol is
+[`atomic-axi-engine.md`](atomic-axi-engine.md); L2 writeback and full coherent
+atomic integration remain unfinished M3 work.
 
 ## Recovery, drain, and counters
 

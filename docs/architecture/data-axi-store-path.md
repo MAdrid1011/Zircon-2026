@@ -1,75 +1,66 @@
-# M3 committed cacheable-store AXI write slice
+# M3 committed L1D store path
 
-This document specifies the first executable store path under ADR-0012 and
-Issue #47. It enables an aligned cacheable RV32I store to become an exact,
-commit-authorized AXI write. It is deliberately not the final write-back L1D,
-MMIO, AMO, LR/SC, or L2 implementation.
+This document specifies the executable write-back cacheable-store path under
+ADR-0012 and Issue #47. It replaces the earlier single-beat write-through
+experiment: an aligned `Memory` PMA store becomes irreversible only when its
+exact ROB-head SQ record handshakes with `L1DLoadCache`, then retires only after
+that cache owner returns the matching `StoreWriteResult`.
 
-## Scope and ownership
+## Ownership and interface
 
-`LoadStoreQueues` retains an integer store's effective address, byte mask, and
-data until that exact ROB tag is the head. `ZirconCore` then offers only that
-head tag on `commitAuthorize`. An M0 store with atomic state or a non-`Memory`
-PMA kind is not eligible for this slice and remains blocked for its later owner;
-it cannot create a synthetic completion.
+`LoadStoreQueues` retains a store's address, byte mask, data, and retire
+metadata until its tag is commit-authorized. `ZirconCore` routes only a
+non-atomic `Memory` effect to the L1D `storeRequest` channel. `storeResult`
+contains the same tag and effective address, is retained under backpressure,
+and becomes `StoreEffectComplete` only on the result-router handshake.
 
-`AXIDataStoreEngine` owns one accepted cacheable store from the LSQ
-`StoreEffect` handshake through the one-beat AXI `AW`, one-beat `W`, and exact
-`B` response. It reserves AXI ID 5, while fetch owns ID 0 and data refills own
-IDs 1--4. `AW` and `W` are held independently under backpressure; neither is
-withdrawn after becoming valid. A `B` must identify ID 5 and may be accepted
-only after both address and data handshakes. The engine holds its exact result
-until the M0 completion boundary accepts it.
-
-| Event | Owner | Architectural result |
+| Stage | Owner | Result |
 | --- | --- | --- |
 | SQ allocation/address/data | SQ | speculative state only |
-| head `commitAuthorize` | SQ | eligible store effect, no retirement |
-| store-engine effect handshake | AXI write owner | line invalidated; AW/W/B drain required |
-| OKAY/EXOKAY `B` | M0 completion plus SQ | non-writing exact completion; store can retire |
-| other `BRESP` | M0 fault plus SQ | precise store/AMO access fault, cause 7, `tval=effective address` |
+| exact-head `commitAuthorize` | SQ | effect eligible, not retired |
+| `storeRequest` fire | L1D | cache update is irreversible |
+| hit | exclusive L1D line | byte merge, dirty set, buffered success result |
+| miss | L1D MSHR then L2/AXI read owner | reserve victim, fill line, byte merge, dirty set |
+| `storeResult` fire | M0 completion plus SQ | exact successful completion; store may retire |
 
-The SQ records `StoreEffectComplete` only on the same edge that the result
-router accepts the engine result. Therefore a completed successful store retains
-its real `MemoryRetireMetadata` until retirement, while a B-error store retains
-no false metadata and feeds the fault path instead.
+`L1DLoadCache` has one store in flight. A store miss may attach to an existing
+same-line unfilled MSHR or allocate a free one; it does not fabricate a result
+while the L2 probe or eight-beat AXI refill is pending. A refill `RRESP` error
+produces the exact store access-fault result and does not install a line.
 
-## Cache interaction
+## Cache and exclusivity rules
 
-This temporary write-through path prevents stale reads from the read-only L1D:
+On a hit, the owner merges each asserted byte lane into the selected word and
+sets the line dirty. On a miss, it reserves a way before probing L2. A resident
+victim transfers its complete line and dirty bit to `ExclusiveL2TransferStore`;
+the old L1D valid and dirty state are cleared on that same ownership transfer.
+An L2 hit removes the L2 copy, preserving its dirty bit in L1D before any store
+bytes are merged. An AXI fill starts clean unless the waiting store updates it.
 
-- before an effect is accepted, L1D refuses it while a same-line refill MSHR is
-  live;
-- on the effect handshake, a matching resident L1D line is invalidated;
-- while the AXI write owner is active, cache-dependent requests for that line
-  are blocked, preventing a stale hit or a new refill before the write result;
-- an already accepted AXI read continues to drain. The store is delayed rather
-  than cancelling or racing that owner.
+There is no ordinary cacheable `AW/W/B` transaction in this slice. AXI ID 5 is
+reserved for the next M3 owner, which drains dirty L2 victims as burst writeback.
+Until that owner exists, a same-line external atomic is backpressured when L1D
+or L2 holds dirty data; it cannot observe stale backing memory or discard dirty
+state. Device stores remain on ID 6 and atomic transactions remain on ID 7.
 
-The final M3 L1D replaces this invalidate/write-through behavior with dirty
-write-back, write-allocate, L2 exclusivity, and the victim/writeback queue. It
-must preserve the commit authorization and exact B-error ownership described
-here.
+## Recovery and invariants
 
-## Recovery, interrupts, and invariants
+A committed store MSHR is not cancelled by squash or flush. Accepted L2 and AXI
+read work drains, then either installs the dirty line and reports success or
+reports the exact refill fault. A speculative load waiter may be removed during
+recovery without removing the store owner. The implementation asserts:
 
-An authorized store blocks interrupts until it retires. Selective squash may
-never discard it. A global flush may discard the SQ record only after an exact
-B-error has made that store faulting; it must never discard a successful or
-still-draining write. `AW`, `W`, and `B` are not cancelled by recovery.
+- only non-atomic `Memory` PMA effects enter `storeRequest`;
+- every store miss has one live MSHR and a non-reserved victim;
+- no dirty line is discarded by an atomic invalidation;
+- a dirty L1D victim transfers its dirty bit with the only copy;
+- a store result is retained until its exact SQ consumer accepts it.
 
-The active implementation asserts all of the following:
+## Verification mapping
 
-- cacheable-store PMA, non-atomic ownership, transfer size, and natural
-  alignment;
-- one live AXI write owner, ID 5 on `B`, and no `B` before both AW/W handshakes;
-- no same-line L1D refill at the effect boundary;
-- no retirement before `StoreEffectComplete`, and no flush of a successful or
-  undrained authorized store.
-
-`AXIDataStoreEngineSpec` covers independent AW/W backpressure, write data and
-mask retention, safe-invalidation backpressure, `BRESP` success/error, result
-retention, and wrong-ID assertion. `LoadStoreQueuesSpec` covers cacheable-only
-authorization, fault-aware lifecycle, and blocked atomics. Top-level tests add
-the real store instruction, AXI write channels, precise B-error trap, retire
-trace, and L1D invalidation coverage.
+`L1DLoadCacheSpec` covers byte-masked store hits, store-miss write allocation,
+exact fault/result retention, and dirty victim transfer. `CoreShellSpec` runs a
+real RV32I store from AXI-fed instructions, verifies its retire metadata, and
+proves no per-store external write occurs. The following L2 writeback slice
+must add AXI ID-5 burst, B-error, victim-full, and dirty `tohost` visibility
+tests before memory ELF completion can be claimed.

@@ -31,10 +31,11 @@ that fire cancels the local streamer/combiner state. Once the AXI owner accepts
 the group, normal response drain is irreversible.
 
 The engine reserves AXI ID 6. IDs 0, 1--4, and 5 remain fetch, L1D refill, and
-cacheable-store ownership respectively. `ZirconCore` locks the shared AR owner
-across backpressure, demultiplexes R/B by these IDs, and serializes an ID-6
-group against the cacheable-store owner. It emits only 32-bit INCR bursts with
-device `cache=0`, `lock=0`, `prot=001`, and `qos=0`.
+the reserved L2 dirty-writeback owner respectively. `ZirconCore` locks the
+shared AR owner across backpressure, demultiplexes R/B by live owners, and
+serializes an ID-6 group against any active atomic or later writeback owner. It
+emits only 32-bit INCR bursts with device `cache=0`, `lock=0`, `prot=001`, and
+`qos=0`.
 
 ## State machine and drain rules
 

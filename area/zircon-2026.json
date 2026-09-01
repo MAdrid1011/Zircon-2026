@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, clean exclusive L1D-L2 transfer store, committed cacheable-store, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D dirty/write-allocate, clean/dirty exclusive L1D-L2 transfer store, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. A clean exclusive L1D-L2 transfer store exists, but L1D dirty/write-allocate state, L2 AXI MSHRs/writeback ownership, external coherency, and formal L1I are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store, but L2 AXI MSHRs/writeback ownership, external coherency, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -48,7 +48,7 @@
       "source": "ZirconCoreConfig.l1i"
     },
     {
-      "name": "l1d_data_read_slice",
+      "name": "l1d_data_writeback_slice",
       "class": "memory_data",
       "entries": 1024,
       "bits_per_entry": 8,
@@ -57,22 +57,31 @@
       "source": "ZirconCoreConfig.l1d and L1DLoadCache.cacheData"
     },
     {
-      "name": "l1d_tag_and_valid_read_slice",
+      "name": "l1d_tag_valid_dirty_writeback_slice",
       "class": "tag_metadata",
       "entries": 32,
-      "bits_per_entry": 24,
+      "bits_per_entry": 25,
       "instances": 1,
       "replication_factor": 1,
-      "source": "L1DLoadCache.cacheTag (23 bits) and cacheValid"
+      "source": "L1DLoadCache.cacheTag (23 bits), cacheValid, and cacheDirty"
     },
     {
       "name": "l1d_mshr_control_read_slice",
       "class": "register_control",
       "entries": 4,
-      "bits_per_entry": 43,
+      "bits_per_entry": 44,
       "instances": 1,
       "replication_factor": 1,
-      "source": "L1DLoadCache MSHR valid/AXI/L2-probe/resolved/filled/fault flags, line address, set, and way"
+      "source": "L1DLoadCache MSHR valid/AXI/L2-probe/resolved/filled/fault/store-pending flags, line address, set, and way"
+    },
+    {
+      "name": "l1d_mshr_store_effects",
+      "class": "register_payload",
+      "entries": 4,
+      "bits_per_entry": 81,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "L1DLoadCache per-MSHR retained StoreEffect for write-allocate completion"
     },
     {
       "name": "l1d_waiter_records_read_slice",
@@ -147,22 +156,13 @@
       "source": "AXIDataReadEngine responseValid and DataReadResponse hold register"
     },
     {
-      "name": "axi_data_store_owner_hold",
-      "class": "register_control",
-      "entries": 1,
-      "bits_per_entry": 84,
-      "instances": 1,
-      "replication_factor": 1,
-      "source": "AXIDataStoreEngine active/effectBits (81 bits) plus independent AW/W sent state"
-    },
-    {
-      "name": "axi_data_store_result_hold",
+      "name": "l1d_store_result_hold",
       "class": "register_payload",
       "entries": 1,
       "bits_per_entry": 40,
       "instances": 1,
       "replication_factor": 1,
-      "source": "AXIDataStoreEngine resultValid and StoreWriteResult {robTag,address,accessFault}"
+      "source": "L1DLoadCache storeResultValid and StoreWriteResult {robTag,address,accessFault}"
     },
     {
       "name": "axi_ordered_io_group_owner",
@@ -385,20 +385,20 @@
       "source": "L1DLoadCache two-way atomic-result line invalidation"
     },
     {
-      "name": "l1d_active_store_line_compare_units",
+      "name": "l1d_store_hit_and_mshr_compare_units",
       "metric": "comparator32_units",
-      "units": 1,
+      "units": 8,
       "width": 1,
       "fanin": 1,
-      "source": "L1DLoadCache active-store same-line request block"
+      "source": "L1DLoadCache two-way store hit, four-MSHR same-line, and two-way dirty-atomic exclusion checks"
     },
     {
-      "name": "axi_data_store_b_id_compare",
-      "metric": "comparator32_units",
-      "units": 1,
-      "width": 1,
-      "fanin": 1,
-      "source": "AXIDataStoreEngine reserved AXI write-ID response check, conservatively charged as one 32-bit comparator"
+      "name": "l1d_store_byte_merge_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 12,
+      "width": 8,
+      "fanin": 2,
+      "source": "L1DLoadCache byte merges for direct store hit, AXI refill, and L2 transfer fill"
     },
     {
       "name": "axi_atomic_reservation_compare_units",
@@ -525,16 +525,16 @@
       "metric": "mux_input_bits",
       "units": 2,
       "width": 64,
-      "fanin": 3,
-      "source": "ZirconCore ordered-device, atomic, and cacheable-store AW/W muxes, conservatively rounded to 64 bits each"
+      "fanin": 2,
+      "source": "ZirconCore ordered-device and atomic AW/W muxes; cacheable stores remain inside dirty L1D"
     },
     {
       "name": "top_axi_response_id_demux_compare_units",
       "metric": "comparator32_units",
-      "units": 8,
+      "units": 7,
       "width": 1,
       "fanin": 1,
-      "source": "ZirconCore B and R response ID demultiplexing across cache-store, fetch, L1D, ordered-device, and atomic owners"
+      "source": "ZirconCore B and R response ID demultiplexing across fetch, L1D, ordered-device, and atomic owners"
     },
     {
       "name": "top_ordered_io_source_mux_inputs",
@@ -558,7 +558,7 @@
       "units": 1,
       "width": 38,
       "fanin": 2,
-      "source": "ZirconCore cacheable-store and ordered-device StoreWriteResult arbitration"
+      "source": "ZirconCore L1D write-allocate and ordered-device StoreWriteResult arbitration"
     },
     {
       "name": "l2_tag_compare_units",

@@ -6,7 +6,7 @@ import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
-import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIDataStoreEngine,
+import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine,
   AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
   LoadCompletion, OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer,
   StoreWriteResult}
@@ -17,9 +17,9 @@ import zircon.trace.RetireTraceFormatter
  * E2 and M0/M1 share the two auxiliary PRF read ports under the frozen global
  * three-start limit. The LSU request/response ownership path is live through
  * the completion network. Cacheable integer loads and commit-authorized
- * cacheable stores and exact-head single-beat MMIO accesses own real AXI
- * transactions; atomic, writeback, L2, burst collection, and the final
- * dual-LSU conflict policy remain later M3 work.
+ * cacheable stores own the exclusive dirty L1D copy; exact-head MMIO and
+ * atomics own real AXI transactions. L2 writeback, burst collection, and the
+ * final dual-LSU conflict policy remain later M3 work.
  */
 class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Module {
   override val desiredName: String = "ZirconCore"
@@ -35,7 +35,6 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
-  val dataStoreEngine = Module(new AXIDataStoreEngine(cfg))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
   val atomicEngine = Module(new AtomicMemoryEngine(cfg))
   val orderedIOCombiner = Module(new OrderedIOCombiner(config = cfg))
@@ -162,16 +161,20 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // completion remain keyed by the original ROB tag.
   l1dLoadCache.io.atomicAccept.valid := lsuIngress.io.atomicEffect.valid
   l1dLoadCache.io.atomicAccept.bits := lsuIngress.io.atomicEffect.bits
+  l1dLoadCache.io.atomicRequiresExternal := atomicEngine.io.externalAccessRequired
+  val atomicExternalSafe = !atomicEngine.io.externalAccessRequired ||
+    l2TransferStore.io.invalidateReady
   atomicEngine.io.effect.valid := lsuIngress.io.atomicEffect.valid &&
-    l1dLoadCache.io.atomicAcceptReady && l2TransferStore.io.invalidateReady &&
-    !dataStoreEngine.io.effect.valid
+    l1dLoadCache.io.atomicAcceptReady && atomicExternalSafe &&
+    !l1dLoadCache.io.storeRequest.valid
   atomicEngine.io.effect.bits := lsuIngress.io.atomicEffect.bits
   lsuIngress.io.atomicEffect.ready := atomicEngine.io.effect.ready &&
-    l1dLoadCache.io.atomicAcceptReady
+    l1dLoadCache.io.atomicAcceptReady && atomicExternalSafe &&
+    !l1dLoadCache.io.storeRequest.valid
   lsuIngress.io.atomicComplete <> atomicEngine.io.result
   atomicEngine.io.flush := backend.io.globalFlush
-  atomicEngine.io.invalidate.valid := dataStoreEngine.io.effect.fire
-  atomicEngine.io.invalidate.bits := dataStoreEngine.io.effect.bits.address
+  atomicEngine.io.invalidate.valid := l1dLoadCache.io.storeRequest.fire
+  atomicEngine.io.invalidate.bits := l1dLoadCache.io.storeRequest.bits.address
   // Once AW/W were accepted, conservatively invalidate even on BRESP failure:
   // an AXI slave error must not leave an old L1D word architecturally visible.
   l1dLoadCache.io.atomicInvalidate.valid := atomicEngine.io.result.fire &&
@@ -188,7 +191,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val singleDeviceGroupFromLoad = deviceLoadAtLiveHead
   val singleDeviceGroupFromStore = !singleDeviceGroupFromLoad && deviceStoreEffect
   val singleDeviceGroupValid = (singleDeviceGroupFromLoad || singleDeviceGroupFromStore) &&
-    !dataStoreEngine.io.busy
+    !l1dLoadCache.io.storeBusy
   val singleDeviceGroup = Wire(new OrderedIOGroup(config = cfg))
   singleDeviceGroup := 0.U.asTypeOf(singleDeviceGroup)
   singleDeviceGroup.count := 1.U
@@ -225,38 +228,28 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   orderedGroupArbiter.io.in(0).bits := singleDeviceGroup
   orderedGroupArbiter.io.in(1) <> orderedIOCombiner.io.out
   orderedIOEngine.io.group.valid := orderedGroupArbiter.io.out.valid &&
-    !dataStoreEngine.io.busy
+    !l1dLoadCache.io.storeBusy
   orderedIOEngine.io.group.bits := orderedGroupArbiter.io.out.bits
   orderedGroupArbiter.io.out.ready := orderedIOEngine.io.group.ready &&
-    !dataStoreEngine.io.busy
+    !l1dLoadCache.io.storeBusy
   lsuIngress.io.burstableDeviceGroupAccepted.valid := orderedIOCombiner.io.out.fire
   lsuIngress.io.burstableDeviceGroupAccepted.bits := orderedIOCombiner.io.out.bits
   deviceLoadEffect.ready := singleDeviceGroupFromLoad &&
-    orderedGroupArbiter.io.in(0).ready && !dataStoreEngine.io.busy
+    orderedGroupArbiter.io.in(0).ready && !l1dLoadCache.io.storeBusy
 
-  l1dLoadCache.io.storeAccept.valid := cacheStoreEffect
-  l1dLoadCache.io.storeAccept.bits := lsuIngress.io.storeEffect.bits
-  dataStoreEngine.io.invalidateReady := l1dLoadCache.io.storeAcceptReady &&
-    l2TransferStore.io.invalidateReady
-  dataStoreEngine.io.effect.valid := cacheStoreEffect && !orderedIOEngine.io.busy
-  dataStoreEngine.io.effect.bits := lsuIngress.io.storeEffect.bits
+  l1dLoadCache.io.storeRequest.valid := cacheStoreEffect && !orderedIOEngine.io.busy
+  l1dLoadCache.io.storeRequest.bits := lsuIngress.io.storeEffect.bits
   lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
-    dataStoreEngine.io.effect.ready && !orderedIOEngine.io.busy,
+    l1dLoadCache.io.storeRequest.ready && !orderedIOEngine.io.busy,
     Mux(deviceStoreEffect,
       !singleDeviceGroupFromLoad && orderedGroupArbiter.io.in(0).ready &&
-        !dataStoreEngine.io.busy,
+        !l1dLoadCache.io.storeBusy,
       false.B))
-  l1dLoadCache.io.storeCommit.valid := dataStoreEngine.io.effect.fire
-  l1dLoadCache.io.storeCommit.bits := dataStoreEngine.io.effect.bits
-  l1dLoadCache.io.activeStore := dataStoreEngine.io.activeStore
-  l2TransferStore.io.invalidate.valid := dataStoreEngine.io.effect.fire ||
-    atomicEngine.io.effect.fire
-  // The candidate address must be independent of `effect.fire`: the L2 ready
-  // path compares this stable source address against registered tags.
-  l2TransferStore.io.invalidate.bits := Mux(dataStoreEngine.io.effect.valid,
-    dataStoreEngine.io.effect.bits.address, lsuIngress.io.atomicEffect.bits.address)
-  assert(!(dataStoreEngine.io.effect.fire && atomicEngine.io.effect.fire),
-    "store and atomic effects cannot claim one L2 invalidation cycle")
+  // Cacheable stores already own their exclusive L1D line. Only an external
+  // atomic invalidates a clean L2 copy before its AXI read/modify/write.
+  l2TransferStore.io.invalidate.valid := atomicEngine.io.effect.fire &&
+    atomicEngine.io.externalWriteRequired
+  l2TransferStore.io.invalidate.bits := lsuIngress.io.atomicEffect.bits.address
 
   val deviceLoadCompletion = Wire(Decoupled(new LoadCompletion(cfg)))
   val deviceStoreResult = Wire(Decoupled(new StoreWriteResult(cfg)))
@@ -280,7 +273,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.loadComplete <> loadCompletionArbiter.io.out
 
   val storeResultArbiter = Module(new Arbiter(new StoreWriteResult(cfg), 2))
-  storeResultArbiter.io.in(0) <> dataStoreEngine.io.result
+  storeResultArbiter.io.in(0) <> l1dLoadCache.io.storeResult
   storeResultArbiter.io.in(1) <> deviceStoreResult
   lsuIngress.io.loadContextRead.valid := false.B
   lsuIngress.io.loadContextRead.bits := 0.U
@@ -326,35 +319,29 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   val orderedAwSelected = orderedIOEngine.io.aw.valid
   val atomicAwSelected = !orderedAwSelected && atomicEngine.io.aw.valid
-  io.axi.aw.valid := orderedAwSelected || atomicAwSelected || dataStoreEngine.io.aw.valid
+  io.axi.aw.valid := orderedAwSelected || atomicAwSelected
   io.axi.aw.bits := Mux(orderedAwSelected, orderedIOEngine.io.aw.bits,
-    Mux(atomicAwSelected, atomicEngine.io.aw.bits, dataStoreEngine.io.aw.bits))
+    atomicEngine.io.aw.bits)
   orderedIOEngine.io.aw.ready := io.axi.aw.ready && orderedAwSelected
   atomicEngine.io.aw.ready := io.axi.aw.ready && atomicAwSelected
-  dataStoreEngine.io.aw.ready := io.axi.aw.ready && !orderedAwSelected && !atomicAwSelected
   val orderedWSelected = orderedIOEngine.io.w.valid
   val atomicWSelected = !orderedWSelected && atomicEngine.io.w.valid
-  io.axi.w.valid := orderedWSelected || atomicWSelected || dataStoreEngine.io.w.valid
+  io.axi.w.valid := orderedWSelected || atomicWSelected
   io.axi.w.bits := Mux(orderedWSelected, orderedIOEngine.io.w.bits,
-    Mux(atomicWSelected, atomicEngine.io.w.bits, dataStoreEngine.io.w.bits))
+    atomicEngine.io.w.bits)
   orderedIOEngine.io.w.ready := io.axi.w.ready && orderedWSelected
   atomicEngine.io.w.ready := io.axi.w.ready && atomicWSelected
-  dataStoreEngine.io.w.ready := io.axi.w.ready && !orderedWSelected && !atomicWSelected
-  val bToCacheStore = io.axi.b.bits.id === 5.U
   val bToOrderedIO = io.axi.b.bits.id === 6.U
   val bToAtomic = io.axi.b.bits.id === 7.U
-  dataStoreEngine.io.b.valid := io.axi.b.valid && bToCacheStore
-  dataStoreEngine.io.b.bits := io.axi.b.bits
   orderedIOEngine.io.b.valid := io.axi.b.valid && bToOrderedIO
   orderedIOEngine.io.b.bits := io.axi.b.bits
   atomicEngine.io.b.valid := io.axi.b.valid && bToAtomic
   atomicEngine.io.b.bits := io.axi.b.bits
-  io.axi.b.ready := Mux(bToCacheStore, dataStoreEngine.io.b.ready,
-    Mux(bToOrderedIO, orderedIOEngine.io.b.ready,
-      Mux(bToAtomic, atomicEngine.io.b.ready, false.B)))
+  io.axi.b.ready := Mux(bToOrderedIO, orderedIOEngine.io.b.ready,
+    Mux(bToAtomic, atomicEngine.io.b.ready, false.B))
   when(io.axi.b.valid) {
-    assert(bToCacheStore || bToOrderedIO || bToAtomic,
-      "top-level AXI B used an ID outside cache-store, ordered-device, and atomic owners")
+    assert(bToOrderedIO || bToAtomic,
+      "top-level AXI B used an ID outside ordered-device and atomic owners")
   }
 
   val arLockValid = RegInit(false.B)

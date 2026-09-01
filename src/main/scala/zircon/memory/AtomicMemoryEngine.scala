@@ -39,6 +39,10 @@ class AtomicMemoryEngine(
     val b = Flipped(Decoupled(new AXI4WriteResponse(idWidth = 4)))
     val busy = Output(Bool())
     val reservationLive = Output(Bool())
+    /** Combinational classification of an offered effect. A failed SC is a
+      * local architectural result and must not wait behind dirty cache data. */
+    val externalAccessRequired = Output(Bool())
+    val externalWriteRequired = Output(Bool())
   })
 
   val state = RegInit(State.Idle)
@@ -105,6 +109,9 @@ class AtomicMemoryEngine(
   val incomingLr = isLr(io.effect.bits.operation)
   val incomingWord = wordAddress(io.effect.bits.address)
   val scReservationHit = reservationValid && reservationWord === incomingWord
+
+  io.externalAccessRequired := !incomingSc || scReservationHit
+  io.externalWriteRequired := incomingAmo || (incomingSc && scReservationHit)
 
   io.effect.ready := state === State.Idle && !resultValid && !io.flush
   io.result.valid := resultValid && !io.flush

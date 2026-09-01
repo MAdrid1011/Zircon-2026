@@ -55,11 +55,15 @@ accepted atomic through retirement, so an MRET cannot repeat an irreversible
 AMO/SC write.
 
 Before ID 7 accepts an atomic, `L1DLoadCache` requires any same-line refill MSHR
-to drain. A result with an externally attempted atomic write invalidates a
-matching resident L1D line when its response is accepted, including a BRESP
-error conservatively. This prevents the current write-through/invalidate L1D
-slice from serving stale data. Dirty ownership, write-back, L2 exclusivity, and
-external multi-master coherency remain M3 work.
+to drain and blocks a matching dirty L1D line. `ExclusiveL2TransferStore` also
+refuses to discard a dirty L2 line. A result with an externally attempted atomic
+write invalidates a matching clean resident L1D line when its response is
+accepted, including a BRESP error conservatively. This prevents an atomic from
+reading stale backing memory or discarding dirty ownership before the ID-5 L2
+writeback owner exists. An SC whose reservation is already absent is exempt: it
+returns the architectural no-write result locally and need not wait on dirty
+cache data or an external owner. L2 writeback and external multi-master
+coherency remain M3 work.
 
 Flush before AXI acceptance cancels the local effect. Once AR, AW, or W has
 accepted, the engine drains the required response; a killed result is discarded

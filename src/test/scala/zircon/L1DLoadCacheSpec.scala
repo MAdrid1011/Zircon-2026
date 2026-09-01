@@ -27,36 +27,17 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.bits.transfer.lineAddress.poke(0)
     dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
     dut.io.l2Response.bits.transfer.dirty.poke(false)
-    dut.io.storeAccept.valid.poke(false)
-    dut.io.storeAccept.bits.robTag.poke(0)
-    dut.io.storeAccept.bits.address.poke(0)
-    dut.io.storeAccept.bits.accessSize.poke(2)
-    dut.io.storeAccept.bits.writeMask.poke(0)
-    dut.io.storeAccept.bits.writeData.poke(0)
-    dut.io.storeAccept.bits.isAtomic.poke(false)
-    dut.io.storeAccept.bits.pmaKind.poke(PMARegionKind.Memory.code)
-    dut.io.storeAccept.bits.aq.poke(false)
-    dut.io.storeAccept.bits.rl.poke(false)
-    dut.io.storeCommit.valid.poke(false)
-    dut.io.storeCommit.bits.robTag.poke(0)
-    dut.io.storeCommit.bits.address.poke(0)
-    dut.io.storeCommit.bits.accessSize.poke(2)
-    dut.io.storeCommit.bits.writeMask.poke(0)
-    dut.io.storeCommit.bits.writeData.poke(0)
-    dut.io.storeCommit.bits.isAtomic.poke(false)
-    dut.io.storeCommit.bits.pmaKind.poke(PMARegionKind.Memory.code)
-    dut.io.storeCommit.bits.aq.poke(false)
-    dut.io.storeCommit.bits.rl.poke(false)
-    dut.io.activeStore.valid.poke(false)
-    dut.io.activeStore.bits.robTag.poke(0)
-    dut.io.activeStore.bits.address.poke(0)
-    dut.io.activeStore.bits.accessSize.poke(2)
-    dut.io.activeStore.bits.writeMask.poke(0)
-    dut.io.activeStore.bits.writeData.poke(0)
-    dut.io.activeStore.bits.isAtomic.poke(false)
-    dut.io.activeStore.bits.pmaKind.poke(PMARegionKind.Memory.code)
-    dut.io.activeStore.bits.aq.poke(false)
-    dut.io.activeStore.bits.rl.poke(false)
+    dut.io.storeRequest.valid.poke(false)
+    dut.io.storeRequest.bits.robTag.poke(0)
+    dut.io.storeRequest.bits.address.poke(0)
+    dut.io.storeRequest.bits.accessSize.poke(2)
+    dut.io.storeRequest.bits.writeMask.poke(0)
+    dut.io.storeRequest.bits.writeData.poke(0)
+    dut.io.storeRequest.bits.isAtomic.poke(false)
+    dut.io.storeRequest.bits.pmaKind.poke(PMARegionKind.Memory.code)
+    dut.io.storeRequest.bits.aq.poke(false)
+    dut.io.storeRequest.bits.rl.poke(false)
+    dut.io.storeResult.ready.poke(false)
     dut.io.atomicAccept.valid.poke(false)
     dut.io.atomicAccept.bits.robTag.poke(0)
     dut.io.atomicAccept.bits.operation.poke(0)
@@ -67,6 +48,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.atomicAccept.bits.writesInteger.poke(false)
     dut.io.atomicAccept.bits.aq.poke(false)
     dut.io.atomicAccept.bits.rl.poke(false)
+    dut.io.atomicRequiresExternal.poke(true)
     dut.io.atomicInvalidate.valid.poke(false)
     dut.io.atomicInvalidate.bits.poke(0)
     dut.io.robHeadTag.poke(0)
@@ -92,6 +74,43 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.request.ready.expect(true)
     dut.clock.step()
     dut.io.request.valid.poke(false)
+  }
+
+  private def submitStore(
+      dut: L1DLoadCache,
+      tag: Int,
+      address: BigInt,
+      mask: Int,
+      data: BigInt
+  ): Unit = {
+    dut.io.storeRequest.valid.poke(true)
+    dut.io.storeRequest.bits.robTag.poke(tag)
+    dut.io.storeRequest.bits.address.poke(address)
+    dut.io.storeRequest.bits.accessSize.poke(2)
+    dut.io.storeRequest.bits.writeMask.poke(mask)
+    dut.io.storeRequest.bits.writeData.poke(data)
+    dut.io.storeRequest.bits.isAtomic.poke(false)
+    dut.io.storeRequest.bits.pmaKind.poke(PMARegionKind.Memory.code)
+    dut.io.storeRequest.bits.aq.poke(false)
+    dut.io.storeRequest.bits.rl.poke(false)
+    dut.io.storeRequest.ready.expect(true)
+    dut.clock.step()
+    dut.io.storeRequest.valid.poke(false)
+  }
+
+  private def consumeStoreResult(
+      dut: L1DLoadCache,
+      tag: Int,
+      address: BigInt,
+      fault: Boolean = false
+  ): Unit = {
+    dut.io.storeResult.valid.expect(true)
+    dut.io.storeResult.bits.robTag.expect(tag)
+    dut.io.storeResult.bits.address.expect(address)
+    dut.io.storeResult.bits.accessFault.expect(fault)
+    dut.io.storeResult.ready.poke(true)
+    dut.clock.step()
+    dut.io.storeResult.ready.poke(false)
   }
 
   private def issueRefill(
@@ -294,7 +313,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("invalidates a committed-store line and blocks same-line cache access while it drains") {
+    it("updates a committed store hit in place and returns its exact result") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val line = BigInt("80001000", 16)
@@ -305,30 +324,131 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.completion.ready.poke(false)
 
-        dut.io.storeAccept.valid.poke(true)
-        dut.io.storeAccept.bits.address.poke(line)
-        dut.io.storeAcceptReady.expect(true)
-        dut.io.storeCommit.valid.poke(true)
-        dut.io.storeCommit.bits.address.poke(line)
-        dut.clock.step()
-        dut.io.storeAccept.valid.poke(false)
-        dut.io.storeCommit.valid.poke(false)
+        submitStore(dut, tag = 2, line, mask = 6, data = BigInt("00aabb00", 16))
+        dut.io.storeBusy.expect(true)
+        consumeStoreResult(dut, tag = 2, line)
+        dut.io.storeBusy.expect(false)
 
-        dut.io.activeStore.valid.poke(true)
-        dut.io.activeStore.bits.address.poke(line)
+        submit(dut, tag = 3, line)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(BigInt("c0aabb00", 16))
+      }
+    }
+
+    it("write-allocates a committed store miss before reporting its result") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80001800", 16)
+        val words = Seq.tabulate(8)(word => BigInt("e0000000", 16) + word)
+        submitStore(dut, tag = 5, line + 4, mask = 3, data = BigInt("0000beef", 16))
+        dut.io.l2Lookup.valid.expect(true)
+        issueRefill(dut, words, lineAddress = line)
+        consumeStoreResult(dut, tag = 5, line + 4)
+
+        submit(dut, tag = 6, line + 4)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.cacheData.expect(BigInt("e000beef", 16))
+      }
+    }
+
+    it("returns an exact store fault and leaves a failed allocation invalid") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80001c00", 16)
+        submitStore(dut, tag = 7, line, mask = 15, data = BigInt("facefeed", 16))
+        issueRefill(dut, Seq.fill(8)(BigInt(0)), fault = true, lineAddress = line)
+        consumeStoreResult(dut, tag = 7, line, fault = true)
+
+        submit(dut, tag = 8, line)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
+    it("does not transfer a victim for a backpressured second store") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val firstLine = BigInt("80002400", 16)
+        val secondLine = BigInt("80002600", 16)
+        submitStore(dut, tag = 1, firstLine, mask = 15, data = 1)
+        dut.io.l2Lookup.valid.expect(true)
+
+        dut.io.storeRequest.valid.poke(true)
+        dut.io.storeRequest.bits.robTag.poke(2)
+        dut.io.storeRequest.bits.address.poke(secondLine)
+        dut.io.storeRequest.bits.accessSize.poke(2)
+        dut.io.storeRequest.bits.writeMask.poke(15)
+        dut.io.storeRequest.bits.writeData.poke(2)
+        dut.io.storeRequest.bits.isAtomic.poke(false)
+        dut.io.storeRequest.bits.pmaKind.poke(PMARegionKind.Memory.code)
+        dut.io.storeRequest.bits.aq.poke(false)
+        dut.io.storeRequest.bits.rl.poke(false)
+        dut.io.storeRequest.ready.expect(false)
+        dut.io.l2Insert.valid.expect(false)
+      }
+    }
+
+    it("blocks an external atomic while a matching L1D line is dirty") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80002000", 16)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, Seq.fill(8)(BigInt("01020304", 16)), lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 2, line, mask = 15, data = BigInt("aabbccdd", 16))
+        consumeStoreResult(dut, tag = 2, line)
+
+        dut.io.atomicAccept.valid.poke(true)
+        dut.io.atomicAccept.bits.address.poke(line)
+        dut.io.atomicAcceptReady.expect(false)
+        dut.io.atomicRequiresExternal.poke(false)
+        dut.io.atomicAcceptReady.expect(true)
+      }
+    }
+
+    it("transfers a dirty L1D victim to L2 after a committed store") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lineA = BigInt("80001000", 16)
+        val lineB = BigInt("80001200", 16)
+        val lineC = BigInt("80001400", 16)
+        val wordsA = Seq.tabulate(8)(word => BigInt("11000000", 16) + word)
+        val wordsB = Seq.tabulate(8)(word => BigInt("22000000", 16) + word)
+
+        submit(dut, tag = 1, lineA)
+        issueRefill(dut, wordsA, lineAddress = lineA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, lineB)
+        issueRefill(dut, wordsB, lineAddress = lineB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        submitStore(dut, tag = 3, lineA, mask = 15, data = BigInt("decafbad", 16))
+        consumeStoreResult(dut, tag = 3, lineA)
+
         dut.io.request.valid.poke(true)
-        dut.io.request.bits.robTag.poke(2)
-        dut.io.request.bits.address.poke(line)
+        dut.io.request.bits.robTag.poke(4)
+        dut.io.request.bits.address.poke(lineC)
         dut.io.request.bits.readMask.poke(15)
         dut.io.request.bits.forwardMask.poke(0)
         dut.io.request.bits.forwardData.poke(0)
         dut.io.request.bits.requiresCache.poke(true)
-        dut.io.request.ready.expect(false)
-        dut.io.activeStore.valid.poke(false)
+        dut.io.request.bits.cacheable.poke(true)
         dut.io.request.ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(lineA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(0).expect(BigInt("decafbad", 16))
         dut.clock.step()
         dut.io.request.valid.poke(false)
-        dut.io.l2Lookup.valid.expect(true)
       }
     }
 
