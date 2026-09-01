@@ -115,8 +115,11 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag
   lsuIngress.io.squash := backend.io.squash
   lsuIngress.io.flush := backend.io.globalFlush
-  lsuIngress.io.loadForwardReady := l1dLoadCache.io.request.ready
-  l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid
+  val cacheableLoadForward = lsuIngress.io.loadForward.bits.cacheable
+  lsuIngress.io.loadForwardReady := cacheableLoadForward &&
+    l1dLoadCache.io.request.ready
+  l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid &&
+    cacheableLoadForward
   l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
   lsuIngress.io.loadComplete <> l1dLoadCache.io.completion
   l1dLoadCache.io.dataRequest <> dataReadEngine.io.request

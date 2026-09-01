@@ -208,6 +208,40 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     Files.writeString(directory.resolve(s"m2-recovery-backpressure-$seed.txt"), evidence)
   }
 
+  /** Until the dedicated M0 MMIO/A owner exists, an accepted legal M0 load
+    * must retain LQ ownership without using the L1D/AXI read slice or retiring.
+    */
+  private def assertBlockedM0Load(
+      dut: ZirconCore,
+      baseInstruction: BigInt,
+      memoryInstruction: BigInt,
+      name: String
+  ): Unit = {
+    clearInputs(dut)
+    var lsuIngress = false
+    var dataReadAddress = false
+    val events = runProgram(dut, Map(
+      ResetVector -> baseInstruction,
+      ResetVector + 4 -> memoryInstruction,
+      ResetVector + 8 -> BigInt("00100073", 16)
+    ), cycles = 192, observeCycle = (core, _) => {
+      val observation = core.io.m2Observation.get
+      lsuIngress ||= observation.m0Ingress.peek().litToBoolean ||
+        observation.m1Ingress.peek().litToBoolean
+      val dataAr = core.io.axi.ar.valid.peek().litToBoolean &&
+        core.io.axi.ar.ready.peek().litToBoolean &&
+        core.io.axi.ar.bits.id.peek().litValue != 0
+      dataReadAddress ||= dataAr
+    })
+
+    withClue(s"$name trace=$events") {
+      assert(lsuIngress, s"$name never reached the dual-LSU ownership path")
+      assert(!dataReadAddress, s"$name incorrectly issued an L1D data AXI read")
+      assert(events.map(_.instruction) == Seq(baseInstruction),
+        s"$name created a false memory or following-instruction retirement")
+    }
+  }
+
   describe("ZirconCore executable M1-M3 integration") {
     it("executes an AXI-fed RV32I dependency chain and emits precise retire events") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
@@ -836,6 +870,36 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         }
         assert(events.head.trap && events.head.cause == 5 &&
           events.head.trapValue == 0 && events.head.pc == ResetVector)
+      }
+    }
+
+    it("blocks a DeviceStrong load without L1D, AXI data, or false retirement") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        assertBlockedM0Load(dut,
+          baseInstruction = BigInt("a00000b7", 16), // lui x1,0xa0000
+          memoryInstruction = BigInt("0000a103", 16), // lw x2,0(x1)
+          name = "DeviceStrong load")
+      }
+    }
+
+    it("blocks a DeviceBurstable load without L1D, AXI data, or false retirement") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        assertBlockedM0Load(dut,
+          baseInstruction = BigInt("b00000b7", 16), // lui x1,0xb0000
+          memoryInstruction = BigInt("0000a103", 16), // lw x2,0(x1)
+          name = "DeviceBurstable load")
+      }
+    }
+
+    it("blocks an atomic load without L1D, AXI data, or false retirement") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        assertBlockedM0Load(dut,
+          baseInstruction = BigInt("800000b7", 16), // lui x1,0x80000
+          memoryInstruction = BigInt("1000a12f", 16), // lr.w x2,(x1)
+          name = "LR.W")
       }
     }
 

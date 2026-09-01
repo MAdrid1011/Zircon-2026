@@ -41,8 +41,11 @@ completion, weaken a fault path, or hide a structure from the static ledger.
 Each component regression should finish within five minutes on the reference
 development host. `make test-m3-store` is the focused cacheable-store tier: it
 runs independent AXI/SQ/cache suites followed by the normal and BRESP-error
-top-level tests. New feature work should add an equivalent focused target
-instead of requiring the complete test corpus for every edit.
+top-level tests. `make test-m3-load-boundary` is the equivalent M0/M1 load tier:
+it runs LSU/LQ/L1D ownership suites and the three DeviceStrong, DeviceBurstable,
+and LR.W no-L1D/no-data-AXI/no-false-retirement checks. New feature work should
+add an equivalent focused target instead of requiring the complete test corpus
+for every edit.
 
 ZirconSim full-core measurements must record wall time, retired instructions,
 retired instructions per second, ELF hash, seed, RTL/submodule/tool SHA, and

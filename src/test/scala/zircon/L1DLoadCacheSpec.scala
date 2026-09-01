@@ -13,6 +13,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.request.bits.forwardMask.poke(0)
     dut.io.request.bits.forwardData.poke(0)
     dut.io.request.bits.requiresCache.poke(false)
+    dut.io.request.bits.cacheable.poke(true)
     dut.io.completion.ready.poke(false)
     dut.io.dataRequest.ready.poke(false)
     dut.io.dataResponse.valid.poke(false)
@@ -68,6 +69,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.request.bits.forwardMask.poke(if (requiresCache) 0 else 15)
     dut.io.request.bits.forwardData.poke(0)
     dut.io.request.bits.requiresCache.poke(requiresCache)
+    dut.io.request.bits.cacheable.poke(true)
     dut.io.request.ready.expect(true)
     dut.clock.step()
     dut.io.request.valid.poke(false)
@@ -96,6 +98,26 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("L1DLoadCache") {
+    it("rejects a non-cacheable M0 forward without a refill or completion") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        dut.io.request.valid.poke(true)
+        dut.io.request.bits.robTag.poke(3)
+        dut.io.request.bits.address.poke(BigInt("a0000000", 16))
+        dut.io.request.bits.readMask.poke(15)
+        dut.io.request.bits.forwardMask.poke(0)
+        dut.io.request.bits.forwardData.poke(0)
+        dut.io.request.bits.requiresCache.poke(true)
+        dut.io.request.bits.cacheable.poke(false)
+        dut.io.request.ready.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step(2)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("returns an eight-beat miss refill then a cache hit without a second data request") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

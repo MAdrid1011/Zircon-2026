@@ -3,7 +3,9 @@
 This document defines the first executable cacheable-load slice of the frozen
 M3 memory contract in ADR-0012 and Issue #47. It does not relax the final L1D,
 L2, store, MMIO, or atomic requirements. Its only architectural effect is an
-aligned cacheable integer load that was admitted by M1 or replayed to M0.
+aligned cacheable integer load with an M1-owned LQ record. M0 device, atomic,
+and general-load records remain pending until their respective M3 execution
+owners are implemented.
 
 ## Scope and geometry
 
@@ -13,8 +15,11 @@ The initial slice is read-only. Commit-authorized stores, AMOs, dirty state,
 writeback, L2 transfers, and device traffic are not accepted by this module and
 remain blocked at their existing legal boundaries.
 
-The cache accepts a `LoadStoreForward` only when it has either an immediate
-response slot or a free miss-waiter slot. A full store-forward request returns a
+The cache accepts a `LoadStoreForward` only when its retained LQ owner marks it
+cacheable, and it has either an immediate response slot or a free miss-waiter
+slot. The eligibility bit is derived from `m1Owner && !isAtomic`; it is checked
+again by `L1DLoadCache` so a future integration error cannot execute an M0
+device/atomic request through the cache. A full store-forward request returns a
 zero cache word to the LQ, which retains responsibility for merging every
 forwarded byte. A hit returns the selected cached word. A miss allocates or
 merges into one of four line MSHRs. Each outstanding architectural load has one
@@ -60,6 +65,8 @@ can be interpreted as a fetch or data result.
 
 - A cache request handshakes only when it receives exactly one immediate
   response owner or one MSHR waiter owner.
+- An M0 device or atomic LQ owner cannot enter L1D, issue a data AR, or create
+  a completion before the ordered-MMIO/RV32A owner exists.
 - Every miss waiter belongs to one live MSHR; every live MSHR has at least one
   waiter or an accepted AXI transaction still draining.
 - A data AXI owner exists from AR acceptance through the final R handshake and
@@ -72,6 +79,8 @@ can be interpreted as a fetch or data result.
 `AXIDataReadEngineSpec` covers AR/R backpressure, four owners, ID interleaving,
 response errors, and beat/`last` assertions. `L1DLoadCacheSpec` covers hit,
 miss, same-line secondary merge, four-MSHR backpressure, refill response
-backpressure, forwarding-only completion, and recovery drain. `CoreShellSpec`
-adds an AXI-fed cacheable RV32I load that writes the real returned value and
-retires exactly once.
+backpressure, forwarding-only completion, non-cacheable rejection, and recovery
+drain. `CoreShellSpec` adds an AXI-fed cacheable RV32I load that writes the real
+returned value and retires exactly once, plus DeviceStrong, DeviceBurstable, and
+LR.W cases proving no L1D/data-AXI request or false retirement before M0 grows
+its required owners.

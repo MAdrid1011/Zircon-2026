@@ -131,8 +131,11 @@ class L1DLoadCache(
   val missResources = anyFreeWaiter && (anyMatchingMshr ||
     (anyFreeMshr && hasVictimWay))
   val blockedByActiveStore = io.request.bits.requiresCache && activeStoreSameLine
-  io.request.ready := !recoveryBlocked && !blockedByActiveStore && Mux(immediateRequest,
-    immediateAvailable, missResources)
+  // The read-only slice is not an execution fallback for M0. Device and
+  // atomic requests retain their ordered LQ owner until their real engines
+  // exist, even if they happen to be fully forwarded by an older store.
+  io.request.ready := io.request.bits.cacheable && !recoveryBlocked &&
+    !blockedByActiveStore && Mux(immediateRequest, immediateAvailable, missResources)
 
   val unissued = VecInit((0 until mshrCount).map(index =>
     mshrValid(index) && !mshrIssued(index)))
@@ -317,6 +320,10 @@ class L1DLoadCache(
     assert(anyFreeWaiter, "L1D accepted a miss without a waiter owner")
     assert(anyMatchingMshr || (anyFreeMshr && hasVictimWay),
       "L1D accepted a miss without an MSHR and victim owner")
+  }
+  when(io.request.fire) {
+    assert(io.request.bits.cacheable,
+      "the executable L1D slice accepted a non-cacheable M0 owner")
   }
   for (waiter <- 0 until waiterCount) {
     when(waiterValid(waiter)) {

@@ -64,7 +64,8 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       tag: Int,
       load: Boolean,
       store: Boolean,
-      atomic: Boolean = false
+      atomic: Boolean = false,
+      m1Owner: Boolean = false
   ): Unit = {
     val port = dut.io.allocate(lane)
     port.valid.poke(true)
@@ -75,7 +76,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     port.bits.unsignedLoad.poke(false)
     port.bits.destinationPhysical.poke(32)
     port.bits.writesInteger.poke(true)
-    port.bits.m1Owner.poke(false)
+    port.bits.m1Owner.poke(m1Owner)
     port.bits.isAtomic.poke(atomic)
     port.bits.pmaKind.poke(PMARegionKind.Memory.code)
     port.bits.aq.poke(false)
@@ -122,6 +123,32 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("LoadStoreQueues") {
+    it("marks only M1 non-atomic load forwards cacheable") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        allocate(dut, 0, tag = 1, load = true, store = false, m1Owner = true)
+        dut.clock.step()
+        noAllocations(dut)
+        queryLoad(dut, 1, BigInt("80001000", 16), 15)
+        dut.io.loadAddress.ready.expect(true)
+        dut.io.loadForward.valid.expect(true)
+        dut.io.loadForward.bits.cacheable.expect(true)
+        dut.clock.step()
+        dut.io.loadAddress.valid.poke(false)
+
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        allocate(dut, 0, tag = 2, load = true, store = false)
+        dut.clock.step()
+        noAllocations(dut)
+        queryLoad(dut, 2, BigInt("a0000000", 16), 15)
+        dut.io.loadAddress.ready.expect(true)
+        dut.io.loadForward.valid.expect(true)
+        dut.io.loadForward.bits.cacheable.expect(false)
+      }
+    }
+
     it("blocks a load behind an older store until address and data are both known") {
       simulate(new LoadStoreQueues) { dut =>
         clear(dut)

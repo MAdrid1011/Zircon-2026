@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -13,6 +13,13 @@ test-m3-store:
 	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a cacheable store"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "cacheable store BRESP error"'
+
+# Fast, focused M3 M0/M1 load-admission regression. It verifies that the
+# unfinished M0 device/atomic owner cannot leak through the executable L1D
+# path, and remains bounded below the five-minute component-simulation gate.
+test-m3-load-boundary:
+	./scripts/sbtw "testOnly zircon.DualLSUIngressSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "without L1D"'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"
