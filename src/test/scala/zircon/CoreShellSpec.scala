@@ -11,6 +11,16 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
   private val Nop = BigInt("00000013", 16)
   private val M2RecoveryBackpressureSeeds = Seq(0x5eedL, 0x5eed1001L,
     0x5eed2002L, 0x5eed3003L)
+  private val M3AxiStressSeeds = Seq(0x5eed3004L, 0x5eed3005L,
+    0x5eed3006L, 0x5eed3007L)
+
+  private case class AxiSchedule(
+      arReady: IndexedSeq[Boolean],
+      rValid: IndexedSeq[Boolean],
+      awReady: IndexedSeq[Boolean],
+      wReady: IndexedSeq[Boolean],
+      bValid: IndexedSeq[Boolean]
+  )
 
   private case class TraceSample(
       order: BigInt,
@@ -84,22 +94,27 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       rValidForCycle: Int => Boolean = _ => true,
       rResponse: (BigInt, BigInt) => Int = (_, _) => 0,
       writeResponse: Option[Int] = None,
-      observeCycle: (ZirconCore, Int) => Unit = (_, _) => ()
+      observeCycle: (ZirconCore, Int) => Unit = (_, _) => (),
+      awReadyForCycle: Int => Boolean = _ => true,
+      wReadyForCycle: Int => Boolean = _ => true,
+      bValidForCycle: Int => Boolean = _ => true
   ): Seq[TraceSample] = {
     val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, BigInt, BigInt, Boolean)]
     val events = scala.collection.mutable.ArrayBuffer.empty[TraceSample]
+    var rHeld = false
     var awSeen = false
     var wLastSeen = false
     var bQueued = false
+    var bHeld = false
     var writeId = BigInt(5)
 
     dut.clock.step(128) // Deterministic bimodal/BTB scrubs.
     for (cycle <- 0 until cycles) {
       driveInterrupts(dut, events.toSeq)
       dut.io.axi.ar.ready.poke(arReadyForCycle(cycle))
-      dut.io.axi.aw.ready.poke(true)
-      dut.io.axi.w.ready.poke(true)
-      val rOffered = pendingReads.nonEmpty && rValidForCycle(cycle)
+      dut.io.axi.aw.ready.poke(awReadyForCycle(cycle))
+      dut.io.axi.w.ready.poke(wReadyForCycle(cycle))
+      val rOffered = pendingReads.nonEmpty && (rHeld || rValidForCycle(cycle))
       if (rOffered) {
         val (id, address, data, last) = pendingReads.front
         dut.io.axi.r.valid.poke(true)
@@ -110,7 +125,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       } else {
         dut.io.axi.r.valid.poke(false)
       }
-      dut.io.axi.b.valid.poke(writeResponse.nonEmpty && bQueued)
+      val bOffered = writeResponse.nonEmpty && bQueued &&
+        (bHeld || bValidForCycle(cycle))
+      dut.io.axi.b.valid.poke(bOffered)
       dut.io.axi.b.bits.id.poke(writeId)
       dut.io.axi.b.bits.resp.poke(writeResponse.getOrElse(0))
 
@@ -151,7 +168,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val wFire = dut.io.axi.w.valid.peek().litToBoolean &&
         dut.io.axi.w.ready.peek().litToBoolean
       val wLast = dut.io.axi.w.bits.last.peek().litToBoolean
-      val bFire = writeResponse.nonEmpty && bQueued &&
+      val bFire = bOffered &&
         dut.io.axi.b.ready.peek().litToBoolean
 
       observeCycle(dut, cycle)
@@ -159,6 +176,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
 
       if (rFire) {
         pendingReads.dequeue()
+        rHeld = false
+      } else if (rOffered) {
+        rHeld = true
       }
       if (arFire) {
         for (beat <- 0 until arBeats) {
@@ -177,8 +197,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
       if (bFire) {
         bQueued = false
+        bHeld = false
         awSeen = false
         wLastSeen = false
+      } else if (bOffered) {
+        bHeld = true
       }
     }
     events.toSeq
@@ -207,6 +230,21 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     (arReady, rValid)
   }
 
+  private def seededAxiSchedule(seed: Long, cycles: Int): AxiSchedule = {
+    val random = new Random(seed)
+    def channel(period: Int, chancePercent: Int): IndexedSeq[Boolean] =
+      Vector.tabulate(cycles) { cycle =>
+        cycle % period == 0 || random.nextInt(100) < chancePercent
+      }
+    AxiSchedule(
+      arReady = channel(period = 7, chancePercent = 70),
+      rValid = channel(period = 5, chancePercent = 65),
+      awReady = channel(period = 11, chancePercent = 60),
+      wReady = channel(period = 13, chancePercent = 60),
+      bValid = channel(period = 17, chancePercent = 65)
+    )
+  }
+
   private def saveM2RecoveryFailure(
       seed: Long,
       arReady: IndexedSeq[Boolean],
@@ -221,6 +259,26 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         s"r_valid=${rValid.map(value => if (value) '1' else '0').mkString}\n" +
         events.mkString("retire_trace=\n", "\n", "\n")
     Files.writeString(directory.resolve(s"m2-recovery-backpressure-$seed.txt"), evidence)
+  }
+
+  private def saveM3AxiStressFailure(
+      seed: Long,
+      scenario: String,
+      schedule: AxiSchedule,
+      events: Seq[TraceSample]
+  ): Unit = {
+    val directory = Paths.get("target", "zircon-failures")
+    Files.createDirectories(directory)
+    val evidence =
+      s"test=CoreShellSpec\nscenario=$scenario\nseed=0x${java.lang.Long.toHexString(seed)}\n" +
+        s"ar_ready=${schedule.arReady.map(value => if (value) '1' else '0').mkString}\n" +
+        s"r_valid=${schedule.rValid.map(value => if (value) '1' else '0').mkString}\n" +
+        s"aw_ready=${schedule.awReady.map(value => if (value) '1' else '0').mkString}\n" +
+        s"w_ready=${schedule.wReady.map(value => if (value) '1' else '0').mkString}\n" +
+        s"b_valid=${schedule.bValid.map(value => if (value) '1' else '0').mkString}\n" +
+        events.mkString("retire_trace=\n", "\n", "\n")
+    Files.writeString(directory.resolve(
+      s"m3-axi-stress-$scenario-${java.lang.Long.toHexString(seed)}.txt"), evidence)
   }
 
   /** RV32A remains outside the current M0 slice and must not borrow the device
@@ -939,6 +997,134 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM2RecoveryFailure(seed, arReady, rValid, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("preserves ordered device writes through explicitly seeded all-channel AXI backpressure") {
+      for (seed <- M3AxiStressSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 512
+          val schedule = seededAxiSchedule(seed, cycles)
+          val deviceAddress = BigInt("a0000000", 16)
+          var sawAr = false
+          var sawR = false
+          var sawAw = false
+          var sawW = false
+          var sawB = false
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("a00000b7", 16), // lui x1,0xa0000
+              ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+              ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+              ResetVector + 12 -> BigInt("00100073", 16) // ebreak
+            ), cycles = cycles, arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                sawAr ||= core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                sawR ||= core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                sawAw ||= core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                sawW ||= core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                sawB ||= core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$retired") {
+              assert(sawAr && sawR && sawAw && sawW && sawB)
+              assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12))
+              val store = retired(2)
+              assert(store.memoryAddress == deviceAddress && store.memoryWriteMask == 15 &&
+                store.memoryWriteData == 90)
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "device-write", schedule, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("preserves exact data RRESP and device BRESP faults under seeded AXI backpressure") {
+      for ((seed, index) <- M3AxiStressSeeds.zipWithIndex) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 512
+          val schedule = seededAxiSchedule(seed, cycles)
+          val dataFault = index % 2 == 0
+          val dataAddress = BigInt("80001000", 16)
+          val deviceAddress = BigInt("b0000000", 16)
+          val scenario = if (dataFault) "data-rresp" else "device-bresp"
+          var sawAr = false
+          var sawR = false
+          var sawAw = false
+          var sawW = false
+          var sawB = false
+          var events = Seq.empty[TraceSample]
+          try {
+            val program = if (dataFault) Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 8 -> BigInt("00100073", 16), // ebreak
+              dataAddress -> BigInt("deadbeef", 16)
+            ) else Map(
+              ResetVector -> BigInt("b00000b7", 16), // lui x1,0xb0000
+              ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+              ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+              ResetVector + 12 -> BigInt("00100073", 16) // ebreak
+            )
+            events = runProgram(dut, program, cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              rResponse = (_, address) => if (dataFault && address >= dataAddress &&
+                address < dataAddress + 32) 2 else 0,
+              writeResponse = if (dataFault) None else Some(2),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                sawAr ||= core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                sawR ||= core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                sawAw ||= core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                sawW ||= core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                sawB ||= core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+              })
+
+            val retired = throughFirstTrap(events)
+            val expectedPc = if (dataFault) ResetVector + 4 else ResetVector + 8
+            val expectedCause = if (dataFault) 5 else 7
+            val expectedTval = if (dataFault) dataAddress else deviceAddress
+            val trap = retired.find(event => event.trap && event.pc == expectedPc)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, scenario=$scenario, " +
+              s"trace=$retired") {
+              assert(sawAr && sawR)
+              if (!dataFault) assert(sawAw && sawW && sawB)
+              assert(trap.exists(event => event.cause == expectedCause &&
+                event.trapValue == expectedTval))
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, scenario, schedule, events)
               throw failure
           }
         }

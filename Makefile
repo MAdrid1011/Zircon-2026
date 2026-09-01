@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-atomic test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-atomic test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -39,6 +39,12 @@ test-m3-ordered-io:
 test-m3-device-io:
 	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.AXIOrderedIOEngineSpec zircon.OrderedIOCombinerSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "Device"'
+
+# Fast full-channel AXI stress tier. It keeps the explicit-seed read/write
+# backpressure and RRESP/BRESP fault cases below the five-minute component budget.
+test-m3-axi-stress:
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ordered device writes through explicitly seeded all-channel AXI backpressure"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves exact data RRESP and device BRESP faults under seeded AXI backpressure"'
 
 # Fast RV32A ownership regression. It remains below the five-minute component
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and

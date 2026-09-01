@@ -51,6 +51,12 @@ for every edit.
 AXI owner and combiner in seconds. Its eventual LSQ/ROB integration needs a
 separate focused top-level target because it carries exact retirement behavior.
 
+`make test-m3-axi-stress` is the focused all-channel tier. It runs the
+explicit-seed M3 top-level device-write success path plus data `RRESP` and
+device `BRESP` fault paths while independently backpressuring AR, R, AW, W,
+and B. The test harness saves the seed, all five channel schedules, and retire
+trace under `target/zircon-failures` when a case fails.
+
 ZirconSim full-core measurements must record wall time, retired instructions,
 retired instructions per second, ELF hash, seed, RTL/submodule/tool SHA, and
 whether tracing was enabled. The normal long run must use an optimized
