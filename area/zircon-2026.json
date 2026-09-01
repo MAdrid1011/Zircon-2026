@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, committed cacheable-store, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, committed cacheable-store, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6, but dirty/replacement state, writeback, L2, atomics, and formal L1I are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable, but dirty/replacement state, writeback, L2, external coherency, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -96,19 +96,19 @@
       "name": "lq_entries_current",
       "class": "register_control",
       "entries": 8,
-      "bits_per_entry": 209,
+      "bits_per_entry": 216,
       "instances": 1,
       "replication_factor": 1,
-      "source": "LoadStoreQueues LQ state including PMA kind, device-effect issued state, and exact retire metadata"
+      "source": "LoadStoreQueues LQ state including retained RV32A operation, PMA/effect state, and exact retire metadata"
     },
     {
       "name": "sq_entries_current",
       "class": "register_control",
       "entries": 8,
-      "bits_per_entry": 199,
+      "bits_per_entry": 213,
       "instances": 1,
       "replication_factor": 1,
-      "source": "LoadStoreQueues SQ state including PMA kind, effect fault, and exact retire metadata"
+      "source": "LoadStoreQueues SQ state including retained RV32A operation/destination, PMA/effect fault, and exact retire metadata"
     },
     {
       "name": "axi_data_read_owner_line_buffers",
@@ -237,13 +237,40 @@
       "source": "LoadStoreQueues DeviceBurstable collection valid, six-bit ROB tag, and three-bit wait counter"
     },
     {
+      "name": "lsq_atomic_result_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 159,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "LoadStoreQueues atomicResultValid plus retained AtomicMemoryResult"
+    },
+    {
+      "name": "axi_atomic_owner_and_reservation",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 192,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AtomicMemoryEngine retained AtomicMemoryEffect, read/write data, state, AW/W state, and 32-bit reservation"
+    },
+    {
+      "name": "axi_atomic_result_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 159,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "AtomicMemoryEngine resultValid plus retained AtomicMemoryResult"
+    },
+    {
       "name": "top_axi_ar_arbiter_state",
       "class": "register_control",
       "entries": 1,
       "bits_per_entry": 5,
       "instances": 1,
       "replication_factor": 1,
-      "source": "ZirconCore arLockValid, two-bit arLockOwner, and two-bit three-client arTurn"
+      "source": "ZirconCore arLockValid, two-bit arLockOwner, and two-bit four-client arTurn"
     },
     {
       "name": "l2_data_default_planned",
@@ -297,6 +324,22 @@
       "source": "L1DLoadCache store-accept same-line MSHR exclusion"
     },
     {
+      "name": "l1d_atomic_mshr_line_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache atomic-start same-line MSHR exclusion"
+    },
+    {
+      "name": "l1d_atomic_invalidate_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache two-way atomic-result line invalidation"
+    },
+    {
       "name": "l1d_active_store_line_compare_units",
       "metric": "comparator32_units",
       "units": 1,
@@ -311,6 +354,30 @@
       "width": 1,
       "fanin": 1,
       "source": "AXIDataStoreEngine reserved AXI write-ID response check, conservatively charged as one 32-bit comparator"
+    },
+    {
+      "name": "axi_atomic_reservation_compare_units",
+      "metric": "comparator32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "AtomicMemoryEngine SC reservation and same-word local-store/AMO invalidation checks"
+    },
+    {
+      "name": "axi_atomic_amo_minmax_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "AtomicMemoryEngine signed/unsigned AMOMIN/AMOMAX word comparisons"
+    },
+    {
+      "name": "axi_atomic_amo_result_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 32,
+      "fanin": 9,
+      "source": "AtomicMemoryEngine nine AMO word-result choices"
     },
     {
       "name": "axi_ordered_io_response_id_compare",
@@ -405,24 +472,24 @@
       "metric": "mux_input_bits",
       "units": 1,
       "width": 64,
-      "fanin": 3,
-      "source": "ZirconCore locked fetch/L1D/device AXI address mux, conservatively rounded to 64 bits"
+      "fanin": 4,
+      "source": "ZirconCore locked fetch/L1D/device/atomic AXI address mux, conservatively rounded to 64 bits"
     },
     {
       "name": "top_axi_write_mux_inputs",
       "metric": "mux_input_bits",
       "units": 2,
       "width": 64,
-      "fanin": 2,
-      "source": "ZirconCore ordered-device versus cacheable-store AW and W channel muxes, conservatively rounded to 64 bits each"
+      "fanin": 3,
+      "source": "ZirconCore ordered-device, atomic, and cacheable-store AW/W muxes, conservatively rounded to 64 bits each"
     },
     {
       "name": "top_axi_response_id_demux_compare_units",
       "metric": "comparator32_units",
-      "units": 6,
+      "units": 8,
       "width": 1,
       "fanin": 1,
-      "source": "ZirconCore B and R response ID demultiplexing across cache-store, fetch, L1D, and ordered-device owners"
+      "source": "ZirconCore B and R response ID demultiplexing across cache-store, fetch, L1D, ordered-device, and atomic owners"
     },
     {
       "name": "top_ordered_io_source_mux_inputs",

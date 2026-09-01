@@ -50,6 +50,18 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.activeStore.bits.pmaKind.poke(PMARegionKind.Memory.code)
     dut.io.activeStore.bits.aq.poke(false)
     dut.io.activeStore.bits.rl.poke(false)
+    dut.io.atomicAccept.valid.poke(false)
+    dut.io.atomicAccept.bits.robTag.poke(0)
+    dut.io.atomicAccept.bits.operation.poke(0)
+    dut.io.atomicAccept.bits.address.poke(0)
+    dut.io.atomicAccept.bits.writeData.poke(0)
+    dut.io.atomicAccept.bits.writeMask.poke(15)
+    dut.io.atomicAccept.bits.destinationPhysical.poke(0)
+    dut.io.atomicAccept.bits.writesInteger.poke(false)
+    dut.io.atomicAccept.bits.aq.poke(false)
+    dut.io.atomicAccept.bits.rl.poke(false)
+    dut.io.atomicInvalidate.valid.poke(false)
+    dut.io.atomicInvalidate.bits.poke(0)
     dut.io.robHeadTag.poke(0)
     dut.io.squash.valid.poke(false)
     dut.io.squash.bits.poke(0)
@@ -115,6 +127,36 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step(2)
         dut.io.dataRequest.valid.expect(false)
         dut.io.completion.valid.expect(false)
+      }
+    }
+
+    it("blocks an atomic behind a same-line refill and invalidates its old L1D line") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val address = BigInt("80001000", 16)
+        submit(dut, tag = 1, address)
+        dut.io.atomicAccept.valid.poke(true)
+        dut.io.atomicAccept.bits.address.poke(address)
+        dut.io.atomicAcceptReady.expect(false)
+        dut.io.atomicAccept.valid.poke(false)
+
+        issueRefill(dut, Seq.tabulate(8)(word => BigInt("10000000", 16) + word))
+        dut.io.completion.ready.poke(true)
+        dut.io.completion.valid.expect(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.clock.step()
+        dut.io.atomicAccept.valid.poke(true)
+        dut.io.atomicAccept.bits.address.poke(address)
+        dut.io.atomicAcceptReady.expect(true)
+        dut.io.atomicAccept.valid.poke(false)
+
+        dut.io.atomicInvalidate.valid.poke(true)
+        dut.io.atomicInvalidate.bits.poke(address)
+        dut.clock.step()
+        dut.io.atomicInvalidate.valid.poke(false)
+        submit(dut, tag = 2, address)
+        dut.io.dataRequest.valid.expect(true)
       }
     }
 

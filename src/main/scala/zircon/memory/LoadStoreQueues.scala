@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.util._
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.ROBTagOrder
+import zircon.frontend.IntOperation
 
 /** Eight-entry load and store queues with byte-precise forwarding.
   *
@@ -45,6 +46,15 @@ class LoadStoreQueues(
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
     val storeCommitInFlight = Output(Bool())
+    val atomicEffect = Decoupled(new AtomicMemoryEffect(config))
+    val atomicComplete = Flipped(Decoupled(new AtomicMemoryResult(config)))
+    val atomicResult = Decoupled(new AtomicMemoryResult(config))
+    /** Retains an accepted AMO/LR/SC through architectural retirement so an
+      * interrupt cannot replay an irreversible bus operation. */
+    val atomicInFlight = Output(Bool())
+    /** Earliest live aq atomic. Core-level MemIQ gating admits only older
+      * memory work until this exact record completes. */
+    val atomicAcquireBarrier = Output(Valid(UInt(config.robTagWidth.W)))
     val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
@@ -74,6 +84,7 @@ class LoadStoreQueues(
   val lqWritesInteger = Reg(Vec(lqEntries, Bool()))
   val lqM1Owner = Reg(Vec(lqEntries, Bool()))
   val lqIsAtomic = Reg(Vec(lqEntries, Bool()))
+  val lqAtomicOperation = Reg(Vec(lqEntries, UInt(7.W)))
   val lqPmaKind = Reg(Vec(lqEntries, UInt(2.W)))
   val lqAq = Reg(Vec(lqEntries, Bool()))
   val lqRl = Reg(Vec(lqEntries, Bool()))
@@ -96,6 +107,10 @@ class LoadStoreQueues(
   val sqDataValid = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqWriteData = Reg(Vec(sqEntries, UInt(32.W)))
   val sqIsAtomic = Reg(Vec(sqEntries, Bool()))
+  val sqAtomicOperation = Reg(Vec(sqEntries, UInt(7.W)))
+  val sqDestinationPhysical = Reg(Vec(sqEntries,
+    UInt(log2Ceil(config.intPhysicalRegisters).W)))
+  val sqWritesInteger = Reg(Vec(sqEntries, Bool()))
   val sqPmaKind = Reg(Vec(sqEntries, UInt(2.W)))
   val sqAq = Reg(Vec(sqEntries, Bool()))
   val sqRl = Reg(Vec(sqEntries, Bool()))
@@ -109,6 +124,8 @@ class LoadStoreQueues(
   val burstableGroupWaitValid = RegInit(false.B)
   val burstableGroupWaitHead = Reg(UInt(config.robTagWidth.W))
   val burstableGroupWaitCycles = RegInit(0.U(3.W))
+  val atomicResultValid = RegInit(false.B)
+  val atomicResultBits = Reg(new AtomicMemoryResult(config))
 
   private def findMatch(
       valid: Vec[Bool],
@@ -247,11 +264,20 @@ class LoadStoreQueues(
   io.loadContext.bits.writesInteger := lqWritesInteger(loadContextIndex)
   io.loadContext.bits.m1Owner := lqM1Owner(loadContextIndex)
   io.loadContext.bits.isAtomic := lqIsAtomic(loadContextIndex)
+  io.loadContext.bits.atomicOperation := lqAtomicOperation(loadContextIndex)
   io.loadContext.bits.aq := lqAq(loadContextIndex)
   io.loadContext.bits.rl := lqRl(loadContextIndex)
 
   private def isDevicePma(kind: UInt): Bool = kind === PMARegionKind.DeviceStrong.code.U ||
     kind === PMARegionKind.DeviceBurstable.code.U
+
+  private def isLr(operation: UInt): Bool = operation === IntOperation.LrW.asUInt
+  private def isSc(operation: UInt): Bool = operation === IntOperation.ScW.asUInt
+  private def isAmo(operation: UInt): Bool = operation === IntOperation.AmoSwapW.asUInt ||
+    operation === IntOperation.AmoAddW.asUInt || operation === IntOperation.AmoXorW.asUInt ||
+    operation === IntOperation.AmoAndW.asUInt || operation === IntOperation.AmoOrW.asUInt ||
+    operation === IntOperation.AmoMinW.asUInt || operation === IntOperation.AmoMaxW.asUInt ||
+    operation === IntOperation.AmoMinuW.asUInt || operation === IntOperation.AmoMaxuW.asUInt
 
   private def advanceRobTag(tag: UInt, distance: Int): UInt = {
     var advanced = tag
@@ -313,6 +339,52 @@ class LoadStoreQueues(
 
   val (headStoreMatch, headStoreIndex) = findMatch(
     sqValid, sqTag, io.robHeadTag, sqEntries, sqIndexWidth)
+
+  val headAtomicLoad = headLoadMatch && lqIsAtomic(headLoadIndex) &&
+    lqPmaKind(headLoadIndex) === PMARegionKind.Memory.code.U
+  val headAtomicStore = headStoreMatch && sqIsAtomic(headStoreIndex) &&
+    sqPmaKind(headStoreIndex) === PMARegionKind.Memory.code.U
+  val headAtomicOperation = Mux(headAtomicLoad,
+    lqAtomicOperation(headLoadIndex), sqAtomicOperation(headStoreIndex))
+  val headAtomicLr = isLr(headAtomicOperation)
+  val headAtomicSc = isSc(headAtomicOperation)
+  val headAtomicAmo = isAmo(headAtomicOperation)
+  val atomicLoadReady = headAtomicLoad && lqAddressValid(headLoadIndex) &&
+    !lqEffectIssued(headLoadIndex) && !lqCompleted(headLoadIndex)
+  val atomicStoreReady = headAtomicStore && sqAddressValid(headStoreIndex) &&
+    sqDataValid(headStoreIndex) && !sqEffectIssued(headStoreIndex) &&
+    !sqEffectComplete(headStoreIndex)
+  val atomicPairReady = atomicLoadReady && atomicStoreReady &&
+    lqAddress(headLoadIndex) === sqAddress(headStoreIndex) &&
+    lqAtomicOperation(headLoadIndex) === sqAtomicOperation(headStoreIndex)
+  val atomicEffectEligible = (headAtomicLr && atomicLoadReady) ||
+    (headAtomicSc && atomicStoreReady) || (headAtomicAmo && atomicPairReady)
+  val atomicDestinationPhysical = Mux(headAtomicLoad,
+    lqDestinationPhysical(headLoadIndex), sqDestinationPhysical(headStoreIndex))
+  val atomicWritesInteger = Mux(headAtomicLoad,
+    lqWritesInteger(headLoadIndex), sqWritesInteger(headStoreIndex))
+  val atomicAddress = Mux(headAtomicLoad, lqAddress(headLoadIndex),
+    sqAddress(headStoreIndex))
+  val atomicAq = Mux(headAtomicLoad, lqAq(headLoadIndex), sqAq(headStoreIndex))
+  val atomicRl = Mux(headAtomicLoad, lqRl(headLoadIndex), sqRl(headStoreIndex))
+  io.atomicEffect.valid := atomicEffectEligible && !recoveryBlocked &&
+    !atomicResultValid
+  io.atomicEffect.bits.robTag := io.robHeadTag
+  io.atomicEffect.bits.operation := headAtomicOperation
+  io.atomicEffect.bits.address := atomicAddress
+  io.atomicEffect.bits.writeData := Mux(headAtomicStore,
+    sqWriteData(headStoreIndex), 0.U)
+  io.atomicEffect.bits.writeMask := Mux(headAtomicStore,
+    sqWriteMask(headStoreIndex), 0.U)
+  io.atomicEffect.bits.destinationPhysical := atomicDestinationPhysical
+  io.atomicEffect.bits.writesInteger := atomicWritesInteger
+  io.atomicEffect.bits.aq := atomicAq
+  io.atomicEffect.bits.rl := atomicRl
+  when((headAtomicLoad || headAtomicStore) && !recoveryBlocked) {
+    assert(headAtomicLr || headAtomicSc || headAtomicAmo,
+      "live atomic LSQ owner retained an unsupported RV32A operation")
+  }
+
   val burstableHeadLoad = headLoadMatch && lqAddressValid(headLoadIndex) &&
     !lqM1Owner(headLoadIndex) && !lqIsAtomic(headLoadIndex) &&
     lqPmaKind(headLoadIndex) === PMARegionKind.DeviceBurstable.code.U &&
@@ -384,6 +456,31 @@ class LoadStoreQueues(
   val (effectCompleteMatch, effectCompleteIndex) = findMatch(
     sqValid, sqTag, io.storeEffectComplete.bits.robTag, sqEntries, sqIndexWidth)
 
+  val (atomicCompleteLoadMatch, atomicCompleteLoadIndex) = findMatch(
+    lqValid, lqTag, io.atomicComplete.bits.robTag, lqEntries, lqIndexWidth)
+  val (atomicCompleteStoreMatch, atomicCompleteStoreIndex) = findMatch(
+    sqValid, sqTag, io.atomicComplete.bits.robTag, sqEntries, sqIndexWidth)
+  val atomicCompleteLr = isLr(io.atomicComplete.bits.operation)
+  val atomicCompleteSc = isSc(io.atomicComplete.bits.operation)
+  val atomicCompleteAmo = isAmo(io.atomicComplete.bits.operation)
+  val atomicCompleteNeedsLoad = atomicCompleteLr || atomicCompleteAmo
+  val atomicCompleteNeedsStore = atomicCompleteSc || atomicCompleteAmo
+  val atomicCompleteLoadEligible = atomicCompleteLoadMatch &&
+    lqIsAtomic(atomicCompleteLoadIndex) &&
+    lqAtomicOperation(atomicCompleteLoadIndex) === io.atomicComplete.bits.operation &&
+    lqEffectIssued(atomicCompleteLoadIndex) && !lqCompleted(atomicCompleteLoadIndex)
+  val atomicCompleteStoreEligible = atomicCompleteStoreMatch &&
+    sqIsAtomic(atomicCompleteStoreIndex) &&
+    sqAtomicOperation(atomicCompleteStoreIndex) === io.atomicComplete.bits.operation &&
+    sqEffectIssued(atomicCompleteStoreIndex) && !sqEffectComplete(atomicCompleteStoreIndex)
+  val atomicCompleteEligible = !recoveryBlocked && !atomicResultValid &&
+    (atomicCompleteNeedsLoad === atomicCompleteLoadEligible) &&
+    (atomicCompleteNeedsStore === atomicCompleteStoreEligible) &&
+    (atomicCompleteLr || atomicCompleteSc || atomicCompleteAmo)
+  io.atomicComplete.ready := atomicCompleteEligible
+  io.atomicResult.valid := atomicResultValid && !recoveryBlocked
+  io.atomicResult.bits := atomicResultBits
+
   val lqRetire = VecInit((0 until lqEntries).map(index =>
     lqValid(index) && io.retire.map(port => port.valid &&
       port.bits === lqTag(index)).reduce(_ || _)))
@@ -439,6 +536,7 @@ class LoadStoreQueues(
     }
     lqValid.foreach(_ := false.B)
     sqValid.foreach(_ := false.B)
+    atomicResultValid := false.B
     burstableGroupWaitValid := false.B
     burstableGroupWaitCycles := 0.U
   }.elsewhen(io.squash.valid) {
@@ -453,6 +551,10 @@ class LoadStoreQueues(
     }
     for (index <- 0 until sqEntries) {
       sqValid(index) := sqSquashSurvivor(index)
+    }
+    when(atomicResultValid && ROBTagOrder.isYounger(
+        atomicResultBits.robTag, io.squash.bits, io.robHeadTag, config)) {
+      atomicResultValid := false.B
     }
     burstableGroupWaitValid := false.B
     burstableGroupWaitCycles := 0.U
@@ -482,6 +584,7 @@ class LoadStoreQueues(
           lqWritesInteger(index) := io.allocate(lane).bits.writesInteger
           lqM1Owner(index) := io.allocate(lane).bits.m1Owner
           lqIsAtomic(index) := io.allocate(lane).bits.isAtomic
+          lqAtomicOperation(index) := io.allocate(lane).bits.atomicOperation
           lqPmaKind(index) := io.allocate(lane).bits.pmaKind
           lqAq(index) := io.allocate(lane).bits.aq
           lqRl(index) := io.allocate(lane).bits.rl
@@ -498,6 +601,9 @@ class LoadStoreQueues(
           sqAccessSize(index) := io.allocate(lane).bits.accessSize
           sqDataValid(index) := false.B
           sqIsAtomic(index) := io.allocate(lane).bits.isAtomic
+          sqAtomicOperation(index) := io.allocate(lane).bits.atomicOperation
+          sqDestinationPhysical(index) := io.allocate(lane).bits.destinationPhysical
+          sqWritesInteger(index) := io.allocate(lane).bits.writesInteger
           sqPmaKind(index) := io.allocate(lane).bits.pmaKind
           sqAq(index) := io.allocate(lane).bits.aq
           sqRl(index) := io.allocate(lane).bits.rl
@@ -577,6 +683,60 @@ class LoadStoreQueues(
     when(io.storeEffect.fire) {
       sqEffectIssued(selectedStoreIndex) := true.B
     }
+    when(io.atomicEffect.fire) {
+      when(headAtomicLoad) {
+        lqEffectIssued(headLoadIndex) := true.B
+      }
+      when(headAtomicStore) {
+        sqEffectIssued(headStoreIndex) := true.B
+      }
+    }
+    when(io.atomicComplete.fire) {
+      atomicResultValid := true.B
+      atomicResultBits := io.atomicComplete.bits
+      when(atomicCompleteNeedsLoad) {
+        assert(atomicCompleteLoadEligible,
+          "atomic result lost its issued LQ owner")
+        lqCompleted(atomicCompleteLoadIndex) := true.B
+        when(!io.atomicComplete.bits.accessFault) {
+          lqMetadataValid(atomicCompleteLoadIndex) := true.B
+          lqMetadata(atomicCompleteLoadIndex).robTag :=
+            lqTag(atomicCompleteLoadIndex)
+          lqMetadata(atomicCompleteLoadIndex).address :=
+            lqAddress(atomicCompleteLoadIndex)
+          lqMetadata(atomicCompleteLoadIndex).readMask :=
+            io.atomicComplete.bits.readMask
+          lqMetadata(atomicCompleteLoadIndex).writeMask := 0.U
+          lqMetadata(atomicCompleteLoadIndex).readData :=
+            io.atomicComplete.bits.readData
+          lqMetadata(atomicCompleteLoadIndex).writeData := 0.U
+        }
+      }
+      when(atomicCompleteNeedsStore) {
+        assert(atomicCompleteStoreEligible,
+          "atomic result lost its issued SQ owner")
+        sqEffectComplete(atomicCompleteStoreIndex) := true.B
+        sqEffectFault(atomicCompleteStoreIndex) := io.atomicComplete.bits.accessFault
+        when(!io.atomicComplete.bits.accessFault) {
+          sqMetadataValid(atomicCompleteStoreIndex) := true.B
+          sqMetadata(atomicCompleteStoreIndex).robTag :=
+            sqTag(atomicCompleteStoreIndex)
+          sqMetadata(atomicCompleteStoreIndex).address :=
+            sqAddress(atomicCompleteStoreIndex)
+          sqMetadata(atomicCompleteStoreIndex).readMask := 0.U
+          sqMetadata(atomicCompleteStoreIndex).writeMask := Mux(
+            io.atomicComplete.bits.storePerformed,
+            io.atomicComplete.bits.writeMask, 0.U)
+          sqMetadata(atomicCompleteStoreIndex).readData := 0.U
+          sqMetadata(atomicCompleteStoreIndex).writeData := Mux(
+            io.atomicComplete.bits.storePerformed,
+            io.atomicComplete.bits.writeData, 0.U)
+        }
+      }
+    }
+    when(io.atomicResult.fire) {
+      atomicResultValid := false.B
+    }
     when(io.storeEffectComplete.valid && effectCompleteMatch) {
       assert(sqCommitAuthorized(effectCompleteIndex) && sqEffectIssued(effectCompleteIndex),
         "store effect completion requires an issued commit-authorized action")
@@ -623,7 +783,8 @@ class LoadStoreQueues(
     assert(io.squash.bits(config.robIndexWidth - 1, 0) < config.robEntries.U,
       "LSQ squash boundary ROB index out of range")
     assert(!io.allocate.exists(_.fire) && !io.storeAddress.fire && !io.storeData.fire &&
-      !io.loadAddress.fire && !io.commitAuthorize.fire && !io.storeEffect.fire,
+      !io.loadAddress.fire && !io.commitAuthorize.fire && !io.storeEffect.fire &&
+      !io.atomicEffect.fire && !io.atomicComplete.fire,
       "LSQ transferred local work during selective squash")
   }
   assert(PopCount(lqValid) <= lqEntries.U, "LQ occupancy exceeded its depth")
@@ -636,5 +797,32 @@ class LoadStoreQueues(
   // retires. Taking an interrupt earlier would flush its completion and make
   // MRET repeat the external read.
   io.deviceLoadInFlight := VecInit((0 until lqEntries).map(index =>
-    lqValid(index) && lqEffectIssued(index))).asUInt.orR
+    lqValid(index) && lqEffectIssued(index) && !lqIsAtomic(index))).asUInt.orR
+  io.atomicInFlight := VecInit((0 until lqEntries).map(index =>
+    lqValid(index) && lqIsAtomic(index) && lqEffectIssued(index))).asUInt.orR ||
+    VecInit((0 until sqEntries).map(index =>
+      sqValid(index) && sqIsAtomic(index) && sqEffectIssued(index))).asUInt.orR ||
+    atomicResultValid
+
+  var acquireBarrierValid: Bool = false.B
+  var acquireBarrierTag: UInt = 0.U(config.robTagWidth.W)
+  var acquireBarrierAge: UInt = 0.U((config.robIndexWidth + 1).W)
+  for (index <- 0 until lqEntries) {
+    val candidate = lqValid(index) && lqIsAtomic(index) && lqAq(index)
+    val age = ROBTagOrder.ageFromHead(lqTag(index), io.robHeadTag, config)
+    val take = candidate && (!acquireBarrierValid || age < acquireBarrierAge)
+    acquireBarrierTag = Mux(take, lqTag(index), acquireBarrierTag)
+    acquireBarrierAge = Mux(take, age, acquireBarrierAge)
+    acquireBarrierValid = acquireBarrierValid || candidate
+  }
+  for (index <- 0 until sqEntries) {
+    val candidate = sqValid(index) && sqIsAtomic(index) && sqAq(index)
+    val age = ROBTagOrder.ageFromHead(sqTag(index), io.robHeadTag, config)
+    val take = candidate && (!acquireBarrierValid || age < acquireBarrierAge)
+    acquireBarrierTag = Mux(take, sqTag(index), acquireBarrierTag)
+    acquireBarrierAge = Mux(take, age, acquireBarrierAge)
+    acquireBarrierValid = acquireBarrierValid || candidate
+  }
+  io.atomicAcquireBarrier.valid := acquireBarrierValid && !recoveryBlocked
+  io.atomicAcquireBarrier.bits := acquireBarrierTag
 }

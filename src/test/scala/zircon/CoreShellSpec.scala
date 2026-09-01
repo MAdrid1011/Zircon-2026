@@ -86,7 +86,6 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     var awSeen = false
     var wLastSeen = false
     var bQueued = false
-    var bCompleted = false
     var writeId = BigInt(5)
 
     dut.clock.step(128) // Deterministic bimodal/BTB scrubs.
@@ -168,12 +167,13 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         writeId = awId
       }
       if (wFire && wLast) wLastSeen = true
-      if (writeResponse.nonEmpty && !bQueued && !bCompleted && awSeen && wLastSeen) {
+      if (writeResponse.nonEmpty && !bQueued && awSeen && wLastSeen) {
         bQueued = true
       }
       if (bFire) {
         bQueued = false
-        bCompleted = true
+        awSeen = false
+        wLastSeen = false
       }
     }
     events.toSeq
@@ -1233,13 +1233,179 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("blocks an atomic load without L1D, AXI data, or false retirement") {
-      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
-        enableM2Observation = true))) { dut =>
-        assertBlockedAtomicLoad(dut,
-          baseInstruction = BigInt("800000b7", 16), // lui x1,0x80000
-          memoryInstruction = BigInt("1000a12f", 16), // lr.w x2,(x1)
-          name = "LR.W")
+    it("executes response-gated LR/SC through the ID-7 atomic owner") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val atomicReads = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+        val atomicWrites = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("1000a12f", 16), // lr.w x2,(x1)
+          ResetVector + 8 -> BigInt("1820a1af", 16), // sc.w x3,x2,(x1)
+          ResetVector + 12 -> BigInt("00100073", 16)
+        ), cycles = 256, writeResponse = Some(0), observeCycle = (core, _) => {
+          val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+            core.io.axi.ar.ready.peek().litToBoolean
+          if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) {
+            atomicReads += ((core.io.axi.ar.bits.addr.peek().litValue,
+              core.io.axi.ar.bits.len.peek().litValue))
+          }
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
+          if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) {
+            atomicWrites += core.io.axi.aw.bits.addr.peek().litValue
+          }
+        }))
+
+        assert(atomicReads.toSeq == Seq((ResetVector, BigInt(0))))
+        assert(atomicWrites.toSeq == Seq(ResetVector))
+        assert(events.map(_.instruction) == Seq(
+          BigInt("800000b7", 16), BigInt("1000a12f", 16),
+          BigInt("1820a1af", 16), BigInt("00100073", 16)))
+        assert(events(1).gprWrite && events(1).gprAddress == 2 &&
+          events(1).gprData == BigInt("800000b7", 16) &&
+          events(1).memoryAddress == ResetVector && events(1).memoryReadMask == 15 &&
+          events(1).memoryReadData == BigInt("800000b7", 16))
+        assert(events(2).gprWrite && events(2).gprAddress == 3 &&
+          events(2).gprData == 0 && events(2).memoryAddress == ResetVector &&
+          events(2).memoryWriteMask == 15 &&
+          events(2).memoryWriteData == BigInt("800000b7", 16))
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("invalidates LR/SC reservation on a conflicting local store") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val writeIds = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("1000a12f", 16), // lr.w x2,(x1)
+          ResetVector + 8 -> BigInt("0000a023", 16), // sw x0,0(x1)
+          ResetVector + 12 -> BigInt("1820a1af", 16), // sc.w x3,x2,(x1)
+          ResetVector + 16 -> BigInt("00100073", 16)
+        ), cycles = 320, writeResponse = Some(0), observeCycle = (core, _) => {
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
+          if (awFire) writeIds += core.io.axi.aw.bits.id.peek().litValue
+        }))
+
+        assert(writeIds.toSeq == Seq(BigInt(5)),
+          s"failed SC incorrectly issued an atomic write: $writeIds")
+        assert(events(3).gprWrite && events(3).gprAddress == 3 &&
+          events(3).gprData == 1 && events(3).memoryWriteMask == 0,
+          s"SC failure did not preserve no-write retire metadata: ${events(3)}")
+      }
+    }
+
+    it("returns the old AMO value only after its ID-7 read-modify-write response") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val atomicWriteData = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("00500113", 16), // addi x2,x0,5
+          ResetVector + 8 -> BigInt("0020a1af", 16), // amoadd.w x3,x2,(x1)
+          ResetVector + 12 -> BigInt("00100073", 16)
+        ), cycles = 256, writeResponse = Some(0), observeCycle = (core, _) => {
+          val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+            core.io.axi.w.ready.peek().litToBoolean
+          if (wFire && core.io.axi.aw.bits.id.peek().litValue == 7) {
+            atomicWriteData += core.io.axi.w.bits.data.peek().litValue
+          }
+        }))
+
+        assert(atomicWriteData.toSeq == Seq(BigInt("800000bc", 16)))
+        assert(events(2).gprWrite && events(2).gprAddress == 3 &&
+          events(2).gprData == BigInt("800000b7", 16) &&
+          events(2).memoryAddress == ResetVector && events(2).memoryReadMask == 15 &&
+          events(2).memoryReadData == BigInt("800000b7", 16) &&
+          events(2).memoryWriteMask == 15 &&
+          events(2).memoryWriteData == BigInt("800000bc", 16))
+      }
+    }
+
+    it("converts an atomic ID-7 RRESP failure into the exact store/AMO trap") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("0000a1af", 16), // amoadd.w x3,x0,(x1)
+          ResetVector + 8 -> BigInt("00100073", 16)
+        ), cycles = 192, rResponse = (id, _) => if (id == 7) 2 else 0))
+
+        assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4))
+        assert(events(1).trap && !events(1).gprWrite && events(1).cause == 7 &&
+          events(1).trapValue == ResetVector)
+      }
+    }
+
+    it("clears an LR reservation across trap and MRET before a following SC") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val atomicWrites = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val handler = ResetVector + 64
+        val events = throughTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("80000237", 16), // lui x4,0x80000
+          ResetVector + 8 -> BigInt("04020213", 16), // addi x4,x4,64
+          ResetVector + 12 -> BigInt("30521073", 16), // csrrw x0,mtvec,x4
+          ResetVector + 16 -> BigInt("30445073", 16), // csrrwi x0,mie,8
+          ResetVector + 20 -> BigInt("30045073", 16), // csrrwi x0,mstatus,8
+          ResetVector + 24 -> BigInt("1000a12f", 16), // lr.w x2,(x1)
+          ResetVector + 28 -> BigInt("1820a1af", 16), // sc.w x3,x2,(x1)
+          ResetVector + 32 -> BigInt("00100073", 16), // ebreak
+          handler -> BigInt("30200073", 16) // mret
+        ), cycles = 512, driveInterrupts = (core, observed) => {
+          val lrRetired = observed.exists(event => event.pc == ResetVector + 24 &&
+            event.gprWrite && event.gprAddress == 2)
+          val interruptTaken = observed.exists(event => event.trap && event.interrupt)
+          core.io.interrupts.msip.poke(lrRetired && !interruptTaken)
+        }, observeCycle = (core, _) => {
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
+          if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) {
+            atomicWrites += core.io.axi.aw.bits.addr.peek().litValue
+          }
+        }), count = 2)
+
+        val sc = events.find(event => event.pc == ResetVector + 28 &&
+          event.gprWrite && event.gprAddress == 3).getOrElse(
+          fail(s"SC did not retire after MRET: $events"))
+        assert(atomicWrites.isEmpty, s"SC after trap issued an atomic write: $atomicWrites")
+        assert(sc.gprData == 1 && sc.memoryWriteMask == 0)
+      }
+    }
+
+    it("holds a younger cacheable load behind an aq atomic until its read response") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        var atomicResponseCycle = -1
+        var firstDataReadCycle = -1
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector + 4 -> BigInt("1400a12f", 16), // lr.w.aq x2,(x1)
+          ResetVector + 8 -> BigInt("0040a183", 16), // lw x3,4(x1)
+          ResetVector + 12 -> BigInt("00100073", 16)
+        ), cycles = 256, observeCycle = (core, cycle) => {
+          val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+            core.io.axi.ar.ready.peek().litToBoolean
+          if (arFire && core.io.axi.ar.bits.id.peek().litValue >= 1 &&
+              core.io.axi.ar.bits.id.peek().litValue <= 4 && firstDataReadCycle < 0) {
+            firstDataReadCycle = cycle
+          }
+          val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+            core.io.axi.r.ready.peek().litToBoolean
+          if (rFire && core.io.axi.r.bits.id.peek().litValue == 7) {
+            atomicResponseCycle = cycle
+          }
+        }))
+
+        assert(events.exists(event => event.pc == ResetVector + 8 && event.gprWrite &&
+          event.gprAddress == 3))
+        assert(atomicResponseCycle >= 0 && firstDataReadCycle > atomicResponseCycle,
+          s"aq atomic did not order the younger load: atomic R=$atomicResponseCycle, " +
+            s"data AR=$firstDataReadCycle")
       }
     }
 

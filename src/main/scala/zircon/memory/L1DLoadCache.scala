@@ -43,6 +43,12 @@ class L1DLoadCache(
     val storeCommit = Input(Valid(new StoreEffect(config)))
     /** Holds while AW/W/B are owned, preventing stale same-line cache use. */
     val activeStore = Input(Valid(new StoreEffect(config)))
+    /** Atomics bypass the read-only data path. They wait for a same-line MSHR
+      * before their AXI read/modify/write begins, then invalidate on a
+      * successful externally visible write. */
+    val atomicAccept = Input(Valid(new AtomicMemoryEffect(config)))
+    val atomicAcceptReady = Output(Bool())
+    val atomicInvalidate = Input(Valid(UInt(32.W)))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
@@ -106,10 +112,15 @@ class L1DLoadCache(
 
   val pendingStoreMatchesMshr = VecInit((0 until mshrCount).map(index =>
     mshrValid(index) && mshrLineAddress(index) === pendingStoreLineAddress)).asUInt.orR
+  val atomicLineAddress = Cat(io.atomicAccept.bits.address(31, lineOffsetWidth),
+    0.U(lineOffsetWidth.W))
+  val atomicMatchesMshr = VecInit((0 until mshrCount).map(index =>
+    mshrValid(index) && mshrLineAddress(index) === atomicLineAddress)).asUInt.orR
   // A committed write may invalidate a resident line immediately, but it must
   // wait for an older/newer same-line refill to drain so a late refill cannot
   // resurrect stale data after the write-through AXI transaction begins.
   io.storeAcceptReady := !recoveryBlocked && !pendingStoreMatchesMshr
+  io.atomicAcceptReady := !recoveryBlocked && !atomicMatchesMshr
 
   val reservedWay = Wire(Vec(ways, Bool()))
   for (way <- 0 until ways) {
@@ -305,6 +316,16 @@ class L1DLoadCache(
     for (way <- 0 until ways) {
       when(cacheValid(way)(storeSet) && cacheTag(way)(storeSet) === storeTag) {
         cacheValid(way)(storeSet) := false.B
+      }
+    }
+  }
+  when(io.atomicInvalidate.valid) {
+    val atomicSet = io.atomicInvalidate.bits(lineOffsetWidth + setWidth - 1,
+      lineOffsetWidth)
+    val atomicTag = io.atomicInvalidate.bits(31, lineOffsetWidth + setWidth)
+    for (way <- 0 until ways) {
+      when(cacheValid(way)(atomicSet) && cacheTag(way)(atomicSet) === atomicTag) {
+        cacheValid(way)(atomicSet) := false.B
       }
     }
   }

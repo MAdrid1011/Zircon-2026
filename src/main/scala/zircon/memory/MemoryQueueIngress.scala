@@ -37,6 +37,11 @@ class MemoryQueueIngress(
     val storeEffect = Decoupled(new StoreEffect(config))
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
     val storeCommitInFlight = Output(Bool())
+    val atomicEffect = Decoupled(new AtomicMemoryEffect(config))
+    val atomicComplete = Flipped(Decoupled(new AtomicMemoryResult(config)))
+    val atomicResult = Decoupled(new AtomicMemoryResult(config))
+    val atomicInFlight = Output(Bool())
+    val atomicAcquireBarrier = Output(Valid(UInt(config.robTagWidth.W)))
     val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
@@ -85,6 +90,11 @@ class MemoryQueueIngress(
   queues.io.storeEffect.ready := io.storeEffect.ready
   queues.io.storeEffectComplete := io.storeEffectComplete
   io.storeCommitInFlight := queues.io.storeCommitInFlight
+  io.atomicEffect <> queues.io.atomicEffect
+  queues.io.atomicComplete <> io.atomicComplete
+  io.atomicResult <> queues.io.atomicResult
+  io.atomicInFlight := queues.io.atomicInFlight
+  io.atomicAcquireBarrier := queues.io.atomicAcquireBarrier
   io.deviceLoadEffect <> queues.io.deviceLoadEffect
   io.deviceLoadInFlight := queues.io.deviceLoadInFlight
   io.burstableDeviceGroup <> queues.io.burstableDeviceGroup
@@ -148,6 +158,7 @@ class MemoryQueueIngress(
       intakeRequest(lane).request.uop.writesInteger
     queues.io.allocate(lane).bits.m1Owner := intakeRequest(lane).m1Owner
     queues.io.allocate(lane).bits.isAtomic := intakeRequest(lane).address.isAtomic
+    queues.io.allocate(lane).bits.atomicOperation := intakeRequest(lane).request.uop.operation
     queues.io.allocate(lane).bits.pmaKind := intakeRequest(lane).address.pmaKind
     queues.io.allocate(lane).bits.aq := intakeRequest(lane).address.aq
     queues.io.allocate(lane).bits.rl := intakeRequest(lane).address.rl

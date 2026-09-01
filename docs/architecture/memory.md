@@ -8,6 +8,9 @@ arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache/data AXI 和
 cacheable-store slices 已可执行。`AXIOrderedIOEngine` 的 device-group AXI owner
 已接入 LQ/SQ、ROB 和顶层 AXI；`DeviceBurstable` 已通过 LSQ preview、streamer 和
 combiner 形成连续 1--4 beat group，不能与未实现的 write-back/L2/A 路径混同。
+`AtomicMemoryEngine` 现已执行 M0 RV32A 的 ID-7 LR/SC/AMO lifecycle；其精确
+ownership、reservation、cache interaction 和仍未完成的 coherent cache work 见
+[`atomic-axi-engine.md`](atomic-axi-engine.md)。
 
 ## 参数和边界
 
@@ -50,8 +53,10 @@ killed.
 `BackendDispatch` sends every legal memory uop to MemIQ. The implemented
 `MemIssueQueue` uses ROB age with source-ready wakeup, accepts two dispatch lanes,
 and can choose one M0 plus one M1 request per cycle. It gives the oldest M1-eligible
-load to M1, then lets M0 choose the oldest distinct M0-eligible uop; this permits
-an atomic/store beside a load and two independent loads on separate LSU paths. It
+load to M1, then lets M0 choose the oldest distinct M0-eligible uop; non-atomic
+M0/store work may proceed beside an independent load. A live atomic conservatively
+blocks younger M1 issue until M0 owns it, preserving `aq` ordering before the LSQ
+record exists. It
 drops only uops younger than a resolving branch and all local uops on global flush.
 `ZirconCore` uses the frozen global three-start arbiter to pass these issue
 channels to `DualLSUIngress`; the ready/valid handshake remains live through
@@ -318,12 +323,19 @@ effect completion.
 ## RV32A
 
 LR/SC and AMOs are M0-only, naturally aligned, and permitted only by atomic
-Memory PMA. Reservation is one 32-bit word. LR installs a reservation after a
-successful read. SC returns zero only if the matching reservation is live; it
-returns one otherwise and clears the reservation either way. A conflicting local
-store/AMO, trap, interrupt, or replacement invalidates it. AMOs serialize their
-read-modify-write effect and await any required AXI/cache response. Device space
-and non-atomic PMA generate precise faults rather than fake atomic completion.
+Memory PMA. `AtomicMemoryEngine` reserves AXI ID 7 and retains one exact-head
+record from AR/AW/W acceptance through its matching R/B response. Reservation is
+one 32-bit word. LR installs a reservation after a successful R; SC returns zero
+only after a matching-reservation write's B, returns one with no write on a miss,
+and clears the reservation either way. A matching local store/AMO, trap,
+interrupt, or LR replacement invalidates it. All nine AMO word functions read
+the old word, compute the retained write value, wait for B, then complete once
+with the old value. Device space and non-atomic PMA generate precise faults
+rather than fake atomic completion. Same-line L1D refills drain before atomic
+launch and externally attempted atomic writes invalidate the temporary
+write-through L1D line. The exact protocol is
+[`atomic-axi-engine.md`](atomic-axi-engine.md); write-back/L2 exclusivity remains
+unfinished M3 work.
 
 ## Recovery, drain, and counters
 

@@ -22,6 +22,19 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     dut.io.storeResult.bits.robTag.poke(0)
     dut.io.storeResult.bits.address.poke(0)
     dut.io.storeResult.bits.accessFault.poke(false)
+    dut.io.atomicResult.valid.poke(false)
+    dut.io.atomicResult.bits.robTag.poke(0)
+    dut.io.atomicResult.bits.operation.poke(0)
+    dut.io.atomicResult.bits.destinationPhysical.poke(0)
+    dut.io.atomicResult.bits.writesInteger.poke(false)
+    dut.io.atomicResult.bits.data.poke(0)
+    dut.io.atomicResult.bits.accessFault.poke(false)
+    dut.io.atomicResult.bits.faultAddress.poke(0)
+    dut.io.atomicResult.bits.readData.poke(0)
+    dut.io.atomicResult.bits.readMask.poke(0)
+    dut.io.atomicResult.bits.writeData.poke(0)
+    dut.io.atomicResult.bits.writeMask.poke(0)
+    dut.io.atomicResult.bits.storePerformed.poke(false)
     dut.io.fault.foreach { fault =>
       fault.valid.poke(false)
       fault.bits.robTag.poke(0)
@@ -50,6 +63,27 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadResult.bits.accessSize.poke(2)
     dut.io.loadResult.bits.unsignedLoad.poke(false)
     dut.io.loadResult.bits.data.poke(data)
+  }
+
+  private def atomicResult(
+      dut: DualMemoryLoadCompletion,
+      tag: Int,
+      data: BigInt,
+      fault: Boolean = false
+  ): Unit = {
+    dut.io.atomicResult.valid.poke(true)
+    dut.io.atomicResult.bits.robTag.poke(tag)
+    dut.io.atomicResult.bits.operation.poke(0)
+    dut.io.atomicResult.bits.destinationPhysical.poke(32 + tag)
+    dut.io.atomicResult.bits.writesInteger.poke(!fault)
+    dut.io.atomicResult.bits.data.poke(data)
+    dut.io.atomicResult.bits.accessFault.poke(fault)
+    dut.io.atomicResult.bits.faultAddress.poke(BigInt("80001000", 16))
+    dut.io.atomicResult.bits.readData.poke(data)
+    dut.io.atomicResult.bits.readMask.poke(15)
+    dut.io.atomicResult.bits.writeData.poke(0)
+    dut.io.atomicResult.bits.writeMask.poke(0)
+    dut.io.atomicResult.bits.storePerformed.poke(false)
   }
 
   describe("DualMemoryLoadCompletion") {
@@ -139,6 +173,36 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
         dut.io.m0Completion.valid.expect(true)
         dut.io.m0Completion.bits.robTag.expect(7)
         dut.io.m0Completion.bits.writesInteger.expect(false)
+      }
+    }
+
+    it("emits exactly one writable M0 completion or cause-7 fault for an atomic") {
+      simulate(new DualMemoryLoadCompletion) { dut =>
+        clear(dut)
+        atomicResult(dut, tag = 3, data = BigInt("deadc0de", 16))
+        dut.io.atomicResult.ready.expect(true)
+        dut.clock.step()
+        dut.io.atomicResult.valid.poke(false)
+        dut.io.m0Completion.valid.expect(true)
+        dut.io.m0Completion.bits.robTag.expect(3)
+        dut.io.m0Completion.bits.writesInteger.expect(true)
+        dut.io.m0Completion.bits.destinationPhysical.expect(35)
+        dut.io.m0Completion.bits.data.expect(BigInt("deadc0de", 16))
+
+        dut.io.m0Completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.m0Completion.ready.poke(false)
+        atomicResult(dut, tag = 4, data = 0, fault = true)
+        dut.io.atomicResult.ready.expect(true)
+        dut.io.faultAccepted(0).valid.expect(true)
+        dut.io.faultAccepted(0).record.cause.expect(7)
+        dut.io.faultAccepted(0).record.trapValue.expect(BigInt("80001000", 16))
+        dut.clock.step()
+        dut.io.atomicResult.valid.poke(false)
+        dut.io.m0Completion.valid.expect(true)
+        dut.io.m0Completion.bits.robTag.expect(4)
+        dut.io.m0Completion.bits.writesInteger.expect(false)
+        dut.io.m0Completion.bits.data.expect(0)
       }
     }
   }

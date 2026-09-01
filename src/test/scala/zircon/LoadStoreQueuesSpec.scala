@@ -2,6 +2,7 @@ package zircon
 
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
+import zircon.frontend.IntOperation
 import zircon.memory.LoadStoreQueues
 
 class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
@@ -17,6 +18,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       port.bits.writesInteger.poke(false)
       port.bits.m1Owner.poke(false)
       port.bits.isAtomic.poke(false)
+      port.bits.atomicOperation.poke(0)
       port.bits.pmaKind.poke(PMARegionKind.Memory.code)
       port.bits.aq.poke(false)
       port.bits.rl.poke(false)
@@ -45,6 +47,21 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     dut.io.commitAuthorize.valid.poke(false)
     dut.io.commitAuthorize.bits.poke(0)
     dut.io.storeEffect.ready.poke(false)
+    dut.io.atomicEffect.ready.poke(false)
+    dut.io.atomicComplete.valid.poke(false)
+    dut.io.atomicComplete.bits.robTag.poke(0)
+    dut.io.atomicComplete.bits.operation.poke(0)
+    dut.io.atomicComplete.bits.destinationPhysical.poke(0)
+    dut.io.atomicComplete.bits.writesInteger.poke(false)
+    dut.io.atomicComplete.bits.data.poke(0)
+    dut.io.atomicComplete.bits.accessFault.poke(false)
+    dut.io.atomicComplete.bits.faultAddress.poke(0)
+    dut.io.atomicComplete.bits.readData.poke(0)
+    dut.io.atomicComplete.bits.readMask.poke(0)
+    dut.io.atomicComplete.bits.writeData.poke(0)
+    dut.io.atomicComplete.bits.writeMask.poke(0)
+    dut.io.atomicComplete.bits.storePerformed.poke(false)
+    dut.io.atomicResult.ready.poke(true)
     dut.io.deviceLoadEffect.ready.poke(false)
     dut.io.burstableDeviceGroup.ready.poke(false)
     dut.io.burstableDeviceGroupAccepted.valid.poke(false)
@@ -80,6 +97,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       load: Boolean,
       store: Boolean,
       atomic: Boolean = false,
+      atomicOperation: IntOperation.Type = IntOperation.LrW,
       m1Owner: Boolean = false,
       pmaKind: PMARegionKind = PMARegionKind.Memory
   ): Unit = {
@@ -94,6 +112,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     port.bits.writesInteger.poke(true)
     port.bits.m1Owner.poke(m1Owner)
     port.bits.isAtomic.poke(atomic)
+    port.bits.atomicOperation.poke(atomicOperation.asUInt.litValue)
     port.bits.pmaKind.poke(pmaKind.code)
     port.bits.aq.poke(false)
     port.bits.rl.poke(false)
@@ -258,6 +277,69 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.io.loadAddress.ready.expect(true)
         dut.io.loadForward.valid.expect(true)
         dut.io.loadForward.bits.cacheable.expect(false)
+      }
+    }
+
+    it("retains atomic LQ/SQ state through one exact response and emits paired retire metadata") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        val address = BigInt("80003000", 16)
+        val oldValue = BigInt("11223344", 16)
+        val newValue = BigInt("11223349", 16)
+        allocate(dut, 0, tag = 0, load = true, store = true, atomic = true,
+          atomicOperation = IntOperation.AmoAddW)
+        dut.clock.step()
+        noAllocations(dut)
+        updateStoreAddress(dut, 0, address, 15)
+        updateStoreData(dut, 0, 5)
+        queryLoad(dut, 0, address, 15)
+        dut.io.loadAddress.ready.expect(true)
+        dut.clock.step()
+        dut.io.loadAddress.valid.poke(false)
+
+        dut.io.atomicEffect.valid.expect(true)
+        dut.io.atomicEffect.bits.robTag.expect(0)
+        dut.io.atomicEffect.bits.operation.expect(IntOperation.AmoAddW.asUInt.litValue)
+        dut.io.atomicEffect.bits.address.expect(address)
+        dut.io.atomicEffect.bits.writeData.expect(5)
+        dut.io.atomicEffect.bits.destinationPhysical.expect(32)
+        dut.io.atomicEffect.ready.poke(true)
+        dut.clock.step()
+        dut.io.atomicEffect.ready.poke(false)
+        dut.io.atomicInFlight.expect(true)
+
+        dut.io.atomicComplete.valid.poke(true)
+        dut.io.atomicComplete.bits.robTag.poke(0)
+        dut.io.atomicComplete.bits.operation.poke(IntOperation.AmoAddW.asUInt.litValue)
+        dut.io.atomicComplete.bits.destinationPhysical.poke(32)
+        dut.io.atomicComplete.bits.writesInteger.poke(true)
+        dut.io.atomicComplete.bits.data.poke(oldValue)
+        dut.io.atomicComplete.bits.accessFault.poke(false)
+        dut.io.atomicComplete.bits.faultAddress.poke(address)
+        dut.io.atomicComplete.bits.readData.poke(oldValue)
+        dut.io.atomicComplete.bits.readMask.poke(15)
+        dut.io.atomicComplete.bits.writeData.poke(newValue)
+        dut.io.atomicComplete.bits.writeMask.poke(15)
+        dut.io.atomicComplete.bits.storePerformed.poke(true)
+        dut.io.atomicComplete.ready.expect(true)
+        dut.clock.step()
+        dut.io.atomicComplete.valid.poke(false)
+        dut.io.atomicResult.valid.expect(true)
+        dut.io.atomicResult.bits.robTag.expect(0)
+        dut.io.atomicResult.bits.data.expect(oldValue)
+        dut.clock.step()
+
+        dut.io.retire(0).valid.poke(true)
+        dut.io.retire(0).bits.poke(0)
+        dut.io.retireMetadata(0).valid.expect(true)
+        dut.io.retireMetadata(0).bits.address.expect(address)
+        dut.io.retireMetadata(0).bits.readMask.expect(15)
+        dut.io.retireMetadata(0).bits.readData.expect(oldValue)
+        dut.io.retireMetadata(0).bits.writeMask.expect(15)
+        dut.io.retireMetadata(0).bits.writeData.expect(newValue)
+        dut.clock.step()
+        dut.io.retire(0).valid.poke(false)
+        dut.io.atomicInFlight.expect(false)
       }
     }
 

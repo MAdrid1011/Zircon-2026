@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-ordered-io test-m3-device-io verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-ordered-io test-m3-device-io test-m3-atomic verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -31,6 +31,15 @@ test-m3-ordered-io:
 test-m3-device-io:
 	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.AXIOrderedIOEngineSpec zircon.OrderedIOCombinerSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "Device"'
+
+# Fast RV32A ownership regression. It remains below the five-minute component
+# budget and covers the ID-7 owner, exact M0 completion, reservation loss, and
+# L1D same-line exclusion/invalidation.
+test-m3-atomic:
+	./scripts/sbtw "testOnly zircon.AtomicMemoryEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec zircon.MemIssueQueueSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "atomic"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "LR/SC"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "reservation"'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

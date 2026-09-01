@@ -18,6 +18,9 @@ class MemoryQueueAllocate(config: ZirconCoreConfig = ZirconCoreConfig.default) e
   val writesInteger = Bool()
   val m1Owner = Bool()
   val isAtomic = Bool()
+  /** Retained for the M0 LR/SC/AMO owner. It must not be reconstructed from a
+    * later decode slot because recovery may already have reused that slot. */
+  val atomicOperation = UInt(7.W)
   val pmaKind = UInt(2.W)
   val aq = Bool()
   val rl = Bool()
@@ -97,8 +100,44 @@ class LoadQueueContext(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val writesInteger = Bool()
   val m1Owner = Bool()
   val isAtomic = Bool()
+  val atomicOperation = UInt(7.W)
   val aq = Bool()
   val rl = Bool()
+}
+
+/** Exact-head RV32A operation retained by the LQ/SQ until its AXI lifecycle
+  * completes. SC has only an SQ owner; LR has only an LQ owner; an AMO owns
+  * both records. All transfers are naturally aligned 32-bit words.
+  */
+class AtomicMemoryEffect(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val operation = UInt(7.W)
+  val address = UInt(32.W)
+  val writeData = UInt(32.W)
+  val writeMask = UInt(4.W)
+  val destinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val writesInteger = Bool()
+  val aq = Bool()
+  val rl = Bool()
+}
+
+/** One architectural result from the serialized RV32A AXI owner. A successful
+  * SC with no live reservation is a legitimate no-write result; every other
+  * nonzero `storePerformed` waits for the matching B response.
+  */
+class AtomicMemoryResult(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val operation = UInt(7.W)
+  val destinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
+  val writesInteger = Bool()
+  val data = UInt(32.W)
+  val accessFault = Bool()
+  val faultAddress = UInt(32.W)
+  val readData = UInt(32.W)
+  val readMask = UInt(4.W)
+  val writeData = UInt(32.W)
+  val writeMask = UInt(4.W)
+  val storePerformed = Bool()
 }
 
 /** A commit-authorized store or atomic action. Cache/MMIO logic may only act

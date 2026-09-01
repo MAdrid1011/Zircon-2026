@@ -38,6 +38,10 @@ class DualLSUIngress(
     val storeEffectComplete = Input(Valid(new StoreEffectComplete(config)))
     val storeWriteResult = Flipped(Decoupled(new StoreWriteResult(config)))
     val storeCommitInFlight = Output(Bool())
+    val atomicEffect = Decoupled(new AtomicMemoryEffect(config))
+    val atomicComplete = Flipped(Decoupled(new AtomicMemoryResult(config)))
+    val atomicInFlight = Output(Bool())
+    val atomicAcquireBarrier = Output(Valid(UInt(config.robTagWidth.W)))
     val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
@@ -103,6 +107,7 @@ class DualLSUIngress(
   loadCompletion.io.loadResult <> ingress.io.loadResult
   loadCompletion.io.loadFault <> ingress.io.loadFault
   loadCompletion.io.storeResult <> io.storeWriteResult
+  loadCompletion.io.atomicResult <> ingress.io.atomicResult
   loadCompletion.io.robHeadTag := io.robHeadTag
   loadCompletion.io.squash := io.squash
   loadCompletion.io.flush := io.flush
@@ -118,6 +123,10 @@ class DualLSUIngress(
   ingress.io.storeEffect.ready := io.storeEffect.ready
   ingress.io.storeEffectComplete := io.storeEffectComplete
   io.storeCommitInFlight := ingress.io.storeCommitInFlight
+  io.atomicEffect <> ingress.io.atomicEffect
+  ingress.io.atomicComplete <> io.atomicComplete
+  io.atomicInFlight := ingress.io.atomicInFlight
+  io.atomicAcquireBarrier := ingress.io.atomicAcquireBarrier
   io.deviceLoadEffect <> ingress.io.deviceLoadEffect
   io.deviceLoadInFlight := ingress.io.deviceLoadInFlight
   io.burstableDeviceGroup <> ingress.io.burstableDeviceGroup

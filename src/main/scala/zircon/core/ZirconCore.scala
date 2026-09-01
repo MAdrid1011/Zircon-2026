@@ -4,10 +4,10 @@ import chisel3._
 import chisel3.util.{Arbiter, Decoupled, PopCount}
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
-  M1BackendSubsystem, MemIssueQueue, SourceKind, UopClass}
+  M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
-import zircon.memory.{AXIDataReadEngine, AXIDataStoreEngine, AXIOrderedIOEngine,
-  DualLSUIngress, L1DLoadCache, LoadCompletion, OrderedIOCombiner,
+import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIDataStoreEngine,
+  AXIOrderedIOEngine, DualLSUIngress, L1DLoadCache, LoadCompletion, OrderedIOCombiner,
   OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
@@ -35,6 +35,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
   val dataStoreEngine = Module(new AXIDataStoreEngine(cfg))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
+  val atomicEngine = Module(new AtomicMemoryEngine(cfg))
   val orderedIOCombiner = Module(new OrderedIOCombiner(config = cfg))
   val orderedIOStreamer = Module(new OrderedIOGroupStreamer(config = cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
@@ -93,9 +94,18 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   memQueue.io.squash := backend.io.squash
   memQueue.io.flush := backend.io.globalFlush
 
-  for ((queueIssue, candidate) <- Seq(
-      (memQueue.io.m0Issue, 1), (memQueue.io.m1Issue, 2))) {
-    auxiliaryRead.io.candidate(candidate).valid := queueIssue.valid
+  val m0BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
+    ROBTagOrder.isYounger(memQueue.io.m0Issue.bits.robTag,
+      lsuIngress.io.atomicAcquireBarrier.bits, backend.io.robHead.bits.robTag, cfg)
+  val m1BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
+    ROBTagOrder.isYounger(memQueue.io.m1Issue.bits.robTag,
+      lsuIngress.io.atomicAcquireBarrier.bits, backend.io.robHead.bits.robTag, cfg)
+  val m0IssueAllowed = !m0BlockedByAcquire
+  val m1IssueAllowed = !m1BlockedByAcquire
+  for ((queueIssue, candidate, allowed) <- Seq(
+      (memQueue.io.m0Issue, 1, m0IssueAllowed),
+      (memQueue.io.m1Issue, 2, m1IssueAllowed))) {
+    auxiliaryRead.io.candidate(candidate).valid := queueIssue.valid && allowed
     auxiliaryRead.io.candidate(candidate).bits.robTag := queueIssue.bits.robTag
     for (source <- 0 until 2) {
       auxiliaryRead.io.candidate(candidate).bits.sourcePhysical(source) :=
@@ -105,12 +115,16 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     }
   }
 
-  lsuIngress.io.m0Issue.valid := memQueue.io.m0Issue.valid && auxiliaryRead.io.grant(1)
+  lsuIngress.io.m0Issue.valid := memQueue.io.m0Issue.valid && m0IssueAllowed &&
+    auxiliaryRead.io.grant(1)
   lsuIngress.io.m0Issue.bits := memQueue.io.m0Issue.bits
-  memQueue.io.m0Issue.ready := lsuIngress.io.m0Issue.ready && auxiliaryRead.io.grant(1)
-  lsuIngress.io.m1Issue.valid := memQueue.io.m1Issue.valid && auxiliaryRead.io.grant(2)
+  memQueue.io.m0Issue.ready := lsuIngress.io.m0Issue.ready && m0IssueAllowed &&
+    auxiliaryRead.io.grant(1)
+  lsuIngress.io.m1Issue.valid := memQueue.io.m1Issue.valid && m1IssueAllowed &&
+    auxiliaryRead.io.grant(2)
   lsuIngress.io.m1Issue.bits := memQueue.io.m1Issue.bits
-  memQueue.io.m1Issue.ready := lsuIngress.io.m1Issue.ready && auxiliaryRead.io.grant(2)
+  memQueue.io.m1Issue.ready := lsuIngress.io.m1Issue.ready && m1IssueAllowed &&
+    auxiliaryRead.io.grant(2)
   for (source <- 0 until 2) {
     lsuIngress.io.prfReadData(source) := auxiliaryRead.io.candidateData(1)(source)
     lsuIngress.io.prfReadData(source + 2) :=
@@ -134,6 +148,26 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
+
+  // Atomics bypass the speculative L1D slice. Their one-owner AXI lifecycle
+  // returns through the LSQ first, so retire metadata and the sole M0
+  // completion remain keyed by the original ROB tag.
+  l1dLoadCache.io.atomicAccept.valid := lsuIngress.io.atomicEffect.valid
+  l1dLoadCache.io.atomicAccept.bits := lsuIngress.io.atomicEffect.bits
+  atomicEngine.io.effect.valid := lsuIngress.io.atomicEffect.valid &&
+    l1dLoadCache.io.atomicAcceptReady
+  atomicEngine.io.effect.bits := lsuIngress.io.atomicEffect.bits
+  lsuIngress.io.atomicEffect.ready := atomicEngine.io.effect.ready &&
+    l1dLoadCache.io.atomicAcceptReady
+  lsuIngress.io.atomicComplete <> atomicEngine.io.result
+  atomicEngine.io.flush := backend.io.globalFlush
+  atomicEngine.io.invalidate.valid := dataStoreEngine.io.effect.fire
+  atomicEngine.io.invalidate.bits := dataStoreEngine.io.effect.bits.address
+  // Once AW/W were accepted, conservatively invalidate even on BRESP failure:
+  // an AXI slave error must not leave an old L1D word architecturally visible.
+  l1dLoadCache.io.atomicInvalidate.valid := atomicEngine.io.result.fire &&
+    atomicEngine.io.result.bits.storePerformed
+  l1dLoadCache.io.atomicInvalidate.bits := atomicEngine.io.result.bits.faultAddress
 
   val cacheStoreEffect = lsuIngress.io.storeEffect.valid &&
     lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.Memory.code.U
@@ -256,7 +290,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.otherFault(2) := lsuIngress.io.fault(1)
   backend.io.interrupts := io.interrupts
   backend.io.interruptBlocked := lsuIngress.io.storeCommitInFlight ||
-    lsuIngress.io.deviceLoadInFlight
+    lsuIngress.io.deviceLoadInFlight || lsuIngress.io.atomicInFlight ||
+    atomicEngine.io.busy
   backend.io.systemSerializingReady := true.B
   backend.io.fpCommit.valid := false.B
   backend.io.fpCommit.bits.flags := 0.U
@@ -272,75 +307,94 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   }
 
   val orderedAwSelected = orderedIOEngine.io.aw.valid
-  io.axi.aw.valid := orderedAwSelected || dataStoreEngine.io.aw.valid
+  val atomicAwSelected = !orderedAwSelected && atomicEngine.io.aw.valid
+  io.axi.aw.valid := orderedAwSelected || atomicAwSelected || dataStoreEngine.io.aw.valid
   io.axi.aw.bits := Mux(orderedAwSelected, orderedIOEngine.io.aw.bits,
-    dataStoreEngine.io.aw.bits)
+    Mux(atomicAwSelected, atomicEngine.io.aw.bits, dataStoreEngine.io.aw.bits))
   orderedIOEngine.io.aw.ready := io.axi.aw.ready && orderedAwSelected
-  dataStoreEngine.io.aw.ready := io.axi.aw.ready && !orderedAwSelected
+  atomicEngine.io.aw.ready := io.axi.aw.ready && atomicAwSelected
+  dataStoreEngine.io.aw.ready := io.axi.aw.ready && !orderedAwSelected && !atomicAwSelected
   val orderedWSelected = orderedIOEngine.io.w.valid
-  io.axi.w.valid := orderedWSelected || dataStoreEngine.io.w.valid
+  val atomicWSelected = !orderedWSelected && atomicEngine.io.w.valid
+  io.axi.w.valid := orderedWSelected || atomicWSelected || dataStoreEngine.io.w.valid
   io.axi.w.bits := Mux(orderedWSelected, orderedIOEngine.io.w.bits,
-    dataStoreEngine.io.w.bits)
+    Mux(atomicWSelected, atomicEngine.io.w.bits, dataStoreEngine.io.w.bits))
   orderedIOEngine.io.w.ready := io.axi.w.ready && orderedWSelected
-  dataStoreEngine.io.w.ready := io.axi.w.ready && !orderedWSelected
+  atomicEngine.io.w.ready := io.axi.w.ready && atomicWSelected
+  dataStoreEngine.io.w.ready := io.axi.w.ready && !orderedWSelected && !atomicWSelected
   val bToCacheStore = io.axi.b.bits.id === 5.U
   val bToOrderedIO = io.axi.b.bits.id === 6.U
+  val bToAtomic = io.axi.b.bits.id === 7.U
   dataStoreEngine.io.b.valid := io.axi.b.valid && bToCacheStore
   dataStoreEngine.io.b.bits := io.axi.b.bits
   orderedIOEngine.io.b.valid := io.axi.b.valid && bToOrderedIO
   orderedIOEngine.io.b.bits := io.axi.b.bits
+  atomicEngine.io.b.valid := io.axi.b.valid && bToAtomic
+  atomicEngine.io.b.bits := io.axi.b.bits
   io.axi.b.ready := Mux(bToCacheStore, dataStoreEngine.io.b.ready,
-    Mux(bToOrderedIO, orderedIOEngine.io.b.ready, false.B))
+    Mux(bToOrderedIO, orderedIOEngine.io.b.ready,
+      Mux(bToAtomic, atomicEngine.io.b.ready, false.B)))
   when(io.axi.b.valid) {
-    assert(bToCacheStore || bToOrderedIO,
-      "top-level AXI B used an ID outside cache-store and ordered-device owners")
+    assert(bToCacheStore || bToOrderedIO || bToAtomic,
+      "top-level AXI B used an ID outside cache-store, ordered-device, and atomic owners")
   }
 
   val arLockValid = RegInit(false.B)
   val arLockOwner = RegInit(0.U(2.W))
-  val arTurn = RegInit(0.U(2.W)) // 0 fetch, 1 L1D refill, 2 ordered device.
-  val arClientValid = Wire(Vec(3, Bool()))
+  val arTurn = RegInit(0.U(2.W)) // 0 fetch, 1 L1D refill, 2 ordered device, 3 atomic.
+  val arClientValid = Wire(Vec(4, Bool()))
   arClientValid(0) := frontend.io.ar.valid
   arClientValid(1) := dataReadEngine.io.ar.valid
   arClientValid(2) := orderedIOEngine.io.ar.valid
-  val arTurnNext = Mux(arTurn === 2.U, 0.U(2.W), arTurn + 1.U)
-  val arTurnAfterNext = Mux(arTurnNext === 2.U, 0.U(2.W), arTurnNext + 1.U)
+  arClientValid(3) := atomicEngine.io.ar.valid
+  val arTurnNext = Mux(arTurn === 3.U, 0.U(2.W), arTurn + 1.U)
+  val arTurnAfterNext = Mux(arTurnNext === 3.U, 0.U(2.W), arTurnNext + 1.U)
+  val arTurnAfterAfterNext = Mux(arTurnAfterNext === 3.U, 0.U(2.W),
+    arTurnAfterNext + 1.U)
   val unlockedArOwner = Mux(arClientValid(arTurn), arTurn,
-    Mux(arClientValid(arTurnNext), arTurnNext, arTurnAfterNext))
+    Mux(arClientValid(arTurnNext), arTurnNext,
+      Mux(arClientValid(arTurnAfterNext), arTurnAfterNext, arTurnAfterAfterNext)))
   val selectedArOwner = Mux(arLockValid, arLockOwner, unlockedArOwner)
   io.axi.ar.valid := Mux(selectedArOwner === 0.U, frontend.io.ar.valid,
     Mux(selectedArOwner === 1.U, dataReadEngine.io.ar.valid,
-      orderedIOEngine.io.ar.valid))
+      Mux(selectedArOwner === 2.U, orderedIOEngine.io.ar.valid,
+        atomicEngine.io.ar.valid)))
   io.axi.ar.bits := Mux(selectedArOwner === 0.U, frontend.io.ar.bits,
     Mux(selectedArOwner === 1.U, dataReadEngine.io.ar.bits,
-      orderedIOEngine.io.ar.bits))
+      Mux(selectedArOwner === 2.U, orderedIOEngine.io.ar.bits,
+        atomicEngine.io.ar.bits)))
   frontend.io.ar.ready := io.axi.ar.ready && selectedArOwner === 0.U
   dataReadEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 1.U
   orderedIOEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 2.U
+  atomicEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 3.U
   when(!arLockValid && io.axi.ar.valid && !io.axi.ar.ready) {
     arLockValid := true.B
     arLockOwner := selectedArOwner
   }
   when(io.axi.ar.fire) {
     arLockValid := false.B
-    arTurn := Mux(selectedArOwner === 2.U, 0.U(2.W), selectedArOwner + 1.U)
+    arTurn := Mux(selectedArOwner === 3.U, 0.U(2.W), selectedArOwner + 1.U)
   }
 
   val rToFetch = io.axi.r.bits.id === 0.U
   val rToData = io.axi.r.bits.id >= 1.U && io.axi.r.bits.id <= 4.U
   val rToOrderedIO = io.axi.r.bits.id === 6.U
+  val rToAtomic = io.axi.r.bits.id === 7.U
   frontend.io.r.valid := io.axi.r.valid && rToFetch
   frontend.io.r.bits := io.axi.r.bits
   dataReadEngine.io.r.valid := io.axi.r.valid && rToData
   dataReadEngine.io.r.bits := io.axi.r.bits
   orderedIOEngine.io.r.valid := io.axi.r.valid && rToOrderedIO
   orderedIOEngine.io.r.bits := io.axi.r.bits
+  atomicEngine.io.r.valid := io.axi.r.valid && rToAtomic
+  atomicEngine.io.r.bits := io.axi.r.bits
   io.axi.r.ready := Mux(rToFetch, frontend.io.r.ready,
     Mux(rToData, dataReadEngine.io.r.ready,
-      Mux(rToOrderedIO, orderedIOEngine.io.r.ready, false.B)))
+      Mux(rToOrderedIO, orderedIOEngine.io.r.ready,
+        Mux(rToAtomic, atomicEngine.io.r.ready, false.B))))
   when(io.axi.r.valid) {
-    assert(rToFetch || rToData || rToOrderedIO,
-      "top-level AXI R used an ID outside fetch, data, and ordered-device owners")
+    assert(rToFetch || rToData || rToOrderedIO || rToAtomic,
+      "top-level AXI R used an ID outside fetch, data, ordered-device, and atomic owners")
   }
 
   io.trace.foreach { trace =>

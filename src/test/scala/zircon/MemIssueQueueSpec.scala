@@ -47,7 +47,7 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("MemIssueQueue") {
-    it("issues a M0-only atomic beside a cacheable load on M1") {
+    it("does not let a cacheable M1 load pass a live M0 atomic") {
       simulate(new MemIssueQueue) { dut =>
         clear(dut)
         drive(dut, 0, tag = 1, endpoints = EndpointMask.M0, UopClass.Atomic)
@@ -59,6 +59,10 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
         dut.io.m0Issue.valid.expect(true)
         dut.io.m0Issue.bits.robTag.expect(1)
         dut.io.m0Issue.bits.uopClass.expect(UopClass.Atomic)
+        dut.io.m1Issue.valid.expect(false)
+        dut.io.m0Issue.ready.poke(true)
+        dut.clock.step()
+        dut.io.m0Issue.ready.poke(false)
         dut.io.m1Issue.valid.expect(true)
         dut.io.m1Issue.bits.robTag.expect(2)
         dut.io.m1Issue.bits.uopClass.expect(UopClass.Load)
@@ -105,7 +109,7 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
       simulate(new MemIssueQueue) { dut =>
         clear(dut)
         for (pair <- 0 until 4) {
-          drive(dut, 0, tag = pair * 2, endpoints = EndpointMask.M0, UopClass.Atomic)
+          drive(dut, 0, tag = pair * 2, endpoints = EndpointMask.M0, UopClass.Store)
           drive(dut, 1, tag = pair * 2 + 1,
             endpoints = EndpointMask.CacheableLoadCandidate, UopClass.Load)
           dut.clock.step()
@@ -115,7 +119,7 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.m0Issue.ready.poke(true)
         dut.io.m1Issue.ready.poke(true)
-        drive(dut, 0, tag = 8, endpoints = EndpointMask.M0, UopClass.Atomic)
+        drive(dut, 0, tag = 8, endpoints = EndpointMask.M0, UopClass.Store)
         drive(dut, 1, tag = 9, endpoints = EndpointMask.CacheableLoadCandidate,
           UopClass.Load)
         dut.io.enqueueCapacity.expect(2)
@@ -137,7 +141,7 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
       simulate(new MemIssueQueue(allowIssueRecycle = false)) { dut =>
         clear(dut)
         for (pair <- 0 until 4) {
-          drive(dut, 0, tag = pair * 2, endpoints = EndpointMask.M0, UopClass.Atomic)
+          drive(dut, 0, tag = pair * 2, endpoints = EndpointMask.M0, UopClass.Store)
           drive(dut, 1, tag = pair * 2 + 1,
             endpoints = EndpointMask.CacheableLoadCandidate, UopClass.Load)
           dut.clock.step()
@@ -146,7 +150,7 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
         dut.io.count.expect(8)
         dut.io.m0Issue.ready.poke(true)
         dut.io.m1Issue.ready.poke(true)
-        drive(dut, 0, tag = 8, endpoints = EndpointMask.M0, UopClass.Atomic)
+        drive(dut, 0, tag = 8, endpoints = EndpointMask.M0, UopClass.Store)
         drive(dut, 1, tag = 9, endpoints = EndpointMask.CacheableLoadCandidate,
           UopClass.Load)
         dut.io.enqueueCapacity.expect(0)
