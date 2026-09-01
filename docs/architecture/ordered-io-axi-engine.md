@@ -2,12 +2,12 @@
 
 `AXIOrderedIOEngine` is the transport owner below `OrderedIOCombiner` for the
 frozen M3 ordered-MMIO contract in ADR-0012 and Issue #47. It is independently
-verified and its one-member path is now connected to `ZirconCore`: an exact-head
-non-atomic device load is retained by the LQ until its ID-6 response reaches the
-real `LoadCompletion`, while an exact-head authorized device store waits for its
-B response before the SQ effect completes. The `DeviceBurstable` 1--4 member
-collector is still not connected; the current core intentionally emits one
-member per device transaction.
+verified and is connected to `ZirconCore` through the exact-head LSQ owner. An
+exact-head non-atomic device load is retained by the LQ until its ID-6 response
+reaches the real `LoadCompletion`, while an exact-head authorized device store
+waits for its B response before the SQ effect completes. `DeviceStrong` remains
+one beat; `DeviceBurstable` collects one through four consecutive members before
+the first AXI acceptance.
 
 ## Parameters and interface
 
@@ -21,7 +21,14 @@ The `group` Decoupled input transfers ownership of one already-authorized group.
 The `response` Decoupled output produces one exact `OrderedIOResponse` per
 member: `{robTag, address, write, readData, accessFault}`. Future LSQ wiring
 maps read responses to LQ completion and writes to SQ effect completion; it
-must never reconstruct metadata from a current ROB head.
+must never reconstruct metadata from a current ROB head. `LoadStoreQueues`
+previews a DeviceBurstable head plus up to three contiguous following ROB tags.
+It waits six full cycles for the fixed M0/M1 replay and LQ/SQ update path before
+sealing the preview. `OrderedIOGroupStreamer` retains that immutable preview and
+feeds every member through `OrderedIOCombiner`; only the combiner's output fire
+marks every participating LQ/SQ entry effect-issued. A flush or squash before
+that fire cancels the local streamer/combiner state. Once the AXI owner accepts
+the group, normal response drain is irreversible.
 
 The engine reserves AXI ID 6. IDs 0, 1--4, and 5 remain fetch, L1D refill, and
 cacheable-store ownership respectively. `ZirconCore` locks the shared AR owner
@@ -58,13 +65,15 @@ effect completion.
 `AXIOrderedIOEngineSpec` covers four-beat DeviceBurstable write ownership with
 W-before-AW and B-error fanout, three-beat read AR backpressure with per-beat
 RRESP attribution and response holding, plus one-beat DeviceStrong traffic.
-`OrderedIOCombinerSpec` covers adjacency, force flush, strong-order groups, and
-the 4 KiB split. `LoadStoreQueuesSpec` and `CoreShellSpec` cover exact-head
-single-beat load/store ownership, response-gated retirement metadata, and RRESP/
-BRESP precise faults through the top-level ID-6 demultiplexer. The focused
+`OrderedIOCombinerSpec` covers adjacency, force flush, strong-order groups, the
+4 KiB split, full four-member streaming, and pre-accept cancellation.
+`LoadStoreQueuesSpec` covers cross-generation ROB-wrap preview/acceptance.
+`CoreShellSpec` covers exact-head single-beat traffic and one four-beat
+DeviceBurstable load and store group with exact per-member retire metadata and
+RRESP/BRESP faults through the top-level ID-6 demultiplexer. The focused
 commands are `make test-m3-ordered-io` and `make test-m3-device-io`.
 
-The static ledger explicitly charges the retained four-request group, group
-control, response hold, ID comparisons, and dynamic request muxes. This does
-not make the ledger complete or claim final MMIO integration; its omissions
-remain disclosed in `area/zircon-2026.json`.
+The static ledger explicitly charges the retained AXI, combiner, and streamer
+four-request groups, collection control, response hold, ID comparisons, and
+dynamic request muxes. This does not make the ledger complete or claim final
+MMIO integration; its omissions remain disclosed in `area/zircon-2026.json`.

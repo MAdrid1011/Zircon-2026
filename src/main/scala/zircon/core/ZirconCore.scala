@@ -7,7 +7,8 @@ import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPip
   M1BackendSubsystem, MemIssueQueue, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
 import zircon.memory.{AXIDataReadEngine, AXIDataStoreEngine, AXIOrderedIOEngine,
-  DualLSUIngress, L1DLoadCache, LoadCompletion, OrderedIOGroup, StoreWriteResult}
+  DualLSUIngress, L1DLoadCache, LoadCompletion, OrderedIOCombiner,
+  OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -34,6 +35,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
   val dataStoreEngine = Module(new AXIDataStoreEngine(cfg))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
+  val orderedIOCombiner = Module(new OrderedIOCombiner(config = cfg))
+  val orderedIOStreamer = Module(new OrderedIOGroupStreamer(config = cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
 
   frontend.io.enable := true.B
@@ -135,42 +138,58 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val cacheStoreEffect = lsuIngress.io.storeEffect.valid &&
     lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.Memory.code.U
   val deviceStoreEffect = lsuIngress.io.storeEffect.valid &&
-    (lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceStrong.code.U ||
-      lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceBurstable.code.U)
+    lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceStrong.code.U
   val deviceLoadEffect = lsuIngress.io.deviceLoadEffect
   val deviceLoadAtLiveHead = deviceLoadEffect.valid && backend.io.robHead.valid &&
     backend.io.robHead.bits.entry.decoded.uopClass === UopClass.Load
-  val deviceGroupFromLoad = deviceLoadAtLiveHead
-  val deviceGroupFromStore = !deviceGroupFromLoad && deviceStoreEffect
-  val deviceGroupValid = (deviceGroupFromLoad || deviceGroupFromStore) &&
+  val singleDeviceGroupFromLoad = deviceLoadAtLiveHead
+  val singleDeviceGroupFromStore = !singleDeviceGroupFromLoad && deviceStoreEffect
+  val singleDeviceGroupValid = (singleDeviceGroupFromLoad || singleDeviceGroupFromStore) &&
     !dataStoreEngine.io.busy
-  val deviceGroup = Wire(new OrderedIOGroup(config = cfg))
-  deviceGroup := 0.U.asTypeOf(deviceGroup)
-  deviceGroup.count := 1.U
-  val deviceRequest = deviceGroup.requests(0)
-  val selectedDeviceTag = Mux(deviceGroupFromLoad,
+  val singleDeviceGroup = Wire(new OrderedIOGroup(config = cfg))
+  singleDeviceGroup := 0.U.asTypeOf(singleDeviceGroup)
+  singleDeviceGroup.count := 1.U
+  val deviceRequest = singleDeviceGroup.requests(0)
+  val selectedDeviceTag = Mux(singleDeviceGroupFromLoad,
     deviceLoadEffect.bits.robTag, lsuIngress.io.storeEffect.bits.robTag)
-  val selectedDeviceAddress = Mux(deviceGroupFromLoad,
+  val selectedDeviceAddress = Mux(singleDeviceGroupFromLoad,
     deviceLoadEffect.bits.address, lsuIngress.io.storeEffect.bits.address)
-  val selectedDeviceSize = Mux(deviceGroupFromLoad,
+  val selectedDeviceSize = Mux(singleDeviceGroupFromLoad,
     deviceLoadEffect.bits.accessSize, lsuIngress.io.storeEffect.bits.accessSize)
-  val selectedDevicePma = Mux(deviceGroupFromLoad,
+  val selectedDevicePma = Mux(singleDeviceGroupFromLoad,
     deviceLoadEffect.bits.pmaKind, lsuIngress.io.storeEffect.bits.pmaKind)
   deviceRequest.order := selectedDeviceTag
   deviceRequest.robTag := selectedDeviceTag
   deviceRequest.address := selectedDeviceAddress
-  deviceRequest.write := deviceGroupFromStore
+  deviceRequest.write := singleDeviceGroupFromStore
   deviceRequest.size := selectedDeviceSize
-  deviceRequest.writeData := Mux(deviceGroupFromStore,
+  deviceRequest.writeData := Mux(singleDeviceGroupFromStore,
     lsuIngress.io.storeEffect.bits.writeData, 0.U)
-  deviceRequest.writeMask := Mux(deviceGroupFromStore,
+  deviceRequest.writeMask := Mux(singleDeviceGroupFromStore,
     lsuIngress.io.storeEffect.bits.writeMask, 0.U)
-  deviceRequest.burstable := selectedDevicePma === PMARegionKind.DeviceBurstable.code.U
+  deviceRequest.burstable := false.B
   deviceRequest.regionTag := selectedDevicePma
-  orderedIOEngine.io.group.valid := deviceGroupValid
-  orderedIOEngine.io.group.bits := deviceGroup
-  deviceLoadEffect.ready := deviceGroupFromLoad && orderedIOEngine.io.group.ready &&
+
+  val orderedCollectionCancel = backend.io.globalFlush || backend.io.squash.valid
+  orderedIOStreamer.io.group <> lsuIngress.io.burstableDeviceGroup
+  orderedIOStreamer.io.cancel := orderedCollectionCancel
+  orderedIOCombiner.io.in <> orderedIOStreamer.io.request
+  orderedIOCombiner.io.forceFlush := orderedIOStreamer.io.forceFlush
+  orderedIOCombiner.io.cancel := orderedCollectionCancel
+  orderedIOStreamer.io.accepted := orderedIOCombiner.io.out.fire
+  val orderedGroupArbiter = Module(new Arbiter(new OrderedIOGroup(config = cfg), 2))
+  orderedGroupArbiter.io.in(0).valid := singleDeviceGroupValid
+  orderedGroupArbiter.io.in(0).bits := singleDeviceGroup
+  orderedGroupArbiter.io.in(1) <> orderedIOCombiner.io.out
+  orderedIOEngine.io.group.valid := orderedGroupArbiter.io.out.valid &&
     !dataStoreEngine.io.busy
+  orderedIOEngine.io.group.bits := orderedGroupArbiter.io.out.bits
+  orderedGroupArbiter.io.out.ready := orderedIOEngine.io.group.ready &&
+    !dataStoreEngine.io.busy
+  lsuIngress.io.burstableDeviceGroupAccepted.valid := orderedIOCombiner.io.out.fire
+  lsuIngress.io.burstableDeviceGroupAccepted.bits := orderedIOCombiner.io.out.bits
+  deviceLoadEffect.ready := singleDeviceGroupFromLoad &&
+    orderedGroupArbiter.io.in(0).ready && !dataStoreEngine.io.busy
 
   l1dLoadCache.io.storeAccept.valid := cacheStoreEffect
   l1dLoadCache.io.storeAccept.bits := lsuIngress.io.storeEffect.bits
@@ -180,7 +199,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
     dataStoreEngine.io.effect.ready && !orderedIOEngine.io.busy,
     Mux(deviceStoreEffect,
-      !deviceGroupFromLoad && orderedIOEngine.io.group.ready && !dataStoreEngine.io.busy,
+      !singleDeviceGroupFromLoad && orderedGroupArbiter.io.in(0).ready &&
+        !dataStoreEngine.io.busy,
       false.B))
   l1dLoadCache.io.storeCommit.valid := dataStoreEngine.io.effect.fire
   l1dLoadCache.io.storeCommit.bits := dataStoreEngine.io.effect.bits
@@ -349,5 +369,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     observation.m0FaultTag := lsuIngress.io.fault(0).record.robTag
     observation.m1FaultTag := lsuIngress.io.fault(1).record.robTag
     observation.robHeadTag := backend.io.robHead.bits.robTag
+    observation.loadQueueCount := lsuIngress.io.loadCount
+    observation.storeQueueCount := lsuIngress.io.storeCount
+    observation.orderedGroupValid := lsuIngress.io.burstableDeviceGroup.valid
+    observation.orderedGroupCount := lsuIngress.io.burstableDeviceGroup.bits.count
   }
 }

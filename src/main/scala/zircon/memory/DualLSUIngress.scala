@@ -40,6 +40,8 @@ class DualLSUIngress(
     val storeCommitInFlight = Output(Bool())
     val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
     val deviceLoadInFlight = Output(Bool())
+    val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
+    val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -118,6 +120,8 @@ class DualLSUIngress(
   io.storeCommitInFlight := ingress.io.storeCommitInFlight
   io.deviceLoadEffect <> ingress.io.deviceLoadEffect
   io.deviceLoadInFlight := ingress.io.deviceLoadInFlight
+  io.burstableDeviceGroup <> ingress.io.burstableDeviceGroup
+  ingress.io.burstableDeviceGroupAccepted := io.burstableDeviceGroupAccepted
   for (lane <- 0 until config.commitWidth) {
     ingress.io.retire(lane) := io.retire(lane)
     io.retireMetadata(lane) := ingress.io.retireMetadata(lane)

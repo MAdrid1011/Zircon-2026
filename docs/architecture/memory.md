@@ -5,9 +5,9 @@ ADR-0012 与 Issue #47。当前 RTL 已有 `PMAClassifier`、局部
 `OrderedIOCombiner`、已接入顶层 dispatch/recovery 的 8-entry `MemIssueQueue`，以及
 已单元验证的 8-entry `LoadStoreQueues`。`ZirconCore` 已通过全局 auxiliary-read
 arbiter 将 MemIQ 的 M0/M1 outputs 接入 `DualLSUIngress`；Cache/data AXI 和
-cacheable-store slices 已可执行。`AXIOrderedIOEngine` 的单拍 device-group AXI
-owner 已接入 LQ/SQ、ROB 和顶层 AXI；连续 `DeviceBurstable` 的 1--4 beat 收集仍未
-接入，不能把当前单拍实现描述为完整 MMIO 合并。
+cacheable-store slices 已可执行。`AXIOrderedIOEngine` 的 device-group AXI owner
+已接入 LQ/SQ、ROB 和顶层 AXI；`DeviceBurstable` 已通过 LSQ preview、streamer 和
+combiner 形成连续 1--4 beat group，不能与未实现的 write-back/L2/A 路径混同。
 
 ## 参数和边界
 
@@ -302,16 +302,18 @@ after the group B response. PMA boundaries and AMOs never join a group.
 `AXIOrderedIOEngine` owns device AXI ID 6 through AR/R or AW/W/B drain, holds one
 exact response per group member, preserves independent AW/W backpressure, and
 checks group shape, ID, RLAST, and responses. It is documented in
-[`ordered-io-axi-engine.md`](ordered-io-axi-engine.md). The current top-level
-forms a one-member group only: an LQ-retained non-atomic device load can enter it
-only at the live ROB head; an SQ device store can enter it only after commit
-authorization. ID-6 read responses become the original `LoadCompletion`; ID-6
-write responses become the original `StoreWriteResult`. Both use true LQ/SQ
-metadata and exact RRESP/BRESP fault addresses. After an ID-6 group is accepted,
-a device load blocks interrupts through its retirement and a device store blocks
-through its effect completion. `DeviceBurstable` still forms
-one group per instruction here; connecting `OrderedIOCombiner` to collect 1--4
-members remains required M3 work.
+[`ordered-io-axi-engine.md`](ordered-io-axi-engine.md). An LQ-retained
+non-atomic device load can begin collection only at the live ROB head; an SQ
+device store can begin only after head commit authorization. DeviceStrong sends
+one member. DeviceBurstable waits a fixed six cycles for the M0/M1 replay and
+LQ/SQ update path, previews up to four contiguous ROB tags, then streams the
+immutable preview through `OrderedIOCombiner`. Flush/squash before combiner
+acceptance cancels the local group; acceptance marks every member effect-issued.
+ID-6 read responses become the original `LoadCompletion`; ID-6 write responses
+become the original `StoreWriteResult`. Both use true LQ/SQ metadata and exact
+RRESP/BRESP fault addresses. After an ID-6 group is accepted, a device load
+blocks interrupts through its retirement and a device store blocks through its
+effect completion.
 
 ## RV32A
 

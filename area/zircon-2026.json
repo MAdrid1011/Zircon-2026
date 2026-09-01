@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, committed cacheable-store, and exact-head single-beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, committed cacheable-store, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "single-beat device loads and stores are connected through the LSQ/ROB and AXI ID 6, but DeviceBurstable collection, dirty/replacement state, writeback, L2, atomics, and formal L1I are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6, but dirty/replacement state, writeback, L2, atomics, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -192,6 +192,51 @@
       "source": "AXIOrderedIOEngine responseValid and OrderedIOResponse record"
     },
     {
+      "name": "ordered_io_combiner_entries",
+      "class": "register_payload",
+      "entries": 4,
+      "bits_per_entry": 150,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "OrderedIOCombiner entries: four OrderedIORequest records"
+    },
+    {
+      "name": "ordered_io_combiner_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 3,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "OrderedIOCombiner group count"
+    },
+    {
+      "name": "ordered_io_group_streamer_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 600,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "OrderedIOGroupStreamer immutable four-request heldGroup"
+    },
+    {
+      "name": "ordered_io_group_streamer_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 4,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "OrderedIOGroupStreamer active and three-bit nextRequest"
+    },
+    {
+      "name": "lsq_burstable_group_collection_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 10,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "LoadStoreQueues DeviceBurstable collection valid, six-bit ROB tag, and three-bit wait counter"
+    },
+    {
       "name": "top_axi_ar_arbiter_state",
       "class": "register_control",
       "entries": 1,
@@ -282,6 +327,62 @@
       "width": 32,
       "fanin": 4,
       "source": "AXIOrderedIOEngine dynamic four-entry W payload and response-member request selection"
+    },
+    {
+      "name": "lsq_burstable_group_tag_match_compare_units",
+      "metric": "comparator32_units",
+      "units": 64,
+      "width": 1,
+      "fanin": 1,
+      "source": "LoadStoreQueues four group positions x LQ/SQ x eight live-tag match candidates; six-bit tags are conservatively charged as 32-bit compares"
+    },
+    {
+      "name": "lsq_burstable_group_shape_compare_units",
+      "metric": "comparator32_units",
+      "units": 6,
+      "width": 1,
+      "fanin": 1,
+      "source": "LoadStoreQueues three follower address and access-size continuity checks, each conservatively charged as a 32-bit compare"
+    },
+    {
+      "name": "ordered_io_combiner_compatibility_compare_units",
+      "metric": "comparator32_units",
+      "units": 7,
+      "width": 1,
+      "fanin": 1,
+      "source": "OrderedIOCombiner order, address, direction, size, PMA, and 4 KiB compatibility checks"
+    },
+    {
+      "name": "lsq_burstable_group_source_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 4,
+      "width": 150,
+      "fanin": 2,
+      "source": "LoadStoreQueues four group records select LQ load versus SQ store fields"
+    },
+    {
+      "name": "ordered_io_combiner_entry_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 150,
+      "fanin": 4,
+      "source": "OrderedIOCombiner dynamic last-entry selection"
+    },
+    {
+      "name": "ordered_io_group_streamer_entry_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 150,
+      "fanin": 4,
+      "source": "OrderedIOGroupStreamer next-request selection"
+    },
+    {
+      "name": "top_ordered_io_group_arbiter_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 603,
+      "fanin": 2,
+      "source": "ZirconCore single-beat DeviceStrong versus streamed DeviceBurstable group arbitration"
     },
     {
       "name": "l1d_waiter_oldest_select",

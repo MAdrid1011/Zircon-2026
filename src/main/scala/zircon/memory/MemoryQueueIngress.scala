@@ -39,6 +39,8 @@ class MemoryQueueIngress(
     val storeCommitInFlight = Output(Bool())
     val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
     val deviceLoadInFlight = Output(Bool())
+    val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
+    val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -85,6 +87,8 @@ class MemoryQueueIngress(
   io.storeCommitInFlight := queues.io.storeCommitInFlight
   io.deviceLoadEffect <> queues.io.deviceLoadEffect
   io.deviceLoadInFlight := queues.io.deviceLoadInFlight
+  io.burstableDeviceGroup <> queues.io.burstableDeviceGroup
+  queues.io.burstableDeviceGroupAccepted := io.burstableDeviceGroupAccepted
   io.loadCount := queues.io.loadCount
   io.storeCount := queues.io.storeCount
 

@@ -84,7 +84,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, BigInt, BigInt, Boolean)]
     val events = scala.collection.mutable.ArrayBuffer.empty[TraceSample]
     var awSeen = false
-    var wSeen = false
+    var wLastSeen = false
     var bQueued = false
     var bCompleted = false
     var writeId = BigInt(5)
@@ -146,6 +146,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val awId = dut.io.axi.aw.bits.id.peek().litValue
       val wFire = dut.io.axi.w.valid.peek().litToBoolean &&
         dut.io.axi.w.ready.peek().litToBoolean
+      val wLast = dut.io.axi.w.bits.last.peek().litToBoolean
       val bFire = writeResponse.nonEmpty && bQueued &&
         dut.io.axi.b.ready.peek().litToBoolean
 
@@ -166,8 +167,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         awSeen = true
         writeId = awId
       }
-      if (wFire) wSeen = true
-      if (writeResponse.nonEmpty && !bQueued && !bCompleted && awSeen && wSeen) {
+      if (wFire && wLast) wLastSeen = true
+      if (writeResponse.nonEmpty && !bQueued && !bCompleted && awSeen && wLastSeen) {
         bQueued = true
       }
       if (bFire) {
@@ -1011,6 +1012,122 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         val trap = events.find(event => event.trap && event.pc == ResetVector + 8)
         assert(trap.exists(event => event.cause == 7 &&
           event.trapValue == deviceAddress), s"missing device BRESP trap in $events")
+      }
+    }
+
+    it("merges four consecutive DeviceBurstable loads into one ID-6 read group") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val address = BigInt("b0000000", 16)
+        val values = Seq(BigInt("11111111", 16), BigInt("22222222", 16),
+          BigInt("33333333", 16), BigInt("44444444", 16))
+        val groups = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+        val lsuIngressCycles = scala.collection.mutable.ArrayBuffer.empty[Int]
+        val groupPreviews = scala.collection.mutable.ArrayBuffer.empty[(Int, BigInt, BigInt)]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("b00000b7", 16), // lui x1,0xb0000
+          ResetVector + 4 -> BigInt("02004333", 16), // div x6,x0,x0
+          ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 12 -> BigInt("0040a183", 16), // lw x3,4(x1)
+          ResetVector + 16 -> BigInt("0080a203", 16), // lw x4,8(x1)
+          ResetVector + 20 -> BigInt("00c0a283", 16), // lw x5,12(x1)
+          ResetVector + 24 -> BigInt("00100073", 16), // ebreak
+          address -> values(0),
+          address + 4 -> values(1),
+          address + 8 -> values(2),
+          address + 12 -> values(3)
+        ), cycles = 256, observeCycle = (core, cycle) => {
+          if (core.io.m2Observation.get.m0Ingress.peek().litToBoolean ||
+              core.io.m2Observation.get.m1Ingress.peek().litToBoolean) {
+            lsuIngressCycles += cycle
+          }
+          val observation = core.io.m2Observation.get
+          if (observation.orderedGroupValid.peek().litToBoolean) {
+            groupPreviews += ((cycle, observation.loadQueueCount.peek().litValue,
+              observation.orderedGroupCount.peek().litValue))
+          }
+          val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+            core.io.axi.ar.ready.peek().litToBoolean
+          if (arFire && core.io.axi.ar.bits.id.peek().litValue == 6) {
+            groups += ((core.io.axi.ar.bits.addr.peek().litValue,
+              core.io.axi.ar.bits.len.peek().litValue))
+          }
+        }))
+
+        assert(groups.toSeq == Seq((address, BigInt(3))),
+          s"expected one four-beat DeviceBurstable AR: groups=$groups " +
+            s"lsuIngressCycles=$lsuIngressCycles groupPreviews=$groupPreviews events=$events")
+        for (member <- values.indices) {
+          val event = events.find(_.pc == ResetVector + 8 + member * 4).get
+          assert(event.gprWrite && event.gprAddress == member + 2 &&
+            event.gprData == values(member))
+          assert(event.memoryAddress == address + member * 4 &&
+            event.memoryReadMask == 15 && event.memoryReadData == values(member))
+        }
+      }
+    }
+
+    it("merges four consecutive DeviceBurstable stores into one ID-6 write group") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val address = BigInt("b0000000", 16)
+        val writeData = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        var awGroup = Option.empty[(BigInt, BigInt)]
+        val busActivity = scala.collection.mutable.ArrayBuffer.empty[(Int, Boolean, Boolean,
+          Boolean, Boolean, Boolean)]
+        val groupPreviews = scala.collection.mutable.ArrayBuffer.empty[(Int, BigInt, BigInt)]
+        val events = runProgram(dut, Map(
+          ResetVector -> BigInt("b00000b7", 16), // lui x1,0xb0000
+          ResetVector + 4 -> BigInt("01100113", 16), // addi x2,x0,17
+          ResetVector + 8 -> BigInt("02200193", 16), // addi x3,x0,34
+          ResetVector + 12 -> BigInt("03300213", 16), // addi x4,x0,51
+          ResetVector + 16 -> BigInt("04400293", 16), // addi x5,x0,68
+          ResetVector + 20 -> BigInt("02004333", 16), // div x6,x0,x0
+          ResetVector + 24 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 28 -> BigInt("0030a223", 16), // sw x3,4(x1)
+          ResetVector + 32 -> BigInt("0040a423", 16), // sw x4,8(x1)
+          ResetVector + 36 -> BigInt("0050a623", 16), // sw x5,12(x1)
+          ResetVector + 40 -> BigInt("00100073", 16) // ebreak
+        ), cycles = 320, writeResponse = Some(0), observeCycle = (core, cycle) => {
+          val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+            core.io.axi.aw.ready.peek().litToBoolean
+          val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+            core.io.axi.w.ready.peek().litToBoolean
+          val wLast = core.io.axi.w.bits.last.peek().litToBoolean
+          val bValid = core.io.axi.b.valid.peek().litToBoolean
+          val bReady = core.io.axi.b.ready.peek().litToBoolean
+          if (awFire || wFire || bValid) {
+            busActivity += ((cycle, awFire, wFire, wLast, bValid, bReady))
+          }
+          val observation = core.io.m2Observation.get
+          if (observation.orderedGroupValid.peek().litToBoolean) {
+            groupPreviews += ((cycle, observation.storeQueueCount.peek().litValue,
+              observation.orderedGroupCount.peek().litValue))
+          }
+          if (awFire && core.io.axi.aw.bits.id.peek().litValue == 6) {
+            awGroup = Some((core.io.axi.aw.bits.addr.peek().litValue,
+              core.io.axi.aw.bits.len.peek().litValue))
+          }
+          if (wFire && core.io.axi.w.bits.last.peek().litToBoolean) {
+            core.io.axi.w.bits.strb.expect(15)
+          }
+          if (wFire) writeData += core.io.axi.w.bits.data.peek().litValue
+        })
+
+        assert(awGroup.contains((address, BigInt(3))),
+          s"expected one four-beat DeviceBurstable AW: aw=$awGroup " +
+            s"busActivity=$busActivity groupPreviews=$groupPreviews events=$events")
+        assert(writeData.toSeq == Seq(BigInt(17), BigInt(34), BigInt(51), BigInt(68)))
+        assert(events.exists(event => event.trap && event.cause == 3),
+          s"four-beat DeviceBurstable write did not reach ebreak: " +
+            s"busActivity=$busActivity events=$events")
+        for (member <- 0 until 4) {
+          val event = events.find(_.pc == ResetVector + 24 + member * 4).get
+          assert(event.memoryAddress == address + member * 4 &&
+            event.memoryWriteMask == 15 && event.memoryWriteData == writeData(member))
+        }
       }
     }
 

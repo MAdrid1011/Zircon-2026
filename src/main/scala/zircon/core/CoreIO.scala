@@ -25,6 +25,10 @@ class M2Observation extends Bundle {
   val m0FaultTag = UInt(6.W)
   val m1FaultTag = UInt(6.W)
   val robHeadTag = UInt(6.W)
+  val loadQueueCount = UInt(5.W)
+  val storeQueueCount = UInt(5.W)
+  val orderedGroupValid = Bool()
+  val orderedGroupCount = UInt(3.W)
 }
 
 class ZirconCoreIO(cfg: ZirconCoreConfig) extends Bundle {

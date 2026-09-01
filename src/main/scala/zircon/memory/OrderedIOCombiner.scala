@@ -264,6 +264,8 @@ class OrderedIOCombiner(
   val io = IO(new Bundle {
     val in = Flipped(Decoupled(new OrderedIORequest(config)))
     val forceFlush = Input(Bool())
+    /** Drops a locally collected but not yet externally accepted group. */
+    val cancel = Input(Bool())
     val out = Decoupled(new OrderedIOGroup(maxBeats, config))
   })
 
@@ -286,13 +288,16 @@ class OrderedIOCombiner(
     (io.in.bits.address(31, 12) === head.address(31, 12))
 
   val closeForIncompatible = io.in.valid && !compatible
-  io.out.valid := nonEmpty && (io.forceFlush || full || !head.burstable || closeForIncompatible)
+  io.out.valid := nonEmpty && !io.cancel &&
+    (io.forceFlush || full || !head.burstable || closeForIncompatible)
   io.out.bits.count := count
   io.out.bits.requests := entries
 
   io.in.ready := !nonEmpty || (!io.out.valid && compatible && !full)
 
-  when(io.out.fire) {
+  when(io.cancel) {
+    count := 0.U
+  }.elsewhen(io.out.fire) {
     count := 0.U
   }.elsewhen(io.in.fire) {
     entries(count(log2Ceil(maxBeats) - 1, 0)) := io.in.bits
@@ -302,5 +307,62 @@ class OrderedIOCombiner(
   assert(count <= maxBeats.U)
   when(nonEmpty) {
     assert(head.writeMask.orR || !head.write)
+  }
+}
+
+/** Streams one prevalidated group through `OrderedIOCombiner` without exposing
+  * it to AXI until every member has been collected. `cancel` is legal only
+  * before the combiner output fires, so a flush can remove a speculative group
+  * while an accepted AXI group remains owned by AXIOrderedIOEngine.
+  */
+class OrderedIOGroupStreamer(
+    val maxBeats: Int = 4,
+    config: ZirconCoreConfig = ZirconCoreConfig.default
+) extends Module {
+  require(maxBeats == 4, "the frozen ordered-device group limit is four beats")
+
+  private val countWidth = log2Ceil(maxBeats + 1)
+  private val indexWidth = log2Ceil(maxBeats)
+
+  val io = IO(new Bundle {
+    val group = Flipped(Decoupled(new OrderedIOGroup(maxBeats, config)))
+    val request = Decoupled(new OrderedIORequest(config))
+    val forceFlush = Output(Bool())
+    val accepted = Input(Bool())
+    val cancel = Input(Bool())
+    val active = Output(Bool())
+  })
+
+  val active = RegInit(false.B)
+  val heldGroup = Reg(new OrderedIOGroup(maxBeats, config))
+  val nextRequest = RegInit(0.U(countWidth.W))
+  val complete = active && nextRequest === heldGroup.count
+
+  io.group.ready := !active && !io.cancel
+  io.request.valid := active && !complete && !io.cancel
+  io.request.bits := heldGroup.requests(nextRequest(indexWidth - 1, 0))
+  io.forceFlush := complete && !io.cancel
+  io.active := active
+
+  when(io.cancel) {
+    active := false.B
+    nextRequest := 0.U
+  }.elsewhen(io.group.fire) {
+    assert(io.group.bits.count =/= 0.U && io.group.bits.count <= maxBeats.U,
+      "ordered group streamer requires one through four members")
+    active := true.B
+    heldGroup := io.group.bits
+    nextRequest := 0.U
+  }.elsewhen(io.accepted) {
+    assert(complete, "ordered group streamer accepted an incomplete group")
+    active := false.B
+    nextRequest := 0.U
+  }.elsewhen(io.request.fire) {
+    nextRequest := nextRequest + 1.U
+  }
+
+  when(active) {
+    assert(heldGroup.count =/= 0.U && heldGroup.count <= maxBeats.U,
+      "active ordered group streamer held an invalid group count")
   }
 }

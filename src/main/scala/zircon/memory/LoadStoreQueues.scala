@@ -21,6 +21,8 @@ class LoadStoreQueues(
   private val sqIndexWidth = log2Ceil(sqEntries)
   private val lqCountWidth = log2Ceil(lqEntries + 1)
   private val sqCountWidth = log2Ceil(sqEntries + 1)
+  // Covers the two-batch M0/M1 replay path before a head device group is sealed.
+  private val burstableGroupCollectionCycles = 6
 
   require(lqEntries == 8 && sqEntries == 8,
     "the frozen M3 contract requires eight LQ and SQ entries")
@@ -45,6 +47,8 @@ class LoadStoreQueues(
     val storeCommitInFlight = Output(Bool())
     val deviceLoadEffect = Decoupled(new OrderedLoadEffect(config))
     val deviceLoadInFlight = Output(Bool())
+    val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
+    val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
 
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
@@ -101,6 +105,10 @@ class LoadStoreQueues(
   val sqEffectFault = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqMetadataValid = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqMetadata = Reg(Vec(sqEntries, new MemoryRetireMetadata(config)))
+
+  val burstableGroupWaitValid = RegInit(false.B)
+  val burstableGroupWaitHead = Reg(UInt(config.robTagWidth.W))
+  val burstableGroupWaitCycles = RegInit(0.U(3.W))
 
   private def findMatch(
       valid: Vec[Bool],
@@ -245,6 +253,18 @@ class LoadStoreQueues(
   private def isDevicePma(kind: UInt): Bool = kind === PMARegionKind.DeviceStrong.code.U ||
     kind === PMARegionKind.DeviceBurstable.code.U
 
+  private def advanceRobTag(tag: UInt, distance: Int): UInt = {
+    var advanced = tag
+    for (_ <- 0 until distance) {
+      val index = advanced(config.robIndexWidth - 1, 0)
+      val generation = advanced(config.robTagWidth - 1)
+      val wraps = index === (config.robEntries - 1).U
+      advanced = Cat(Mux(wraps, !generation, generation),
+        Mux(wraps, 0.U(config.robIndexWidth.W), index + 1.U))
+    }
+    advanced
+  }
+
   val (commitMatch, commitIndex) = findMatch(
     sqValid, sqTag, io.commitAuthorize.bits, sqEntries, sqIndexWidth)
   val commitEligible = commitMatch && sqAddressValid(commitIndex) &&
@@ -259,7 +279,8 @@ class LoadStoreQueues(
   var selectedStoreAge: UInt = 0.U((config.robIndexWidth + 1).W)
   for (index <- 0 until sqEntries) {
     val candidate = sqValid(index) && sqCommitAuthorized(index) &&
-      !sqEffectIssued(index)
+      !sqEffectIssued(index) &&
+      sqPmaKind(index) =/= PMARegionKind.DeviceBurstable.code.U
     val age = ROBTagOrder.ageFromHead(sqTag(index), io.robHeadTag, config)
     val take = candidate && (!selectedStoreValid || age < selectedStoreAge)
     selectedStoreIndex = Mux(take, index.U, selectedStoreIndex)
@@ -281,13 +302,84 @@ class LoadStoreQueues(
     lqValid, lqTag, io.robHeadTag, lqEntries, lqIndexWidth)
   val deviceLoadEligible = headLoadMatch && lqAddressValid(headLoadIndex) &&
     !lqM1Owner(headLoadIndex) && !lqIsAtomic(headLoadIndex) &&
-    isDevicePma(lqPmaKind(headLoadIndex)) && !lqEffectIssued(headLoadIndex) &&
+    lqPmaKind(headLoadIndex) === PMARegionKind.DeviceStrong.code.U &&
+    !lqEffectIssued(headLoadIndex) &&
     !lqCompleted(headLoadIndex)
   io.deviceLoadEffect.valid := deviceLoadEligible && !recoveryBlocked
   io.deviceLoadEffect.bits.robTag := lqTag(headLoadIndex)
   io.deviceLoadEffect.bits.address := lqAddress(headLoadIndex)
   io.deviceLoadEffect.bits.accessSize := lqAccessSize(headLoadIndex)
   io.deviceLoadEffect.bits.pmaKind := lqPmaKind(headLoadIndex)
+
+  val (headStoreMatch, headStoreIndex) = findMatch(
+    sqValid, sqTag, io.robHeadTag, sqEntries, sqIndexWidth)
+  val burstableHeadLoad = headLoadMatch && lqAddressValid(headLoadIndex) &&
+    !lqM1Owner(headLoadIndex) && !lqIsAtomic(headLoadIndex) &&
+    lqPmaKind(headLoadIndex) === PMARegionKind.DeviceBurstable.code.U &&
+    !lqEffectIssued(headLoadIndex) && !lqCompleted(headLoadIndex)
+  val burstableHeadStore = headStoreMatch && sqAddressValid(headStoreIndex) &&
+    sqDataValid(headStoreIndex) && !sqIsAtomic(headStoreIndex) &&
+    sqPmaKind(headStoreIndex) === PMARegionKind.DeviceBurstable.code.U &&
+    sqCommitAuthorized(headStoreIndex) && !sqEffectIssued(headStoreIndex)
+  val burstableGroupLoad = burstableHeadLoad
+  val burstableGroupStore = !burstableGroupLoad && burstableHeadStore
+  val burstableGroupEligible = burstableGroupLoad || burstableGroupStore
+  val burstableGroupWaitMature = burstableGroupWaitValid &&
+    burstableGroupWaitHead === io.robHeadTag &&
+      burstableGroupWaitCycles === burstableGroupCollectionCycles.U
+  val groupAddress = Mux(burstableGroupLoad,
+    lqAddress(headLoadIndex), sqAddress(headStoreIndex))
+  val groupSize = Mux(burstableGroupLoad,
+    lqAccessSize(headLoadIndex), sqAccessSize(headStoreIndex))
+  val groupPma = PMARegionKind.DeviceBurstable.code.U
+  val groupStride = (1.U(33.W) << groupSize)(31, 0)
+  val groupMembers = Wire(Vec(4, Bool()))
+  val group = Wire(new OrderedIOGroup(config = config))
+  group := 0.U.asTypeOf(group)
+  for (member <- 0 until 4) {
+    val expectedTag = advanceRobTag(io.robHeadTag, member)
+    val (loadMatch, loadIndex) = findMatch(
+      lqValid, lqTag, expectedTag, lqEntries, lqIndexWidth)
+    val (storeMatch, storeIndex) = findMatch(
+      sqValid, sqTag, expectedTag, sqEntries, sqIndexWidth)
+    val loadEligible = loadMatch && lqAddressValid(loadIndex) &&
+      !lqM1Owner(loadIndex) && !lqIsAtomic(loadIndex) &&
+      lqPmaKind(loadIndex) === PMARegionKind.DeviceBurstable.code.U &&
+      !lqEffectIssued(loadIndex) && !lqCompleted(loadIndex)
+    val storeEligible = storeMatch && sqAddressValid(storeIndex) &&
+      sqDataValid(storeIndex) && !sqIsAtomic(storeIndex) &&
+      sqPmaKind(storeIndex) === PMARegionKind.DeviceBurstable.code.U &&
+      !sqEffectIssued(storeIndex)
+    val memberAddress = Mux(burstableGroupLoad,
+      lqAddress(loadIndex), sqAddress(storeIndex))
+    val memberSize = Mux(burstableGroupLoad,
+      lqAccessSize(loadIndex), sqAccessSize(storeIndex))
+    val expectedAddress = member match {
+      case 0 => groupAddress
+      case 1 => groupAddress + groupStride
+      case 2 => groupAddress + groupStride + groupStride
+      case 3 => groupAddress + groupStride + groupStride + groupStride
+    }
+    val candidate = Mux(burstableGroupLoad, loadEligible, storeEligible) &&
+      memberAddress === expectedAddress && memberSize === groupSize
+    groupMembers(member) := (if (member == 0) burstableGroupEligible else
+      groupMembers(member - 1) && candidate)
+
+    val request = group.requests(member)
+    request.order := ROBTagOrder.ageFromHead(expectedTag, io.robHeadTag, config)
+    request.robTag := expectedTag
+    request.address := memberAddress
+    request.write := burstableGroupStore
+    request.size := memberSize
+    request.writeData := Mux(burstableGroupStore, sqWriteData(storeIndex), 0.U)
+    request.writeMask := Mux(burstableGroupStore, sqWriteMask(storeIndex), 0.U)
+    request.burstable := true.B
+    request.regionTag := groupPma
+  }
+  group.count := PopCount(groupMembers)
+  io.burstableDeviceGroup.valid := burstableGroupEligible && burstableGroupWaitMature &&
+    !recoveryBlocked
+  io.burstableDeviceGroup.bits := group
 
   val (effectCompleteMatch, effectCompleteIndex) = findMatch(
     sqValid, sqTag, io.storeEffectComplete.bits.robTag, sqEntries, sqIndexWidth)
@@ -347,6 +439,8 @@ class LoadStoreQueues(
     }
     lqValid.foreach(_ := false.B)
     sqValid.foreach(_ := false.B)
+    burstableGroupWaitValid := false.B
+    burstableGroupWaitCycles := 0.U
   }.elsewhen(io.squash.valid) {
     for (index <- 0 until sqEntries) {
       when(sqValid(index) && !sqSquashSurvivor(index)) {
@@ -360,6 +454,8 @@ class LoadStoreQueues(
     for (index <- 0 until sqEntries) {
       sqValid(index) := sqSquashSurvivor(index)
     }
+    burstableGroupWaitValid := false.B
+    burstableGroupWaitCycles := 0.U
   }.otherwise {
     for (index <- 0 until lqEntries) {
       when(lqRetire(index)) {
@@ -445,6 +541,36 @@ class LoadStoreQueues(
     when(io.deviceLoadEffect.fire) {
       lqEffectIssued(headLoadIndex) := true.B
     }
+    when(io.burstableDeviceGroupAccepted.valid) {
+      assert(io.burstableDeviceGroupAccepted.bits.count =/= 0.U &&
+        io.burstableDeviceGroupAccepted.bits.count <= 4.U,
+        "accepted DeviceBurstable group must contain one through four members")
+      for (member <- 0 until 4) {
+        when(member.U < io.burstableDeviceGroupAccepted.bits.count) {
+          val request = io.burstableDeviceGroupAccepted.bits.requests(member)
+          val (loadMatch, loadIndex) = findMatch(
+            lqValid, lqTag, request.robTag, lqEntries, lqIndexWidth)
+          val (storeMatch, storeIndex) = findMatch(
+            sqValid, sqTag, request.robTag, sqEntries, sqIndexWidth)
+          when(request.write) {
+            assert(storeMatch && sqAddressValid(storeIndex) && sqDataValid(storeIndex) &&
+              !sqIsAtomic(storeIndex) &&
+              sqPmaKind(storeIndex) === PMARegionKind.DeviceBurstable.code.U &&
+              !sqEffectIssued(storeIndex),
+              "accepted DeviceBurstable write must retain an eligible SQ owner")
+            sqCommitAuthorized(storeIndex) := true.B
+            sqEffectIssued(storeIndex) := true.B
+          }.otherwise {
+            assert(loadMatch && lqAddressValid(loadIndex) && !lqM1Owner(loadIndex) &&
+              !lqIsAtomic(loadIndex) &&
+              lqPmaKind(loadIndex) === PMARegionKind.DeviceBurstable.code.U &&
+              !lqEffectIssued(loadIndex) && !lqCompleted(loadIndex),
+              "accepted DeviceBurstable read must retain an eligible LQ owner")
+            lqEffectIssued(loadIndex) := true.B
+          }
+        }
+      }
+    }
     when(io.commitAuthorize.fire) {
       sqCommitAuthorized(commitIndex) := true.B
     }
@@ -466,6 +592,16 @@ class LoadStoreQueues(
         sqMetadata(effectCompleteIndex).readData := 0.U
         sqMetadata(effectCompleteIndex).writeData := sqWriteData(effectCompleteIndex)
       }
+    }
+    when(!burstableGroupEligible || io.burstableDeviceGroupAccepted.valid) {
+      burstableGroupWaitValid := false.B
+      burstableGroupWaitCycles := 0.U
+    }.elsewhen(!burstableGroupWaitValid || burstableGroupWaitHead =/= io.robHeadTag) {
+      burstableGroupWaitValid := true.B
+      burstableGroupWaitHead := io.robHeadTag
+      burstableGroupWaitCycles := 0.U
+    }.elsewhen(burstableGroupWaitCycles =/= burstableGroupCollectionCycles.U) {
+      burstableGroupWaitCycles := burstableGroupWaitCycles + 1.U
     }
   }
 

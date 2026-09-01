@@ -46,6 +46,20 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     dut.io.commitAuthorize.bits.poke(0)
     dut.io.storeEffect.ready.poke(false)
     dut.io.deviceLoadEffect.ready.poke(false)
+    dut.io.burstableDeviceGroup.ready.poke(false)
+    dut.io.burstableDeviceGroupAccepted.valid.poke(false)
+    dut.io.burstableDeviceGroupAccepted.bits.count.poke(1)
+    dut.io.burstableDeviceGroupAccepted.bits.requests.foreach { request =>
+      request.order.poke(0)
+      request.robTag.poke(0)
+      request.address.poke(0)
+      request.write.poke(false)
+      request.size.poke(2)
+      request.writeData.poke(0)
+      request.writeMask.poke(0)
+      request.burstable.poke(true)
+      request.regionTag.poke(PMARegionKind.DeviceBurstable.code)
+    }
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
     dut.io.storeEffectComplete.bits.accessFault.poke(false)
@@ -166,6 +180,58 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.retire(0).valid.poke(false)
         dut.io.deviceLoadInFlight.expect(false)
+      }
+    }
+
+    it("previews and accepts four contiguous DeviceBurstable loads across ROB wrap") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        val tags = Seq(22, 23, 32, 33)
+        val addresses = Seq(BigInt("b0000ff0", 16), BigInt("b0000ff4", 16),
+          BigInt("b0000ff8", 16), BigInt("b0000ffc", 16))
+        for ((tag, address) <- tags.zip(addresses)) {
+          allocate(dut, 0, tag = tag, load = true, store = false,
+            pmaKind = PMARegionKind.DeviceBurstable)
+          dut.clock.step()
+          noAllocations(dut)
+          queryLoad(dut, tag, address, 15)
+          dut.io.loadAddress.ready.expect(true)
+          dut.clock.step()
+          dut.io.loadAddress.valid.poke(false)
+        }
+
+        dut.io.robHeadTag.poke(tags.head)
+        dut.io.deviceLoadEffect.valid.expect(false)
+        // The collector waits six full cycles so M0 can populate later LQ/SQ members.
+        dut.clock.step(7)
+        dut.io.burstableDeviceGroup.valid.expect(true)
+        dut.io.burstableDeviceGroup.bits.count.expect(4)
+        for ((tag, member) <- tags.zipWithIndex) {
+          dut.io.burstableDeviceGroup.bits.requests(member).robTag.expect(tag)
+          dut.io.burstableDeviceGroup.bits.requests(member).order.expect(member)
+          dut.io.burstableDeviceGroup.bits.requests(member).address.expect(addresses(member))
+          dut.io.burstableDeviceGroup.bits.requests(member).write.expect(false)
+          dut.io.burstableDeviceGroup.bits.requests(member).burstable.expect(true)
+        }
+
+        dut.io.burstableDeviceGroupAccepted.valid.poke(true)
+        dut.io.burstableDeviceGroupAccepted.bits.count.poke(4)
+        for ((tag, member) <- tags.zipWithIndex) {
+          val request = dut.io.burstableDeviceGroupAccepted.bits.requests(member)
+          request.order.poke(member)
+          request.robTag.poke(tag)
+          request.address.poke(addresses(member))
+          request.write.poke(false)
+          request.size.poke(2)
+          request.writeData.poke(0)
+          request.writeMask.poke(0)
+          request.burstable.poke(true)
+          request.regionTag.poke(PMARegionKind.DeviceBurstable.code)
+        }
+        dut.clock.step()
+        dut.io.burstableDeviceGroupAccepted.valid.poke(false)
+        dut.io.burstableDeviceGroup.valid.expect(false)
+        dut.io.deviceLoadInFlight.expect(true)
       }
     }
 
