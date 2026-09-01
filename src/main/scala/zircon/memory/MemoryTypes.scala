@@ -179,8 +179,8 @@ class StoreWriteResult(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 }
 
 /** L2 demand clients share physical read MSHRs without reserving slots by
-  * cache. The current integration only drives `Data`; `Instruction` is the
-  * retained L1I contract rather than an implemented L1I request path.
+  * cache. Both active L1I and L1D paths use this interface; `Instruction`
+  * carries the L1I local token and `Data` carries an L1D local MSHR token.
   */
 object L2DemandClient {
   val Instruction = 0

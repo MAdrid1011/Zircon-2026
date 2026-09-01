@@ -271,11 +271,13 @@ line and drains it through an ID-5 eight-beat AXI burst. A failing B response
 retries the retained line rather than discarding it. Trace elaborations provide
 a targeted dirty `tohost` bridge that transfers the exact L1D line to L2,
 evicts it, and holds the committed store until its ID-5 B response; it is not a
-general `FENCE` implementation or production hardware. Formal L1I and its
-active demand admission, coherent external atomic handling, and general cache
-ordering remain unfinished. `AXIDataReadEngine` now owns the four physical L2 demand slots and
-returns an exact client token rather than treating an L1D-local MSHR as an AXI
-ID; the current client is D-side only.
+general `FENCE` implementation or production hardware. The active
+[L1I demand slice](l1-instruction-cache.md) now owns the 1 KiB, two-way
+instruction cache and uses the retained `Instruction` token through the same
+four physical L2 demand slots. It has no resident L2 I-hit array or final I/D
+coherence. Formal L1I proof, coherent external atomic handling, and general
+cache ordering remain unfinished. `AXIDataReadEngine` returns the exact client
+token rather than treating an L1D-local MSHR as an AXI ID.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,

@@ -21,9 +21,11 @@ wrong `RLAST`, or out-of-range request is an assertion.
 
 An L2 hit bypasses this engine: `ExclusiveL2TransferStore` transfers the only
 D copy to L1D. On an L2 miss, L1D sends a `Data` client request and later
-matches the response with `clientMshr`. The current core has no L1I client;
-`Instruction` is retained only so the future L1I uses the same credit pool
-rather than a statically reserved second pool.
+matches the response with `clientMshr`. `L1InstructionCache` is an active
+`Instruction` client with local token zero; it shares these four physical
+owners fairly with L1D and receives only the complete response for its retained
+owner. The executable slice does not yet implement an I-side resident L2 hit
+or dynamic I/D allocation.
 
 ## Recovery and verification
 

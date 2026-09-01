@@ -4,6 +4,7 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
 import zircon.backend.{BranchProvider, CommitRedirectReason}
 import zircon.frontend.M1Frontend
+import zircon.memory.L2DemandClient
 
 class M1FrontendSpec extends AnyFunSpec with ChiselSim {
   private val ResetVector = BigInt("80000000", 16)
@@ -14,12 +15,12 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
 
   private def clearInputs(dut: M1Frontend): Unit = {
     dut.io.enable.poke(false)
-    dut.io.ar.ready.poke(false)
-    dut.io.r.valid.poke(false)
-    dut.io.r.bits.id.poke(0)
-    dut.io.r.bits.data.poke(0)
-    dut.io.r.bits.resp.poke(0)
-    dut.io.r.bits.last.poke(false)
+    dut.io.l2Request.ready.poke(false)
+    dut.io.l2Response.valid.poke(false)
+    dut.io.l2Response.bits.client.poke(L2DemandClient.Instruction)
+    dut.io.l2Response.bits.clientMshr.poke(0)
+    dut.io.l2Response.bits.accessFault.poke(false)
+    for (word <- 0 until 8) dut.io.l2Response.bits.lineData(word).poke(0)
     dut.io.decode.foreach(_.ready.poke(false))
 
     dut.io.branchTraining.valid.poke(false)
@@ -75,34 +76,34 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
     dut.io.currentPc.expect(base)
     dut.io.enable.poke(true)
     dut.clock.step()
-    dut.io.ar.valid.expect(true)
-    dut.io.ar.bits.id.expect(0)
-    dut.io.ar.bits.addr.expect(base)
-    dut.io.ar.bits.len.expect(beats - 1)
-    dut.io.ar.bits.size.expect(2)
-    dut.io.ar.bits.burst.expect(1)
+    dut.clock.step()
+    dut.io.l2Request.valid.expect(true)
+    dut.io.l2Request.bits.client.expect(L2DemandClient.Instruction)
+    dut.io.l2Request.bits.clientMshr.expect(0)
+    dut.io.l2Request.bits.lineAddress.expect(base & ~BigInt(31))
   }
 
   private def acceptRequest(dut: M1Frontend): Unit = {
-    dut.io.ar.ready.poke(true)
+    dut.io.l2Request.ready.poke(true)
     dut.clock.step()
-    dut.io.ar.ready.poke(false)
-    dut.io.r.ready.expect(true)
+    dut.io.l2Request.ready.poke(false)
+    dut.io.l2Response.ready.expect(true)
   }
 
-  private def sendPacket(dut: M1Frontend, words: Seq[BigInt]): Unit = {
-    words.zipWithIndex.foreach { case (word, index) =>
-      dut.io.r.valid.poke(true)
-      dut.io.r.bits.id.poke(0)
-      dut.io.r.bits.data.poke(word)
-      dut.io.r.bits.resp.poke(0)
-      dut.io.r.bits.last.poke(index == words.length - 1)
-      dut.io.r.ready.expect(true)
-      dut.clock.step()
-      dut.io.r.valid.poke(false)
+  private def sendPacket(dut: M1Frontend, words: Seq[BigInt],
+      expectPacket: Boolean = true): Unit = {
+    dut.io.l2Response.valid.poke(true)
+    dut.io.l2Response.bits.client.poke(L2DemandClient.Instruction)
+    dut.io.l2Response.bits.clientMshr.poke(0)
+    dut.io.l2Response.bits.accessFault.poke(false)
+    for (index <- 0 until 8) {
+      dut.io.l2Response.bits.lineData(index).poke(words.lift(index).getOrElse(Nop))
     }
-    dut.io.fetchBusy.expect(true)
+    dut.io.l2Response.ready.expect(true)
     dut.clock.step()
+    dut.io.l2Response.valid.poke(false)
+    dut.io.fetchBusy.expect(expectPacket)
+    if (expectPacket) dut.clock.step()
   }
 
   private def driveRecovery(dut: M1Frontend, target: BigInt): Unit = {
@@ -150,8 +151,8 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
 
         dut.clock.step()
-        dut.io.ar.valid.expect(true)
-        dut.io.ar.bits.addr.expect(ResetVector + 20)
+        dut.io.l2Request.valid.expect(false)
+        dut.io.fetchBusy.expect(true)
       }
     }
 
@@ -170,14 +171,14 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         dut.io.decode(0).bits.prediction.predictedTaken.expect(false)
         dut.io.decode(1).valid.expect(false)
         dut.clock.step(3)
-        dut.io.ar.valid.expect(false)
+        dut.io.l2Request.valid.expect(false)
 
         driveRecovery(dut, recoveredTarget)
         dut.io.unresolvedIndirect.expect(false)
         dut.io.currentPc.expect(recoveredTarget)
-        dut.clock.step()
-        dut.io.ar.valid.expect(true)
-        dut.io.ar.bits.addr.expect(recoveredTarget)
+        dut.clock.step(2)
+        dut.io.l2Request.valid.expect(true)
+        dut.io.l2Request.bits.lineAddress.expect(recoveredTarget)
       }
     }
 
@@ -195,9 +196,8 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         dut.io.decode(0).bits.prediction.predictedTarget.expect(ResetVector + 16)
         dut.io.decode(0).bits.prediction.conditional.expect(true)
         dut.io.decode(0).bits.prediction.provider.expect(BranchProvider.Base)
-        dut.clock.step()
-        dut.io.ar.valid.expect(true)
-        dut.io.ar.bits.addr.expect(ResetVector + 16)
+        dut.clock.step(2)
+        dut.io.l2Request.valid.expect(false)
       }
     }
 
@@ -221,20 +221,11 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         dut.io.currentPc.expect(commitTarget)
         dut.io.fetchDraining.expect(true)
 
-        for (index <- 0 until 4) {
-          dut.io.r.valid.poke(true)
-          dut.io.r.bits.id.poke(0)
-          dut.io.r.bits.data.poke(index)
-          dut.io.r.bits.resp.poke(0)
-          dut.io.r.bits.last.poke(index == 3)
-          dut.io.r.ready.expect(true)
-          dut.clock.step()
-          dut.io.r.valid.poke(false)
-        }
+        sendPacket(dut, Seq.tabulate(4)(BigInt(_)), expectPacket = false)
         dut.io.decode.foreach(_.valid.expect(false))
-        dut.clock.step()
-        dut.io.ar.valid.expect(true)
-        dut.io.ar.bits.addr.expect(commitTarget)
+        dut.clock.step(2)
+        dut.io.l2Request.valid.expect(true)
+        dut.io.l2Request.bits.lineAddress.expect(commitTarget)
       }
     }
   }

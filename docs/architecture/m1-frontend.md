@@ -1,7 +1,7 @@
 # M1 Frontend
 
-`M1Frontend` is the executable RV32I frontend boundary. It combines the
-temporary one-outstanding `AXIInstructionFetch`, the frozen 512-entry banked
+`M1Frontend` is the executable RV32I frontend boundary. It combines the active
+`L1InstructionCache` shared-demand client, the frozen 512-entry banked
 bimodal direction predictor, 64-entry BTB, 8-entry speculative RAS,
 predecode/history scan, and the four-entry FetchDecodeQueue. It emits two
 in-order `FetchQueueEntry` decode lanes; the backend remains the sole owner of
@@ -11,22 +11,22 @@ decode, rename, execution, and commit.
 
 | Item | Value |
 |---|---:|
-| AXI fetch packet | 1--4 32-bit words |
+| L1I fetch packet | 1--4 32-bit words, clipped at a 32-byte line boundary |
 | frontend fetch width | 4 |
 | decode output width | 2 |
 | queue depth | 4 entries |
 | direction provider | 512-entry four-bank bimodal Base |
 | target provider | 64-entry two-way BTB plus 8-entry RAS |
 
-M3 replaces only the temporary AXI transport with the formal L1I/cache
-scheduler. It must preserve the packet, prediction metadata, redirect, drain,
-and precise fetch-fault behavior at this boundary.
+The active M3 L1I/cache scheduler preserves the packet, prediction metadata,
+redirect, drain, and precise fetch-fault behavior at this boundary. Its
+shared-demand contract is specified in [M3 L1 Instruction Cache](l1-instruction-cache.md).
 
 ## Interfaces
 
 | Interface | Direction | Contract |
 |---|---|---|
-| `enable`, `ar`, `r` | fetch input / AXI | Starts a transport request when the predictors and indirect barrier permit it. |
+| `enable`, `l2Request`, `l2Response` | fetch input / shared L2 demand | Starts a cached fetch when the predictors and indirect barrier permit it. |
 | `decode[2]` | output | Ordered FetchDecodeQueue entries; lane 1 is never valid without lane 0. |
 | `branchTraining` | input | Commit-only BDB training record for bimodal and BTB. |
 | `executeRecovery` | input | Mispredict recovery history, RAS checkpoint/action, and actual redirect target. |
@@ -61,9 +61,9 @@ cycle.
 Redirect priority is exact: `commitRedirect` has priority over
 `executeRecovery`; both override the predicted next PC. An external redirect
 flushes the FetchDecodeQueue, clears history/RAS for a commit redirect or
-restores the BDB checkpoint/action for execute recovery, and is passed to the
-AXI transport. A transaction accepted before redirect is therefore drained by
-`AXIInstructionFetch`; an unconsumed response is discarded.
+restores the BDB checkpoint/action for execute recovery, and is passed to L1I.
+A shared demand accepted before redirect is therefore drained through
+`AXIDataReadEngine`; an unconsumed response is discarded.
 
 A JALR without an RAS or BTB target is queued as the last accepted prefix entry
 with `predictedTaken=false`. The frontend sets an indirect barrier immediately
@@ -77,18 +77,19 @@ drained older stores and device work before the backend emits this event.
 
 ## Invariants And Verification Mapping
 
-- The accepted mask is non-empty and no longer than the AXI packet.
+- The accepted mask is non-empty and no longer than the L1I packet.
 - Queue enqueue, history advance, and RAS speculation are one atomic packet
   event; a higher-priority redirect prevents all three.
-- `commitRedirect` wins over execute recovery, and no AR is issued while an
+- `commitRedirect` wins over execute recovery, and no demand is issued while an
   indirect barrier is active.
 - Bimodal/BTB mutation is driven only by commit training; FENCE.I never races
   with training.
-- Fetch queue fault data is copied directly from the AXI packet and remains in
+- Fetch queue fault data is copied directly from the L1I packet and remains in
   program order through decode.
 
 `M1FrontendSpec` verifies packet-to-decode transfer, earliest-control target
 selection, targetless-JALR blocking and recovery, commit-training prediction,
-and commit-over-recovery redirect priority while draining an accepted AXI
-burst. `AXIInstructionFetchSpec` owns the transport's lower-level boundary,
-backpressure, RRESP, ID, and RLAST cases.
+and commit-over-recovery redirect priority while draining an accepted L2
+demand. `L1InstructionCacheSpec` owns cache hit/miss, demand drain, and
+refill-fault cases. `AXIInstructionFetchSpec` remains the regression for the
+M1 historical transport contract.

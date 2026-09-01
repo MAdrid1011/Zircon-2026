@@ -56,12 +56,13 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
 
   private def sendInstructionPacket(dut: ZirconCore, words: Seq[BigInt],
       responses: Seq[Int] = Seq.empty): Unit = {
-    words.zipWithIndex.foreach { case (word, index) =>
+    require(words.length <= 8)
+    (0 until 8).foreach { index =>
       dut.io.axi.r.valid.poke(true)
-      dut.io.axi.r.bits.id.poke(0)
-      dut.io.axi.r.bits.data.poke(word)
+      dut.io.axi.r.bits.id.poke(1)
+      dut.io.axi.r.bits.data.poke(words.lift(index).getOrElse(Nop))
       dut.io.axi.r.bits.resp.poke(responses.lift(index).getOrElse(0))
-      dut.io.axi.r.bits.last.poke(index == words.length - 1)
+      dut.io.axi.r.bits.last.poke(index == 7)
       dut.io.axi.r.ready.expect(true)
       dut.clock.step()
       dut.io.axi.r.valid.poke(false)
@@ -280,7 +281,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           core.io.axi.ar.bits.len.peek().litValue))
       }
       cacheReadSeen ||= arFire && core.io.axi.ar.bits.id.peek().litValue >= 1 &&
-        core.io.axi.ar.bits.id.peek().litValue <= 4
+        core.io.axi.ar.bits.id.peek().litValue <= 4 &&
+        core.io.axi.ar.bits.addr.peek().litValue == deviceAddress
     }))
 
     withClue(s"$name trace=$events deviceReads=$deviceReads") {
@@ -308,11 +310,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         dut.io.trace.get.foreach(_.valid.expect(false))
 
         dut.clock.step(128)
-        dut.clock.step()
+        dut.clock.step(3)
         dut.io.axi.ar.valid.expect(true)
-        dut.io.axi.ar.bits.id.expect(0)
+        dut.io.axi.ar.bits.id.expect(1)
         dut.io.axi.ar.bits.addr.expect(ResetVector)
-        dut.io.axi.ar.bits.len.expect(3)
+        dut.io.axi.ar.bits.len.expect(7)
         dut.io.axi.ar.ready.poke(true)
         dut.clock.step()
         dut.io.axi.ar.ready.poke(false)
@@ -362,7 +364,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         dut.clock.step(128)
-        dut.clock.step()
+        dut.clock.step(3)
         dut.io.axi.ar.valid.expect(true)
         dut.io.axi.ar.ready.poke(true)
         dut.clock.step()
@@ -1440,7 +1442,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         ), cycles = 256, observeCycle = (core, cycle) => {
           val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
             core.io.axi.ar.ready.peek().litToBoolean
-          if (arFire && core.io.axi.ar.bits.id.peek().litValue >= 1 &&
+          if (atomicResponseCycle >= 0 && arFire &&
+              core.io.axi.ar.bits.id.peek().litValue >= 1 &&
               core.io.axi.ar.bits.id.peek().litValue <= 4 && firstDataReadCycle < 0) {
             firstDataReadCycle = cycle
           }
@@ -1498,8 +1501,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
             core.io.axi.ar.ready.peek().litToBoolean
           val id = core.io.axi.ar.bits.id.peek().litValue
-          if (arFire && id >= 1 && id <= 4) {
-            dataReads += core.io.axi.ar.bits.addr.peek().litValue
+          val address = core.io.axi.ar.bits.addr.peek().litValue
+          if (arFire && id >= 1 && id <= 4 &&
+              Set(lineA, lineB, lineC).contains(address)) {
+            dataReads += address
           }
         }))
 
@@ -1518,14 +1523,15 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val events = throughFirstTrap(runProgram(dut, Map(
-          ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
           ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
           ResetVector + 8 -> BigInt("00100073", 16)
-        ), cycles = 192, rResponse = (id, _) => if (id == 0) 0 else 2))
+        ), cycles = 192, rResponse = (_, address) =>
+          if (address >= BigInt("80001000", 16) && address < BigInt("80001020", 16)) 2 else 0))
 
         assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4))
         assert(events(1).trap && !events(1).gprWrite && events(1).cause == 5 &&
-          events(1).trapValue == ResetVector)
+          events(1).trapValue == BigInt("80001000", 16))
       }
     }
   }

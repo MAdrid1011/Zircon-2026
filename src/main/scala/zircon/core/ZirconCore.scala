@@ -1,15 +1,15 @@
 package zircon.core
 
 import chisel3._
-import chisel3.util.{Arbiter, Decoupled, PopCount}
+import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter}
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
-  HostStoreFlush, LoadCompletion, OrderedIOCombiner, OrderedIOGroup,
-  OrderedIOGroupStreamer, StoreWriteResult}
+  HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
+  OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -36,6 +36,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
   val l2DemandEngine = Module(new AXIDataReadEngine(cfg))
+  val l2DemandArbiter = Module(new RRArbiter(new L2DemandRequest(cfg), 2))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
   val atomicEngine = Module(new AtomicMemoryEngine(cfg))
   val orderedIOCombiner = Module(new OrderedIOCombiner(config = cfg))
@@ -145,8 +146,26 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid &&
     cacheableLoadForward
   l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
-  l1dLoadCache.io.dataRequest <> l2DemandEngine.io.request
-  l1dLoadCache.io.dataResponse <> l2DemandEngine.io.response
+  l2DemandArbiter.io.in(0) <> l1dLoadCache.io.dataRequest
+  l2DemandArbiter.io.in(1) <> frontend.io.l2Request
+  l2DemandEngine.io.request <> l2DemandArbiter.io.out
+  val l2ResponseToInstruction = l2DemandEngine.io.response.bits.client ===
+    L2DemandClient.Instruction.U
+  val l2ResponseToData = l2DemandEngine.io.response.bits.client ===
+    L2DemandClient.Data.U
+  l1dLoadCache.io.dataResponse.valid := l2DemandEngine.io.response.valid &&
+    l2ResponseToData
+  l1dLoadCache.io.dataResponse.bits := l2DemandEngine.io.response.bits
+  frontend.io.l2Response.valid := l2DemandEngine.io.response.valid &&
+    l2ResponseToInstruction
+  frontend.io.l2Response.bits := l2DemandEngine.io.response.bits
+  l2DemandEngine.io.response.ready := Mux(l2ResponseToInstruction,
+    frontend.io.l2Response.ready, Mux(l2ResponseToData,
+      l1dLoadCache.io.dataResponse.ready, false.B))
+  when(l2DemandEngine.io.response.valid) {
+    assert(l2ResponseToInstruction || l2ResponseToData,
+      "L2 demand response named an unsupported top-level client")
+  }
   l1dLoadCache.io.l2Insert <> l2TransferStore.io.insert
   l1dLoadCache.io.l2Lookup <> l2TransferStore.io.lookup
   l1dLoadCache.io.l2Response <> l2TransferStore.io.response
@@ -390,12 +409,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   val arLockValid = RegInit(false.B)
   val arLockOwner = RegInit(0.U(2.W))
-  val arTurn = RegInit(0.U(2.W)) // 0 fetch, 1 L1D refill, 2 ordered device, 3 atomic.
+  val arTurn = RegInit(0.U(2.W)) // 0 shared L2 demand, 1 ordered device, 2 atomic.
   val arClientValid = Wire(Vec(4, Bool()))
-  arClientValid(0) := frontend.io.ar.valid
-  arClientValid(1) := l2DemandEngine.io.ar.valid
-  arClientValid(2) := orderedIOEngine.io.ar.valid
-  arClientValid(3) := atomicEngine.io.ar.valid
+  arClientValid(0) := l2DemandEngine.io.ar.valid
+  arClientValid(1) := orderedIOEngine.io.ar.valid
+  arClientValid(2) := atomicEngine.io.ar.valid
+  arClientValid(3) := false.B
   val arTurnNext = Mux(arTurn === 3.U, 0.U(2.W), arTurn + 1.U)
   val arTurnAfterNext = Mux(arTurnNext === 3.U, 0.U(2.W), arTurnNext + 1.U)
   val arTurnAfterAfterNext = Mux(arTurnAfterNext === 3.U, 0.U(2.W),
@@ -404,18 +423,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     Mux(arClientValid(arTurnNext), arTurnNext,
       Mux(arClientValid(arTurnAfterNext), arTurnAfterNext, arTurnAfterAfterNext)))
   val selectedArOwner = Mux(arLockValid, arLockOwner, unlockedArOwner)
-  io.axi.ar.valid := Mux(selectedArOwner === 0.U, frontend.io.ar.valid,
-    Mux(selectedArOwner === 1.U, l2DemandEngine.io.ar.valid,
-      Mux(selectedArOwner === 2.U, orderedIOEngine.io.ar.valid,
-        atomicEngine.io.ar.valid)))
-  io.axi.ar.bits := Mux(selectedArOwner === 0.U, frontend.io.ar.bits,
-    Mux(selectedArOwner === 1.U, l2DemandEngine.io.ar.bits,
-      Mux(selectedArOwner === 2.U, orderedIOEngine.io.ar.bits,
-        atomicEngine.io.ar.bits)))
-  frontend.io.ar.ready := io.axi.ar.ready && selectedArOwner === 0.U
-  l2DemandEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 1.U
-  orderedIOEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 2.U
-  atomicEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 3.U
+  io.axi.ar.valid := Mux(selectedArOwner === 0.U, l2DemandEngine.io.ar.valid,
+    Mux(selectedArOwner === 1.U, orderedIOEngine.io.ar.valid,
+      Mux(selectedArOwner === 2.U, atomicEngine.io.ar.valid, false.B)))
+  io.axi.ar.bits := Mux(selectedArOwner === 0.U, l2DemandEngine.io.ar.bits,
+    Mux(selectedArOwner === 1.U, orderedIOEngine.io.ar.bits,
+      atomicEngine.io.ar.bits))
+  l2DemandEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 0.U
+  orderedIOEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 1.U
+  atomicEngine.io.ar.ready := io.axi.ar.ready && selectedArOwner === 2.U
   when(!arLockValid && io.axi.ar.valid && !io.axi.ar.ready) {
     arLockValid := true.B
     arLockOwner := selectedArOwner
@@ -425,25 +441,21 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     arTurn := Mux(selectedArOwner === 3.U, 0.U(2.W), selectedArOwner + 1.U)
   }
 
-  val rToFetch = io.axi.r.bits.id === 0.U
   val rToData = io.axi.r.bits.id >= 1.U && io.axi.r.bits.id <= 4.U
   val rToOrderedIO = io.axi.r.bits.id === 6.U
   val rToAtomic = io.axi.r.bits.id === 7.U
-  frontend.io.r.valid := io.axi.r.valid && rToFetch
-  frontend.io.r.bits := io.axi.r.bits
   l2DemandEngine.io.r.valid := io.axi.r.valid && rToData
   l2DemandEngine.io.r.bits := io.axi.r.bits
   orderedIOEngine.io.r.valid := io.axi.r.valid && rToOrderedIO
   orderedIOEngine.io.r.bits := io.axi.r.bits
   atomicEngine.io.r.valid := io.axi.r.valid && rToAtomic
   atomicEngine.io.r.bits := io.axi.r.bits
-  io.axi.r.ready := Mux(rToFetch, frontend.io.r.ready,
-    Mux(rToData, l2DemandEngine.io.r.ready,
-      Mux(rToOrderedIO, orderedIOEngine.io.r.ready,
-        Mux(rToAtomic, atomicEngine.io.r.ready, false.B))))
+  io.axi.r.ready := Mux(rToData, l2DemandEngine.io.r.ready,
+    Mux(rToOrderedIO, orderedIOEngine.io.r.ready,
+      Mux(rToAtomic, atomicEngine.io.r.ready, false.B)))
   when(io.axi.r.valid) {
-    assert(rToFetch || rToData || rToOrderedIO || rToAtomic,
-      "top-level AXI R used an ID outside fetch, data, ordered-device, and atomic owners")
+    assert(rToData || rToOrderedIO || rToAtomic,
+      "top-level AXI R used an ID outside L2 demand, ordered-device, and atomic owners")
   }
 
   io.trace.foreach { trace =>

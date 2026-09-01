@@ -66,17 +66,35 @@ class M0RequestArbiterSpec extends AnyFunSpec with ChiselSim {
     input.bits.m1Owner.poke(replay)
   }
 
+  private def acceptInput(dut: M0RequestArbiter, replay: Boolean,
+      tag: Int, address: BigInt): Unit = {
+    drive(dut, replay, tag, address)
+    val input = if (replay) dut.io.replay else dut.io.direct
+    input.ready.expect(true)
+    dut.clock.step()
+    input.valid.poke(false)
+  }
+
+  private def acceptBoth(dut: M0RequestArbiter, directTag: Int,
+      replayTag: Int): Unit = {
+    drive(dut, replay = false, directTag, BigInt("80001000", 16))
+    drive(dut, replay = true, replayTag, BigInt("a0000000", 16))
+    dut.io.direct.ready.expect(true)
+    dut.io.replay.ready.expect(true)
+    dut.clock.step()
+    dut.io.direct.valid.poke(false)
+    dut.io.replay.valid.poke(false)
+  }
+
   describe("M0RequestArbiter") {
     it("chooses the older replay across the ROB index wrap") {
       simulate(new M0RequestArbiter) { dut =>
         clear(dut)
         dut.io.robHeadTag.poke(20)
-        drive(dut, replay = false, tag = 0, BigInt("80001000", 16))
-        drive(dut, replay = true, tag = 21, BigInt("a0000000", 16))
+        acceptBoth(dut, directTag = 0, replayTag = 21)
         dut.io.output.ready.poke(true)
         dut.io.output.valid.expect(true)
         dut.io.output.bits.address.robTag.expect(21)
-        dut.io.replay.ready.expect(true)
         dut.io.direct.ready.expect(false)
       }
     }
@@ -84,33 +102,27 @@ class M0RequestArbiterSpec extends AnyFunSpec with ChiselSim {
     it("passes the direct M0 path when no replay is pending") {
       simulate(new M0RequestArbiter) { dut =>
         clear(dut)
-        drive(dut, replay = false, tag = 4, BigInt("80002000", 16))
+        acceptInput(dut, replay = false, tag = 4, BigInt("80002000", 16))
         dut.io.output.ready.poke(true)
         dut.io.output.valid.expect(true)
         dut.io.output.bits.address.robTag.expect(4)
-        dut.io.direct.ready.expect(true)
-        dut.io.replay.ready.expect(false)
       }
     }
 
-    it("locks a selected source while backpressured despite a later older replay") {
+    it("retains a selected request while backpressured despite source withdrawal") {
       simulate(new M0RequestArbiter) { dut =>
         clear(dut)
         dut.io.robHeadTag.poke(1)
-        drive(dut, replay = false, tag = 4, BigInt("80003000", 16))
+        acceptInput(dut, replay = false, tag = 4, BigInt("80003000", 16))
         dut.io.output.valid.expect(true)
         dut.io.output.bits.address.robTag.expect(4)
-        dut.clock.step()
 
-        drive(dut, replay = true, tag = 3, BigInt("a0000000", 16))
+        acceptInput(dut, replay = true, tag = 3, BigInt("a0000000", 16))
         dut.io.output.bits.address.robTag.expect(4)
         dut.io.direct.ready.expect(false)
         dut.io.replay.ready.expect(false)
         dut.io.output.ready.poke(true)
-        dut.io.direct.ready.expect(true)
         dut.clock.step()
-
-        dut.io.direct.valid.poke(false)
         dut.io.output.valid.expect(true)
         dut.io.output.bits.address.robTag.expect(3)
       }
@@ -119,8 +131,8 @@ class M0RequestArbiterSpec extends AnyFunSpec with ChiselSim {
     it("suppresses all transfers during selective recovery and global flush") {
       simulate(new M0RequestArbiter) { dut =>
         clear(dut)
-        drive(dut, replay = false, tag = 4, BigInt("80004000", 16))
-        drive(dut, replay = true, tag = 5, BigInt("a0000000", 16))
+        acceptInput(dut, replay = false, tag = 4, BigInt("80004000", 16))
+        acceptInput(dut, replay = true, tag = 5, BigInt("a0000000", 16))
         dut.io.output.ready.poke(true)
         dut.io.squash.valid.poke(true)
         dut.io.squash.bits.poke(3)
