@@ -39,3 +39,26 @@ equivalence of their loads, stores, or atomics. The next verification change
 must compare committed load/store/atomic metadata and final backing-memory
 state against locked Spike and Sail, then add error and backpressure stress
 with explicit seeds.
+
+## Committed-memory differential harness status
+
+ZirconSim commit `2bce488562b756a572be9a9004d720a5eb4bab42` adds the bounded
+Spike committed-memory comparison and exact sorted AXI backing-memory snapshots.
+It covers the four ELFs above through `make -C ZirconSim diff-memory-spike
+SPIKE=/path/to/locked/spike`, including their trailing `tohost` store. The
+comparator checks committed load/store/AMO metadata and every touched backing
+word reconstructed from the ELF image and reference committed stores.
+
+At this revision the following local prerequisites passed:
+
+```bash
+make -C ZirconSim unit
+make -C ZirconSim tohost
+```
+
+The latter reproduced the table's four seed-1 completions and produced a
+backing-memory snapshot for each run. No locked Spike executable was available
+for a complete `diff-memory-spike` invocation, so this is harness and local
+completion evidence only. It must not be read as a successful Spike
+committed-memory differential; a Sail memory trace adapter also remains
+required.
