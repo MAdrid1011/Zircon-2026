@@ -46,6 +46,8 @@ class MemoryQueueIngress(
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
     val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
+    val orderingBarrier = Input(Valid(UInt(config.robTagWidth.W)))
+    val orderingReady = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -99,6 +101,8 @@ class MemoryQueueIngress(
   io.deviceLoadInFlight := queues.io.deviceLoadInFlight
   io.burstableDeviceGroup <> queues.io.burstableDeviceGroup
   queues.io.burstableDeviceGroupAccepted := io.burstableDeviceGroupAccepted
+  queues.io.orderingBarrier := io.orderingBarrier
+  io.orderingReady := queues.io.orderingReady
   io.loadCount := queues.io.loadCount
   io.storeCount := queues.io.storeCount
 

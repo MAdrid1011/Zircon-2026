@@ -69,6 +69,32 @@ class MemIssueQueueSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("does not let younger M0 work pass an unready atomic") {
+      simulate(new MemIssueQueue) { dut =>
+        clear(dut)
+        // The atomic cannot start until p32 wakes; the younger M0 store is
+        // otherwise ready and must remain behind the pre-LSQ ordering barrier.
+        dut.io.integerReady.poke(BigInt(1) << 1)
+        drive(dut, 0, tag = 1, endpoints = EndpointMask.M0, UopClass.Atomic,
+          sourceReady = false, sourcePhysical = 32)
+        drive(dut, 1, tag = 2, endpoints = EndpointMask.M0, UopClass.Store,
+          sourcePhysical = 1)
+        dut.clock.step()
+        dut.io.enqueue.foreach(_.valid.poke(false))
+
+        dut.io.m0Issue.valid.expect(false)
+        dut.io.m1Issue.valid.expect(false)
+        dut.io.integerReady.poke((BigInt(1) << 1) | (BigInt(1) << 32))
+        dut.io.m0Issue.valid.expect(true)
+        dut.io.m0Issue.bits.robTag.expect(1)
+        dut.io.m0Issue.ready.poke(true)
+        dut.clock.step()
+        dut.io.m0Issue.ready.poke(false)
+        dut.io.m0Issue.valid.expect(true)
+        dut.io.m0Issue.bits.robTag.expect(2)
+      }
+    }
+
     it("uses M1 for the oldest load and M0 for the next independent load") {
       simulate(new MemIssueQueue) { dut =>
         clear(dut)

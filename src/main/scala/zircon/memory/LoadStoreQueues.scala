@@ -60,6 +60,13 @@ class LoadStoreQueues(
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
     val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
 
+    /** A FENCE/FENCE.I at the live ROB head asks whether every older local
+      * memory owner has drained. The tag, rather than total occupancy, keeps
+      * speculative younger work from deadlocking the serializing instruction.
+      */
+    val orderingBarrier = Input(Valid(UInt(config.robTagWidth.W)))
+    val orderingReady = Output(Bool())
+
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -789,6 +796,16 @@ class LoadStoreQueues(
   }
   assert(PopCount(lqValid) <= lqEntries.U, "LQ occupancy exceeded its depth")
   assert(PopCount(sqValid) <= sqEntries.U, "SQ occupancy exceeded its depth")
+  val orderingBarrierAge = ROBTagOrder.ageFromHead(
+    io.orderingBarrier.bits, io.robHeadTag, config)
+  val olderLoadPending = VecInit((0 until lqEntries).map(index =>
+    lqValid(index) && ROBTagOrder.ageFromHead(
+      lqTag(index), io.robHeadTag, config) < orderingBarrierAge)).asUInt.orR
+  val olderStorePending = VecInit((0 until sqEntries).map(index =>
+    sqValid(index) && ROBTagOrder.ageFromHead(
+      sqTag(index), io.robHeadTag, config) < orderingBarrierAge)).asUInt.orR
+  io.orderingReady := !io.orderingBarrier.valid ||
+    !(olderLoadPending || olderStorePending)
   io.loadCount := PopCount(lqValid)
   io.storeCount := PopCount(sqValid)
   io.storeCommitInFlight := VecInit((0 until sqEntries).map(index =>

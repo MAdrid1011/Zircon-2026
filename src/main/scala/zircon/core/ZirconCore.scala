@@ -5,7 +5,7 @@ import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter}
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
-import zircon.frontend.M1Frontend
+import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
   HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
@@ -341,7 +341,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.interruptBlocked := lsuIngress.io.storeCommitInFlight ||
     lsuIngress.io.deviceLoadInFlight || lsuIngress.io.atomicInFlight ||
     atomicEngine.io.busy
-  backend.io.systemSerializingReady := true.B
+  // FENCE/FENCE.I execute only at the ROB head. Querying the LSQ with that
+  // exact tag drains older owners while allowing younger speculative loads to
+  // keep making progress; a global queue-empty condition would deadlock here.
+  val headFence = backend.io.robHead.valid &&
+    (backend.io.robHead.bits.entry.decoded.operation === IntOperation.Fence ||
+      backend.io.robHead.bits.entry.decoded.operation === IntOperation.FenceI)
+  lsuIngress.io.orderingBarrier.valid := headFence
+  lsuIngress.io.orderingBarrier.bits := backend.io.robHead.bits.robTag
+  backend.io.systemSerializingReady := !headFence || lsuIngress.io.orderingReady
   backend.io.fpCommit.valid := false.B
   backend.io.fpCommit.bits.flags := 0.U
   backend.io.fpCommit.bits.dirty := false.B

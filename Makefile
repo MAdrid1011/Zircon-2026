@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-atomic verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-atomic test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -48,6 +48,13 @@ test-m3-atomic:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "atomic"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "LR/SC"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "reservation"'
+
+# Fast FENCE/aq/rl ordering tier. It covers pre-LSQ atomic gating, age-tagged
+# LQ/SQ FENCE drain, and the executable FENCE/aq pressure cases below five minutes.
+test-m3-ordering:
+	./scripts/sbtw "testOnly zircon.MemIssueQueueSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "allows FENCE to retire while a younger cacheable load owns LQ state"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "holds a younger cacheable load behind an aq atomic until its read response"'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

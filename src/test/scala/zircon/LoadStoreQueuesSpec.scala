@@ -77,6 +77,8 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       request.burstable.poke(true)
       request.regionTag.poke(PMARegionKind.DeviceBurstable.code)
     }
+    dut.io.orderingBarrier.valid.poke(false)
+    dut.io.orderingBarrier.bits.poke(0)
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
     dut.io.storeEffectComplete.bits.accessFault.poke(false)
@@ -158,6 +160,36 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("LoadStoreQueues") {
+    it("drains only owners older than an age-tagged FENCE barrier") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        dut.io.robHeadTag.poke(23)
+        // tag 23 precedes the wrapped tag 32 (generation one, index zero).
+        allocate(dut, 0, tag = 23, load = true, store = false)
+        dut.clock.step()
+        noAllocations(dut)
+        dut.io.orderingBarrier.valid.poke(true)
+        dut.io.orderingBarrier.bits.poke(32)
+        dut.io.orderingReady.expect(false)
+
+        // The live LQ owner is younger than this barrier and must not block it.
+        dut.io.orderingBarrier.bits.poke(23)
+        dut.io.orderingReady.expect(true)
+
+        // Stores participate in the same age comparison.
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        allocate(dut, 0, tag = 23, load = false, store = true)
+        dut.clock.step()
+        noAllocations(dut)
+        dut.io.orderingBarrier.bits.poke(32)
+        dut.io.orderingReady.expect(false)
+        dut.io.orderingBarrier.bits.poke(23)
+        dut.io.orderingReady.expect(true)
+      }
+    }
+
     it("issues an exact-head device load once and waits for its real completion") {
       simulate(new LoadStoreQueues) { dut =>
         clear(dut)

@@ -78,10 +78,11 @@ class MemIssueQueue(
     entryValid(index) && allSourcesReady(entryUop(index))
 
   // aq/rl remains authoritative in the ROB execution context. Before an
-  // atomic reaches that context, however, its compact MemIQ record must stop a
-  // younger M1 load from escaping in the same issue window. Conservatively
-  // serialize all live atomics here; this is stronger than a non-aq atomic but
-  // preserves RVWMO without duplicating mutable ordering metadata in UopRef.
+  // atomic reaches that context, however, its compact MemIQ record must stop
+  // younger M0 and M1 work from escaping in the same issue window.
+  // Conservatively serialize all live atomics here; this is stronger than a
+  // non-aq atomic but preserves RVWMO without duplicating mutable ordering
+  // metadata in UopRef.
   val atomicCandidates = (0 until entries).map(index =>
     entryValid(index) && entryUop(index).uopClass === UopClass.Atomic)
   val (oldestAtomicValid, oldestAtomicIndex) = selectOldest(atomicCandidates)
@@ -97,6 +98,8 @@ class MemIssueQueue(
   val m0Candidates = (0 until entries).map(index =>
     readyForIssue(index) &&
       entryUop(index).allowedEndpoints(ExecutionEndpoint.M0General.asUInt) &&
+      (!oldestAtomicValid || !ROBTagOrder.isYounger(
+        entryUop(index).robTag, oldestAtomicTag, io.robHeadTag, config)) &&
       !(m1SelectedValid && m1SelectedIndex === index.U))
   val (m0SelectedValid, m0SelectedIndex) = selectOldest(m0Candidates)
 

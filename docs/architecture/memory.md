@@ -56,8 +56,8 @@ killed.
 and can choose one M0 plus one M1 request per cycle. It gives the oldest M1-eligible
 load to M1, then lets M0 choose the oldest distinct M0-eligible uop; non-atomic
 M0/store work may proceed beside an independent load. A live atomic conservatively
-blocks younger M1 issue until M0 owns it, preserving `aq` ordering before the LSQ
-record exists. It
+blocks younger M0 and M1 issue until M0 owns it, preserving `aq` ordering before the
+LSQ record exists. It
 drops only uops younger than a resolving branch and all local uops on global flush.
 `ZirconCore` uses the frozen global three-start arbiter to pass these issue
 channels to `DualLSUIngress`; the ready/valid handshake remains live through
@@ -204,6 +204,7 @@ also available, rather than accidentally exposing stale cache data.
 | `StoreAddressUpdate` / `StoreDataUpdate` | fill separate SQ readiness state; its retained access width, mask, data and atomic ordering are emitted only with a commit-authorized effect; no cache, AXI, or device interface is present at this point |
 | `commitAuthorize` / `StoreEffect` / `StoreEffectComplete` | only an address-and-data-ready exact tag can be authorized; only an authorized tag can issue an effect, and success is required before it may retire |
 | `retire`, `squash`, `flush` | retirement reads metadata before releasing its local owner; selective squash removes only younger, non-authorized work; a flush asserts that it cannot discard an authorized store |
+| `orderingBarrier` / `orderingReady` | a live-head `FENCE` or `FENCE.I` supplies its exact ROB tag; only valid LQ/SQ entries older in modulo-24 ROB age block readiness, while younger speculative owners never do |
 
 The module asserts queue depth, unique live ownership by ROB tag, legal two-wide
 allocation, no transfers during recovery, and no retirement before the relevant
@@ -213,6 +214,13 @@ youngest-store selection, both queues full, commit-only store effects, atomic
 read/write metadata composition, metadata lifetime, and ROB-wrap selective
 recovery. Dual-LSU conflict resolution, PMA,
 fault creation, cache access, and AXI drains remain the next integration layer.
+
+`ZirconCore` presents this age-tagged query only while a `FENCE` or `FENCE.I`
+is the live ROB head. The query prevents a global queue-occupancy deadlock: a
+younger speculative load can remain in LQ while the fence retires, whereas every
+older LQ/SQ owner must have drained first. The queue's wrap-aware directed test
+covers an older owner, a younger owner, and a store; top-level FENCE pressure and
+external writeback visibility remain required M3 evidence.
 
 `LoadCompletion` is now a ready/valid response boundary. A normal response makes
 the LQ publish a `MemoryLoadResult` only when its corresponding result sink is

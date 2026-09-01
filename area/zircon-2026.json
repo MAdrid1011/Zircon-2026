@@ -441,6 +441,30 @@
       "source": "L1DLoadCache two Reg-backed 128-word way reads"
     },
     {
+      "name": "lsq_fence_older_owner_compare_units",
+      "metric": "comparator32_units",
+      "units": 16,
+      "width": 1,
+      "fanin": 1,
+      "source": "LoadStoreQueues age-tagged FENCE/FENCE.I readiness: eight LQ plus eight SQ older-owner comparisons, conservatively charged as 32-bit compares"
+    },
+    {
+      "name": "mem_iq_atomic_pre_lsq_order_compare_units",
+      "metric": "comparator32_units",
+      "units": 8,
+      "width": 1,
+      "fanin": 1,
+      "source": "MemIssueQueue live-atomic barrier: eight M0 younger-than-oldest-atomic gates before ROB context/LSQ allocation, conservatively charged as 32-bit compares"
+    },
+    {
+      "name": "top_fence_head_operation_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "ZirconCore live ROB-head FENCE/FENCE.I operation classification, conservatively charged as one 32-bit compare"
+    },
+    {
       "name": "l1d_tag_compare_units",
       "metric": "comparator32_units",
       "units": 2,

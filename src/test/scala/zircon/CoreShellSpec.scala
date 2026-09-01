@@ -685,6 +685,34 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("allows FENCE to retire while a younger cacheable load owns LQ state") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(
+          enableTrace = true, enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        var youngerLoadEntered = false
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("0000000f", 16), // fence
+          ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 12 -> BigInt("00100073", 16), // ebreak
+          BigInt("80001000", 16) -> BigInt("44332211", 16)
+        ), cycles = 256, observeCycle = (core, _) => {
+          youngerLoadEntered ||= core.io.m2Observation.get.m1Ingress.peek().litToBoolean
+        }))
+
+        val fenceIndex = events.indexWhere(_.instruction == BigInt("0000000f", 16))
+        val loadIndex = events.indexWhere(_.instruction == BigInt("0000a103", 16))
+        assert(youngerLoadEntered,
+          s"the younger load never entered the M1/LQ ownership path: $events")
+        assert(fenceIndex >= 0 && loadIndex > fenceIndex,
+          s"FENCE did not retire before the younger load: $events")
+        val load = events(loadIndex)
+        assert(load.gprWrite && load.gprAddress == 2 &&
+          load.gprData == BigInt("44332211", 16))
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
     it("takes a pending software interrupt at the live head then returns through MRET") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

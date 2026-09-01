@@ -66,8 +66,11 @@ retirement, selective squash of a younger owner, or global flush.
   `FENCE` does not redirect.
 
 `FENCE.I` readiness is intentionally one aggregate signal at this boundary.
-The future frontend/cache integration must assert it only after old stores and
-MMIO are drained and I-Cache/BTB invalidation has completed.
+The M3 core derives it from an exact live-head FENCE tag and the LSQ's
+wrap-aware older-owner query, so younger speculative LQ/SQ entries cannot
+deadlock retirement. `FENCE.I` invalidates frontend cache/BTB state with its
+commit redirect. General dirty-cache writeback and external-coherency FENCE
+semantics remain outside this partial M3 slice.
 
 ## Commit, rollback, and flush ordering
 

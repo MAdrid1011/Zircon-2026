@@ -80,6 +80,8 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
       request.burstable.poke(true)
       request.regionTag.poke(PMARegionKind.DeviceBurstable.code)
     }
+    dut.io.orderingBarrier.valid.poke(false)
+    dut.io.orderingBarrier.bits.poke(0)
     dut.io.storeEffectComplete.valid.poke(false)
     dut.io.storeEffectComplete.bits.robTag.poke(0)
     dut.io.storeEffectComplete.bits.accessFault.poke(false)

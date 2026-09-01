@@ -14,7 +14,8 @@ are ready, and no prior atomic response is awaiting M0 completion. The owner
 then transfers to `AtomicMemoryEngine`; it never reconstructs the operation or
 destination from a later decode slot.
 
-MemIQ conservatively prevents a younger M1 load from passing any live atomic.
+MemIQ conservatively prevents younger M0 and M1 work from passing any live
+atomic, including an unready atomic before the ROB context has reached LSQ.
 After LSQ allocation, an `aq` record additionally blocks younger memory issue
 until that tag completes. `rl` is satisfied by head-only launch: all older
 architectural work has retired before the atomic can accept AXI. This is

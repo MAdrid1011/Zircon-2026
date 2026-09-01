@@ -46,6 +46,8 @@ class DualLSUIngress(
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
     val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
+    val orderingBarrier = Input(Valid(UInt(config.robTagWidth.W)))
+    val orderingReady = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
       Valid(UInt(config.robTagWidth.W))))
     val retireMetadata = Output(Vec(config.commitWidth,
@@ -131,6 +133,8 @@ class DualLSUIngress(
   io.deviceLoadInFlight := ingress.io.deviceLoadInFlight
   io.burstableDeviceGroup <> ingress.io.burstableDeviceGroup
   ingress.io.burstableDeviceGroupAccepted := io.burstableDeviceGroupAccepted
+  ingress.io.orderingBarrier := io.orderingBarrier
+  io.orderingReady := ingress.io.orderingReady
   for (lane <- 0 until config.commitWidth) {
     ingress.io.retire(lane) := io.retire(lane)
     io.retireMetadata(lane) := ingress.io.retireMetadata(lane)
