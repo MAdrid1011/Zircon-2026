@@ -191,6 +191,28 @@ class DataReadResponse(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val accessFault = Bool()
 }
 
+/** A complete D-cache line whose ownership moves between L1D, L2, a transfer
+  * register, and the dirty-victim/writeback path. The address is always line
+  * aligned and the dirty bit travels with the only owning copy.
+  */
+class CacheLineTransfer(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val lineAddress = UInt(32.W)
+  val lineData = Vec(config.l2.lineBytes / 4, UInt(32.W))
+  val dirty = Bool()
+}
+
+/** Request to move a D-side line out of the exclusive L2. A hit transfers the
+  * line into the response buffer; a miss has no data ownership.
+  */
+class L2LookupRequest(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val lineAddress = UInt(32.W)
+}
+
+class L2LookupResponse(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle {
+  val hit = Bool()
+  val transfer = new CacheLineTransfer(config)
+}
+
 /** Exact architectural memory information kept until the owning ROB entry
   * retires. This is the sole LSQ source for retire tracing.
   */

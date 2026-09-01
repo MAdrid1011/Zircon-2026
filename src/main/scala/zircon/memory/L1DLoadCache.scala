@@ -5,11 +5,13 @@ import chisel3.util._
 import zircon.ZirconCoreConfig
 import zircon.backend.ROBTagOrder
 
-/** Read-only executable slice of the frozen 1 KiB, two-way M3 L1D.
+/** Executable 1 KiB L1D load slice with an exclusive L2 transfer boundary.
   *
-  * Stores, atomics, dirty eviction, L2 transfer, and device traffic remain
-  * outside this module. Four miss owners and eight load waiters make cacheable
-  * loads live without treating an AXI response as a fabricated completion.
+  * Stores remain write-through/invalidate until the later dirty write-back
+  * owner exists. Clean L1D victims move into L2, and an L2 hit moves its sole
+  * copy through a transfer response before an AXI fallback is considered.
+  * Four miss owners and eight load waiters make cacheable loads live without
+  * treating an AXI response as a fabricated completion.
   */
 class L1DLoadCache(
     config: ZirconCoreConfig = ZirconCoreConfig.default
@@ -36,6 +38,11 @@ class L1DLoadCache(
     val completion = Decoupled(new LoadCompletion(config))
     val dataRequest = Decoupled(new DataReadRequest(config))
     val dataResponse = Flipped(Decoupled(new DataReadResponse(config)))
+    /** Exclusive L1D<->L2 line moves. A new L1D miss first transfers any
+      * resident victim, then probes L2 before issuing its AXI fallback. */
+    val l2Insert = Decoupled(new CacheLineTransfer(config))
+    val l2Lookup = Decoupled(new L2LookupRequest(config))
+    val l2Response = Flipped(Decoupled(new L2LookupResponse(config)))
     /** Acceptability of the next commit-authorized write-through store. */
     val storeAccept = Input(Valid(new StoreEffect(config)))
     val storeAcceptReady = Output(Bool())
@@ -62,6 +69,8 @@ class L1DLoadCache(
   val mshrIssued = RegInit(VecInit.fill(mshrCount)(false.B))
   val mshrFilled = RegInit(VecInit.fill(mshrCount)(false.B))
   val mshrFault = RegInit(VecInit.fill(mshrCount)(false.B))
+  val mshrL2ProbeIssued = RegInit(VecInit.fill(mshrCount)(false.B))
+  val mshrL2Resolved = RegInit(VecInit.fill(mshrCount)(false.B))
   val mshrLineAddress = Reg(Vec(mshrCount, UInt(32.W)))
   val mshrSet = Reg(Vec(mshrCount, UInt(setWidth.W)))
   val mshrWay = Reg(Vec(mshrCount, UInt(log2Ceil(ways).W)))
@@ -70,9 +79,16 @@ class L1DLoadCache(
   val waiterMshr = Reg(Vec(waiterCount, UInt(mshrWidth.W)))
   val waiterTag = Reg(Vec(waiterCount, UInt(config.robTagWidth.W)))
   val waiterWord = Reg(Vec(waiterCount, UInt(log2Ceil(wordsPerLine).W)))
+  val mshrHasWaiter = Wire(Vec(mshrCount, Bool()))
+  for (mshr <- 0 until mshrCount) {
+    mshrHasWaiter(mshr) := (0 until waiterCount).map(waiter =>
+      waiterValid(waiter) && waiterMshr(waiter) === mshr.U).reduce(_ || _)
+  }
 
   val immediateValid = RegInit(false.B)
   val immediateResponse = Reg(new LoadCompletion(config))
+  val l2ProbeActive = RegInit(false.B)
+  val l2ProbeMshr = Reg(UInt(mshrWidth.W))
   val recoveryBlocked = io.flush || io.squash.valid
 
   val requestSet = io.request.bits.address(lineOffsetWidth + setWidth - 1,
@@ -135,12 +151,23 @@ class L1DLoadCache(
   val victimWays = Mux(hasInvalidWay, invalidWay.asUInt, usableWay.asUInt)
   val hasVictimWay = victimWays.orR
   val victimWay = PriorityEncoder(victimWays)
+  val victimValid = cacheValid(victimWay)(requestSet)
 
   val immediateRequest = !io.request.bits.requiresCache ||
     (anyCacheHit && !activeStoreSameLine)
   val immediateAvailable = !immediateValid || io.completion.ready
+  val newMissNeedsL2Insert = !anyMatchingMshr && anyFreeMshr && hasVictimWay &&
+    victimValid
+  io.l2Insert.valid := io.request.valid && io.request.bits.cacheable &&
+    !recoveryBlocked && !immediateRequest && anyFreeWaiter && newMissNeedsL2Insert
+  io.l2Insert.bits.lineAddress := Cat(cacheTag(victimWay)(requestSet), requestSet,
+    0.U(lineOffsetWidth.W))
+  io.l2Insert.bits.dirty := false.B
+  for (word <- 0 until wordsPerLine) {
+    io.l2Insert.bits.lineData(word) := cacheData(victimWay)(requestSet)(word)
+  }
   val missResources = anyFreeWaiter && (anyMatchingMshr ||
-    (anyFreeMshr && hasVictimWay))
+    (anyFreeMshr && hasVictimWay && (!newMissNeedsL2Insert || io.l2Insert.ready)))
   val blockedByActiveStore = io.request.bits.requiresCache && activeStoreSameLine
   // The read-only slice is not an execution fallback for M0. Device and
   // atomic requests retain their ordered LQ owner until their real engines
@@ -148,8 +175,27 @@ class L1DLoadCache(
   io.request.ready := io.request.bits.cacheable && !recoveryBlocked &&
     !blockedByActiveStore && Mux(immediateRequest, immediateAvailable, missResources)
 
+  val unresolvedL2 = VecInit((0 until mshrCount).map(index =>
+    mshrValid(index) && !mshrL2ProbeIssued(index) && !mshrFilled(index)))
+  val hasUnresolvedL2 = unresolvedL2.asUInt.orR
+  val unresolvedL2Index = PriorityEncoder(unresolvedL2.asUInt)
+  io.l2Lookup.valid := hasUnresolvedL2 && !l2ProbeActive && !recoveryBlocked
+  io.l2Lookup.bits.lineAddress := mshrLineAddress(unresolvedL2Index)
+  io.l2Response.ready := l2ProbeActive && mshrValid(l2ProbeMshr) &&
+    mshrL2ProbeIssued(l2ProbeMshr)
+  when(io.l2Lookup.fire) {
+    l2ProbeActive := true.B
+    l2ProbeMshr := unresolvedL2Index
+    mshrL2ProbeIssued(unresolvedL2Index) := true.B
+  }
+  when(io.l2Response.valid) {
+    assert(io.l2Response.ready,
+      "L1D received an L2 response without its live transfer owner")
+  }
+
   val unissued = VecInit((0 until mshrCount).map(index =>
-    mshrValid(index) && !mshrIssued(index)))
+    mshrValid(index) && mshrL2Resolved(index) && !mshrIssued(index) &&
+      !mshrFilled(index) && mshrHasWaiter(index)))
   val hasUnissued = unissued.asUInt.orR
   val unissuedIndex = PriorityEncoder(unissued.asUInt)
   io.dataRequest.valid := hasUnissued && !recoveryBlocked
@@ -216,8 +262,11 @@ class L1DLoadCache(
     waiterValid.foreach(_ := false.B)
     for (mshr <- 0 until mshrCount) {
       when(!mshrIssued(mshr)) {
-        mshrValid(mshr) := false.B
-        mshrFilled(mshr) := false.B
+        when(!mshrL2ProbeIssued(mshr)) {
+          mshrValid(mshr) := false.B
+          mshrFilled(mshr) := false.B
+          mshrL2Resolved(mshr) := false.B
+        }
       }
     }
   }.elsewhen(io.squash.valid) {
@@ -236,9 +285,10 @@ class L1DLoadCache(
         waiterValid(waiter) && waiterMshr(waiter) === mshr.U &&
           !ROBTagOrder.isYounger(waiterTag(waiter), io.squash.bits,
             io.robHeadTag, config)).reduce(_ || _)
-      when(!mshrIssued(mshr) && !hasSurvivor) {
+      when(!mshrIssued(mshr) && !mshrL2ProbeIssued(mshr) && !hasSurvivor) {
         mshrValid(mshr) := false.B
         mshrFilled(mshr) := false.B
+        mshrL2Resolved(mshr) := false.B
       }
     }
   }.otherwise {
@@ -268,6 +318,8 @@ class L1DLoadCache(
           mshrIssued(chosenMshr) := false.B
           mshrFilled(chosenMshr) := false.B
           mshrFault(chosenMshr) := false.B
+          mshrL2ProbeIssued(chosenMshr) := false.B
+          mshrL2Resolved(chosenMshr) := false.B
           mshrLineAddress(chosenMshr) := requestLineAddress
           mshrSet(chosenMshr) := requestSet
           mshrWay(chosenMshr) := victimWay
@@ -305,6 +357,27 @@ class L1DLoadCache(
       }
     }
   }
+  when(io.l2Response.fire) {
+    val responseMshr = l2ProbeMshr
+    l2ProbeActive := false.B
+    mshrL2Resolved(responseMshr) := true.B
+    when(io.l2Response.bits.hit) {
+      mshrFilled(responseMshr) := true.B
+      mshrFault(responseMshr) := false.B
+      val fillWay = mshrWay(responseMshr)
+      val fillSet = mshrSet(responseMshr)
+      for (way <- 0 until ways) {
+        when(fillWay === way.U) {
+          cacheValid(way)(fillSet) := true.B
+          cacheTag(way)(fillSet) := mshrLineAddress(responseMshr)(31,
+            lineOffsetWidth + setWidth)
+          for (word <- 0 until wordsPerLine) {
+            cacheData(way)(fillSet)(word) := io.l2Response.bits.transfer.lineData(word)
+          }
+        }
+      }
+    }
+  }
   when(io.storeCommit.valid) {
     assert(io.storeAcceptReady,
       "L1D accepted a committed store while its line had a live refill")
@@ -334,6 +407,14 @@ class L1DLoadCache(
       mshrValid(mshr) := false.B
       mshrIssued(mshr) := false.B
       mshrFilled(mshr) := false.B
+      mshrL2ProbeIssued(mshr) := false.B
+      mshrL2Resolved(mshr) := false.B
+    }
+    when(mshrValid(mshr) && mshrL2Resolved(mshr) && !mshrIssued(mshr) &&
+        !mshrFilled(mshr) && !mshrHasWaiter(mshr)) {
+      mshrValid(mshr) := false.B
+      mshrL2ProbeIssued(mshr) := false.B
+      mshrL2Resolved(mshr) := false.B
     }
   }
 

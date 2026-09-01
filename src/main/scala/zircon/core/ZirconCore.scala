@@ -7,8 +7,9 @@ import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPip
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.M1Frontend
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIDataStoreEngine,
-  AXIOrderedIOEngine, DualLSUIngress, L1DLoadCache, LoadCompletion, OrderedIOCombiner,
-  OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
+  AXIOrderedIOEngine, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
+  LoadCompletion, OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer,
+  StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -32,6 +33,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
   val lsuIngress = Module(new DualLSUIngress(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
+  val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val dataReadEngine = Module(new AXIDataReadEngine(cfg))
   val dataStoreEngine = Module(new AXIDataStoreEngine(cfg))
   val orderedIOEngine = Module(new AXIOrderedIOEngine(config = cfg))
@@ -145,6 +147,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
   l1dLoadCache.io.dataRequest <> dataReadEngine.io.request
   l1dLoadCache.io.dataResponse <> dataReadEngine.io.response
+  l1dLoadCache.io.l2Insert <> l2TransferStore.io.insert
+  l1dLoadCache.io.l2Lookup <> l2TransferStore.io.lookup
+  l1dLoadCache.io.l2Response <> l2TransferStore.io.response
+  // Dirty L2 victims are impossible until the later L1D write-back owner marks
+  // lines dirty. Keep the queue explicitly stalled instead of dropping it.
+  l2TransferStore.io.victim.ready := false.B
   l1dLoadCache.io.robHeadTag := backend.io.robHead.bits.robTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
@@ -155,7 +163,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.atomicAccept.valid := lsuIngress.io.atomicEffect.valid
   l1dLoadCache.io.atomicAccept.bits := lsuIngress.io.atomicEffect.bits
   atomicEngine.io.effect.valid := lsuIngress.io.atomicEffect.valid &&
-    l1dLoadCache.io.atomicAcceptReady
+    l1dLoadCache.io.atomicAcceptReady && l2TransferStore.io.invalidateReady &&
+    !dataStoreEngine.io.effect.valid
   atomicEngine.io.effect.bits := lsuIngress.io.atomicEffect.bits
   lsuIngress.io.atomicEffect.ready := atomicEngine.io.effect.ready &&
     l1dLoadCache.io.atomicAcceptReady
@@ -227,7 +236,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   l1dLoadCache.io.storeAccept.valid := cacheStoreEffect
   l1dLoadCache.io.storeAccept.bits := lsuIngress.io.storeEffect.bits
-  dataStoreEngine.io.invalidateReady := l1dLoadCache.io.storeAcceptReady
+  dataStoreEngine.io.invalidateReady := l1dLoadCache.io.storeAcceptReady &&
+    l2TransferStore.io.invalidateReady
   dataStoreEngine.io.effect.valid := cacheStoreEffect && !orderedIOEngine.io.busy
   dataStoreEngine.io.effect.bits := lsuIngress.io.storeEffect.bits
   lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
@@ -239,6 +249,14 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   l1dLoadCache.io.storeCommit.valid := dataStoreEngine.io.effect.fire
   l1dLoadCache.io.storeCommit.bits := dataStoreEngine.io.effect.bits
   l1dLoadCache.io.activeStore := dataStoreEngine.io.activeStore
+  l2TransferStore.io.invalidate.valid := dataStoreEngine.io.effect.fire ||
+    atomicEngine.io.effect.fire
+  // The candidate address must be independent of `effect.fire`: the L2 ready
+  // path compares this stable source address against registered tags.
+  l2TransferStore.io.invalidate.bits := Mux(dataStoreEngine.io.effect.valid,
+    dataStoreEngine.io.effect.bits.address, lsuIngress.io.atomicEffect.bits.address)
+  assert(!(dataStoreEngine.io.effect.fire && atomicEngine.io.effect.fire),
+    "store and atomic effects cannot claim one L2 invalidation cycle")
 
   val deviceLoadCompletion = Wire(Decoupled(new LoadCompletion(cfg)))
   val deviceStoreResult = Wire(Decoupled(new StoreWriteResult(cfg)))

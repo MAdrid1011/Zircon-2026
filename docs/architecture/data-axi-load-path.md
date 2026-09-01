@@ -11,9 +11,12 @@ owners are implemented.
 
 `L1DLoadCache` uses the frozen 1 KiB, two-way, 32-byte-line L1D geometry:
 16 sets, eight 32-bit words per line, and four independently owned miss slots.
-The initial slice is read-only. Commit-authorized stores, AMOs, dirty state,
-writeback, L2 transfers, and device traffic are not accepted by this module and
-remain blocked at their existing legal boundaries.
+The initial slice remains read-only for L1D data. Commit-authorized stores,
+AMOs, dirty state, writeback, and device traffic are not accepted by this
+module and remain blocked at their existing legal boundaries. A later clean
+exclusive transfer stage now probes `ExclusiveL2TransferStore` before the AXI
+fallback: L1D victims move into L2 and an L2 hit moves its sole copy back to
+L1D. That stage does not yet provide dirty write-back or L2 AXI MSHRs.
 
 The cache accepts a `LoadStoreForward` only when its retained LQ owner marks it
 cacheable, and it has either an immediate response slot or a free miss-waiter

@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, committed cacheable-store, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with partial M3 L1D/data-AXI read, clean exclusive L1D-L2 transfer store, committed cacheable-store, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable, but dirty/replacement state, writeback, L2, external coherency, and formal L1I are not implemented",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. A clean exclusive L1D-L2 transfer store exists, but L1D dirty/write-allocate state, L2 AXI MSHRs/writeback ownership, external coherency, and formal L1I are not implemented",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -69,10 +69,10 @@
       "name": "l1d_mshr_control_read_slice",
       "class": "register_control",
       "entries": 4,
-      "bits_per_entry": 41,
+      "bits_per_entry": 43,
       "instances": 1,
       "replication_factor": 1,
-      "source": "L1DLoadCache mshrValid/Issued/Filled/Fault, line address, set, and way"
+      "source": "L1DLoadCache MSHR valid/AXI/L2-probe/resolved/filled/fault flags, line address, set, and way"
     },
     {
       "name": "l1d_waiter_records_read_slice",
@@ -273,13 +273,58 @@
       "source": "ZirconCore arLockValid, two-bit arLockOwner, and two-bit four-client arTurn"
     },
     {
-      "name": "l2_data_default_planned",
+      "name": "l2_data_transfer_store",
       "class": "memory_data",
       "entries": 4096,
       "bits_per_entry": 8,
       "instances": 1,
       "replication_factor": 1,
-      "source": "ZirconCoreConfig.l2 default"
+      "source": "ExclusiveL2TransferStore.lineData for the default 4 KiB L2"
+    },
+    {
+      "name": "l2_tag_valid_dirty_transfer_store",
+      "class": "tag_metadata",
+      "entries": 128,
+      "bits_per_entry": 24,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExclusiveL2TransferStore 128 default-config lines: 22-bit tag, valid, and dirty"
+    },
+    {
+      "name": "l2_replacement_control_transfer_store",
+      "class": "register_control",
+      "entries": 32,
+      "bits_per_entry": 2,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExclusiveL2TransferStore two-bit round-robin replacement way for each default L2 set"
+    },
+    {
+      "name": "l2_response_transfer_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 291,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExclusiveL2TransferStore responseValid plus L2LookupResponse {hit, line address, eight words, dirty}"
+    },
+    {
+      "name": "l2_dirty_victim_payload",
+      "class": "register_payload",
+      "entries": 2,
+      "bits_per_entry": 289,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExclusiveL2TransferStore two CacheLineTransfer dirty-victim FIFO entries"
+    },
+    {
+      "name": "l2_dirty_victim_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 4,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "two-entry Chisel Queue enqueue/dequeue pointers and occupancy count"
     }
   ],
   "logic": [
@@ -514,6 +559,38 @@
       "width": 38,
       "fanin": 2,
       "source": "ZirconCore cacheable-store and ordered-device StoreWriteResult arbitration"
+    },
+    {
+      "name": "l2_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 12,
+      "width": 1,
+      "fanin": 1,
+      "source": "ExclusiveL2TransferStore four-way insert, lookup, and external-write invalidation tag checks"
+    },
+    {
+      "name": "l2_way_data_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 2,
+      "width": 256,
+      "fanin": 4,
+      "source": "ExclusiveL2TransferStore dynamic four-way victim and lookup-response line-data selections"
+    },
+    {
+      "name": "l2_way_select_priority_bits",
+      "metric": "priority_select_bits",
+      "units": 3,
+      "width": 2,
+      "fanin": 4,
+      "source": "ExclusiveL2TransferStore insert-invalid, lookup-hit, and invalidation-hit four-way selectors"
+    },
+    {
+      "name": "l1d_l2_probe_select_bits",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 2,
+      "fanin": 4,
+      "source": "L1DLoadCache oldest unresolved L2-probe MSHR selector"
     }
   ]
 }

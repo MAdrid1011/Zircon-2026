@@ -256,9 +256,17 @@ result to a 1 KiB two-way `L1DLoadCache` with four refill owners, then to the
 shared data AXI read engine. It accepts only cacheable integer loads; full
 store-forwarding completes through the LQ without a bus transaction. The slice
 uses IDs 1-4, eight-beat line refills, owner-local response backpressure,
-RRESP-to-exact-load-fault conversion, and recovery drain. Stores, AMOs, MMIO,
-dirty state, L2 ownership, and writeback do not enter this slice and remain
-blocked until their respective M3 owners exist.
+RRESP-to-exact-load-fault conversion, and recovery drain.
+
+`ExclusiveL2TransferStore` now forms the first executable exclusive boundary:
+a clean resident L1D victim transfers into the four-way 4 KiB/8 KiB L2 store
+when a new L1D miss claims its way; each miss probes L2 before issuing AXI; and
+an L2 hit removes the L2 copy into an L1D response transfer buffer. The store
+has a two-entry dirty victim FIFO and backpressures dirty displacement, but no
+L1D line is dirty yet and no L2 AXI MSHR/writeback owner exists. The current
+write-through store/atomic paths therefore invalidate a matching clean L2 line
+before their external effect. This is an executable clean-transfer stage, not
+the final write-back/write-allocate hierarchy.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,

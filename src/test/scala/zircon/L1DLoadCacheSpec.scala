@@ -20,6 +20,13 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.dataResponse.bits.mshr.poke(0)
     dut.io.dataResponse.bits.lineData.foreach(_.poke(0))
     dut.io.dataResponse.bits.accessFault.poke(false)
+    dut.io.l2Insert.ready.poke(true)
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2Response.valid.poke(false)
+    dut.io.l2Response.bits.hit.poke(false)
+    dut.io.l2Response.bits.transfer.lineAddress.poke(0)
+    dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+    dut.io.l2Response.bits.transfer.dirty.poke(false)
     dut.io.storeAccept.valid.poke(false)
     dut.io.storeAccept.bits.robTag.poke(0)
     dut.io.storeAccept.bits.address.poke(0)
@@ -93,6 +100,19 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       fault: Boolean = false,
       lineAddress: BigInt = BigInt("80001000", 16)
   ): Unit = {
+    dut.io.l2Lookup.valid.expect(true)
+    dut.io.l2Lookup.bits.lineAddress.expect(lineAddress)
+    dut.io.l2Lookup.ready.poke(true)
+    dut.clock.step()
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2Response.valid.poke(true)
+    dut.io.l2Response.bits.hit.poke(false)
+    dut.io.l2Response.bits.transfer.lineAddress.poke(lineAddress)
+    dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+    dut.io.l2Response.bits.transfer.dirty.poke(false)
+    dut.io.l2Response.ready.expect(true)
+    dut.clock.step()
+    dut.io.l2Response.valid.poke(false)
     dut.io.dataRequest.valid.expect(true)
     dut.io.dataRequest.bits.lineAddress.expect(lineAddress)
     dut.io.dataRequest.ready.poke(true)
@@ -107,6 +127,27 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.dataResponse.ready.expect(true)
     dut.clock.step()
     dut.io.dataResponse.valid.poke(false)
+  }
+
+  private def startAxiRefill(dut: L1DLoadCache, lineAddress: BigInt): Unit = {
+    dut.io.l2Lookup.valid.expect(true)
+    dut.io.l2Lookup.bits.lineAddress.expect(lineAddress)
+    dut.io.l2Lookup.ready.poke(true)
+    dut.clock.step()
+    dut.io.l2Lookup.ready.poke(false)
+    dut.io.l2Response.valid.poke(true)
+    dut.io.l2Response.bits.hit.poke(false)
+    dut.io.l2Response.bits.transfer.lineAddress.poke(lineAddress)
+    dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+    dut.io.l2Response.bits.transfer.dirty.poke(false)
+    dut.io.l2Response.ready.expect(true)
+    dut.clock.step()
+    dut.io.l2Response.valid.poke(false)
+    dut.io.dataRequest.valid.expect(true)
+    dut.io.dataRequest.bits.lineAddress.expect(lineAddress)
+    dut.io.dataRequest.ready.poke(true)
+    dut.clock.step()
+    dut.io.dataRequest.ready.poke(false)
   }
 
   describe("L1DLoadCache") {
@@ -135,6 +176,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         clear(dut)
         val address = BigInt("80001000", 16)
         submit(dut, tag = 1, address)
+        dut.io.l2Lookup.valid.expect(true)
         dut.io.atomicAccept.valid.poke(true)
         dut.io.atomicAccept.bits.address.poke(address)
         dut.io.atomicAcceptReady.expect(false)
@@ -156,7 +198,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.atomicInvalidate.valid.poke(false)
         submit(dut, tag = 2, address)
-        dut.io.dataRequest.valid.expect(true)
+        dut.io.l2Lookup.valid.expect(true)
       }
     }
 
@@ -203,16 +245,11 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.ready.poke(false)
 
         submit(dut, tag = 3, lineC)
-        dut.io.dataRequest.valid.expect(true)
-        dut.io.dataRequest.bits.lineAddress.expect(lineC)
-        dut.io.dataRequest.ready.poke(true)
-        dut.clock.step()
-        dut.io.dataRequest.ready.poke(false)
+        startAxiRefill(dut, lineC)
 
         submit(dut, tag = 4, lineA)
         dut.io.completion.valid.expect(false)
-        dut.io.dataRequest.valid.expect(true)
-        dut.io.dataRequest.bits.lineAddress.expect(lineA)
+        dut.io.l2Lookup.valid.expect(true)
       }
     }
 
@@ -221,7 +258,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         clear(dut)
         val words = (0 until 8).map(index => BigInt("b0000000", 16) + index)
         submit(dut, tag = 1, BigInt("80001000", 16))
-        dut.io.dataRequest.valid.expect(true)
+        dut.io.l2Lookup.valid.expect(true)
         submit(dut, tag = 2, BigInt("80001014", 16))
         issueRefill(dut, words)
         dut.io.completion.valid.expect(true)
@@ -291,8 +328,60 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.request.ready.expect(true)
         dut.clock.step()
         dut.io.request.valid.poke(false)
-        dut.io.dataRequest.valid.expect(true)
-        dut.io.dataRequest.bits.lineAddress.expect(line)
+        dut.io.l2Lookup.valid.expect(true)
+      }
+    }
+
+    it("fills an L2 transfer hit without issuing an AXI refill") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80003000", 16)
+        val words = Seq.tabulate(8)(word => BigInt("d0000000", 16) + word)
+        submit(dut, tag = 7, line + 12)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(true)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(line)
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        words.zipWithIndex.foreach { case (word, index) =>
+          dut.io.l2Response.bits.transfer.lineData(index).poke(word)
+        }
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(3))
+      }
+    }
+
+    it("drains a flushed L2 miss transfer without creating a fallback AXI refill") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80003800", 16)
+        submit(dut, tag = 9, line)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(false)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(line)
+        dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
       }
     }
   }

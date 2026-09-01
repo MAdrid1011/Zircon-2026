@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-ordered-io test-m3-device-io test-m3-atomic verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-atomic verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -20,6 +20,13 @@ test-m3-store:
 test-m3-load-boundary:
 	./scripts/sbtw "testOnly zircon.DualLSUIngressSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "without L1D"'
+
+# Fast, focused exclusive L1D-L2 transfer regression. It covers clean victim
+# handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery
+# drain, and one complete-core no-refill path within the component budget.
+test-m3-l2:
+	./scripts/sbtw "testOnly zircon.ExclusiveL2TransferStoreSpec zircon.L1DLoadCacheSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "serves an evicted L1D line"'
 
 # Fast, focused device-group AXI transport regression. LSQ/ROB integration is
 # covered separately once the ordered M0 owner becomes executable.

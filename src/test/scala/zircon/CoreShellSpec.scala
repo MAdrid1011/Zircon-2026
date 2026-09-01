@@ -1427,6 +1427,43 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("serves an evicted L1D line from the exclusive L2 without another AXI refill") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val lineA = BigInt("80001000", 16)
+        val lineB = BigInt("80001200", 16)
+        val lineC = BigInt("80001400", 16)
+        val dataReads = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("0000a083", 16), // lw x1,0(x1): A -> B
+          ResetVector + 8 -> BigInt("0000a083", 16), // B -> C
+          ResetVector + 12 -> BigInt("0000a083", 16), // C -> A, evicting A
+          ResetVector + 16 -> BigInt("0000a103", 16), // lw x2,0(x1): L2 hit A
+          ResetVector + 20 -> BigInt("00100073", 16),
+          lineA -> lineB,
+          lineB -> lineC,
+          lineC -> lineA
+        ), cycles = 384, observeCycle = (core, _) => {
+          val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+            core.io.axi.ar.ready.peek().litToBoolean
+          val id = core.io.axi.ar.bits.id.peek().litValue
+          if (arFire && id >= 1 && id <= 4) {
+            dataReads += core.io.axi.ar.bits.addr.peek().litValue
+          }
+        }))
+
+        assert(dataReads == Seq(lineA, lineB, lineC),
+          s"final load should move the L2 line, not refill AXI again: $dataReads")
+        val finalLoad = events.find(_.pc == ResetVector + 16).getOrElse(
+          fail(s"final L2-served load did not retire: $events"))
+        assert(finalLoad.gprWrite && finalLoad.gprAddress == 2 &&
+          finalLoad.gprData == lineB)
+        assert(finalLoad.memoryAddress == lineA &&
+          finalLoad.memoryReadMask == 15 && finalLoad.memoryReadData == lineB)
+      }
+    }
+
     it("turns a data AXI RRESP error into the exact load-access trap") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
