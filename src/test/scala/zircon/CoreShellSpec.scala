@@ -2063,7 +2063,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("starts a clean AXI owner epoch after reset with a partial RRESP fault") {
+    it("starts clean AXI read and write owner epochs across reset") {
       for (seed <- M3AxiResetSeeds) {
         simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
           clearInputs(dut)
@@ -2077,10 +2077,17 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           val expected = Seq(
             BigInt("10203040", 16), BigInt("50607080", 16),
             BigInt("90a0b0c0", 16), BigInt("d0e0f000", 16))
+          val deviceAddress = BigInt("a0000000", 16)
           val preResetOwnerIds = scala.collection.mutable.Set.empty[BigInt]
           var faultOfferId = Option.empty[BigInt]
           var faultBeatAccepted = false
-          var resetIssued = false
+          var resetPhase = 0
+          var resetCount = 0
+          var preResetAw = false
+          var preResetW = false
+          var finalAw = false
+          var finalW = false
+          var finalB = false
           var events = Seq.empty[TraceSample]
 
           def isDataAddress(address: BigInt): Boolean =
@@ -2093,12 +2100,19 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
               ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
               ResetVector + 12 -> BigInt("0400a203", 16), // lw x4,64(x1)
               ResetVector + 16 -> BigInt("0600a283", 16), // lw x5,96(x1)
-              ResetVector + 20 -> BigInt("00100073", 16),
+              ResetVector + 20 -> BigInt("a0000337", 16), // lui x6,0xa0000
+              ResetVector + 24 -> BigInt("05a00393", 16), // addi x7,x0,90
+              ResetVector + 28 -> BigInt("00732023", 16), // sw x7,0(x6)
+              ResetVector + 32 -> BigInt("00100073", 16),
               lines(0) -> expected(0), lines(1) -> expected(1),
               lines(2) -> expected(2), lines(3) -> expected(3)
             ), cycles = cycles,
               arReadyForCycle = cycle => schedule.arReady(cycle),
               rValidForCycle = cycle => schedule.rValid(cycle),
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => resetPhase == 2 && schedule.bValid(cycle),
               readSelectForCycle = (_, pending) => {
                 val candidates = pending.indices.filter { index =>
                   !pending.take(index).exists(_._1 == pending(index)._1)
@@ -2107,26 +2121,31 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
                   isDataAddress(pending(index)._2))
                 val instructionCandidates = candidates.filterNot(index =>
                   isDataAddress(pending(index)._2))
-                if (!resetIssued && preResetOwnerIds.size == 4 &&
+                if (resetPhase == 0 && preResetOwnerIds.size == 4 &&
                     !faultBeatAccepted && dataCandidates.nonEmpty) {
                   val selected = dataCandidates(selectorRandom.nextInt(dataCandidates.size))
                   faultOfferId = Some(pending(selected)._1)
                   selected
-                } else if (!resetIssued && instructionCandidates.nonEmpty) {
+                } else if (resetPhase == 0 && instructionCandidates.nonEmpty) {
                   instructionCandidates.head
                 } else if (candidates.nonEmpty) {
                   candidates(selectorRandom.nextInt(candidates.size))
                 } else 0
               },
               readValidForCycle = (_, _, address) => {
-                !isDataAddress(address) || resetIssued ||
+                !isDataAddress(address) || resetPhase > 0 ||
                   (preResetOwnerIds.size == 4 && !faultBeatAccepted)
               },
               rResponse = (_, address) =>
-                if (!resetIssued && isDataAddress(address)) 2 else 0,
+                if (resetPhase == 0 && isDataAddress(address)) 2 else 0,
               resetForCycle = (_, _) => {
-                val assertReset = faultBeatAccepted && !resetIssued
-                if (assertReset) resetIssued = true
+                val resetReadOwners = resetPhase == 0 && faultBeatAccepted
+                val resetWriteOwner = resetPhase == 1 && preResetAw && preResetW
+                val assertReset = resetReadOwners || resetWriteOwner
+                if (assertReset) {
+                  resetPhase += 1
+                  resetCount += 1
+                }
                 assertReset
               },
               observeCycle = (core, _) => {
@@ -2134,25 +2153,44 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
                   core.io.axi.ar.ready.peek().litToBoolean
                 val rFire = core.io.axi.r.valid.peek().litToBoolean &&
                   core.io.axi.r.ready.peek().litToBoolean
-                if (!resetIssued && arFire &&
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                val deviceAw = awFire && core.io.axi.aw.bits.id.peek().litValue == 6
+                if (resetPhase == 0 && arFire &&
                     isDataAddress(core.io.axi.ar.bits.addr.peek().litValue)) {
                   preResetOwnerIds += core.io.axi.ar.bits.id.peek().litValue
                 }
-                if (!resetIssued && rFire && faultOfferId.contains(
+                if (resetPhase == 0 && rFire && faultOfferId.contains(
                     core.io.axi.r.bits.id.peek().litValue)) {
                   faultBeatAccepted = true
+                }
+                if (resetPhase == 1) {
+                  preResetAw ||= deviceAw
+                  preResetW ||= wFire && (preResetAw || deviceAw)
+                } else if (resetPhase == 2) {
+                  finalAw ||= deviceAw
+                  finalW ||= wFire && (finalAw || deviceAw)
+                  finalB ||= bFire && core.io.axi.b.bits.id.peek().litValue == 6
                 }
               })
 
             val retired = throughFirstTrap(events)
             withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
               s"preResetOwners=$preResetOwnerIds, faultBeat=$faultBeatAccepted, " +
-              s"reset=$resetIssued, trace=$retired") {
+              s"resetCount=$resetCount, preWrite=($preResetAw,$preResetW), " +
+              s"finalWrite=($finalAw,$finalW,$finalB), trace=$retired") {
               assert(preResetOwnerIds.size == 4)
-              assert(faultBeatAccepted && resetIssued)
+              assert(faultBeatAccepted && resetCount == 2 && resetPhase == 2)
+              assert(preResetAw && preResetW)
+              assert(finalAw && finalW && finalB)
               assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
                 ResetVector + 8, ResetVector + 12, ResetVector + 16,
-                ResetVector + 20))
+                ResetVector + 20, ResetVector + 24, ResetVector + 28,
+                ResetVector + 32))
               for ((pc, register, value, address) <- Seq(
                   (ResetVector + 4, 2, expected(0), lines(0)),
                   (ResetVector + 8, 3, expected(1), lines(1)),
@@ -2163,11 +2201,14 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
                   event.memoryAddress == address && event.memoryReadData == value &&
                   !event.trap))
               }
+              assert(retired.exists(event => event.pc == ResetVector + 28 &&
+                event.memoryAddress == deviceAddress && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == 90 && !event.trap))
               assert(retired.last.trap && retired.last.cause == 3)
             }
           } catch {
             case failure: Throwable =>
-              saveM3AxiStressFailure(seed, "reset-owner-epoch", schedule, events,
+              saveM3AxiStressFailure(seed, "reset-read-write-epochs", schedule, events,
                 Some(selectorSeed))
               throw failure
           }

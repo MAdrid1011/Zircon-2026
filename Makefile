@@ -57,7 +57,7 @@ test-m3-axi-stress:
 	./scripts/sbtw 'testOnly zircon.AXIDataReadEngineSpec'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves cross-ID AXI read ownership under seeded response interleaving"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retains four data owners before seeded cross-ID AXI drain"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "starts a clean AXI owner epoch after reset with a partial RRESP fault"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "starts clean AXI read and write owner epochs across reset"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ordered device writes through explicitly seeded all-channel AXI backpressure"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves exact data RRESP and device BRESP faults under seeded AXI backpressure"'
 
