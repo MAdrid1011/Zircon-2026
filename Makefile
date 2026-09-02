@@ -196,6 +196,7 @@ test-m3-ordering:
 # executable RV32F support until the retained result bridge reaches commit.
 test-m4-fp-move:
 	./scripts/sbtw 'testOnly zircon.FloatingAdmissionSpec zircon.FloatingMovePipeSpec zircon.FloatingResultBridgeSpec'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "RV32F"'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

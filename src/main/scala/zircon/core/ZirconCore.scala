@@ -3,9 +3,10 @@ package zircon.core
 import chisel3._
 import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter, Valid}
 import zircon.{PMARegionKind, ZirconCoreConfig}
-import zircon.backend.{CompletionResult, FaultCandidate, FloatingIssueQueue,
-  FloatingScoreboard, LongIssueQueue, LongPipe, M1BackendSubsystem, MemIssueQueue,
-  ROBTagOrder, SourceKind, UopClass}
+import zircon.backend.{CompletionResult, FaultCandidate, FloatingCommitState,
+  FloatingIssueQueue, FloatingMovePipe, FloatingResultBridge, FloatingScoreboard,
+  LongIssueQueue, LongPipe, M1BackendSubsystem, MemIssueQueue, ROBTagOrder,
+  SourceKind, UopClass}
 import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress,
@@ -34,6 +35,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val longPipe = Module(new LongPipe(cfg))
   val floatingQueue = Module(new FloatingIssueQueue(cfg))
   val floatingScoreboard = Module(new FloatingScoreboard(cfg))
+  val floatingMovePipe = Module(new FloatingMovePipe(cfg))
+  val floatingResultBridge = Module(new FloatingResultBridge(cfg))
+  val floatingCommitState = Module(new FloatingCommitState(cfg))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
   val lsuIngress = Module(new DualLSUIngress(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
@@ -85,13 +89,6 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   floatingScoreboard.io.robHeadTag := backend.io.robHead.bits.robTag
   floatingScoreboard.io.squash := backend.io.squash
   floatingScoreboard.io.flush := backend.io.globalFlush
-  floatingScoreboard.io.readRelease.valid := false.B
-  floatingScoreboard.io.readRelease.bits := 0.U.asTypeOf(
-    new zircon.backend.FloatingScoreboardAllocation(cfg))
-  floatingScoreboard.io.complete.valid := false.B
-  floatingScoreboard.io.complete.bits := 0.U.asTypeOf(
-    new zircon.backend.FloatingScoreboardCompletion(cfg))
-  floatingQueue.io.issue.ready := false.B
   longQueue.io.integerReady := backend.io.integerReady
   longQueue.io.robHeadTag := backend.io.robHead.bits.robTag
   longQueue.io.squash := backend.io.squash
@@ -106,22 +103,80 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   auxiliaryRead.io.robHeadTag := backend.io.robHead.bits.robTag
   auxiliaryRead.io.readData := backend.io.auxReadData
 
-  auxiliaryRead.io.candidate(0).valid := longQueue.io.issue.valid
-  auxiliaryRead.io.candidate(0).bits.robTag := longQueue.io.issue.bits.robTag
+  val floatingOlderThanLong = floatingQueue.io.issue.valid &&
+    (!longQueue.io.issue.valid || ROBTagOrder.ageFromHead(
+      floatingQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg) <
+      ROBTagOrder.ageFromHead(longQueue.io.issue.bits.robTag,
+        backend.io.robHead.bits.robTag, cfg))
+  val selectFloatingE2 = floatingOlderThanLong
+  val selectLongE2 = longQueue.io.issue.valid && !selectFloatingE2
+  val selectedE2Uop = Mux(selectFloatingE2, floatingQueue.io.issue.bits,
+    longQueue.io.issue.bits)
+  val selectedE2Valid = selectFloatingE2 || selectLongE2
+  auxiliaryRead.io.candidate(0).valid := selectedE2Valid
+  auxiliaryRead.io.candidate(0).bits.robTag := selectedE2Uop.robTag
   for (source <- 0 until 2) {
     auxiliaryRead.io.candidate(0).bits.sourcePhysical(source) :=
-      longQueue.io.issue.bits.sourcePhysical(source)
+      selectedE2Uop.sourcePhysical(source)
     auxiliaryRead.io.candidate(0).bits.sourceRequired(source) :=
-      longQueue.io.issue.bits.sourceKind(source) === SourceKind.IntegerRegister
+      selectedE2Uop.sourceKind(source) === SourceKind.IntegerRegister
   }
   longPipe.io.robHeadTag := backend.io.robHead.bits.robTag
   longPipe.io.squash := backend.io.squash
   longPipe.io.flush := backend.io.globalFlush
-  longPipe.io.input.valid := longQueue.io.issue.valid && auxiliaryRead.io.grant(0)
+  longPipe.io.input.valid := selectLongE2 && auxiliaryRead.io.grant(0)
   longPipe.io.input.bits.uop := longQueue.io.issue.bits
   longPipe.io.input.bits.lhs := auxiliaryRead.io.candidateData(0)(0)
   longPipe.io.input.bits.rhs := auxiliaryRead.io.candidateData(0)(1)
-  longQueue.io.issue.ready := longPipe.io.input.ready && auxiliaryRead.io.grant(0)
+  longQueue.io.issue.ready := selectLongE2 && longPipe.io.input.ready &&
+    auxiliaryRead.io.grant(0)
+
+  floatingMovePipe.io.robHeadTag := backend.io.robHead.bits.robTag
+  floatingMovePipe.io.squash := backend.io.squash
+  floatingMovePipe.io.flush := backend.io.globalFlush
+  floatingMovePipe.io.input.valid := selectFloatingE2 && auxiliaryRead.io.grant(0)
+  floatingMovePipe.io.input.bits.robTag := floatingQueue.io.issue.bits.robTag
+  floatingMovePipe.io.input.bits.operation := floatingQueue.io.issue.bits.floatingOperation
+  floatingMovePipe.io.input.bits.integerDestinationPhysical :=
+    floatingQueue.io.issue.bits.destinationPhysical
+  floatingMovePipe.io.input.bits.integerSource := auxiliaryRead.io.candidateData(0)(0)
+  floatingMovePipe.io.input.bits.floatSource := floatingCommitState.io.readData
+  floatingMovePipe.io.input.bits.floatDestination :=
+    floatingQueue.io.issue.bits.floatingDestination
+  floatingQueue.io.issue.ready := selectFloatingE2 && floatingMovePipe.io.input.ready &&
+    auxiliaryRead.io.grant(0)
+
+  floatingCommitState.io.readAddress(0) := floatingQueue.io.issue.bits.floatingSource(0)
+  floatingCommitState.io.readAddress(1) := floatingQueue.io.issue.bits.floatingSource(1)
+  floatingScoreboard.io.readRelease.valid := floatingMovePipe.io.input.fire
+  floatingScoreboard.io.readRelease.bits.robTag := floatingQueue.io.issue.bits.robTag
+  for (source <- 0 until 3) {
+    floatingScoreboard.io.readRelease.bits.sourceValid(source) :=
+      floatingQueue.io.issue.bits.sourceKind(source) === SourceKind.FloatingRegister
+    floatingScoreboard.io.readRelease.bits.source(source) :=
+      floatingQueue.io.issue.bits.floatingSource(source)
+  }
+  floatingScoreboard.io.readRelease.bits.destinationValid :=
+    floatingQueue.io.issue.bits.writesFloat
+  floatingScoreboard.io.readRelease.bits.destination :=
+    floatingQueue.io.issue.bits.floatingDestination
+
+  floatingResultBridge.io.input <> floatingMovePipe.io.output
+  floatingResultBridge.io.robHeadTag := backend.io.robHead.bits.robTag
+  floatingResultBridge.io.squash := backend.io.squash
+  floatingResultBridge.io.flush := backend.io.globalFlush
+  floatingCommitState.io.enqueue <> floatingResultBridge.io.floatingResult
+  floatingCommitState.io.robHeadTag := backend.io.robHead.bits.robTag
+  floatingCommitState.io.squash := backend.io.squash
+  floatingCommitState.io.flush := backend.io.globalFlush
+  val floatingRetires = VecInit((0 until cfg.commitWidth).map(lane =>
+    backend.io.retired(lane).valid &&
+      backend.io.retired(lane).bits.entry.floating.legal &&
+      backend.io.retired(lane).bits.entry.floating.writesFloatRd))
+  floatingCommitState.io.commitEnable := floatingRetires.asUInt.orR
+  floatingCommitState.io.commitTag := Mux(floatingRetires(0),
+    backend.io.retired(0).bits.robTag, backend.io.retired(1).bits.robTag)
+  floatingScoreboard.io.complete := floatingCommitState.io.scoreboardComplete
 
   for (lane <- 0 until cfg.decodeWidth) {
     memQueue.io.enqueue(lane) <> backend.io.memEnqueue(lane)
@@ -394,7 +449,10 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     lsuIngress.io.retire(lane).bits := backend.io.retired(lane).bits.robTag
   }
 
-  backend.io.otherCompletion(0) <> longPipe.io.completion
+  val e2CompletionArbiter = Module(new Arbiter(new CompletionResult(cfg), 2))
+  e2CompletionArbiter.io.in(0) <> longPipe.io.completion
+  e2CompletionArbiter.io.in(1) <> floatingResultBridge.io.completion
+  backend.io.otherCompletion(0) <> e2CompletionArbiter.io.out
   backend.io.otherCompletion(1) <> lsuIngress.io.m0Completion
   backend.io.otherCompletion(2) <> lsuIngress.io.m1Completion
   backend.io.otherFault(0) := 0.U.asTypeOf(new FaultCandidate(cfg))
@@ -415,9 +473,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   cacheFenceDrain.io.request := headFence && lsuIngress.io.orderingReady
   backend.io.systemSerializingReady := !headFence ||
     (lsuIngress.io.orderingReady && cacheFenceDrain.io.complete)
-  backend.io.fpCommit.valid := false.B
-  backend.io.fpCommit.bits.flags := 0.U
-  backend.io.fpCommit.bits.dirty := false.B
+  backend.io.fpCommit := floatingCommitState.io.fpCommit
   for (lane <- 0 until cfg.commitWidth) {
     val traceReadPhysical = Mux(
       backend.io.retired(lane).valid &&
@@ -538,7 +594,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     formatter.io.retired := backend.io.retired
     formatter.io.memoryMetadata := lsuIngress.io.retireMetadata
     formatter.io.gprData := backend.io.auxReadData
-    formatter.io.fprWrite := 0.U.asTypeOf(Valid(new zircon.backend.FloatingRegisterWrite(cfg)))
+    formatter.io.fprWrite := floatingCommitState.io.fprWrite
     formatter.io.csrWrite := backend.io.csrWrite
     formatter.io.trapCommit := backend.io.trapCommit
     formatter.io.trapEntry := backend.io.trapEntry
@@ -550,7 +606,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   io.m2Observation.foreach { observation =>
     observation.e0Start := backend.io.e0Start
     observation.e1Start := backend.io.e1Start
-    observation.e2Start := longPipe.io.input.fire
+    observation.e2Start := longPipe.io.input.fire || floatingMovePipe.io.input.fire
     observation.e1Completion := backend.io.e1Completion
     observation.e2Completion := backend.io.e2Completion
     observation.m0Ingress := lsuIngress.io.m0Issue.fire

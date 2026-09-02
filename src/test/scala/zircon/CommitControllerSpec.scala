@@ -3,7 +3,7 @@ package zircon
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
 import zircon.backend.{CommitController, CommitRedirectReason, EndpointMask, MachineInterruptCause, UopClass}
-import zircon.frontend.IntOperation
+import zircon.frontend.{FloatingOperation, IntOperation}
 
 class CommitControllerSpec extends AnyFunSpec with ChiselSim {
   private def clearInputs(dut: CommitController): Unit = {
@@ -71,6 +71,9 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
     decoded.isControl.poke(false)
     decoded.isMemory.poke(false)
     decoded.isFenceI.poke(operation == IntOperation.FenceI)
+    entry.floating.legal.poke(false)
+    entry.floating.operation.poke(FloatingOperation.Invalid)
+    entry.floating.writesFloatRd.poke(false)
   }
 
   describe("CommitController") {
@@ -136,6 +139,29 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
         dut.io.trapEntry.valid.expect(true)
         dut.io.trapEntry.bits.entry.pc.expect(BigInt("80000024", 16))
         dut.io.trapLane.expect(1)
+      }
+    }
+
+    it("retires an older FPR write before exposing a younger synchronous fault") {
+      simulate(new CommitController) { dut =>
+        clearInputs(dut)
+        driveRobLane(dut, 0, 10, BigInt("80000028", 16),
+          allocatesPhysical = false)
+        driveRobLane(dut, 1, 11, BigInt("8000002c", 16))
+        dut.io.rob(0).bits.entry.floating.legal.poke(true)
+        dut.io.rob(0).bits.entry.floating.operation.poke(FloatingOperation.FmvWX)
+        dut.io.rob(0).bits.entry.floating.writesFloatRd.poke(true)
+        dut.io.firstFault.valid.poke(true)
+        dut.io.firstFault.bits.robTag.poke(11)
+        dut.io.firstFault.bits.cause.poke(2)
+        dut.io.firstFault.bits.trapValue.poke(BigInt("ffffffff", 16))
+
+        dut.io.rob(0).ready.expect(true)
+        dut.io.rob(1).ready.expect(false)
+        dut.io.retired(0).valid.expect(true)
+        dut.io.retired(1).valid.expect(false)
+        dut.io.trapCommit.valid.expect(false)
+        dut.io.flush.expect(false)
       }
     }
 

@@ -81,6 +81,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       gprWrite: Boolean,
       gprAddress: BigInt,
       gprData: BigInt,
+      fprWrite: Boolean,
+      fprAddress: BigInt,
+      fprData: BigInt,
       csrWrite: Boolean,
       csrAddress: BigInt,
       csrData: BigInt,
@@ -233,6 +236,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             gprWrite = event.gprWrite.peek().litToBoolean,
             gprAddress = event.gprAddress.peek().litValue,
             gprData = event.gprData.peek().litValue,
+            fprWrite = event.fprWrite.peek().litToBoolean,
+            fprAddress = event.fprAddress.peek().litValue,
+            fprData = event.fprData.peek().litValue,
             csrWrite = event.csrWrite.peek().litToBoolean,
             csrAddress = event.csrAddress.peek().litValue,
             csrData = event.csrData.peek().litValue,
@@ -532,6 +538,40 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         assert(events(0) == (BigInt(0), ResetVector, BigInt("00500093", 16), true, false, BigInt(0)))
         assert(events(1) == (BigInt(1), ResetVector + 4, BigInt("00308113", 16), true, false, BigInt(0)))
         assert(events(2) == (BigInt(2), ResetVector + 8, BigInt("00100073", 16), false, true, BigInt(3)))
+      }
+    }
+
+    it("commits the RV32F move subset through FPR state and the retire trace") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val fmvWX = BigInt("f00083d3", 16) // fmv.w.x f7,x1
+        val fmvXW = BigInt("e0038153", 16) // fmv.x.w x2,f7
+        val program = Map(
+          ResetVector -> BigInt("000020b7", 16), // lui x1,2 => mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16), // csrrw x0,mstatus,x1
+          ResetVector + 8 -> Nop,
+          ResetVector + 12 -> Nop,
+          ResetVector + 16 -> Nop,
+          ResetVector + 20 -> Nop,
+          ResetVector + 24 -> Nop,
+          ResetVector + 28 -> Nop,
+          ResetVector + 32 -> fmvWX,
+          ResetVector + 36 -> fmvXW,
+          ResetVector + 40 -> BigInt("00100073", 16) // ebreak
+        )
+
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 384))
+        val fprMove = events.find(_.instruction == fmvWX).getOrElse(
+          fail(s"FMV.W.X did not retire: $events"))
+        val gprMove = events.find(_.instruction == fmvXW).getOrElse(
+          fail(s"FMV.X.W did not retire: $events"))
+        assert(fprMove.fprWrite && fprMove.fprAddress == 7 &&
+          fprMove.fprData == BigInt("00002000", 16),
+          s"FMV.W.X trace did not carry exact FPR state: $fprMove")
+        assert(gprMove.gprWrite && gprMove.gprAddress == 2 &&
+          gprMove.gprData == BigInt("00002000", 16),
+          s"FMV.X.W did not observe the committed FPR value: $gprMove")
+        assert(events.last.trap && events.last.cause == 3)
       }
     }
 

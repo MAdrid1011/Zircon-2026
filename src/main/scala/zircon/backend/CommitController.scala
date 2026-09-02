@@ -60,6 +60,8 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     io.rob(0).bits.entry.decoded.uopClass === UopClass.System
   val lane1Serialized = io.rob(1).bits.entry.decoded.uopClass === UopClass.Csr ||
     io.rob(1).bits.entry.decoded.uopClass === UopClass.System
+  val lane0WritesFloat = io.rob(0).bits.entry.floating.legal &&
+    io.rob(0).bits.entry.floating.writesFloatRd
 
   val lane0Fault = io.firstFault.valid && io.rob(0).valid &&
     io.firstFault.bits.robTag === io.rob(0).bits.robTag
@@ -77,7 +79,7 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     exceptionLane := 0.U
   }.elsewhen(interruptAccepted) {
     // Interrupts occur before the next unretired instruction.
-  }.elsewhen(lane1Fault && !lane0Serialized) {
+  }.elsewhen(lane1Fault && !lane0Serialized && !lane0WritesFloat) {
     retireLane(0) := true.B
     exceptionValid := true.B
     exceptionLane := 1.U
@@ -86,7 +88,8 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
       (!lane0Serialized || io.sideEffect(0).serializingReady)
     when(lane0CanRetire) {
       retireLane(0) := true.B
-      when(io.rob(1).valid && !lane0Serialized && !lane1Serialized) {
+      when(io.rob(1).valid && !lane0Serialized && !lane1Serialized &&
+          !lane0WritesFloat && !lane1Fault) {
         retireLane(1) := true.B
       }
     }
@@ -160,6 +163,10 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     "commit lane 1 cannot retire without lane 0")
   when(retireLane(0) && lane0Serialized) {
     assert(!retireLane(1), "a lane-0 CSR/system uop must retire alone")
+  }
+  when(retireLane(0) && lane0WritesFloat) {
+    assert(!retireLane(1),
+      "an FPR write must retire alone so its commit-qualified state is exact")
   }
   when(retireLane(1)) {
     assert(!lane1Serialized, "a CSR/system uop cannot retire from lane 1")
