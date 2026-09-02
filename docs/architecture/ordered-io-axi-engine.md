@@ -77,7 +77,14 @@ and base address under `target/zircon-failures`.
 `CoreShellSpec` covers exact-head single-beat traffic and one four-beat
 DeviceBurstable load and store group with exact per-member retire metadata and
 RRESP/BRESP faults through the top-level ID-6 demultiplexer. The focused
-commands are `make test-m3-ordered-io` and `make test-m3-device-io`.
+top-level four-seed tier (`0x5eed0201`--`0x5eed0204`) covers one through four
+beat groups, alternating read/write direction, independent device AW/W/B
+backpressure, exact `len`, and the retained LQ/SQ group members while an older
+long divide keeps ROB pressure live. Its fetch warm-up deliberately presents the
+complete group before the frozen six-cycle collection timer starts; general fetch
+backpressure may legally seal a smaller group and is covered separately by the
+AXI stress tiers. The focused commands are `make test-m3-ordered-io`,
+`make test-m3-ordered-io-top`, and `make test-m3-device-io`.
 
 The static ledger explicitly charges the retained AXI, combiner, and streamer
 four-request groups, collection control, response hold, ID comparisons, and

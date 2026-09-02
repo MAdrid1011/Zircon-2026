@@ -59,6 +59,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedfd03L)
   private val M3MshrPressureSeeds = Seq(0x5eedfe01L, 0x5eedfe02L,
     0x5eedfe03L, 0x5eedfe04L)
+  private val M3OrderedIoTopSeeds = Seq(0x5eed0201L, 0x5eed0202L,
+    0x5eed0203L, 0x5eed0204L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2104,6 +2106,117 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           val event = events.find(_.pc == ResetVector + 24 + member * 4).get
           assert(event.memoryAddress == address + member * 4 &&
             event.memoryWriteMask == 15 && event.memoryWriteData == writeData(member))
+        }
+      }
+    }
+
+    it("runs seeded one-to-four beat DeviceBurstable groups under ROB pressure") {
+      val loadInstructions = Seq(
+        BigInt("0000a103", 16), BigInt("0040a183", 16),
+        BigInt("0080a203", 16), BigInt("00c0a283", 16))
+      val storeInstructions = Seq(
+        BigInt("0020a023", 16), BigInt("0030a223", 16),
+        BigInt("0040a423", 16), BigInt("0050a623", 16))
+      val storeValues = Seq(BigInt(17), BigInt(34), BigInt(51), BigInt(68))
+      for ((seed, index) <- M3OrderedIoTopSeeds.zipWithIndex) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val count = index + 1
+          val write = index % 2 == 1
+          val cycles = 768
+          val schedule = seededAxiSchedule(seed, cycles)
+          val address = BigInt("b0000000", 16)
+          val values = (0 until count).map(member => BigInt("41000000", 16) + member)
+          val program = scala.collection.mutable.Map[BigInt, BigInt](
+            ResetVector -> BigInt("b00000b7", 16) // lui x1,0xb0000
+          )
+          val deviceFirstPc = if (write) ResetVector + 24 else ResetVector + 8
+          if (write) {
+            program.update(ResetVector + 4, BigInt("01100113", 16))
+            program.update(ResetVector + 8, BigInt("02200193", 16))
+            program.update(ResetVector + 12, BigInt("03300213", 16))
+            program.update(ResetVector + 16, BigInt("04400293", 16))
+            program.update(ResetVector + 20, BigInt("02004333", 16)) // div x6,x0,x0
+            for (member <- 0 until count) {
+              program.update(deviceFirstPc + member * 4, storeInstructions(member))
+            }
+          } else {
+            program.update(ResetVector + 4, BigInt("02004333", 16)) // div x6,x0,x0
+            for (member <- 0 until count) {
+              program.update(deviceFirstPc + member * 4, loadInstructions(member))
+              program.update(address + member * 4, values(member))
+            }
+          }
+          program.update(deviceFirstPc + count * 4, BigInt("00100073", 16))
+          val id6Groups = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val writeData = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var maxQueueCount = BigInt(0)
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, program.toMap, cycles = cycles,
+              // The fixed six-cycle MMIO collection window must see every
+              // already-dispatched member. Fetch pressure is covered by the
+              // AXI suites; here it would intentionally seal a smaller group
+              // before later instructions reach the LQ/SQ.
+              arReadyForCycle = cycle => cycle < 128 || schedule.arReady(cycle),
+              rValidForCycle = cycle => cycle < 128 || schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              writeResponse = if (write) Some(0) else None,
+              observeCycle = (core, _) => {
+                val observation = core.io.m2Observation.get
+                val queueCount = if (write) observation.storeQueueCount.peek().litValue
+                else observation.loadQueueCount.peek().litValue
+                maxQueueCount = maxQueueCount.max(queueCount)
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 6) {
+                  id6Groups += ((core.io.axi.ar.bits.addr.peek().litValue,
+                    core.io.axi.ar.bits.len.peek().litValue))
+                }
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 6) {
+                  id6Groups += ((core.io.axi.aw.bits.addr.peek().litValue,
+                    core.io.axi.aw.bits.len.peek().litValue))
+                }
+                if (wFire) writeData += core.io.axi.w.bits.data.peek().litValue
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} count=$count " +
+              s"write=$write groups=$id6Groups maxQueue=$maxQueueCount " +
+              s"writeData=$writeData trace=$retired") {
+              assert(id6Groups.toSeq == Seq((address, BigInt(count - 1))),
+                "DeviceBurstable operations did not form one exact ID-6 group")
+              assert(maxQueueCount >= count,
+                "all same-group device owners were not simultaneously live under ROB pressure")
+              if (write) assert(writeData.toSeq == storeValues.take(count))
+              for (member <- 0 until count) {
+                val event = retired.find(_.pc == deviceFirstPc + member * 4).getOrElse(
+                  fail(s"missing device member $member"))
+                assert(event.memoryAddress == address + member * 4)
+                if (write) {
+                  assert(event.memoryWriteMask == 15 &&
+                    event.memoryWriteData == storeValues(member))
+                } else {
+                  assert(event.gprWrite && event.gprAddress == member + 2 &&
+                    event.gprData == values(member) && event.memoryReadMask == 15 &&
+                    event.memoryReadData == values(member))
+                }
+              }
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, s"ordered-io-top-$count-${if (write) "write" else "read"}",
+                schedule, events, program = Some(program.toMap))
+              throw failure
+          }
         }
       }
     }
