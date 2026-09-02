@@ -3594,6 +3594,71 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("invalidates a clean resident L1D line before a later external modifier") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val dataLine = BigInt("80001000", 16)
+        val firstLoadPc = ResetVector + 4
+        val secondLoadPc = ResetVector + 8 + 64 * 4
+        var firstLoadRetired = false
+        var requestAccepted = false
+        var responseCount = 0
+        var dataArCount = 0
+        val program = Map[BigInt, BigInt](
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          firstLoadPc -> BigInt("0000a103", 16), // lw x2,0(x1)
+          secondLoadPc -> BigInt("0000a183", 16), // lw x3,0(x1)
+          secondLoadPc + 4 -> BigInt("00100073", 16),
+          dataLine -> BigInt("11223344", 16)
+        ) ++ (0 until 64).map(index =>
+          ResetVector + 8 + index * 4 -> Nop).toMap
+        val events = runProgram(dut, program, cycles = 896,
+          driveExternalCoherence = (core, _) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (firstLoadRetired && !requestAccepted) {
+              request.valid.poke(true)
+              request.bits.kind.poke(0)
+              request.bits.lineAddress.poke(dataLine)
+              if (request.ready.peek().litToBoolean) requestAccepted = true
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean && response.ready.peek().litToBoolean) {
+              response.bits.kind.expect(0)
+              response.bits.lineAddress.expect(dataLine)
+              responseCount += 1
+            }
+          }, observeCycle = (core, _) => {
+            firstLoadRetired ||= core.io.trace.get.exists(lane =>
+              lane.valid.peek().litToBoolean && lane.pc.peek().litValue == firstLoadPc &&
+                !lane.trap.peek().litToBoolean)
+            val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean
+            if (arFire && core.io.axi.ar.bits.addr.peek().litValue == dataLine) {
+              dataArCount += 1
+            }
+          })
+        val retired = throughFirstTrap(events)
+        val firstLoad = retired.find(_.pc == firstLoadPc).getOrElse(
+          fail(s"first load did not retire: $retired"))
+        val secondLoad = retired.find(_.pc == secondLoadPc).getOrElse(
+          fail(s"second load did not retire: $retired"))
+        withClue(s"request=$requestAccepted response=$responseCount ar=$dataArCount " +
+          s"trace=$retired") {
+          assert(firstLoadRetired && requestAccepted && responseCount == 1)
+          assert(dataArCount == 2,
+            "the second load reused a stale resident L1D line after external invalidation")
+          assert(firstLoad.gprWrite && firstLoad.gprAddress == 2 &&
+            firstLoad.gprData == BigInt("11223344", 16))
+          assert(secondLoad.gprWrite && secondLoad.gprAddress == 3 &&
+            secondLoad.gprData == BigInt("11223344", 16))
+          assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
     it("drains an in-flight instruction refill before external-coherence response") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

@@ -92,5 +92,7 @@ the replacement is accepted only after the original response fires.
 `CoreShellSpec` applies the same rule at the production port: it holds an
 atomic-invalidate acknowledgement for three cycles, checks the exact retained
 payload every cycle, then permits one response and requires refetch through
-`EBREAK`. Integration still needs a concrete platform master, board wrapper,
-and full pressure matrix.
+`EBREAK`. A second top-level scenario first fills a clean L1D line, submits its
+external write-invalidate request, then requires a later same-address load to
+own a new AXI read rather than reuse the invalidated local line. Integration
+still needs a concrete platform master, board wrapper, and full pressure matrix.

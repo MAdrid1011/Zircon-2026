@@ -87,7 +87,7 @@ the original load retains exact retire metadata.
 `ExternalCoherenceAdapter` now provides the reusable one-request platform
 gate: it retains a modifier until the matching core response and drops it on
 reset; its two directed tests pass locally. `make test-m3-external-coherence`
-now covers six component and nine core cases. Concrete
+now covers six component and ten core cases. Concrete
 `ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
 external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
