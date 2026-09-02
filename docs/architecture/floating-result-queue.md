@@ -11,8 +11,15 @@ allowing it to write an FPR or update `fflags` early.
 Each entry is `{robTag, writesFloat, fprAddress, fprData, flags}`. One E2
 result may enqueue each cycle while a registered free slot exists. The commit
 consumer supplies the current ROB head tag and accepts the matching result;
-that fire is the only future source for `FloatingRegisterFile.write`,
+that fire is the only source for `FloatingRegisterFile.write`,
 `FloatingScoreboard.complete`, and `MachineCSRFile.fpCommit`.
+
+`FloatingCommitState` now composes the queue with the architectural FPR file.
+One matching `commit.fire` atomically produces the optional FPR write, the
+ROB-tagged destination completion, and the `fflags`/FS-dirty event. It asserts
+that recovery cannot transfer retained state. The composition is a local M4
+foundation only: it has no decoder, issue, FPU, CSR, or top-level connection,
+so executable F instruction encodings remain illegal.
 
 Selective squash removes only tags younger than its boundary. Global flush
 removes every uncommitted entry. Neither recovery path permits enqueue or
@@ -28,5 +35,7 @@ the F decoder and E2 execution integration exist.
 `FloatingResultQueueSpec` enqueues younger-before-older results, holds the
 older matching result under commit backpressure, commits by exact ROB tag, and
 proves selective squash/global flush remove only the correct retained entries.
-Integration remains responsible for FPU exception flags, commit trace fields,
-scoreboard release, and true F instruction execution.
+`FloatingCommitStateSpec` adds younger-before-older commit composition and
+checks exact FPR readback, flag propagation, and destination completion.
+Integration remains responsible for FPU execution, source-release timing, CSR
+wiring, commit trace fields, and true F instruction execution.

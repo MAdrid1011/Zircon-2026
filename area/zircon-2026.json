@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The standalone 32x32 FPR and four tagged floating-scoreboard reservations are conservatively counted below; FPU, result-queue, E2, LSU, CSR, and trace integration remain unimplemented and are not an area sign-off"
+    "The standalone 32x32 FPR, four tagged floating-scoreboard reservations, and four retained floating result records are conservatively counted below; FPU, E2, LSU, CSR, and trace integration remain unimplemented and are not an area sign-off"
   ],
   "storage": [
     {
@@ -22,13 +22,13 @@
       "source": "ZirconCoreConfig.intPhysicalRegisters and IntegerPhysicalRegisterFile"
     },
     {
-      "name": "floating_prf_data_planned",
+      "name": "floating_prf_data",
       "class": "register_payload",
       "entries": 32,
       "bits_per_entry": 32,
       "instances": 1,
       "replication_factor": 1,
-      "source": "frozen 32x32 2R1W FPR contract"
+      "source": "FloatingRegisterFile: 32x32 architectural 2R1W FPR state"
     },
     {
       "name": "floating_scoreboard_tagged_reservations",
@@ -38,6 +38,15 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "FloatingScoreboard: 30-bit {ROB tag, three source-valid/source pairs, destination-valid/destination} reservation plus sourceConsumed"
+    },
+    {
+      "name": "floating_result_queue_records",
+      "class": "register_payload",
+      "entries": 4,
+      "bits_per_entry": 50,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingResultQueue: four 49-bit {ROB tag, writesFloat, FPR address, FPR data, flags} records plus one valid bit per record"
     },
     {
       "name": "issue_queue_uop_payload",
