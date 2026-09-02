@@ -69,8 +69,8 @@ recording unimplemented activity as zero.
 
 `ExclusiveL2TransferStoreSpec` covers hit removal, miss behavior, exact line
 payload/dirty-bit transfer, clean instruction allocation and merge, dirty victim
-FIFO ordering and full backpressure, the global-FENCE dirty sweep, and the 8 KiB
-configuration.
+FIFO ordering and full backpressure, exact dirty-line cleanup while that FIFO is
+full, the global-FENCE dirty sweep, and the 8 KiB configuration.
 `AXIL2WritebackEngineSpec` and `CoreShellSpec`
 cover retained ID-5 drain and a real dirty replacement. L1D/L2 integration
 still needs L2 MSHR pressure and the global single-owner assertion across L1D,

@@ -294,6 +294,56 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("backpressures exact dirty cleanup behind a full victim FIFO") {
+      simulate(new ExclusiveL2TransferStore) { dut =>
+        clear(dut)
+        val base = BigInt("80002d00", 16)
+        val stride = BigInt("400", 16) // Keep all lines in one L2 set.
+        val lines = (0 until 6).map(index => base + stride * index)
+        val words = (0 until 6).map(index =>
+          Seq.tabulate(8)(word => BigInt(index * 0x100 + word)))
+
+        // Two clean replacements fill the FIFO with dirty lines 0 and 1,
+        // leaving dirty lines 2 and 3 resident for exact cleanup.
+        (0 until 4).foreach(index => insert(dut, lines(index), words(index), dirty = true))
+        insert(dut, lines(4), words(4), dirty = false)
+        insert(dut, lines(5), words(5), dirty = false)
+        dut.io.victimCount.expect(2)
+        dut.io.victim.valid.expect(true)
+        dut.io.victim.bits.lineAddress.expect(lines(0))
+
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(lines(2))
+        dut.io.flushLineDirty.expect(true)
+        dut.io.flushLine.ready.expect(false)
+        dut.io.residentLineCount.expect(4)
+
+        // The full FIFO has no same-cycle dequeue/enqueue bypass. Releasing
+        // one credit first drains the existing oldest victim; cleanup can
+        // then handshake in the following cycle and occupy the tail behind
+        // line 1.
+        dut.io.victim.ready.poke(true)
+        dut.io.flushLine.ready.expect(false)
+        dut.io.victim.bits.lineAddress.expect(lines(0))
+        dut.clock.step()
+        dut.io.victim.ready.poke(false)
+        dut.io.flushLine.ready.expect(true)
+        dut.clock.step()
+        dut.io.flushLine.valid.poke(false)
+        dut.io.victimCount.expect(2)
+        dut.io.victim.valid.expect(true)
+        dut.io.victim.bits.lineAddress.expect(lines(1))
+        dut.io.residentLineCount.expect(3)
+
+        dut.io.victim.ready.poke(true)
+        dut.clock.step()
+        dut.io.victim.bits.lineAddress.expect(lines(2))
+        dut.clock.step()
+        dut.io.victim.ready.poke(false)
+        dut.io.victimCount.expect(0)
+      }
+    }
+
     it("drains dirty residents into the victim FIFO for a cache-global FENCE") {
       simulate(new ExclusiveL2TransferStore) { dut =>
         clear(dut)
