@@ -742,6 +742,100 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drains an accepted wrong-path cache refill without retiring its load") {
+      val seed = 0x5eed0301L
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val cycles = 384
+        val schedule = seededAxiSchedule(seed, cycles)
+        val branchLine = BigInt("80001000", 16)
+        val dataLine = BigInt("80001020", 16)
+        val dataOwnerBeats = scala.collection.mutable.Map.empty[BigInt, Int]
+        var dataArs = 0
+        var drainedBeats = 0
+        var firstDrainCycle = Option.empty[Int]
+        var branchRetireCycle = Option.empty[Int]
+        var firstTrapCycle = Option.empty[Int]
+        var events = Seq.empty[TraceSample]
+        val program = Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 8 -> BigInt("00210463", 16), // beq x2,x2,+8
+          ResetVector + 12 -> BigInt("0200a183", 16), // wrong-path lw x3,32(x1)
+          ResetVector + 16 -> BigInt("00100073", 16), // ebreak target
+          branchLine -> BigInt("11223344", 16),
+          dataLine -> BigInt("55667788", 16)
+        )
+        try {
+          events = runProgram(dut, program, cycles = cycles,
+            arReadyForCycle = cycle => schedule.arReady(cycle),
+            rValidForCycle = cycle => schedule.rValid(cycle),
+            // Keep the wrong-path line live through branch recovery and the
+            // target trap. Once accepted, its AXI owner must still drain.
+            readValidForCycle = (cycle, _, address) =>
+              (address != branchLine || cycle >= 64) &&
+                (address != dataLine || cycle >= 256),
+            awReadyForCycle = cycle => schedule.awReady(cycle),
+            wReadyForCycle = cycle => schedule.wReady(cycle),
+            bValidForCycle = cycle => schedule.bValid(cycle),
+            observeCycle = (core, cycle) => {
+              core.io.trace.get.foreach { event =>
+                if (event.valid.peek().litToBoolean &&
+                    event.pc.peek().litValue == ResetVector + 8 && !event.trap.peek().litToBoolean &&
+                    branchRetireCycle.isEmpty) {
+                  branchRetireCycle = Some(cycle)
+                }
+                if (event.valid.peek().litToBoolean && event.trap.peek().litToBoolean &&
+                    firstTrapCycle.isEmpty) {
+                  firstTrapCycle = Some(cycle)
+                }
+              }
+              val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                core.io.axi.ar.ready.peek().litToBoolean
+              val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                core.io.axi.r.ready.peek().litToBoolean
+              if (arFire && core.io.axi.ar.bits.addr.peek().litValue == dataLine) {
+                val id = core.io.axi.ar.bits.id.peek().litValue
+                dataArs += 1
+                dataOwnerBeats.update(id, 8)
+              }
+              if (rFire) {
+                val id = core.io.axi.r.bits.id.peek().litValue
+                dataOwnerBeats.get(id).foreach { remaining =>
+                  drainedBeats += 1
+                  if (firstDrainCycle.isEmpty) firstDrainCycle = Some(cycle)
+                  if (remaining == 1) dataOwnerBeats.remove(id)
+                  else dataOwnerBeats.update(id, remaining - 1)
+                }
+              }
+            })
+
+          val retired = throughFirstTrap(events)
+          withClue(s"seed=0x${java.lang.Long.toHexString(seed)} dataArs=$dataArs " +
+            s"drained=$drainedBeats branchRetire=$branchRetireCycle " +
+            s"firstTrap=$firstTrapCycle firstDrain=$firstDrainCycle " +
+            s"trace=$retired") {
+            assert(dataArs == 1, "wrong-path load did not acquire exactly one data AXI owner")
+            assert(drainedBeats == 8 && dataOwnerBeats.isEmpty,
+              "accepted wrong-path refill did not drain every AXI beat")
+            assert(branchRetireCycle.nonEmpty &&
+              firstDrainCycle.exists(_ > branchRetireCycle.get),
+              "wrong-path data response arrived before its resolving branch retired")
+            assert(!retired.exists(_.pc == ResetVector + 12),
+              "wrong-path load reached architectural retirement")
+            assert(retired.last.pc == ResetVector + 16 && retired.last.trap &&
+              retired.last.cause == 3)
+          }
+        } catch {
+          case failure: Throwable =>
+            saveM3AxiStressFailure(seed, "wrong-path-refill-drain", schedule, events,
+              program = Some(program))
+            throw failure
+        }
+      }
+    }
+
     it("uses a direct JAL target and commits its architectural link value") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

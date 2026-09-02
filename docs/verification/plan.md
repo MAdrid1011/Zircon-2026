@@ -214,6 +214,15 @@ three unissued MSHRs while draining the sole accepted L2 miss response, then
 checks a fresh miss reclaims the released credit. The remaining response/recovery
 matrix under resource saturation remains open.
 
+`make test-m3-axi-wrong-path-drain` runs the explicit-seed `0x5eed0301`
+complete-core recovery case. An older cache-miss load supplies a taken branch
+while the decoded wrong-path load has already acquired a distinct L1D/AXI
+refill owner. The resolving branch retires before the wrong-path R channel is
+released; all eight R beats then drain exactly once, no wrong-path load retires,
+and the target `EBREAK` takes its exact trap. On 2026-09-02 this was 1/1 in
+12.545 seconds. The larger squash/flush and resource-pressure cross-product
+remains open.
+
 Each random failure bundle contains the generator and memory seeds, ELF and
 SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
 path. No timeout increase, response filtering, or seed replacement is a valid
