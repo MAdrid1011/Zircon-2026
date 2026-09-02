@@ -39,6 +39,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf303L)
   private val M3AtomicRandomSeeds = Seq(0x5eedf401L, 0x5eedf402L,
     0x5eedf403L)
+  private val M3LrScRandomSeeds = Seq(0x5eedf501L, 0x5eedf502L,
+    0x5eedf503L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2488,6 +2490,81 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "random-rv32a-amo", schedule, events,
                 Some(selectorSeed), Some(program.toMap))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("preserves seeded LR/SC success and local reservation loss under AXI backpressure") {
+      for (seed <- M3LrScRandomSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val random = new Random(seed)
+          val schedule = seededAxiSchedule(seed, 1800)
+          val selectorSeed = seed ^ 0x7a0c0L
+          val selectorRandom = new Random(selectorSeed)
+          val base = BigInt("80001000", 16)
+          val storeData = BigInt(random.nextInt(2048))
+          val initialFirst = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+          val initialSecond = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> ((storeData << 20) | (BigInt(2) << 7) | BigInt(0x13)),
+            ResetVector + 8 -> BigInt("1000a1af", 16), // lr.w x3,(x1)
+            ResetVector + 12 -> BigInt("1820a22f", 16), // sc.w x4,x2,(x1)
+            ResetVector + 16 -> BigInt("00408093", 16), // addi x1,x1,4
+            ResetVector + 20 -> BigInt("1000a2af", 16), // lr.w x5,(x1)
+            ResetVector + 24 -> BigInt("0000a023", 16), // sw x0,0(x1)
+            ResetVector + 28 -> BigInt("1820a32f", 16), // sc.w x6,x2,(x1)
+            ResetVector + 32 -> BigInt("00100073", 16),
+            base -> initialFirst,
+            base + 4 -> initialSecond)
+          var events = Seq.empty[TraceSample]
+          var id7Reads = 0
+          var id7Writes = 0
+          var id7Responses = 0
+          try {
+            events = runProgram(dut, program, cycles = 1800,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) id7Writes += 1
+                if (bFire && core.io.axi.b.bits.id.peek().litValue == 7) id7Responses += 1
+              })
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$retired") {
+              assert(id7Reads == 2 && id7Writes == 1 && id7Responses == 1)
+              val firstLr = retired.find(_.pc == ResetVector + 8).get
+              val firstSc = retired.find(_.pc == ResetVector + 12).get
+              val secondLr = retired.find(_.pc == ResetVector + 20).get
+              val secondSc = retired.find(_.pc == ResetVector + 28).get
+              assert(firstLr.gprData == initialFirst && firstLr.memoryReadData == initialFirst)
+              assert(firstSc.gprData == 0 && firstSc.memoryWriteData == storeData)
+              assert(secondLr.gprData == initialSecond && secondLr.memoryReadData == initialSecond)
+              assert(secondSc.gprData == 1 && secondSc.memoryWriteMask == 0)
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "random-lr-sc-reservation", schedule, events,
+                Some(selectorSeed), Some(program))
               throw failure
           }
         }
