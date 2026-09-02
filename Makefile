@@ -23,8 +23,9 @@ test-m3-load-boundary:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "without L1D"'
 
 # Fast M3 two-candidate load-forward tier. It checks the retained-LQ boundary
-# plus direct two-lane L1D different-bank hits, same-bank/address replay, and
-# exact result-slot ordering before the later dual-miss resource work.
+# plus direct two-lane L1D different-bank hits, same-bank/address replay,
+# same-line secondary merge, and exact result-slot ordering before hit/miss and
+# different-line dual-miss resource work.
 test-m3-dual-load-forward:
 	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1"'

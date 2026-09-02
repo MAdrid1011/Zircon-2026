@@ -145,10 +145,11 @@ MemIQ issued it through M0 or M1; the retained `m1Owner` bit routes its real
 L1D completion to the matching endpoint. Device and atomic M0 owners do not
 enter that path. ADR-0020 exposed the two retained candidates and ADR-0021
 replaces the active top-level arbiter with direct two-lane L1D ingress. The
-implemented first increment performs both tag lookups and captures two
-different-bank hit results. It deliberately serializes every pair containing a
-miss until MSHR, waiter, victim, and L2 resource allocation is made dual-safe;
-it must not claim frozen dual-port hit/miss throughput yet.
+implemented increments perform both tag lookups, capture two different-bank hit
+results, and merge a same-line miss pair into one MSHR with two waiters. They
+deliberately serialize hit/miss and different-line miss pairs until MSHR,
+victim, and L2 resource allocation is made dual-safe; they must not claim
+frozen dual-port hit/miss throughput yet.
 
 ## PMA and precise exceptions
 
@@ -309,11 +310,12 @@ resource or backpressure/replay deterministically.
 The executable slice now receives both M0 and M1 cacheable-load forwards
 directly. It accepts two cache hits only when their four-way word banks differ
 and both exact result slots are available; a same-bank or same-address pair
-accepts only the older ROB tag. A hit/miss or two-miss pair still accepts only
-the older request, so neither a second MSHR nor a second victim/L2 transfer is
-fabricated. Completing the remaining matrix requires directed hit/miss,
-same-line merge, dual-miss, MSHR/waiter/victim-full, L2-backpressure, and
-recovery evidence.
+accepts only the older ROB tag. Two same-line misses allocate or reuse one MSHR
+only when two waiter credits exist, then return both exact owners from one
+refill. A hit/miss or different-line miss pair still accepts only the older
+request, so neither a second MSHR nor a second victim/L2 transfer is fabricated.
+Completing the remaining matrix requires directed hit/miss, different-line dual
+miss, MSHR/waiter/victim-full, L2-backpressure, and recovery evidence.
 
 L2 has four ways and four MSHRs. The 4 KiB (32-set) configuration is the default;
 8 KiB is solely the M5 A/B point. L2 dynamically serves I and D demand and does

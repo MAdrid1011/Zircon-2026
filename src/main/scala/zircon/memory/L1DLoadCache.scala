@@ -142,6 +142,9 @@ class L1DLoadCache(
   val portWord = (0 until config.decodeWidth).map(port =>
     io.request(port).bits.address(lineOffsetWidth - 1, 2))
   val portBank = portWord.map(_(wordBankWidth - 1, 0))
+  val portLineAddress = (0 until config.decodeWidth).map(port =>
+    Cat(io.request(port).bits.address(31, lineOffsetWidth),
+      0.U(lineOffsetWidth.W)))
   val portCacheHit = (0 until config.decodeWidth).map(port => VecInit(
     (0 until ways).map(way => cacheValid(way)(portSet(port)) &&
       cacheTag(way)(portSet(port)) === portTag(port))))
@@ -173,6 +176,10 @@ class L1DLoadCache(
   val freeWaiter = (~waiterValid.asUInt)(waiterCount - 1, 0)
   val anyFreeWaiter = freeWaiter.orR
   val freeWaiterIndex = PriorityEncoder(freeWaiter)
+  val secondFreeWaiter = VecInit((0 until waiterCount).map(index =>
+    !waiterValid(index) && index.U =/= freeWaiterIndex))
+  val anySecondFreeWaiter = secondFreeWaiter.asUInt.orR
+  val secondFreeWaiterIndex = PriorityEncoder(secondFreeWaiter.asUInt)
 
   val storeSet = io.storeRequest.bits.address(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -297,6 +304,17 @@ class L1DLoadCache(
     portImmediateRequest(0) && portImmediateRequest(1) &&
     !(io.request(0).bits.requiresCache && io.request(1).bits.requiresCache &&
       sameWordBank)
+  val sameLineDualMiss = io.request(0).valid && io.request(1).valid &&
+    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
+    !portImmediateRequest(0) && !portImmediateRequest(1) &&
+    portLineAddress(0) === portLineAddress(1)
+  val sameLineDualWaiterCredits = anyFreeWaiter && anySecondFreeWaiter
+  // If the pair cannot consume two waiter credits, it falls through to the
+  // existing oldest-first path. This keeps a victim transfer coupled to a
+  // real accepted request instead of evicting a line for a blocked younger
+  // waiter.
+  val loadWaiterCredits = Mux(sameLineDualMiss && sameLineDualWaiterCredits,
+    sameLineDualWaiterCredits, anyFreeWaiter)
   val selectedImmediateSlotAvailable = Mux(selectFirstRequest,
     immediateSlotAvailable(0), immediateSlotAvailable(1))
   val newMissNeedsL2Insert = !anyMatchingMshr && anyFreeMshr && hasVictimWay &&
@@ -305,7 +323,7 @@ class L1DLoadCache(
     storeHasVictimWay && storeVictimValid
   val loadL2Insert = selectedRequestValid && selectedRequest.cacheable &&
     !io.storeRequest.valid && !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked && !immediateRequest &&
-    anyFreeWaiter && newMissNeedsL2Insert
+    loadWaiterCredits && newMissNeedsL2Insert
   val storeL2Insert = io.storeRequest.valid && storeOwnerAvailable &&
     !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked &&
     !anyStoreCacheHit && !anyStoreLineMshr && anyFreeMshr &&
@@ -325,6 +343,9 @@ class L1DLoadCache(
   io.flushLine.ready := flushL2Insert && io.l2Insert.ready
   val missResources = anyFreeWaiter && (anyMatchingMshr ||
     (anyFreeMshr && hasVictimWay && (!newMissNeedsL2Insert || io.l2Insert.ready)))
+  val sameLineDualMissResources = sameLineDualWaiterCredits &&
+    (anyMatchingMshr || (anyFreeMshr && hasVictimWay &&
+      (!newMissNeedsL2Insert || io.l2Insert.ready)))
   val storeMissResources = anyStoreMatchingMshr ||
     (!anyStoreLineMshr && anyFreeMshr && storeHasVictimWay &&
       (!storeNewMissNeedsL2Insert || io.l2Insert.ready))
@@ -340,10 +361,12 @@ class L1DLoadCache(
   val dualImmediateReady = dualImmediateCompatible && requestAdmissionOpen &&
     io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
     immediateSlotAvailable(0) && immediateSlotAvailable(1)
+  val sameLineDualMissReady = sameLineDualMiss && requestAdmissionOpen &&
+    sameLineDualMissResources
   for (port <- 0 until config.decodeWidth) {
     val selected = selectedRequestPort === port.U
     io.request(port).ready := Mux(dualImmediateCompatible, dualImmediateReady,
-      selected && selectedRequestReady)
+      Mux(sameLineDualMissReady, true.B, selected && selectedRequestReady))
   }
   io.storeRequest.ready := !io.fenceDrain && !recoveryBlocked && !io.flushLine.valid && storeOwnerAvailable &&
     !io.storeRequest.bits.isAtomic &&
@@ -505,12 +528,27 @@ class L1DLoadCache(
     }
     val selectedRequestFire = selectedRequestValid && Mux(selectFirstRequest,
       io.request(0).fire, io.request(1).fire)
-    when(selectedRequestFire && !immediateRequest) {
+    val dualSameLineMissFire = sameLineDualMissReady && io.request(0).fire &&
+      io.request(1).fire
+    val selectedMissFire = selectedRequestFire && !immediateRequest &&
+      !dualSameLineMissFire
+    when(dualSameLineMissFire || selectedMissFire) {
       val chosenMshr = Mux(anyMatchingMshr, matchingMshrIndex, freeMshrIndex)
-      waiterValid(freeWaiterIndex) := true.B
-      waiterMshr(freeWaiterIndex) := chosenMshr
-      waiterTag(freeWaiterIndex) := selectedRequest.robTag
-      waiterWord(freeWaiterIndex) := requestWord
+      when(dualSameLineMissFire) {
+        waiterValid(freeWaiterIndex) := true.B
+        waiterMshr(freeWaiterIndex) := chosenMshr
+        waiterTag(freeWaiterIndex) := io.request(0).bits.robTag
+        waiterWord(freeWaiterIndex) := portWord(0)
+        waiterValid(secondFreeWaiterIndex) := true.B
+        waiterMshr(secondFreeWaiterIndex) := chosenMshr
+        waiterTag(secondFreeWaiterIndex) := io.request(1).bits.robTag
+        waiterWord(secondFreeWaiterIndex) := portWord(1)
+      }.otherwise {
+        waiterValid(freeWaiterIndex) := true.B
+        waiterMshr(freeWaiterIndex) := chosenMshr
+        waiterTag(freeWaiterIndex) := selectedRequest.robTag
+        waiterWord(freeWaiterIndex) := requestWord
+      }
       when(!anyMatchingMshr) {
         mshrValid(chosenMshr) := true.B
         mshrIssued(chosenMshr) := false.B
@@ -697,10 +735,22 @@ class L1DLoadCache(
 
   val selectedRequestFire = selectedRequestValid && Mux(selectFirstRequest,
     io.request(0).fire, io.request(1).fire)
-  when(selectedRequestFire && !immediateRequest) {
+  val dualSameLineMissFire = sameLineDualMissReady && io.request(0).fire &&
+    io.request(1).fire
+  val selectedMissFire = selectedRequestFire && !immediateRequest &&
+    !dualSameLineMissFire
+  when(selectedMissFire) {
     assert(anyFreeWaiter, "L1D accepted a miss without a waiter owner")
     assert(anyMatchingMshr || (anyFreeMshr && hasVictimWay),
       "L1D accepted a miss without an MSHR and victim owner")
+  }
+  when(dualSameLineMissFire) {
+    assert(sameLineDualWaiterCredits,
+      "L1D accepted a same-line pair without two exact waiter credits")
+    assert(portLineAddress(0) === portLineAddress(1),
+      "L1D dual-miss admission must merge only one exact line")
+    assert(anyMatchingMshr || (anyFreeMshr && hasVictimWay),
+      "L1D accepted a merged miss without one MSHR and victim owner")
   }
   for (port <- 0 until config.decodeWidth) {
     when(io.request(port).fire) {

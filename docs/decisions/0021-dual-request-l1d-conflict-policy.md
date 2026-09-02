@@ -39,12 +39,13 @@ before either candidate changes architectural or cache ownership:
 physical transfer ports. Multiple local MSHRs may queue behind those ports; the
 dual request interface does not promise two AXI transactions per cycle.
 
-The first implementation increment has replaced the active top-level
+The first implementation increments have replaced the active top-level
 `DualLoadForwardArbiter` connection with direct two-lane L1D ingress. It
 performs both tag lookups, accepts different-bank hit pairs into two exact
-result slots, and backpressures a same-bank or same-address younger request.
-Pairs containing a miss still use the older request only. This is explicitly
-not evidence that the remaining MSHR, waiter, victim, and L2 rows are done.
+result slots, backpressures a same-bank or same-address younger request, and
+merges two same-line misses into one MSHR with two exact waiters. Hit/miss and
+different-line miss pairs still use the older request only. This is explicitly
+not evidence that the remaining MSHR, victim, and L2 rows are done.
 
 The implementation must use a two-port FPGA-friendly tag/data organization.
 For the Nexys4 DDR point this is a registered RAM boundary or an equivalent

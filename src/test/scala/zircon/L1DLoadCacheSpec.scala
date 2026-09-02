@@ -680,6 +680,36 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("merges two same-line misses into one refill with exact waiter completions") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80005c00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("77000000", 16) + word)
+
+        // The two lanes request different words from one absent line. Lane 1
+        // is older, so it must retire first even though its waiter is second.
+        presentLoad(dut, lane = 0, tag = 7, address = line + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = line + 20)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(5))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(1))
+      }
+    }
+
     it("drains a flushed L2 miss transfer without creating a fallback AXI refill") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

@@ -522,6 +522,14 @@
       "source": "L1DLoadCache same-bank conflict check for two simultaneous cache-hit candidates, conservatively charged as one 32-bit compare"
     },
     {
+      "name": "l1d_same_line_dual_miss_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache two-lane line-address equality check for same-line dual-miss merge, conservatively charged as one 32-bit compare"
+    },
+    {
       "name": "l1d_immediate_result_select",
       "metric": "priority_select_bits",
       "units": 1,
@@ -688,6 +696,14 @@
       "width": 6,
       "fanin": 8,
       "source": "L1DLoadCache oldest filled-MSHR waiter selector"
+    },
+    {
+      "name": "l1d_same_line_second_free_waiter_select",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 3,
+      "fanin": 8,
+      "source": "L1DLoadCache second free-waiter priority selector for atomic same-line dual-miss admission"
     },
     {
       "name": "l2_demand_line_response_mux_inputs",
