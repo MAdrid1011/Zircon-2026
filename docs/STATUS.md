@@ -1,6 +1,6 @@
 # Zircon-2026 实施状态
 
-最新本地全回归（2026-09-02）为 63 suites、376 tests，全部通过；
+最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 为 5 suites、74 tests 加 1 条顶层 core 用例，耗时约 4 分 29 秒。
 最新完整 `L1DLoadCacheSpec` 为 39/39 tests、约 2 分 5 秒，覆盖 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、两个不同 set dirty-victim miss 的单 transfer owner 串行化、四 MSHR 满载时的第五 miss replay/drain/re-admission，以及 flush/squash 时已接受 L2 probe 或 issued AXI refill 的 drain 与未发 probe peer 取消。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
