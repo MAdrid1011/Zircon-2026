@@ -101,6 +101,51 @@ class ExternalCoherenceAdapterSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("retains a core-acknowledged modifier through authorization backpressure") {
+      simulate(new ExternalCoherenceAdapter) { dut =>
+        clear(dut)
+        offer(dut, ExternalCoherenceKind.AtomicInvalidate.litValue, FirstLine)
+        dut.io.modifier.ready.expect(true)
+        dut.clock.step()
+        dut.io.modifier.valid.poke(false)
+        acceptCoreRequest(dut, ExternalCoherenceKind.AtomicInvalidate.litValue, FirstLine)
+        respond(dut, ExternalCoherenceKind.AtomicInvalidate.litValue, FirstLine)
+
+        // A subsequent platform modifier may be offered while the authorized
+        // action is backpressured, but it cannot replace the acknowledged
+        // request or become externally visible early.
+        offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue, SecondLine)
+        for (_ <- 0 until 3) {
+          dut.io.modifier.ready.expect(false)
+          dut.io.core.request.valid.expect(false)
+          dut.io.core.response.ready.expect(false)
+          dut.io.authorized.valid.expect(true)
+          dut.io.authorized.bits.kind.expect(ExternalCoherenceKind.AtomicInvalidate)
+          dut.io.authorized.bits.lineAddress.expect(FirstLine)
+          dut.clock.step()
+        }
+
+        dut.io.authorized.ready.poke(true)
+        dut.io.authorized.valid.expect(true)
+        dut.io.authorized.bits.kind.expect(ExternalCoherenceKind.AtomicInvalidate)
+        dut.io.authorized.bits.lineAddress.expect(FirstLine)
+        dut.clock.step()
+        dut.io.authorized.ready.poke(false)
+        dut.io.modifier.valid.poke(false)
+        dut.io.modifier.ready.expect(true)
+
+        // The blocked replacement was never accepted. Re-offer it only after
+        // the first authorization fires, then require a new core request.
+        offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue, SecondLine)
+        dut.io.modifier.ready.expect(true)
+        dut.clock.step()
+        dut.io.modifier.valid.poke(false)
+        dut.io.core.request.valid.expect(true)
+        dut.io.core.request.bits.kind.expect(ExternalCoherenceKind.WriteInvalidate)
+        dut.io.core.request.bits.lineAddress.expect(SecondLine)
+      }
+    }
+
     it("rejects a core acknowledgement that does not match the held modifier") {
       assertThrows[Throwable] {
         simulate(new ExternalCoherenceAdapter) { dut =>

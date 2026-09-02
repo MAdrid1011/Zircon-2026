@@ -232,9 +232,12 @@ metadata before EBREAK. A paired `SLVERR` slice drains the full target burst
 before its one acknowledgement and requires the original load to retire the
 exact cause-5/`tval` trap rather than fabricate a completion.
 `ExternalCoherenceAdapterSpec` holds a platform modifier across core-request
-backpressure and requires its exact core response before `authorized` can fire;
-its reset case drops the unacknowledged modifier and proves a fresh epoch can
-complete a different request. `ZirconPlatformCore` synthesizably connects that
+backpressure and requires its exact core response before `authorized` can fire.
+It also holds an already acknowledged authorization through three cycles of
+downstream backpressure while rejecting a replacement modifier, then requires
+that replacement to make a distinct core request after the first authorization
+fires; its reset case drops the unacknowledged modifier and proves a fresh epoch
+can complete a different request. `ZirconPlatformCore` synthesizably connects that
 adapter to production `ZirconCore` and `make platform-verilog` elaborates it;
 the concrete board/SoC external master remains unwired.
 `AtomicMemoryEngineSpec` verifies that line invalidation clears a reservation

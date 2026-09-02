@@ -88,8 +88,10 @@ returns `SLVERR` for every target beat, requires the full faulting burst to
 drain before one acknowledgement, and then observes the load's exact cause-5
 and `tval` trap.
 `ExternalCoherenceAdapter` now provides the reusable one-request platform
-gate: it retains a modifier until the matching core response and drops it on
-reset; its two directed tests pass locally. A complete-core LR/SC slice adds
+gate: it retains a modifier until the matching core response, holds the exact
+authorized payload under downstream backpressure without accepting a
+replacement, and drops it on reset; its directed component tests pass locally.
+A complete-core LR/SC slice adds
 three explicit AXI-backpressure seeds each for matching and disjoint external
 invalidations: the matching case clears the reservation and permits no ID-7
 write, while the disjoint case retains it and permits exactly one write only
