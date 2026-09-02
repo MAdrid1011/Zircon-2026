@@ -54,6 +54,7 @@ are:
 ./scripts/sbtw 'testOnly zircon.AtomicMemoryEngineSpec'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external cacheable invalidation"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
+./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
 make -C ZirconSim tohost-rv32a
 ```
 

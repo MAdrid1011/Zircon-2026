@@ -186,6 +186,9 @@ uniqueness. The complete-core clean case accepts one request during an AXI-fed
 instruction stream and reaches one exact response before continued EBREAK
 execution. The dirty case first retires a cacheable store, then requires one
 target ID-5 eight-beat burst and its successful B before the external response.
+The retry slice first returns an ID-5 `BRESP` error, requires the same target
+line to issue a second eight-beat burst, and permits the response only after
+the second successful B.
 `AtomicMemoryEngineSpec` verifies that line invalidation clears a reservation
 held at a non-base word. ZirconSim's production driver explicitly holds the
 sideband idle and the traced RV32A `tohost` run still exits 0 at 228 cycles/12

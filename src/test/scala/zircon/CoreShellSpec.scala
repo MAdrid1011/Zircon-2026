@@ -3600,6 +3600,70 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("retries a failing coherence writeback before acknowledging") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val dirtyAddress = BigInt("80001000", 16)
+        var storeRetired = false
+        var requestAccepted = false
+        var id5BCount = 0
+        var responseCount = 0
+        var responseBeforeRetry = false
+        val writebackAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        var events = Seq.empty[TraceSample]
+        val program = Map[BigInt, BigInt](
+          ResetVector -> BigInt("800010b7", 16),
+          ResetVector + 4 -> BigInt("05a00113", 16),
+          ResetVector + 8 -> BigInt("0020a023", 16)
+        ) ++ (0 until 64).map(index =>
+          ResetVector + 12 + index * 4 -> Nop).toMap ++ Map(
+          ResetVector + 12 + 64 * 4 -> BigInt("00100073", 16))
+        events = runProgram(dut, program, cycles = 1024,
+          writeResponseForCycle = Some((_, id) =>
+            if (id == 5 && id5BCount == 0) 2 else 0),
+          driveExternalCoherence = (core, _) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (storeRetired && !requestAccepted) {
+              request.valid.poke(true)
+              request.bits.kind.poke(0)
+              request.bits.lineAddress.poke(dirtyAddress)
+              if (request.ready.peek().litToBoolean) requestAccepted = true
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean &&
+                response.ready.peek().litToBoolean) {
+              responseBeforeRetry ||= id5BCount < 2
+              responseCount += 1
+            }
+          }, observeCycle = (core, _) => {
+            storeRetired ||= core.io.trace.get.exists(lane =>
+              lane.valid.peek().litToBoolean && lane.pc.peek().litValue == ResetVector + 8 &&
+                !lane.trap.peek().litToBoolean)
+            val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+              core.io.axi.aw.ready.peek().litToBoolean
+            val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+              core.io.axi.b.ready.peek().litToBoolean
+            if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+              writebackAddresses += core.io.axi.aw.bits.addr.peek().litValue
+            }
+            if (bFire && core.io.axi.b.bits.id.peek().litValue == 5) {
+              id5BCount += 1
+            }
+          })
+        val retired = throughFirstTrap(events)
+        withClue(s"trace=$retired writes=$writebackAddresses b=$id5BCount " +
+          s"response=$responseCount beforeRetry=$responseBeforeRetry") {
+          assert(storeRetired && requestAccepted)
+          assert(writebackAddresses.toSeq == Seq(dirtyAddress, dirtyAddress))
+          assert(id5BCount == 2 && !responseBeforeRetry && responseCount == 1)
+          assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
     it("replays seeded same-bank M0 and M1 loads into one exact AXI refill") {
       for (seed <- M3DualLoadMergeSeeds) {
         simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
