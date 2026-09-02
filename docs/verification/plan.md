@@ -114,11 +114,13 @@ load/store/FENCE retire metadata; observed local result is 3/3 in 143.0
 seconds. Longer mixed error streams and formal credit/protocol proofs remain
 open.
 
-The full `L1DLoadCacheSpec` is now 38/38 in approximately 2 minutes 3 seconds. It holds
+The full `L1DLoadCacheSpec` is now 39/39 in approximately 2 minutes 5 seconds. It holds
 a fifth independent miss while all four MSHRs are live, then allows it only after the
 oldest L2-hit owner drains and releases its exact MSHR credit. It also serializes
 two dirty-victim misses from different sets, checking that each accepted
-L1D-to-L2 transfer retains its own dirty word. Its added
+L1D-to-L2 transfer retains its own dirty word. A squashed younger owner that
+has already issued its AXI refill drains that response without a completion
+before its older survivor can probe. Its added
 dirty-victim hit/miss and dual-miss cases first accept an older different-set
 hit or invalid-way miss, hold the younger replacement miss, then check that its
 sole L1D-to-L2 transfer retains the dirty word. A dual-miss flush additionally

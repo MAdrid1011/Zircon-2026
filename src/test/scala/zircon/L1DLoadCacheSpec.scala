@@ -1315,6 +1315,49 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drains an issued squashed refill before serving its older survivor") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerLine = BigInt("80007200", 16)
+        val olderLine = BigInt("80007300", 16)
+        val youngerWords = Seq.tabulate(8)(word => BigInt("12000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("13000000", 16) + word)
+
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine + 16)
+        dut.io.request.foreach(_.ready.expect(true))
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        // The younger MSHR has crossed both the L2 and AXI ownership
+        // boundaries. A subsequent squash may discard its waiter, but it
+        // cannot abandon the physical response credit.
+        startAxiRefill(dut, youngerLine)
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(3)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.dataResponse.valid.poke(true)
+        dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+        dut.io.dataResponse.bits.clientMshr.poke(0)
+        dut.io.dataResponse.bits.accessFault.poke(false)
+        youngerWords.zipWithIndex.foreach { case (word, index) =>
+          dut.io.dataResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.dataResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.dataResponse.valid.poke(false)
+
+        dut.io.completion.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(olderLine)
+        issueRefill(dut, olderWords, lineAddress = olderLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(olderWords(4))
+      }
+    }
+
     it("flushes an unissued peer while draining the one accepted dual-miss probe") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
