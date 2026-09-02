@@ -210,8 +210,9 @@ metadata before EBREAK.
 `ExternalCoherenceAdapterSpec` holds a platform modifier across core-request
 backpressure and requires its exact core response before `authorized` can fire;
 its reset case drops the unacknowledged modifier and proves a fresh epoch can
-complete a different request. The generic adapter is synthesizable but remains
-unwired to a concrete board/SoC external master.
+complete a different request. `ZirconPlatformCore` synthesizably connects that
+adapter to production `ZirconCore` and `make platform-verilog` elaborates it;
+the concrete board/SoC external master remains unwired.
 `AtomicMemoryEngineSpec` verifies that line invalidation clears a reservation
 held at a non-base word. ZirconSim's production driver explicitly holds the
 sideband idle and the traced RV32A `tohost` run still exits 0 at 228 cycles/12

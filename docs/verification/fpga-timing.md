@@ -17,10 +17,11 @@ and the command line. Setup WNS must be non-negative at this 100 MHz point;
 any negative slack fails the gate. A higher achieved frequency is welcome, but
 never substitutes for the 100 MHz timing check.
 
-The current repository has no board wrapper, XDC, or post-route timing report.
-Consequently FPGA timing support is **unverified**, not failed or passed. This does
-not block current RTL work, but it blocks the final `v1.0.0` release until the
-evidence above is committed.
+The current repository has `ZirconPlatformCore`, a synthesizable generic
+integration boundary, but no board-specific clock/reset wrapper, XDC, or
+post-route timing report. Consequently FPGA timing support is **unverified**,
+not failed or passed. This does not block current RTL work, but it blocks the
+final `v1.0.0` release until the evidence above is committed.
 
 On 2026-09-02, a read-only search of the local desktop workspaces found no
 `.xpr` or `.xdc` file implementing Zircon for `xc7a200tfbg676-2L`. The one

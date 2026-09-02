@@ -47,8 +47,11 @@ block cleanup. ZirconSim drives the sideband explicitly idle because it remains
 a single-hart/private-memory model. `ExternalCoherenceAdapter` is the
 synthesizable one-request platform gate: it retains a modifier, sends the core
 request, and only exposes `authorized` after the exact response handshake. A
-board/SoC wrapper must still connect that authorization to its real external
-master and to verified board pins. The current local checks are:
+`ZirconPlatformCore` instantiates that gate with the production `ZirconCore`
+port and exposes AXI, interrupts, `modifier`, and `authorized` as one
+no-observation integration boundary. A board/SoC wrapper must still connect
+`authorized` to its real external master and to verified board pins. The
+current local checks are:
 
 ```bash
 ./scripts/sbtw 'testOnly zircon.ExternalCoherenceControllerSpec'
@@ -59,6 +62,7 @@ master and to verified board pins. The current local checks are:
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
 make test-m3-external-coherence
+make platform-verilog
 make -C ZirconSim tohost-rv32a
 ```
 

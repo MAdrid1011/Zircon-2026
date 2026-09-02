@@ -30,7 +30,8 @@ LR reservation word，最后返回 response。clean 或 absent target 不产生�
 writeback。ZirconSim 作为 single-hart/private-memory 平台将该端口显式保持 idle；
 `ExternalCoherenceAdapter` 为 FPGA/SoC wrapper 提供可综合的 one-request gate：它
 锁存 modifier，驱动此协议，并只在 matching `response` fire 后产生 `authorized`。具体
-板级 wrapper 仍负责承载真正的外部 cacheable modifier 与 pin mapping。
+`ZirconPlatformCore` 已将此 gate 与 production core 固定连接；板级 wrapper 仍负责承载
+真正的外部 cacheable modifier、clock/reset 和 pin mapping。
 
 ## RetireEvent
 

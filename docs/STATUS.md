@@ -85,7 +85,8 @@ the original load retains exact retire metadata.
 gate: it retains a modifier until the matching core response and drops it on
 reset; its two directed tests pass locally. `make test-m3-external-coherence`
 also passes five component and seven core cases in about 83 seconds. Concrete
-FPGA/SoC external-master wiring, full pressure/broader-reset/error
+`ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
+external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
 
 状态只能在对应自动测试或报告进入 Git 后更新；控制文档更新本身不等价于硬件进展。
