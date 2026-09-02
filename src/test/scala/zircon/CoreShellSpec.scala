@@ -51,6 +51,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf903L)
   private val M3LrScGranularitySeeds = Seq(0x5eedfa01L, 0x5eedfa02L,
     0x5eedfa03L)
+  private val M3LrScReplacementSeeds = Seq(0x5eedfb01L, 0x5eedfb02L,
+    0x5eedfb03L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2855,6 +2857,76 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "random-lr-sc-disjoint-store", schedule, events,
                 Some(selectorSeed), Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("replaces seeded LR/SC reservations with a later LR") {
+      for (seed <- M3LrScReplacementSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val random = new Random(seed)
+          val schedule = seededAxiSchedule(seed, 1600)
+          val selectorSeed = seed ^ 0x7a120L
+          val selectorRandom = new Random(selectorSeed)
+          val firstAddress = BigInt("80001000", 16)
+          val secondAddress = firstAddress + 32
+          val firstInitial = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+          val secondInitial = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("1000a1af", 16), // lr.w x3,(x1)
+            ResetVector + 8 -> BigInt("02008293", 16), // addi x5,x1,32
+            ResetVector + 12 -> BigInt("1002a32f", 16), // lr.w x6,(x5)
+            ResetVector + 16 -> BigInt("1820a22f", 16), // sc.w x4,x2,(x1)
+            ResetVector + 20 -> BigInt("00100073", 16),
+            firstAddress -> firstInitial,
+            secondAddress -> secondInitial)
+          var events = Seq.empty[TraceSample]
+          var id7Reads = 0
+          var id7Writes = 0
+          try {
+            events = throughFirstTrap(runProgram(dut, program, cycles = 1600,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) id7Writes += 1
+              }))
+            val firstLr = events.find(event => event.pc == ResetVector + 4 &&
+              event.gprWrite && event.gprAddress == 3).getOrElse(
+              fail(s"first LR did not retire: $events"))
+            val secondLr = events.find(event => event.pc == ResetVector + 12 &&
+              event.gprWrite && event.gprAddress == 6).getOrElse(
+              fail(s"replacement LR did not retire: $events"))
+            val sc = events.find(event => event.pc == ResetVector + 16 &&
+              event.gprWrite && event.gprAddress == 4).getOrElse(
+              fail(s"SC did not retire after reservation replacement: $events"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$events") {
+              assert(id7Reads == 2 && id7Writes == 0)
+              assert(firstLr.gprData == firstInitial && firstLr.memoryAddress == firstAddress)
+              assert(secondLr.gprData == secondInitial && secondLr.memoryAddress == secondAddress)
+              assert(sc.gprData == 1 && sc.memoryWriteMask == 0 && sc.memoryWriteData == 0)
+              assert(events.last.trap && events.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "random-lr-sc-reservation-replacement", schedule,
+                events, Some(selectorSeed), Some(program))
               throw failure
           }
         }
