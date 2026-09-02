@@ -843,6 +843,101 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("backpressures a fifth miss when all four MSHRs are live") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lines = (0 until 5).map(index =>
+          BigInt("80008000", 16) + BigInt(index * 0x100))
+
+        // Keep all four existing MSHRs before their L2 probes are accepted.
+        // The fifth independent line must remain valid at the ingress and
+        // cannot fabricate a waiter or a speculative cache replacement.
+        for ((line, index) <- lines.take(4).zipWithIndex) {
+          submit(dut, tag = index + 1, address = line + 4)
+        }
+        presentLoad(dut, lane = 0, tag = 9, address = lines(4) + 4)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.request(0).valid.poke(false)
+      }
+    }
+
+    it("backpressures a ninth waiter when one MSHR has all eight waiter credits") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80008400", 16)
+
+        // Four same-line dual-miss pairs consume all eight LQ waiter slots
+        // while sharing one MSHR and waiting behind the serialized L2 probe.
+        for (pair <- 0 until 4) {
+          presentLoad(dut, lane = 0, tag = 2 + pair * 2,
+            address = line + pair * 8)
+          presentLoad(dut, lane = 1, tag = 3 + pair * 2,
+            address = line + pair * 8 + 4)
+          dut.io.request(0).ready.expect(true)
+          dut.io.request(1).ready.expect(true)
+          dut.clock.step()
+          dut.io.request.foreach(_.valid.poke(false))
+        }
+
+        presentLoad(dut, lane = 0, tag = 12, address = line)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.request(0).valid.poke(false)
+      }
+    }
+
+    it("holds a dirty-victim miss behind L2 transfer backpressure") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lineA = BigInt("80009000", 16)
+        val lineB = BigInt("80009200", 16)
+        val lineC = BigInt("80009400", 16)
+        val wordsA = Seq.tabulate(8)(word => BigInt("81000000", 16) + word)
+        val wordsB = Seq.tabulate(8)(word => BigInt("82000000", 16) + word)
+
+        // Fill both ways of one set, then make each resident line dirty.
+        submit(dut, tag = 1, address = lineA)
+        issueRefill(dut, wordsA, lineAddress = lineA)
+        dut.io.completion.ready.poke(true)
+        dut.io.completion.valid.expect(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        submit(dut, tag = 2, address = lineB)
+        issueRefill(dut, wordsB, lineAddress = lineB)
+        dut.io.completion.ready.poke(true)
+        dut.io.completion.valid.expect(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        submitStore(dut, tag = 3, address = lineA + 4,
+          mask = 15, data = BigInt("dead0001", 16))
+        consumeStoreResult(dut, tag = 3, address = lineA + 4)
+        submitStore(dut, tag = 4, address = lineB + 4,
+          mask = 15, data = BigInt("dead0002", 16))
+        consumeStoreResult(dut, tag = 4, address = lineB + 4)
+
+        // lineC maps to the same set, so replacement requires the sole L2
+        // transfer port. With that port backpressured, no MSHR is allocated.
+        dut.io.l2Insert.ready.poke(false)
+        presentLoad(dut, lane = 0, tag = 5, address = lineC)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(lineA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+
+        dut.io.l2Insert.ready.poke(true)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Insert.ready.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(lineC)
+      }
+    }
+
     it("drops only the younger dual-miss owner before L2 acceptance") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

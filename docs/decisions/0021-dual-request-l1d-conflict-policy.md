@@ -77,6 +77,9 @@ combinational path.
 - Tests must cover dual hit, hit/miss, same-line secondary merge, dual miss,
   same bank/set/address, MSHR full, waiter full, dirty-victim pressure, L2
   backpressure, response order, and squash/flush for each accepted owner.
+- The current resource-pressure tests prove that a fifth live miss, a ninth
+  waiter on one MSHR, and a dirty-victim miss behind a backpressured L2 insert
+  are all held at ready/valid without creating an unowned transaction.
 - The current directed matrix proves that a lane-1-old hit beats a lane-0-young
   miss, and that a lane-1-old different-line miss is the sole admitted owner.
   It also proves concurrent different-set hit/miss completion with one exact
