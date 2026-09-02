@@ -154,17 +154,17 @@ request handshakes before checking both exact load retirements. This proves
 the uncontented top-level dual-LSU path; bank/set/victim and recovery conflict
 matrices remain separate obligations.
 
-`make test-m3-partial-store-forward` runs byte and halfword cases for each of
-three explicit seeds `0x5eedfd01`--`0x5eedfd03` through independent five-channel
-AXI backpressure. The byte program stores byte-1 of an initially uncached
+`make test-m3-partial-store-forward` runs byte and both aligned halfword lane
+pairs for each of three explicit seeds `0x5eedfd01`--`0x5eedfd03` through
+independent five-channel AXI backpressure. The byte program stores byte-1 of an initially uncached
 `0x11223344` word, then executes a younger `lw`; it requires exactly one
 data-line refill, exact store metadata `{address+1, mask=0x2, data=0xbb00}`,
 and a non-faulting load/GPR/memory retirement value of `0x1122bb44`. The halfword
 program writes bytes 2--3 and requires `{address+2, mask=0xc, data=0xaabb0000}`
-plus a `0xaabb3344` load retirement. The latest byte and halfword runs pass 1/1
-in 32.491 and 32.905 seconds respectively; failures retain seed, schedule,
-program, and retire trace. Additional offsets and resource-pressure forwarding
-rows remain open.
+plus a `0xaabb3344` load retirement; the low-halfword case writes bytes 0--1
+with `{address, mask=0x3, data=0x0000aabb}` and requires `0x1122aabb`. Failures
+retain seed, schedule, program, and retire trace. Unaligned byte offsets and
+resource-pressure forwarding rows remain open.
 
 `CoreShellSpec` additionally runs three explicit RV32A program seeds
 (`0x5eedf401`--`0x5eedf403`). Each randomizes all nine AMO.W operation order,

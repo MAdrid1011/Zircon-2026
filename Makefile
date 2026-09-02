@@ -39,11 +39,13 @@ test-m3-dual-load-merge:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-address resident hits"'
 
-# Six explicit-seed complete-core partial-store forwarding runs. They require
-# older SB and SH byte lanes to merge with the cacheable refill read by a younger LW.
+# Nine explicit-seed complete-core partial-store forwarding runs. They require
+# older SB and both aligned SH lane pairs to merge with a cacheable refill read
+# by a younger LW.
 test-m3-partial-store-forward:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older partial store forward with a cacheable refill"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older halfword store forward with a cacheable refill"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older low-halfword store forward with a cacheable refill"'
 
 # Four explicit-seed complete-core MSHR pressure runs. Four data lines hold all
 # retained owners; a fifth cannot send AR before one exact data R handshake.
