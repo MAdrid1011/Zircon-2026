@@ -86,6 +86,10 @@ can be interpreted as a fetch or data result.
 
 `AXIDataReadEngineSpec` covers client-token preservation, AR/R backpressure,
 four L2 owners, ID interleaving, response errors, and beat/`last` assertions.
+It also holds a completed clean response while a second owner has already
+recorded `RRESP` failure: that owner's final beat remains backpressured until
+the response credit is released, then emits its original token, full line, and
+fault marker atomically.
 `L1DLoadCacheSpec` covers hit, miss, same-line secondary merge, four-MSHR
 backpressure, refill response backpressure including reverse MSHR response
 order, forwarding-only completion,

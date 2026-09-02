@@ -93,7 +93,10 @@ interleaving, response backpressure, and one deterministic RRESP fault per
 seed; this is short-run evidence, not the required long top-level stress.
 Its deterministic response-credit case holds one completed refill until a
 second owner's final R beat is visibly backpressured, then consumes both in
-order through the one-entry response buffer.
+order through the one-entry response buffer. A paired faulted-owner case
+records `SLVERR` before that backpressured final beat and requires the
+replacement response to retain the second owner's exact token, line data, and
+access-fault metadata.
 
 The full `L1DLoadCacheSpec` now passes 40/40 tests in 138.1 seconds. Its
 waiter-credit recovery case holds a ninth same-line request while one MSHR owns
