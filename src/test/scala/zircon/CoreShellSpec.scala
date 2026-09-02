@@ -31,6 +31,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedd003L, 0x5eedd004L)
   private val M3AxiMixedTrafficSeeds = Seq(0x5eede001L, 0x5eede002L,
     0x5eede003L, 0x5eede004L)
+  private val M3AxiLongMixedTrafficSeeds = Seq(0x5eedf101L, 0x5eedf102L,
+    0x5eedf103L, 0x5eedf104L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -1226,6 +1228,95 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "mixed-cache-device-traffic", schedule, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("drains two dirty cache lines and device AXI traffic through seeded backpressure") {
+      for (seed <- M3AxiLongMixedTrafficSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1600
+          val schedule = seededAxiSchedule(seed, cycles)
+          val firstLine = BigInt("80001000", 16)
+          val secondLine = firstLine + 64
+          val thirdLine = firstLine + 128
+          val deviceAddress = BigInt("b0000000", 16)
+          val dataArAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val writeAw = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val writeResponses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("b0000237", 16), // lui x4,0xb0000
+              ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 12 -> BigInt("0220a023", 16), // sw x2,32(x1)
+              ResetVector + 16 -> BigInt("00222023", 16), // sw x2,0(x4)
+              ResetVector + 20 -> BigInt("0400a283", 16), // lw x5,64(x1)
+              ResetVector + 24 -> BigInt("0800a303", 16), // lw x6,128(x1)
+              ResetVector + 28 -> BigInt("0a60a023", 16), // sw x6,160(x1)
+              ResetVector + 32 -> BigInt("0000000f", 16), // fence
+              ResetVector + 36 -> BigInt("00100073", 16),
+              firstLine -> BigInt("11223344", 16),
+              secondLine -> BigInt("55667788", 16),
+              thirdLine -> BigInt("99aabbcc", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire) {
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (Set(firstLine, secondLine, thirdLine).contains(address)) {
+                    dataArAddresses += address
+                  }
+                }
+                if (awFire) {
+                  writeAw += ((core.io.axi.aw.bits.id.peek().litValue,
+                    core.io.axi.aw.bits.len.peek().litValue))
+                }
+                if (bFire) writeResponses += core.io.axi.b.bits.id.peek().litValue
+              })
+
+            val retired = throughFirstTrap(events)
+            val id5Writes = writeAw.count(_ == (BigInt(5), BigInt(7)))
+            val id6Writes = writeAw.count(_ == (BigInt(6), BigInt(0)))
+            val id5Responses = writeResponses.count(_ == BigInt(5))
+            val id6Responses = writeResponses.count(_ == BigInt(6))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, dataAr=$dataArAddresses, " +
+              s"aw=$writeAw, b=$writeResponses, trace=$retired") {
+              assert(dataArAddresses.toSet == Set(firstLine, secondLine, thirdLine))
+              assert(id5Writes == 2 && id6Writes == 1)
+              assert(id5Responses == 2 && id6Responses == 1)
+              assert(retired.exists(event => event.pc == ResetVector + 24 &&
+                event.gprWrite && event.gprAddress == 6 &&
+                event.gprData == BigInt("99aabbcc", 16) &&
+                event.memoryAddress == thirdLine && event.memoryReadData ==
+                  BigInt("99aabbcc", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 28 &&
+                event.memoryAddress == thirdLine + 32 && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == BigInt("99aabbcc", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 16 &&
+                event.memoryAddress == deviceAddress && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == BigInt("11223344", 16)))
+              assert(retired.exists(_.instruction == BigInt("0000000f", 16)))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "long-mixed-cache-device-traffic", schedule, events)
               throw failure
           }
         }

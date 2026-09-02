@@ -100,13 +100,15 @@ four RRESP-error bursts from youngest to oldest. Its retire trace still accepts
 only the oldest load's exact cause-5/tval trap. It runs with the existing two
 owner RRESP and ID-6 BRESP reversal cases through `make test-m3-axi-faults`.
 
-The four-seed `make test-m3-axi-mixed` tier (`0x5eede001`--`0x5eede004`)
-combines two cache refills, a cacheable store, an ID-6 device store, and a
-FENCE-triggered ID-5 writeback under independently randomized all-channel
-backpressure. It requires both data AR lines, both ID-5/ID-6 AW/B owners, and
-exact load/store/FENCE retire metadata; the observed local result is 1/1 in
-50.5 seconds. Longer mixed streams and formal credit/protocol proofs remain
-open.
+The `make test-m3-axi-mixed` tier has two independent four-seed scenarios.
+`0x5eede001`--`0x5eede004` combines two cache refills, a cacheable store, an
+ID-6 device store, and a FENCE-triggered ID-5 writeback under independently
+randomized all-channel backpressure. `0x5eedf101`--`0x5eedf104` extends that
+stream to three cache refills, two distinct dirty cache lines, an ID-6 device
+store, and a FENCE which must drain exactly two ID-5 bursts and one ID-6
+transaction. Both require exact load/store/FENCE retire metadata; observed
+local result is 2/2 in 98.7 seconds. Longer mixed error streams and formal
+credit/protocol proofs remain open.
 
 The full `L1DLoadCacheSpec` is now 37/37 in approximately 1 minute 59 seconds. It holds
 a fifth independent miss while all four MSHRs are live, then allows it only after the
