@@ -516,5 +516,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     observation.storeQueueCount := lsuIngress.io.storeCount
     observation.orderedGroupValid := lsuIngress.io.burstableDeviceGroup.valid
     observation.orderedGroupCount := lsuIngress.io.burstableDeviceGroup.bits.count
+    observation.l2VictimCount := l2TransferStore.io.victimCount
+    observation.l2WritebackBusy := l2WritebackEngine.io.busy
   }
 }

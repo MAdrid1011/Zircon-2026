@@ -39,6 +39,8 @@ class M2Observation extends Bundle {
   val storeQueueCount = UInt(5.W)
   val orderedGroupValid = Bool()
   val orderedGroupCount = UInt(3.W)
+  val l2VictimCount = UInt(2.W)
+  val l2WritebackBusy = Bool()
 }
 
 class ZirconCoreIO(cfg: ZirconCoreConfig) extends Bundle {

@@ -1022,6 +1022,56 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("fills the dirty L2 victim FIFO before a cache-global FENCE can retire") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(
+          enableTrace = true, enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val base = BigInt("80001140", 16)
+        var maxVictimCount = 0
+        var sawWritebackBusy = false
+        var sawWritebackAw = false
+        val events = runProgram(dut, Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("14008093", 16), // addi x1,x1,320
+          ResetVector + 8 -> BigInt("00100113", 16), // addi x2,x0,1
+          ResetVector + 12 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 16 -> BigInt("40008093", 16), // addi x1,x1,1024
+          ResetVector + 20 -> BigInt("0020a023", 16),
+          ResetVector + 24 -> BigInt("40008093", 16),
+          ResetVector + 28 -> BigInt("0020a023", 16),
+          ResetVector + 32 -> BigInt("40008093", 16),
+          ResetVector + 36 -> BigInt("0020a023", 16),
+          ResetVector + 40 -> BigInt("40008093", 16),
+          ResetVector + 44 -> BigInt("0020a023", 16),
+          ResetVector + 48 -> BigInt("40008093", 16),
+          ResetVector + 52 -> BigInt("0020a023", 16),
+          ResetVector + 56 -> BigInt("0000000f", 16), // fence
+          ResetVector + 60 -> BigInt("00100073", 16)
+        ), cycles = 2048, writeResponse = Some(0), bValidForCycle = _ => false,
+          observeCycle = (core, _) => {
+            val observation = core.io.m2Observation.get
+            maxVictimCount = maxVictimCount.max(
+              observation.l2VictimCount.peek().litValue.toInt)
+            sawWritebackBusy ||= observation.l2WritebackBusy.peek().litToBoolean
+            sawWritebackAw ||= core.io.axi.aw.valid.peek().litToBoolean &&
+              core.io.axi.aw.ready.peek().litToBoolean &&
+              core.io.axi.aw.bits.id.peek().litValue == 5
+          })
+
+        withClue(s"base=0x${base.toString(16)}, maxVictims=$maxVictimCount, " +
+          s"writebackBusy=$sawWritebackBusy, aw=$sawWritebackAw, trace=$events") {
+          assert(maxVictimCount == 2,
+            "the FENCE sequence never reached the two-entry dirty victim FIFO limit")
+          assert(sawWritebackBusy && sawWritebackAw,
+            "the retained ID-5 writeback owner never became active")
+          assert(!events.exists(_.instruction == BigInt("0000000f", 16)),
+            "FENCE retired while the dirty victim FIFO and ID-5 owner were not drained")
+          assert(!events.exists(_.instruction == BigInt("00100073", 16)),
+            "younger work retired while the cache-global FENCE was blocked")
+        }
+      }
+    }
+
     it("preserves mixed cache and device AXI traffic through seeded backpressure") {
       for (seed <- M3AxiMixedTrafficSeeds) {
         simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>

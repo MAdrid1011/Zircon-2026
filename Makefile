@@ -83,6 +83,7 @@ test-m3-axi-faults:
 test-m3-fence-pressure:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains every dirty line before a cache-global FENCE retires"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retries an errored dirty FENCE writeback before retirement"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "fills the dirty L2 victim FIFO before a cache-global FENCE can retire"'
 
 # Mixed cache refill/writeback and ordered-device traffic runs in a separate
 # four-seed tier, keeping the more focused AXI slices quick to reproduce.
