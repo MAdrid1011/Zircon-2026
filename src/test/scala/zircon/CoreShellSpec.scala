@@ -17,6 +17,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eed7003L, 0x5eed7004L)
   private val M3AxiWritebackResetSeeds = Seq(0x5eed8001L, 0x5eed8002L,
     0x5eed8003L, 0x5eed8004L)
+  private val M3AxiLongStreamSeeds = Seq(0x5eed9001L, 0x5eed9002L,
+    0x5eed9003L, 0x5eed9004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -2058,6 +2060,121 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "four-owner-interleave", schedule, events,
+                Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("reuses all data AXI owners across a seeded long cross-ID load stream") {
+      for (seed <- M3AxiLongStreamSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 2048
+          val schedule = seededAxiSchedule(seed, cycles)
+          val selectorSeed = seed ^ 0x4a3b2c1dL
+          val selectorRandom = new Random(selectorSeed)
+          val lines = (0 until 8).map(index => BigInt("80001000", 16) + index * 0x20)
+          val expected = (0 until 8).map(index => BigInt("20000000", 16) + index)
+          val dataArs = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val liveDataOwners = scala.collection.mutable.Map.empty[BigInt, (BigInt, Int)]
+          val observedDataIds = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var lastDataResponseId = Option.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
+              ResetVector + 12 -> BigInt("0400a203", 16), // lw x4,64(x1)
+              ResetVector + 16 -> BigInt("0600a283", 16), // lw x5,96(x1)
+              ResetVector + 20 -> BigInt("0800a303", 16), // lw x6,128(x1)
+              ResetVector + 24 -> BigInt("0a00a383", 16), // lw x7,160(x1)
+              ResetVector + 28 -> BigInt("0c00a403", 16), // lw x8,192(x1)
+              ResetVector + 32 -> BigInt("0e00a483", 16), // lw x9,224(x1)
+              ResetVector + 36 -> BigInt("00100073", 16),
+              lines(0) -> expected(0), lines(1) -> expected(1),
+              lines(2) -> expected(2), lines(3) -> expected(3),
+              lines(4) -> expected(4), lines(5) -> expected(5),
+              lines(6) -> expected(6), lines(7) -> expected(7)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                val dataCandidates = candidates.filter(index =>
+                  lines.contains(pending(index)._2))
+                val alternativeData = lastDataResponseId match {
+                  case Some(previous) => dataCandidates.filter(index =>
+                    pending(index)._1 != previous)
+                  case None => dataCandidates
+                }
+                val selectedPool = if (alternativeData.nonEmpty) alternativeData
+                else if (dataCandidates.nonEmpty) dataCandidates
+                else candidates
+                if (selectedPool.nonEmpty) {
+                  val selected = selectedPool(selectorRandom.nextInt(selectedPool.size))
+                  if (lines.contains(pending(selected)._2)) {
+                    lastDataResponseId = Some(pending(selected)._1)
+                  }
+                  selected
+                } else 0
+              },
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                if (arFire) {
+                  val id = core.io.axi.ar.bits.id.peek().litValue
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (lines.contains(address)) {
+                    assert(!liveDataOwners.contains(id),
+                      s"seed=$seed reused live data AXI owner $id")
+                    dataArs += ((address, id))
+                    liveDataOwners.update(id, (address, 8))
+                  }
+                }
+                if (rFire) {
+                  val id = core.io.axi.r.bits.id.peek().litValue
+                  liveDataOwners.get(id).foreach { case (address, remaining) =>
+                    observedDataIds += id
+                    if (remaining == 1) liveDataOwners.remove(id)
+                    else liveDataOwners.update(id, (address, remaining - 1))
+                  }
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val dataIdSwitch = observedDataIds.sliding(2).exists(pair => pair.head != pair.last)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, ars=$dataArs, " +
+              s"dataIds=$observedDataIds, trace=$retired") {
+              assert(dataArs.map(_._1).toSet == lines.toSet)
+              assert(dataArs.size == lines.size)
+              assert(dataArs.map(_._2).distinct.size == 4)
+              assert(dataArs.groupBy(_._2).exists { case (_, owners) => owners.size > 1 })
+              assert(liveDataOwners.isEmpty)
+              assert(dataIdSwitch)
+              assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12, ResetVector + 16,
+                ResetVector + 20, ResetVector + 24, ResetVector + 28,
+                ResetVector + 32, ResetVector + 36))
+              for (index <- lines.indices) {
+                val pc = ResetVector + 4 + index * 4
+                val register = index + 2
+                assert(retired.exists(event => event.pc == pc && event.gprWrite &&
+                  event.gprAddress == register && event.gprData == expected(index) &&
+                  event.memoryAddress == lines(index) &&
+                  event.memoryReadData == expected(index) && !event.trap))
+              }
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "long-owner-reuse", schedule, events,
                 Some(selectorSeed))
               throw failure
           }
