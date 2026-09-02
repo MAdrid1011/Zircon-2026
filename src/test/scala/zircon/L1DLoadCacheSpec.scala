@@ -1526,6 +1526,57 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("releases unissued saturated MSHRs while draining one flushed L2 probe") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lines = Seq.tabulate(5)(index => BigInt("80003e00", 16) + index * 32)
+
+        // Saturate the four-MSHR budget behind the serialized L2 port, then
+        // let only the oldest owner cross that boundary. A full flush must
+        // cancel the three unissued owners without abandoning the accepted
+        // probe's response credit.
+        lines.take(4).zipWithIndex.foreach { case (line, index) =>
+          submit(dut, tag = index + 1, address = line)
+        }
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(lines.head)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // A miss response for the accepted owner is a drain-only event after
+        // flush: no waiter remains, so it cannot fall through to AXI.
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(false)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(lines.head)
+        dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.clock.step()
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // Once the drain-only owner releases its MSHR, a fresh request must
+        // be admitted normally; no cancelled owner may retain a hidden credit.
+        presentLoad(dut, lane = 0, tag = 9, address = lines(4))
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(lines(4))
+      }
+    }
+
     it("drains an issued AXI refill after flush without completing its waiter") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

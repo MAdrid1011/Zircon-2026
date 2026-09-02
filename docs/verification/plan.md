@@ -97,6 +97,13 @@ dirty-victim recovery case holds a replacement miss before the L2 transfer
 handshake, applies full flush, and proves there is no retained MSHR, L2/AXI,
 or completion owner while the original dirty L1D line remains a local hit.
 
+The latest full `L1DLoadCacheSpec` run passes 43/43 in 127.877 seconds. Its
+new saturated-flush case first consumes all four MSHRs, lets only the oldest
+L2 probe cross the boundary, then applies full flush. The three unissued
+owners are released; the accepted probe's L2 miss response drains without an
+AXI refill or completion; and a new miss subsequently receives a real MSHR
+credit. This closes that resource-saturation recovery cell only.
+
 `CoreShellSpec` additionally runs three explicit RV32A program seeds
 (`0x5eedf401`--`0x5eedf403`). Each randomizes all nine AMO.W operation order,
 initial word values, operands, legal cross-ID read selection, and all five AXI
@@ -160,7 +167,7 @@ load/store/FENCE retire metadata; observed local result is 3/3 in 143.0
 seconds. Longer mixed error streams and formal credit/protocol proofs remain
 open.
 
-The full `L1DLoadCacheSpec` is now 39/39 in approximately 2 minutes 5 seconds. It holds
+The full `L1DLoadCacheSpec` is now 43/43 in 127.877 seconds. It holds
 a fifth independent miss while all four MSHRs are live, then allows it only after the
 oldest L2-hit owner drains and releases its exact MSHR credit. It also serializes
 two dirty-victim misses from different sets, checking that each accepted
@@ -172,7 +179,9 @@ hit or invalid-way miss, hold the younger replacement miss, then check that its
 sole L1D-to-L2 transfer retains the dirty word. A dual-miss flush additionally
 proves that the accepted probe drains without a completion or AXI fallback
 while its unissued peer is cancelled. A separate issued-refill flush drains the
-accepted data response without a completion. The remaining response/recovery
+accepted data response without a completion. The saturated-flush case releases
+three unissued MSHRs while draining the sole accepted L2 miss response, then
+checks a fresh miss reclaims the released credit. The remaining response/recovery
 matrix under resource saturation remains open.
 
 Each random failure bundle contains the generator and memory seeds, ELF and
