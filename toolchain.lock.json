@@ -22,6 +22,7 @@
     "riscvDv": "b7a0b4b0b51346a3c64f159f81ea262d867c14a9",
     "riscvFormal": "4f29e83a8387a81467716548f165fd97045af617",
     "berkeleyTestFloat3": "a9c849f1b0eb0264b626d9686ffae167d996e3be",
+    "berkeleySoftFloat3": "a0c6494cdc11865811dec815d5c0049fba9d82a8",
     "riscvTests": "2ebecad997fa58cd9e5724340ba75aa4b59bd1d0",
     "embenchIot": "09c2ed8c3b7008c95d08b038de4a3f6dc103ed70"
   },

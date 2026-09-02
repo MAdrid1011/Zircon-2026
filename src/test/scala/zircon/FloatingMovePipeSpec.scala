@@ -329,6 +329,55 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("matches a deterministic non-NaN TestFloat add/sub corpus slice") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, rounding: Int, lhs: String,
+            rhs: String, expected: String, flags: Int): Unit = {
+          drive(dut, tag = 6, operation = operation, floatSource0 = BigInt(lhs, 16),
+            floatSource1 = BigInt(rhs, 16), floatDestination = 11,
+            roundingMode = rounding)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatData.expect(BigInt(expected, 16))
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        // Berkeley TestFloat 3 @ a9c849f + SoftFloat 3 @ a0c6494,
+        // f32_{add,sub}, seed 149130, tininess-after. NaN payload cases stay
+        // in the canonical-NaN tests.
+        val corpus = Seq(
+          (FloatingOperation.FaddS, 0, "C1E2AC6C", "CA996786", "CA9967BF", 1),
+          (FloatingOperation.FsubS, 0, "C1E2AC6C", "CA996786", "4A99674D", 1),
+          (FloatingOperation.FaddS, 1, "B1003EFE", "001FEFFF", "B1003EFD", 1),
+          (FloatingOperation.FsubS, 1, "33FFFFFE", "40FFFFFE", "C0FFFFFD", 1),
+          (FloatingOperation.FaddS, 2, "BF1FFBFF", "CBFFFFFF", "CC000000", 1),
+          (FloatingOperation.FsubS, 2, "00000000", "00000000", "80000000", 0),
+          (FloatingOperation.FaddS, 3, "3801EFFF", "19B254A9", "3801F000", 1),
+          (FloatingOperation.FsubS, 3, "4BFFFEF8", "407FFFFF", "4BFFFEF7", 1),
+          (FloatingOperation.FaddS, 4, "4BFFFEF8", "407FFFFF", "4BFFFEFA", 1),
+          (FloatingOperation.FsubS, 4, "BF1FFBFF", "CBFFFFFF", "4BFFFFFF", 1),
+          (FloatingOperation.FaddS, 0, "B6E00004", "BF7FFFFF", "BF800038", 1),
+          (FloatingOperation.FsubS, 0, "B6E00004", "BF7FFFFF", "3F7FFF8F", 1),
+          (FloatingOperation.FaddS, 1, "4BFFFEF8", "407FFFFF", "4BFFFEF9", 1),
+          (FloatingOperation.FsubS, 1, "3F800000", "5E7E0008", "DE7E0007", 1),
+          (FloatingOperation.FaddS, 2, "C0000000", "3EFFFFFE", "BFC00001", 1),
+          (FloatingOperation.FsubS, 2, "80800001", "3F7FE040", "BF7FE041", 1),
+          (FloatingOperation.FaddS, 3, "33FFFFFE", "40FFFFFE", "40FFFFFF", 1),
+          (FloatingOperation.FsubS, 3, "33FFFFFE", "40FFFFFE", "C0FFFFFD", 1),
+          (FloatingOperation.FaddS, 4, "80800001", "3F7FE040", "3F7FE040", 1),
+          (FloatingOperation.FsubS, 4, "C0000000", "3EFFFFFE", "C0200000", 1)
+        )
+        corpus.foreach { case (operation, rounding, lhs, rhs, expected, flags) =>
+          check(operation, rounding, lhs, rhs, expected, flags)
+        }
+      }
+    }
+
     it("drops only younger retained work on squash and all work on flush") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)
