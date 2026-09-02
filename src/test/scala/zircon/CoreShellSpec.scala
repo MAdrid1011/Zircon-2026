@@ -55,6 +55,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedfb03L)
   private val M3DualLoadMergeSeeds = Seq(0x5eedfc01L, 0x5eedfc02L,
     0x5eedfc03L)
+  private val M3PartialStoreForwardSeeds = Seq(0x5eedfd01L, 0x5eedfd02L,
+    0x5eedfd03L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -3098,6 +3100,70 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         assert(events(1).memoryAddress == ResetVector &&
           events(1).memoryReadMask == 15 &&
           events(1).memoryReadData == BigInt("800000b7", 16))
+      }
+    }
+
+    it("merges an older partial store forward with a cacheable refill") {
+      for (seed <- M3PartialStoreForwardSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 512
+          val schedule = seededAxiSchedule(seed, cycles)
+          val line = BigInt("80001000", 16)
+          val initialWord = BigInt("11223344", 16)
+          val mergedWord = BigInt("1122bb44", 16)
+          val dataLineRefills = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("fbb00113", 16), // addi x2,x0,-69
+            ResetVector + 8 -> BigInt("002080a3", 16), // sb x2,1(x1)
+            ResetVector + 12 -> BigInt("0000a183", 16), // lw x3,0(x1)
+            ResetVector + 16 -> BigInt("00100073", 16), // ebreak
+            line -> initialWord
+          )
+          try {
+            events = runProgram(dut, program, cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val id = core.io.axi.ar.bits.id.peek().litValue
+                val address = core.io.axi.ar.bits.addr.peek().litValue
+                if (arFire && id >= 1 && id <= 4 && address == line) {
+                  dataLineRefills += address
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val store = retired.find(_.pc == ResetVector + 8).getOrElse(
+              fail(s"partial store did not retire: seed=0x${java.lang.Long.toHexString(seed)} " +
+                s"trace=$retired"))
+            val load = retired.find(_.pc == ResetVector + 12).getOrElse(
+              fail(s"partial forwarded load did not retire: seed=0x${java.lang.Long.toHexString(seed)} " +
+                s"trace=$retired"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} " +
+              s"lineRefills=$dataLineRefills trace=$retired") {
+              assert(dataLineRefills == Seq(line),
+                "partial-forwarding miss did not use exactly one data-line refill")
+              assert(store.memoryAddress == line + 1 && store.memoryWriteMask == 2 &&
+                store.memoryWriteData == BigInt("bb00", 16) && !store.trap)
+              assert(load.gprWrite && load.gprAddress == 3 && load.gprData == mergedWord &&
+                load.memoryAddress == line && load.memoryReadMask == 15 &&
+                load.memoryReadData == mergedWord && !load.trap)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "partial-store-forward-refill", schedule, events,
+                program = Some(program))
+              throw failure
+          }
+        }
       }
     }
 
