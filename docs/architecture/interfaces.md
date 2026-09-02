@@ -15,6 +15,21 @@ valid 在握手前必须保持，ready 可独立回压。R channel 可在不同 
 
 `InterruptInputs` 包含 `meip/msip/mtip`。这些信号是电平输入；CSR/commit controller 在提交边界选择中断。M0 shell 只保留端口，不解释中断。
 
+## ExternalCoherencePort
+
+`externalCoherence` 是 production `ZirconCoreIO` 的一请求 sideband，不是 AXI
+snoop slave。平台在外部 cacheable store、LR/SC 或 AMO 前提交
+`request { kind, lineAddress }`，其中 `lineAddress` 必须 32-byte 对齐，`kind`
+为 `WriteInvalidate` 或 `AtomicInvalidate`。平台只能在同一 payload 的
+`response` 握手后发出外部 modifier。
+
+接收请求会封锁新的 cacheable I/D/store/atomic ingress，等待已接受的 I-side
+demand/lookahead owner drain，清理目标 L1D 和 L2 line。dirty L2 cleanup 仅在目标
+ID-5 successful B 后继续；随后 invalidates L1I/BTB 并清除同一 cache line 内所有
+LR reservation word，最后返回 response。clean 或 absent target 不产生虚假
+writeback。ZirconSim 作为 single-hart/private-memory 平台将该端口显式保持 idle；
+FPGA/SoC adapter 负责在真正的外部 cacheable modifier 前驱动该协议。
+
 ## RetireEvent
 
 启用 `enableTrace` 时生成两个 `RetireEvent` lane。每项包含：

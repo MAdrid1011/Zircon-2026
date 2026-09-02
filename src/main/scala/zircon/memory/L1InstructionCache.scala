@@ -57,6 +57,8 @@ class L1InstructionCache(
     val currentPc = Output(UInt(32.W))
     val busy = Output(Bool())
     val draining = Output(Bool())
+    /** No accepted instruction demand or lookahead owner remains. */
+    val coherenceDrained = Output(Bool())
   })
 
   val state = RegInit(L1InstructionCacheState.Idle)
@@ -155,6 +157,7 @@ class L1InstructionCache(
   io.currentPc := pc
   io.busy := state =/= L1InstructionCacheState.Idle
   io.draining := state === L1InstructionCacheState.Drain
+  io.coherenceDrained := state === L1InstructionCacheState.Idle && !lookaheadInFlight
 
   when(io.redirect.valid) {
     assert(!io.redirect.bits(1, 0).orR,

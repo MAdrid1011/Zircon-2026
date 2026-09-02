@@ -97,6 +97,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     dut.io.interrupts.meip.poke(false)
     dut.io.interrupts.msip.poke(false)
     dut.io.interrupts.mtip.poke(false)
+    dut.io.externalCoherence.request.valid.poke(false)
+    dut.io.externalCoherence.request.bits.kind.poke(0)
+    dut.io.externalCoherence.request.bits.lineAddress.poke(0)
+    dut.io.externalCoherence.response.ready.poke(true)
     dut.io.axi.aw.ready.poke(true)
     dut.io.axi.w.ready.poke(true)
     dut.io.axi.ar.ready.poke(false)
@@ -140,6 +144,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       program: Map[BigInt, BigInt],
       cycles: Int = 128,
       driveInterrupts: (ZirconCore, Seq[TraceSample]) => Unit = (_, _) => (),
+      driveExternalCoherence: (ZirconCore, Int) => Unit = (_, _) => (),
       arReadyForCycle: Int => Boolean = _ => true,
       rValidForCycle: Int => Boolean = _ => true,
       readSelectForCycle: (Int, Seq[(BigInt, BigInt, BigInt, Boolean)]) => Int =
@@ -186,6 +191,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         writeBeat = 0
       } else {
         driveInterrupts(dut, events.toSeq)
+        driveExternalCoherence(dut, cycle)
       }
       dut.io.axi.ar.ready.poke(!resetActive && arReadyForCycle(cycle))
       dut.io.axi.aw.ready.poke(!resetActive && awReadyForCycle(cycle))
@@ -3489,6 +3495,108 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           secondLoad.memoryAddress == secondLine && secondLoad.memoryReadData ==
             BigInt("55667788", 16))
         assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("serializes an external cacheable invalidation through the live top-level port") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val targetLine = ResetVector
+        var requestAccepted = false
+        var responseCount = 0
+        var events = Seq.empty[TraceSample]
+        val program = (0 until 64).map(index =>
+          ResetVector + index * 4 -> Nop).toMap ++ Map(
+          ResetVector + 64 * 4 -> BigInt("00100073", 16))
+        events = runProgram(dut, program, cycles = 640,
+          driveExternalCoherence = (core, cycle) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (!requestAccepted && cycle >= 24) {
+              request.valid.poke(true)
+              request.bits.kind.poke(0)
+              request.bits.lineAddress.poke(targetLine)
+              if (request.ready.peek().litToBoolean) requestAccepted = true
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean &&
+                response.ready.peek().litToBoolean) {
+              response.bits.kind.expect(0)
+              response.bits.lineAddress.expect(targetLine)
+              responseCount += 1
+            }
+          })
+        val retired = throughFirstTrap(events)
+        assert(requestAccepted, "top-level external coherence request never handshook")
+        assert(responseCount == 1,
+          s"top-level external coherence response count was $responseCount")
+        assert(retired.last.trap && retired.last.cause == 3,
+          s"program did not continue to EBREAK after coherence cleanup: $retired")
+      }
+    }
+
+    it("waits for dirty external-coherence writeback before acknowledging") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val dirtyAddress = BigInt("80001000", 16)
+        var storeRetired = false
+        var requestAccepted = false
+        var responseCount = 0
+        var id5BSeen = false
+        var responseBeforeB = false
+        val writebackAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        var events = Seq.empty[TraceSample]
+        val program = Map[BigInt, BigInt](
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+          ResetVector + 8 -> BigInt("0020a023", 16) // sw x2,0(x1)
+        ) ++ (0 until 64).map(index =>
+          ResetVector + 12 + index * 4 -> Nop).toMap ++ Map(
+          ResetVector + 12 + 64 * 4 -> BigInt("00100073", 16))
+        events = runProgram(dut, program, cycles = 896, writeResponse = Some(0),
+          driveExternalCoherence = (core, _) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (storeRetired && !requestAccepted) {
+              request.valid.poke(true)
+              request.bits.kind.poke(1)
+              request.bits.lineAddress.poke(dirtyAddress)
+              if (request.ready.peek().litToBoolean) requestAccepted = true
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean &&
+                response.ready.peek().litToBoolean) {
+              response.bits.kind.expect(1)
+              response.bits.lineAddress.expect(dirtyAddress)
+              responseBeforeB ||= !id5BSeen
+              responseCount += 1
+            }
+          }, observeCycle = (core, _) => {
+            storeRetired ||= core.io.trace.get.exists(lane =>
+              lane.valid.peek().litToBoolean && lane.pc.peek().litValue == ResetVector + 8 &&
+                !lane.trap.peek().litToBoolean)
+            val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+              core.io.axi.aw.ready.peek().litToBoolean
+            val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+              core.io.axi.b.ready.peek().litToBoolean
+            if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+              writebackAddresses += core.io.axi.aw.bits.addr.peek().litValue
+              core.io.axi.aw.bits.len.expect(7)
+            }
+            id5BSeen ||= bFire && core.io.axi.b.bits.id.peek().litValue == 5
+          })
+        val retired = throughFirstTrap(events)
+        withClue(s"trace=$retired writes=$writebackAddresses b=$id5BSeen " +
+          s"response=$responseCount beforeB=$responseBeforeB") {
+          assert(storeRetired && requestAccepted)
+          assert(writebackAddresses.toSeq == Seq(dirtyAddress))
+          assert(id5BSeen && !responseBeforeB && responseCount == 1)
+          assert(retired.last.trap && retired.last.cause == 3)
+        }
       }
     }
 

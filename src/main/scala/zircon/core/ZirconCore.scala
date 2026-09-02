@@ -8,7 +8,7 @@ import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPip
 import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress,
-  ExclusiveL2TransferStore, L1DLoadCache,
+  ExclusiveL2TransferStore, ExternalCoherenceController, L1DLoadCache,
   HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
   OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
@@ -44,8 +44,20 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val orderedIOCombiner = Module(new OrderedIOCombiner(config = cfg))
   val orderedIOStreamer = Module(new OrderedIOGroupStreamer(config = cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
+  val externalCoherence = Module(new ExternalCoherenceController)
+
+  externalCoherence.io.request.valid := io.externalCoherence.request.valid
+  externalCoherence.io.request.bits := io.externalCoherence.request.bits
+  io.externalCoherence.request.ready := externalCoherence.io.request.ready
+  io.externalCoherence.response.valid := externalCoherence.io.response.valid
+  io.externalCoherence.response.bits := externalCoherence.io.response.bits
+  externalCoherence.io.response.ready := io.externalCoherence.response.ready
+  externalCoherence.io.instructionDrained := frontend.io.coherenceDrained
+  externalCoherence.io.writebackComplete := l2WritebackEngine.io.completed
 
   frontend.io.enable := true.B
+  frontend.io.coherenceBlock := externalCoherence.io.cacheableIngressBlocked
+  frontend.io.coherenceInvalidate := externalCoherence.io.l1iInvalidate
   for (lane <- 0 until cfg.decodeWidth) {
     backend.io.input(lane).valid := frontend.io.decode(lane).valid
     backend.io.input(lane).bits := frontend.io.decode(lane).bits
@@ -146,10 +158,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   for (lane <- 0 until cfg.decodeWidth) {
     val cacheableLoadForward = lsuIngress.io.loadForward(lane).bits.cacheable
     l1dLoadCache.io.request(lane).valid :=
-      lsuIngress.io.loadForward(lane).valid && cacheableLoadForward
+      lsuIngress.io.loadForward(lane).valid && cacheableLoadForward &&
+        !externalCoherence.io.cacheableIngressBlocked
     l1dLoadCache.io.request(lane).bits := lsuIngress.io.loadForward(lane).bits
     lsuIngress.io.loadForward(lane).ready := Mux(cacheableLoadForward,
-      l1dLoadCache.io.request(lane).ready, true.B)
+      l1dLoadCache.io.request(lane).ready &&
+        !externalCoherence.io.cacheableIngressBlocked, true.B)
   }
   l2DemandArbiter.io.in(0) <> l1dLoadCache.io.dataRequest
   l2DemandArbiter.io.in(1) <> frontend.io.l2Request
@@ -194,22 +208,26 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // Atomics bypass the speculative L1D slice. Their one-owner AXI lifecycle
   // returns through the LSQ first, so retire metadata and the sole M0
   // completion remain keyed by the original ROB tag.
-  l1dLoadCache.io.atomicAccept.valid := lsuIngress.io.atomicEffect.valid
+  l1dLoadCache.io.atomicAccept.valid := lsuIngress.io.atomicEffect.valid &&
+    !externalCoherence.io.cacheableIngressBlocked
   l1dLoadCache.io.atomicAccept.bits := lsuIngress.io.atomicEffect.bits
   l1dLoadCache.io.atomicRequiresExternal := atomicEngine.io.externalAccessRequired
   val atomicExternalSafe = !atomicEngine.io.externalAccessRequired ||
     l2TransferStore.io.invalidateReady
   atomicEngine.io.effect.valid := lsuIngress.io.atomicEffect.valid &&
     l1dLoadCache.io.atomicAcceptReady && atomicExternalSafe &&
-    !l1dLoadCache.io.storeRequest.valid
+    !l1dLoadCache.io.storeRequest.valid &&
+    !externalCoherence.io.cacheableIngressBlocked
   atomicEngine.io.effect.bits := lsuIngress.io.atomicEffect.bits
   lsuIngress.io.atomicEffect.ready := atomicEngine.io.effect.ready &&
     l1dLoadCache.io.atomicAcceptReady && atomicExternalSafe &&
-    !l1dLoadCache.io.storeRequest.valid
+    !l1dLoadCache.io.storeRequest.valid &&
+    !externalCoherence.io.cacheableIngressBlocked
   lsuIngress.io.atomicComplete <> atomicEngine.io.result
   atomicEngine.io.flush := backend.io.globalFlush
   atomicEngine.io.invalidate.valid := l1dLoadCache.io.storeRequest.fire
   atomicEngine.io.invalidate.bits := l1dLoadCache.io.storeRequest.bits.address
+  atomicEngine.io.invalidateLine := externalCoherence.io.reservationInvalidateLine
   // Once AW/W were accepted, conservatively invalidate even on BRESP failure:
   // an AXI slave error must not leave an old L1D word architecturally visible.
   l1dLoadCache.io.atomicInvalidate.valid := atomicEngine.io.result.fire &&
@@ -272,7 +290,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   deviceLoadEffect.ready := singleDeviceGroupFromLoad &&
     orderedGroupArbiter.io.in(0).ready && !l1dLoadCache.io.storeBusy
 
-  l1dLoadCache.io.storeRequest.valid := cacheStoreEffect && !orderedIOEngine.io.busy
+  l1dLoadCache.io.storeRequest.valid := cacheStoreEffect && !orderedIOEngine.io.busy &&
+    !externalCoherence.io.cacheableIngressBlocked
   l1dLoadCache.io.storeRequest.bits := lsuIngress.io.storeEffect.bits
   lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
     l1dLoadCache.io.storeRequest.ready && !orderedIOEngine.io.busy,
@@ -311,21 +330,28 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.loadComplete <> loadCompletionArbiter.io.out
 
   val storeResultArbiter = Module(new Arbiter(new StoreWriteResult(cfg), 2))
+  val l1dCleanupArbiter = Module(new Arbiter(UInt(32.W), 2))
+  val l2CleanupArbiter = Module(new Arbiter(UInt(32.W), 2))
+  l1dCleanupArbiter.io.in(0) <> externalCoherence.io.l1dCleanup
+  l2CleanupArbiter.io.in(0) <> externalCoherence.io.l2Cleanup
+  l1dLoadCache.io.flushLine <> l1dCleanupArbiter.io.out
+  l2TransferStore.io.flushLine <> l2CleanupArbiter.io.out
+  externalCoherence.io.l2CleanupDirty := l2TransferStore.io.flushLineDirty
   if (cfg.enableHostFlush) {
     val hostStoreFlush = Module(new HostStoreFlush(cfg))
     val hostControl = io.hostFlush.get
     hostStoreFlush.io.enabled := hostControl.enable
     hostStoreFlush.io.address := hostControl.address
-    hostStoreFlush.io.l1dFlush <> l1dLoadCache.io.flushLine
-    hostStoreFlush.io.l2Flush <> l2TransferStore.io.flushLine
+    hostStoreFlush.io.l1dFlush <> l1dCleanupArbiter.io.in(1)
+    hostStoreFlush.io.l2Flush <> l2CleanupArbiter.io.in(1)
     hostStoreFlush.io.writebackComplete := l2WritebackEngine.io.completed
     hostStoreFlush.io.input <> l1dLoadCache.io.storeResult
     storeResultArbiter.io.in(0) <> hostStoreFlush.io.output
   } else {
-    l1dLoadCache.io.flushLine.valid := false.B
-    l1dLoadCache.io.flushLine.bits := 0.U
-    l2TransferStore.io.flushLine.valid := false.B
-    l2TransferStore.io.flushLine.bits := 0.U
+    l1dCleanupArbiter.io.in(1).valid := false.B
+    l1dCleanupArbiter.io.in(1).bits := 0.U
+    l2CleanupArbiter.io.in(1).valid := false.B
+    l2CleanupArbiter.io.in(1).bits := 0.U
     storeResultArbiter.io.in(0) <> l1dLoadCache.io.storeResult
   }
   storeResultArbiter.io.in(1) <> deviceStoreResult

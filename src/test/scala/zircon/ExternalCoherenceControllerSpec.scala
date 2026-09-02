@@ -13,6 +13,7 @@ class ExternalCoherenceControllerSpec extends AnyFunSpec with ChiselSim {
     dut.io.request.bits.lineAddress.poke(0)
     dut.io.response.ready.poke(false)
     dut.io.l1dCleanup.ready.poke(false)
+    dut.io.instructionDrained.poke(true)
     dut.io.l2Cleanup.ready.poke(false)
     dut.io.l2CleanupDirty.poke(false)
     dut.io.writebackComplete.valid.poke(false)
@@ -48,6 +49,20 @@ class ExternalCoherenceControllerSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("ExternalCoherenceController") {
+    it("waits for an accepted instruction owner before touching data state") {
+      simulate(new ExternalCoherenceController) { dut =>
+        clear(dut)
+        dut.io.instructionDrained.poke(false)
+        offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue)
+        dut.clock.step()
+        dut.io.request.valid.poke(false)
+        dut.io.l1dCleanup.valid.expect(false)
+        dut.io.cacheableIngressBlocked.expect(true)
+        dut.io.instructionDrained.poke(true)
+        dut.io.l1dCleanup.valid.expect(true)
+      }
+    }
+
     it("serializes a clean write-invalidate before its exact response") {
       simulate(new ExternalCoherenceController) { dut =>
         clear(dut)

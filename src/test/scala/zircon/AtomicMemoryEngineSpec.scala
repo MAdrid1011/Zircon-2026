@@ -22,6 +22,8 @@ class AtomicMemoryEngineSpec extends AnyFunSpec with ChiselSim {
     dut.io.result.ready.poke(true)
     dut.io.invalidate.valid.poke(false)
     dut.io.invalidate.bits.poke(0)
+    dut.io.invalidateLine.valid.poke(false)
+    dut.io.invalidateLine.bits.poke(0)
     dut.io.flush.poke(false)
     dut.io.ar.ready.poke(true)
     dut.io.r.valid.poke(false)
@@ -119,6 +121,40 @@ class AtomicMemoryEngineSpec extends AnyFunSpec with ChiselSim {
         acceptRead(dut, BigInt("deadc0de", 16))
         consumeResult(dut, tag = 3, data = BigInt("deadc0de", 16))
         dut.io.reservationLive.expect(true)
+      }
+    }
+
+    it("clears every word reservation in an externally invalidated cache line") {
+      simulate(new AtomicMemoryEngine) { dut =>
+        clear(dut)
+        offer(dut, IntOperation.LrW, tag = 1, address = WordAddress + 12)
+        // This helper's fixed address is the line base; drive the non-base
+        // word response directly to establish the intended LR reservation.
+        dut.io.ar.valid.expect(true)
+        dut.io.ar.bits.addr.expect(WordAddress + 12)
+        dut.clock.step()
+        dut.io.r.valid.poke(true)
+        dut.io.r.bits.id.poke(7)
+        dut.io.r.bits.data.poke(BigInt("01020304", 16))
+        dut.io.r.bits.resp.poke(0)
+        dut.io.r.bits.last.poke(true)
+        dut.io.r.ready.expect(true)
+        dut.clock.step()
+        dut.io.r.valid.poke(false)
+        consumeResult(dut, tag = 1, data = BigInt("01020304", 16))
+        dut.io.reservationLive.expect(true)
+
+        dut.io.invalidateLine.valid.poke(true)
+        dut.io.invalidateLine.bits.poke(WordAddress)
+        dut.clock.step()
+        dut.io.invalidateLine.valid.poke(false)
+        dut.io.reservationLive.expect(false)
+
+        offer(dut, IntOperation.ScW, tag = 2, address = WordAddress + 12,
+          writeData = BigInt("a5a5a5a5", 16), destination = 33)
+        dut.io.ar.valid.expect(false)
+        dut.io.aw.valid.expect(false)
+        consumeResult(dut, tag = 2, data = 1)
       }
     }
 

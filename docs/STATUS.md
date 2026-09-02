@@ -61,4 +61,18 @@ cache-global FENCE 的四 seed 压力用例使两条不同 dirty L1D line 依次
 | M5 IPC/静态面积收敛 | partially completed | ADR-0009 已冻结静态口径，validator、comparison report、3 项脚本测试和 CI 入口可用。当前账本已按源码计入 active L1I、resident-L2 instruction probe、L1D/L2 transfer、cache-global FENCE controller/dirty scans、direct two-lane L1D 年龄 selector、80-bit conservative miss payload mux、双 hit result slots、双端口 tag/data lookup、bank conflict comparator、同 line dual-miss equality/secondary waiter selector、different-set hit/miss and dual-miss set/MSHR/way checks and owner selectors、四个 demand owner、ID-5 writeback、ID-6 device、ID-7 atomic、age-tagged FENCE owner checks 和 MemIQ atomic gate；`make static-area` 当前报告 68,652 storage bit、71,608 mux-input-bit proxy、1,240 priority-select-bit proxy、198 comparator32 proxy。两侧 manifest 仍不完整，报告明确为 `PARTIAL`，不是面积签收 | 随 RTL 补齐两侧 manifest，最终以 `--require-complete` 生成完整静态对照并完成同环境 IPC 测量 |
 | M6 验证闭环 | missing | 覆盖与随机门槛已定义 | 里程碑十亿退休指令 |
 
+### M3 External Coherence Update
+
+The earlier M3 row's statement that ADR-0023 had no controller or integration
+is superseded. `ZirconCoreIO.externalCoherence` now implements the retained
+single-request port through `ExternalCoherenceController`: new cacheable
+ingress is blocked, I-side owners drain, exact L1D/L2 cleanup occurs, dirty
+targets wait for matching ID-5 B, L1I/BTB and line-scoped LR reservations are
+invalidated, then the original response returns. `CoreShellSpec` has clean and
+dirty complete-core paths; the latter observes one target ID-5 eight-beat burst
+and response only after B. `ZirconSim` gitlink `3023715` explicitly drives the
+port idle in its private-memory model and its RV32A `tohost` run remains 228
+cycles/12 retirements. FPGA/SoC platform adapter, full pressure/reset/error
+matrix, bounded formal, and multi-master system integration remain incomplete.
+
 状态只能在对应自动测试或报告进入 Git 后更新；控制文档更新本身不等价于硬件进展。

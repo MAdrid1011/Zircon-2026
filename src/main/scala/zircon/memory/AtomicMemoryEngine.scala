@@ -29,6 +29,9 @@ class AtomicMemoryEngine(
     val result = Decoupled(new AtomicMemoryResult(config))
     /** A same-hart committed store invalidates only a matching reservation. */
     val invalidate = Input(Valid(UInt(32.W)))
+    /** An external cacheable modifier invalidates every reservation word in
+      * its 32-byte line after local cache cleanup completes. */
+    val invalidateLine = Input(Valid(UInt(32.W)))
     /** A trap/interrupt flush clears the reservation and suppresses killed
       * completion delivery, while already accepted AXI channels still drain. */
     val flush = Input(Bool())
@@ -247,6 +250,10 @@ class AtomicMemoryEngine(
   }
   when(io.invalidate.valid && reservationValid &&
       reservationWord === wordAddress(io.invalidate.bits)) {
+    reservationValid := false.B
+  }
+  when(io.invalidateLine.valid && reservationValid &&
+      reservationWord(31, 5) === io.invalidateLine.bits(31, 5)) {
     reservationValid := false.B
   }
   when(io.effect.fire && incomingSc) {

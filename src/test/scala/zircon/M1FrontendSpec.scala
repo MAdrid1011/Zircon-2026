@@ -15,6 +15,8 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
 
   private def clearInputs(dut: M1Frontend): Unit = {
     dut.io.enable.poke(false)
+    dut.io.coherenceBlock.poke(false)
+    dut.io.coherenceInvalidate.poke(false)
     dut.io.l2Lookup.ready.poke(false)
     dut.io.l2LookupResponse.valid.poke(false)
     dut.io.l2LookupResponse.bits.hit.poke(false)

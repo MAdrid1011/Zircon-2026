@@ -1,8 +1,10 @@
 package zircon.core
 
 import chisel3._
+import chisel3.util.Decoupled
 import zircon.ZirconCoreConfig
 import zircon.bus.AXI4MasterPort
+import zircon.memory.{ExternalCoherenceRequest, ExternalCoherenceResponse}
 import zircon.trace.RetireEvent
 
 class InterruptInputs extends Bundle {
@@ -16,6 +18,13 @@ class InterruptInputs extends Bundle {
 class HostFlushControl extends Bundle {
   val enable = Bool()
   val address = UInt(32.W)
+}
+
+/** Platform sideband required before an external cacheable write or atomic.
+  * The platform must wait for `response` before performing that modifier. */
+class ExternalCoherencePort extends Bundle {
+  val request = Flipped(Decoupled(new ExternalCoherenceRequest))
+  val response = Decoupled(new ExternalCoherenceResponse)
 }
 
 /** Test-only M2/M3 handshakes. This port is absent from every production config. */
@@ -46,6 +55,7 @@ class M2Observation extends Bundle {
 class ZirconCoreIO(cfg: ZirconCoreConfig) extends Bundle {
   val axi = new AXI4MasterPort(addressWidth = 32, dataWidth = 32, idWidth = 4)
   val interrupts = Input(new InterruptInputs)
+  val externalCoherence = new ExternalCoherencePort
   val trace = if (cfg.enableTrace) Some(Output(Vec(cfg.commitWidth, new RetireEvent))) else None
   val m2Observation = if (cfg.enableM2Observation) Some(Output(new M2Observation)) else None
   val hostFlush = if (cfg.enableHostFlush) Some(Input(new HostFlushControl)) else None

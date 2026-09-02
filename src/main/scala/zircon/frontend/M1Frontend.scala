@@ -16,6 +16,10 @@ class M1Frontend(
 ) extends Module {
   val io = IO(new Bundle {
     val enable = Input(Bool())
+    /** Blocks new instruction-cache lookup/demand work while an external
+      * cacheable modifier drains and invalidates its target line. */
+    val coherenceBlock = Input(Bool())
+    val coherenceInvalidate = Input(Bool())
     val l2Lookup = Decoupled(UInt(32.W))
     val l2LookupResponse = Flipped(Decoupled(new zircon.memory.L2InstructionLookupResponse(config)))
     val l2Request = Decoupled(new L2DemandRequest(config))
@@ -32,6 +36,7 @@ class M1Frontend(
     val currentPc = Output(UInt(32.W))
     val fetchBusy = Output(Bool())
     val fetchDraining = Output(Bool())
+    val coherenceDrained = Output(Bool())
     val unresolvedIndirect = Output(Bool())
     val predictorsReady = Output(Bool())
     val queueCount = Output(UInt(log2Ceil(config.fetchWidth + 1).W))
@@ -57,7 +62,7 @@ class M1Frontend(
   val fenceICommit = commitRedirect &&
     io.commitRedirect.bits.reason === CommitRedirectReason.FenceI
 
-  fetch.io.invalidate := fenceICommit
+  fetch.io.invalidate := fenceICommit || io.coherenceInvalidate
 
   bimodal.io.fetchBase := fetch.io.response.bits.base
   bimodal.io.train.valid := io.branchTraining.valid &&
@@ -72,7 +77,7 @@ class M1Frontend(
   btb.io.train.bits.conditional := io.branchTraining.bits.metadata.conditional
   btb.io.train.bits.call := io.branchTraining.bits.metadata.call
   btb.io.train.bits.ret := io.branchTraining.bits.metadata.ret
-  btb.io.invalidate := fenceICommit
+  btb.io.invalidate := fenceICommit || io.coherenceInvalidate
 
   val predictorsReady = bimodal.io.ready && btb.io.ready
   control.io.fetchBase := fetch.io.response.bits.base
@@ -143,7 +148,7 @@ class M1Frontend(
   io.decode <> queue.io.dequeue
 
   fetch.io.enable := io.enable && predictorsReady && !unresolvedIndirect &&
-    !frontendRedirect
+    !frontendRedirect && !io.coherenceBlock
   fetch.io.redirect.valid := frontendRedirect
   fetch.io.redirect.bits := redirectTarget
   fetch.io.response.ready := responseCanEnqueue && !frontendRedirect
@@ -157,11 +162,12 @@ class M1Frontend(
   // Direct control targets can enter the next L1I lookup on the response edge.
   fetch.io.continueAfterResponse := io.enable && predictorsReady &&
     !unresolvedIndirect && !frontendRedirect &&
-    !control.io.unresolvedIndirect.valid && !responseHasFetchFault
+    !control.io.unresolvedIndirect.valid && !responseHasFetchFault &&
+    !io.coherenceBlock
   fetch.io.lookaheadEnable := io.enable && predictorsReady &&
     !unresolvedIndirect && !frontendRedirect &&
     !control.io.unresolvedIndirect.valid && !control.io.redirect.valid &&
-    !responseHasFetchFault
+    !responseHasFetchFault && !io.coherenceBlock
   io.l2Lookup <> fetch.io.l2Lookup
   fetch.io.l2LookupResponse <> io.l2LookupResponse
   io.l2Request <> fetch.io.l2Request
@@ -179,6 +185,7 @@ class M1Frontend(
   io.currentPc := fetch.io.currentPc
   io.fetchBusy := fetch.io.busy
   io.fetchDraining := fetch.io.draining
+  io.coherenceDrained := fetch.io.coherenceDrained
   io.unresolvedIndirect := unresolvedIndirect
   io.predictorsReady := predictorsReady
   io.queueCount := queue.io.count

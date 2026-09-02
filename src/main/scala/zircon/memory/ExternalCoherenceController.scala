@@ -37,6 +37,9 @@ class ExternalCoherenceController extends Module {
     val cacheableIngressBlocked = Output(Bool())
 
     val l1dCleanup = Decoupled(UInt(32.W))
+    /** Existing I-side demand/lookahead owners must drain before a target line
+      * can be removed from shared L2 and the private L1I. */
+    val instructionDrained = Input(Bool())
     val l2Cleanup = Decoupled(UInt(32.W))
     val l2CleanupDirty = Input(Bool())
     val writebackComplete = Input(Valid(UInt(32.W)))
@@ -51,7 +54,7 @@ class ExternalCoherenceController extends Module {
   io.request.ready := state === State.Idle
   io.cacheableIngressBlocked := state =/= State.Idle || io.request.fire
 
-  io.l1dCleanup.valid := state === State.CleanL1D
+  io.l1dCleanup.valid := state === State.CleanL1D && io.instructionDrained
   io.l1dCleanup.bits := heldLineAddress
   io.l2Cleanup.valid := state === State.CleanL2
   io.l2Cleanup.bits := heldLineAddress
@@ -77,6 +80,10 @@ class ExternalCoherenceController extends Module {
   when(io.response.valid) {
     assert(io.cacheableIngressBlocked,
       "external coherence acknowledged while cacheable ingress was open")
+  }
+  when(state === State.CleanL1D && !io.instructionDrained) {
+    assert(!io.l1dCleanup.fire,
+      "external coherence cleaned data state before I-side owners drained")
   }
 
   switch(state) {

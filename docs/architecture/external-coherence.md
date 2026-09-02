@@ -35,17 +35,26 @@ The component accepts only 32-byte-aligned `WriteInvalidate` and
 `AtomicInvalidate` requests and does not accept a replacement request while
 the retained request is active.
 
-This is not yet an externally coherent core. `ZirconCore` has not yet exposed
-the port or connected its existing L1D/L2/atomic endpoints to the controller.
-The L1D and L2 cleanup endpoints now acknowledge exact dirty, clean, and
-absent targets: dirty L1D cleanup transfers to L2, dirty L2 cleanup reports
-its ID-5 obligation through `flushLineDirty`, and clean/absent targets create
-no victim. Matching in-flight L1D owners still block cleanup. The current
-local foundation checks are:
+`ZirconCore` now exposes the production port and connects the controller to
+the L1I drain/invalidate path, L1D/L2 cleanup arbiters, ID-5 completion, and
+line-scoped atomic reservation clearing. It blocks a request until a retained
+I-side demand or lookahead owner drains, so an old instruction refill cannot
+repopulate the target after acknowledgement. The L1D and L2 cleanup endpoints
+acknowledge exact dirty, clean, and absent targets: dirty L1D cleanup transfers
+to L2, dirty L2 cleanup reports its ID-5 obligation through `flushLineDirty`,
+and clean/absent targets create no victim. Matching in-flight L1D owners still
+block cleanup. ZirconSim drives the sideband explicitly idle because it remains
+a single-hart/private-memory model; a board/SoC adapter is still required to
+serialize a real external master before its modifier. The current local checks
+are:
 
 ```bash
 ./scripts/sbtw 'testOnly zircon.ExternalCoherenceControllerSpec'
 ./scripts/sbtw 'testOnly zircon.L1DLoadCacheSpec zircon.ExclusiveL2TransferStoreSpec'
+./scripts/sbtw 'testOnly zircon.AtomicMemoryEngineSpec'
+./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external cacheable invalidation"'
+./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
+make -C ZirconSim tohost-rv32a
 ```
 
 ## Required Invariants

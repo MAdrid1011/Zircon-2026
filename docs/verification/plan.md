@@ -177,6 +177,22 @@ failure.
 | MMIO/A | ID-6 strong/burstable groups plus LR/SC success and local/trap reservation failure, every AMO function, exact R/B fault conversion, and aq ordering have local directed evidence. `AXIOrderedIOEngineSpec` adds four explicit seeds `0x5eed0101`--`0x5eed0104`, covering every 1--4 beat group size, read/write direction, independently backpressured address/write channels, held local response, RRESP and BRESP errors. `CoreShellSpec` adds `0x5eed0201`--`0x5eed0204`: with the full group presented before its six-cycle collection timer, one through four retained device owners execute under long-div ROB pressure as one exact ID-6 transaction and retire exact member metadata. Remaining: fetch-pressure group-sealing matrix, external reservation-loss cases, FENCE pressure, formal AXI/LSQ properties, and committed-memory differential. |
 | Core/differential | deterministic RV32IMA ELF including `tohost`; explicit-seed stress starting at `0x5eed3004`; trace memory fields; Spike and Sail committed-memory comparison; applicable ACT4 IMA smoke |
 
+### External Coherence Integration
+
+ADR-0023's one-request `ExternalCoherencePort` is now connected in
+`ZirconCore`. The local controller test covers I-side-drain gating, retained
+request ownership, clean cleanup, dirty writeback matching, and response
+uniqueness. The complete-core clean case accepts one request during an AXI-fed
+instruction stream and reaches one exact response before continued EBREAK
+execution. The dirty case first retires a cacheable store, then requires one
+target ID-5 eight-beat burst and its successful B before the external response.
+`AtomicMemoryEngineSpec` verifies that line invalidation clears a reservation
+held at a non-base word. ZirconSim's production driver explicitly holds the
+sideband idle and the traced RV32A `tohost` run still exits 0 at 228 cycles/12
+retirements. This is directed local evidence only: external platform adapter,
+in-flight refill/reset/B-error stress, full L1I/L1D/L2 state matrix, and formal
+response/credit proofs remain M3 obligations.
+
 The four-seed `0x5eee0001`--`0x5eee0004` fault tier first permits four
 logical data lines to obtain their shared physical AXI owners, then drains all
 four RRESP-error bursts from youngest to oldest. Its retire trace still accepts
