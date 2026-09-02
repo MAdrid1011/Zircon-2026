@@ -1732,6 +1732,81 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("releases saturated MSHRs after a dirty victim transfer on global flush") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("8000c000", 16)
+        val residentB = BigInt("8000c200", 16)
+        val transferredMiss = BigInt("8000c400", 16)
+        val unissuedLines = Seq(
+          BigInt("8000c100", 16),
+          BigInt("8000c140", 16),
+          BigInt("8000c180", 16))
+        val freshLine = BigInt("8000c1c0", 16)
+        val words = Seq.tabulate(8)(word => BigInt("87000000", 16) + word)
+
+        // The first miss replaces a dirty resident line and crosses only the
+        // L1D-to-L2 transfer boundary. Keep its serialized lookup unaccepted,
+        // then consume the remaining three MSHR credits with independent
+        // misses. All four owners are local/cancellable at flush time.
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, words, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, words, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 3, address = residentA + 4,
+          mask = 15, data = BigInt("dead0007", 16))
+        consumeStoreResult(dut, tag = 3, address = residentA + 4)
+        submitStore(dut, tag = 4, address = residentB + 4,
+          mask = 15, data = BigInt("dead0008", 16))
+        consumeStoreResult(dut, tag = 4, address = residentB + 4)
+
+        presentLoad(dut, lane = 0, tag = 5, address = transferredMiss + 4)
+        dut.io.request(0).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(1).expect(BigInt("dead0007", 16))
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        unissuedLines.zipWithIndex.foreach { case (line, index) =>
+          submit(dut, tag = 6 + index, address = line + 4)
+        }
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(transferredMiss)
+        dut.io.dataRequest.valid.expect(false)
+
+        // The transferred dirty victim remains owned by L2, but every local
+        // demand is still cancellable. Flush cannot emit a stale lookup, AXI
+        // refill, or completion, and it must release all four MSHR credits.
+        dut.io.flush.poke(true)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // A fresh line proves that neither the three unissued requests nor
+        // the dirty-victim demand retained a hidden MSHR or waiter credit.
+        presentLoad(dut, lane = 0, tag = 9, address = freshLine + 4)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(freshLine)
+      }
+    }
+
     it("releases a squashed dirty-victim owner after its L2 transfer fires") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
