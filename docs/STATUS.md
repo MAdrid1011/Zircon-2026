@@ -2,8 +2,9 @@
 
 最新本地全回归（2026-09-02）为 63 suites、376 tests，全部通过；
 `make test-m3-dual-load-forward` 为 5 suites、66 tests 加 1 条顶层 core 用例，耗时 3 分 43 秒。
-最新 L1D resource-pressure slice 为 30/30 tests、1 分 32 秒，覆盖 MSHR、waiter 和 dirty-victim L2 backpressure。
+最新完整 `L1DLoadCacheSpec` 为 32/32 tests、1 分 47 秒，覆盖 MSHR、waiter、dirty-victim L2 backpressure 与 recovery。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
+不同 set pair 中若年轻 miss 需要 resident victim，`L1DLoadCacheSpec` 证明较老 hit 单独握手，年轻 miss 只在下一周期得到唯一 L1D-to-L2 transfer owner。
 AXI data owner slice 为 7/7 tests（随机部分使用 4 个显式 seed，约 5 秒），并覆盖四 owner 尚未 drain、其中一个已记录 RRESP fault 时的 reset/ID reuse；顶层 cross-ID 双 LSU、四-owner drain 和 reset-owner-epoch slice 各为 1/1（均为 4 个显式 seed）。`make test-m3-axi-stress` 实测约 4 分 16 秒；`make test-m3-axi-long` 为 1/1、约 52 秒，随机交错八条独立 cache-line load 并确认四 physical owner 回收复用；`make test-m3-axi-faults` 当前覆盖两条各 4-seed 的反向 fault-order 路径：年轻 RRESP fault burst 先完成仍保持更老 load 的精确 trap，且年轻 cacheable-load RRESP 先 drain 后仍由更老 ID-6 device-store BRESP 取得精确 trap。完整 `CoreShellSpec` 为 49/49、12 分 6 秒。reset slice 先 reset 四个 data owner 和一个 partial fault，再 reset ID-6 AW/W、ID-5 WLAST 和 ID-7 AMO AW/W（均在 B 前），最终冷启动重跑并检查无旧 owner/fault/credit 泄漏；`make test-m3-axi-reset` 两个顶层 slice 实测约 1 分 40 秒。ID-5 的 3/3 tests 覆盖 error retry 中的 partial AW/W reset，ID-7 的 7/7 tests 覆盖 AwaitRead、partial AW/W 和 LR reservation reset；两 suite 合计 10/10、约 9 秒。更长 multi-owner/组合错误 stress 仍未闭环。
 
 本页按研发计划顺序记录可由代码、测试或报告验证的状态。`completed` 表示已有实现和自动测试，`partially completed` 表示公共契约或局部模块已存在，`missing` 表示尚无可运行实现。

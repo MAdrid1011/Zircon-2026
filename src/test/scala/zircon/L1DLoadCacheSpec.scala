@@ -783,6 +783,66 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("replays a younger victim miss behind an older different-set hit") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("80008000", 16)
+        val residentB = BigInt("80008200", 16)
+        val missLine = BigInt("80008400", 16)
+        val hitLine = BigInt("80008100", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("51000000", 16) + word)
+        val hitWords = Seq.tabulate(8)(word => BigInt("52000000", 16) + word)
+        val refillWords = Seq.tabulate(8)(word => BigInt("53000000", 16) + word)
+
+        // Fill both ways of the miss set, then populate a distinct hit set.
+        // The same-set addresses are 0x200 apart for the fixed 16-set L1D.
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, residentWords, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, residentWords, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 3, address = hitLine)
+        issueRefill(dut, hitWords, lineAddress = hitLine)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // Lane 0 is younger and requires a resident victim transfer; lane 1
+        // is an immediate hit in another set. The dual fast path may not
+        // fabricate a second L2 transfer, so only the older hit fires.
+        presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(false)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        // With the hit accepted, the retained younger request can now claim
+        // the single victim-transfer path and issue its exact MSHR owner.
+        dut.io.request(0).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        issueRefill(dut, refillWords, lineAddress = missLine)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(hitWords(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(refillWords(1))
+      }
+    }
+
     it("accepts different-set dual misses with two exact MSHR owners") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

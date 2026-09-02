@@ -70,6 +70,9 @@ The same-set hit/miss case also accepts both requests when the miss reserves the
 other invalid way; replacement with resident or dirty victims remains oldest-only.
 Same-set dual misses likewise require two distinct invalid ways; a full set
 admits only the older miss and transfers one victim through the single L2 port.
+For a different-set pair whose younger miss requires a resident victim,
+`L1DLoadCacheSpec` proves that only the older hit handshakes in the contention
+cycle; the retained miss may claim the one-wide L1D-to-L2 transfer only later.
 `AXIDataReadEngineSpec` now adds four explicit seeds (`0x5eed4001`--
 `0x5eed4004`) covering randomized AR backpressure, four-owner ID/beat
 interleaving, response backpressure, and one deterministic RRESP fault per
