@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The initial RV32F E2 path, including five-mode/dynamic integer-to-single conversion, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete arithmetic FPU, FMA source-read path, float-to-integer conversion, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
+    "The initial RV32F E2 path, including five-mode/dynamic integer-to-single and single-to-integer conversion, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete arithmetic FPU, FMA source-read path, floating memory operations, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
   ],
   "storage": [
     {
@@ -1140,6 +1140,38 @@
       "width": 1,
       "fanin": 1,
       "source": "FloatingMovePipe variable left and right alignment shifts for FCVT.S.W/U"
+    },
+    {
+      "name": "floating_fcvt_float_to_integer_select_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 33,
+      "fanin": 31,
+      "source": "FloatingMovePipe FCVT.W[U].S finite magnitude path: 23 right-shift, nine left-shift, and range/default selections charged as a single conservative 31-way 33-bit selection network"
+    },
+    {
+      "name": "floating_fcvt_float_to_integer_rounding_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 80,
+      "fanin": 2,
+      "source": "FloatingMovePipe FCVT.W[U].S five-mode tie/directed-rounding, invalid-result, signed-negation, and NX/NV result selections"
+    },
+    {
+      "name": "floating_fcvt_float_to_integer_compare_units",
+      "metric": "comparator32_units",
+      "units": 37,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe FCVT.W[U].S exponent shift decode, finite/range tests, signed and unsigned representability checks, conservatively charged at 32-bit comparator granularity"
+    },
+    {
+      "name": "floating_fcvt_float_to_integer_adders",
+      "metric": "adder32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe FCVT.W[U].S retained rounding increment and valid negative-result two's-complement formation"
     }
   ]
 }

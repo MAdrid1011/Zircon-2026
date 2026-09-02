@@ -36,6 +36,14 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
         dut.io.instruction.poke(opFp(0x70, rs2 = 0, rs1 = 1, funct3 = 1, rd = 3))
         dut.io.live.expect(true)
         dut.io.decoded.operation.expect(FloatingOperation.FclassS)
+
+        dut.io.instruction.poke(opFp(0x60, rs2 = 0, rs1 = 1, funct3 = 0, rd = 3))
+        dut.io.live.expect(true)
+        dut.io.decoded.operation.expect(FloatingOperation.FcvtWS)
+
+        dut.io.instruction.poke(opFp(0x60, rs2 = 1, rs1 = 1, funct3 = 0, rd = 3))
+        dut.io.live.expect(true)
+        dut.io.decoded.operation.expect(FloatingOperation.FcvtWuS)
       }
     }
 

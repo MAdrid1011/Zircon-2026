@@ -211,6 +211,66 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("converts finite, exceptional, and boundary single values to integers precisely") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, source: BigInt, rounding: Int,
+            expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 5, operation = operation, integerDestination = 37,
+            floatSource0 = source, roundingMode = rounding)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesInteger.expect(true)
+          dut.io.output.bits.writesFloat.expect(false)
+          dut.io.output.bits.integerDestinationPhysical.expect(37)
+          dut.io.output.bits.integerData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        // +/-0.5 is the RNE/RMM tie boundary, and directed modes depend on sign.
+        check(FloatingOperation.FcvtWS, BigInt("3f000000", 16), 0, 0, 1)
+        check(FloatingOperation.FcvtWS, BigInt("3f000000", 16), 3, 1, 1)
+        check(FloatingOperation.FcvtWS, BigInt("3f000000", 16), 4, 1, 1)
+        check(FloatingOperation.FcvtWS, BigInt("bf000000", 16), 0, 0, 1)
+        check(FloatingOperation.FcvtWS, BigInt("bf000000", 16), 2,
+          BigInt("ffffffff", 16), 1)
+        check(FloatingOperation.FcvtWS, BigInt("bf000000", 16), 4,
+          BigInt("ffffffff", 16), 1)
+        // Exact, fractional, and subnormal finite cases.
+        check(FloatingOperation.FcvtWS, BigInt("3fc00000", 16), 0, 2, 1)
+        check(FloatingOperation.FcvtWS, BigInt("40200000", 16), 0, 2, 1)
+        check(FloatingOperation.FcvtWS, BigInt("bfa00000", 16), 2,
+          BigInt("fffffffe", 16), 1)
+        check(FloatingOperation.FcvtWS, BigInt("bfa00000", 16), 3,
+          BigInt("ffffffff", 16), 1)
+        check(FloatingOperation.FcvtWS, BigInt("00000001", 16), 3, 1, 1)
+        check(FloatingOperation.FcvtWS, BigInt("80000001", 16), 2,
+          BigInt("ffffffff", 16), 1)
+        // Signed and unsigned representability boundaries.
+        check(FloatingOperation.FcvtWS, BigInt("cf000000", 16), 0,
+          BigInt("80000000", 16), 0)
+        check(FloatingOperation.FcvtWS, BigInt("4f000000", 16), 0,
+          BigInt("80000000", 16), BigInt(16))
+        check(FloatingOperation.FcvtWuS, BigInt("4f7fffff", 16), 0,
+          BigInt("ffffff00", 16), 0)
+        check(FloatingOperation.FcvtWuS, BigInt("4f800000", 16), 0,
+          BigInt("ffffffff", 16), BigInt(16))
+        check(FloatingOperation.FcvtWuS, BigInt("bf000000", 16), 1, 0, 1)
+        check(FloatingOperation.FcvtWuS, BigInt("bf000000", 16), 2,
+          BigInt("ffffffff", 16), BigInt(16))
+        // Both NaN classes and infinities take the architectural invalid path.
+        Seq("7fc00001", "7f800001", "7f800000", "ff800000").foreach { bits =>
+          check(FloatingOperation.FcvtWS, BigInt(bits, 16), 0,
+            BigInt("80000000", 16), BigInt(16))
+          check(FloatingOperation.FcvtWuS, BigInt(bits, 16), 0,
+            BigInt("ffffffff", 16), BigInt(16))
+        }
+      }
+    }
+
     it("drops only younger retained work on squash and all work on flush") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

@@ -56,7 +56,8 @@ class FloatingMovePipe(
       operation === FloatingOperation.FmaxS || operation === FloatingOperation.FleS ||
       operation === FloatingOperation.FltS || operation === FloatingOperation.FeqS ||
       operation === FloatingOperation.FclassS || operation === FloatingOperation.FcvtSW ||
-      operation === FloatingOperation.FcvtSWu
+      operation === FloatingOperation.FcvtSWu || operation === FloatingOperation.FcvtWS ||
+      operation === FloatingOperation.FcvtWuS
 
   val active = RegInit(false.B)
   val request = Reg(new FloatingMoveRequest(config))
@@ -118,7 +119,7 @@ class FloatingMovePipe(
     true.B -> "h00000040".U(32.W)
   ))
 
-  val integerConversion = request.operation === FloatingOperation.FcvtSW ||
+  val integerToFloatConversion = request.operation === FloatingOperation.FcvtSW ||
     request.operation === FloatingOperation.FcvtSWu
   val conversionSigned = request.operation === FloatingOperation.FcvtSW
   val conversionSign = conversionSigned && request.integerSource(31)
@@ -164,6 +165,78 @@ class FloatingMovePipe(
     Cat(conversionSign, roundedConversionExponent(7, 0),
       Mux(conversionCarry, 0.U(23.W), roundedConversionSignificand(22, 0))))
 
+  val floatToIntegerConversion = request.operation === FloatingOperation.FcvtWS ||
+    request.operation === FloatingOperation.FcvtWuS
+  val floatToUnsigned = request.operation === FloatingOperation.FcvtWuS
+  val floatToIntegerSign = lhs(31)
+  val floatToIntegerFinite = lhsExponent =/= "hff".U
+  val floatToIntegerNonzero = lhs(30, 0).orR
+  val floatToIntegerSignificand = Mux(lhsExponent === 0.U,
+    Cat(0.U(1.W), lhsFraction), Cat(1.U(1.W), lhsFraction))
+  val floatToIntegerRightTruncated = WireDefault(0.U(24.W))
+  val floatToIntegerDiscarded = WireDefault(false.B)
+  val floatToIntegerGuard = WireDefault(false.B)
+  val floatToIntegerSticky = WireDefault(false.B)
+  for (shift <- 1 to 23) {
+    when(lhsExponent === (150 - shift).U) {
+      floatToIntegerRightTruncated := floatToIntegerSignificand >> shift
+      floatToIntegerDiscarded := floatToIntegerSignificand(shift - 1, 0).orR
+      floatToIntegerGuard := floatToIntegerSignificand(shift - 1)
+      if (shift > 1) {
+        floatToIntegerSticky := floatToIntegerSignificand(shift - 2, 0).orR
+      }
+    }
+  }
+  val lessThanOneGreaterHalf = lhsExponent > 126.U ||
+    (lhsExponent === 126.U && lhsFraction.orR)
+  val lessThanOneAtLeastHalf = lhsExponent >= 126.U
+  val lessThanOneRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> lessThanOneGreaterHalf,
+    1.U -> false.B,
+    2.U -> (floatToIntegerSign && floatToIntegerNonzero),
+    3.U -> (!floatToIntegerSign && floatToIntegerNonzero),
+    4.U -> lessThanOneAtLeastHalf
+  ))
+  val floatToIntegerRightRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (floatToIntegerGuard &&
+      (floatToIntegerSticky || floatToIntegerRightTruncated(0))),
+    1.U -> false.B,
+    2.U -> (floatToIntegerSign && floatToIntegerDiscarded),
+    3.U -> (!floatToIntegerSign && floatToIntegerDiscarded),
+    4.U -> floatToIntegerGuard
+  ))
+  val floatToIntegerLeftMagnitude = WireDefault(0.U(33.W))
+  for (shift <- 0 to 8) {
+    when(lhsExponent === (150 + shift).U) {
+      // Exponents 150--158 produce at most 32 magnitude bits. Slice the
+      // statically widened Chisel shift result so this range remains explicit.
+      floatToIntegerLeftMagnitude := (Cat(0.U(9.W), floatToIntegerSignificand) << shift)(32, 0)
+    }
+  }
+  val floatToIntegerMagnitude = WireDefault(0.U(33.W))
+  val floatToIntegerInexact = WireDefault(false.B)
+  when(lhsExponent < 127.U) {
+    floatToIntegerMagnitude := lessThanOneRoundUp.asUInt
+    floatToIntegerInexact := floatToIntegerNonzero
+  }.elsewhen(lhsExponent < 150.U) {
+    floatToIntegerMagnitude := Cat(0.U(9.W), floatToIntegerRightTruncated) +
+      floatToIntegerRightRoundUp.asUInt
+    floatToIntegerInexact := floatToIntegerDiscarded
+  }.elsewhen(lhsExponent <= 158.U) {
+    floatToIntegerMagnitude := floatToIntegerLeftMagnitude
+  }
+  val floatToIntegerSignedInvalid = !floatToIntegerFinite || lhsExponent > 158.U ||
+    (!floatToIntegerSign && floatToIntegerMagnitude > "h07fffffff".U) ||
+    (floatToIntegerSign && floatToIntegerMagnitude > "h080000000".U)
+  val floatToIntegerUnsignedInvalid = !floatToIntegerFinite || lhsExponent > 158.U ||
+    (floatToIntegerSign && floatToIntegerMagnitude.orR)
+  val floatToIntegerInvalid = Mux(floatToUnsigned, floatToIntegerUnsignedInvalid,
+    floatToIntegerSignedInvalid)
+  val floatToIntegerData = Mux(floatToIntegerInvalid,
+    Mux(floatToUnsigned, "hffffffff".U(32.W), "h80000000".U(32.W)),
+    Mux(floatToIntegerSign, (~floatToIntegerMagnitude(31, 0)).asUInt + 1.U,
+      floatToIntegerMagnitude(31, 0)))
+
   val result = WireDefault(0.U.asTypeOf(new FloatingMoveResult(config)))
   result.robTag := request.robTag
   result.integerDestinationPhysical := request.integerDestinationPhysical
@@ -178,10 +251,18 @@ class FloatingMovePipe(
   }.elsewhen(request.operation === FloatingOperation.FclassS) {
     result.writesInteger := true.B
     result.integerData := fclassData
-  }.elsewhen(integerConversion) {
+  }.elsewhen(integerToFloatConversion) {
     result.writesFloat := true.B
     result.floatData := conversionData
     when(conversionDiscarded) { result.flags := "b00001".U }
+  }.elsewhen(floatToIntegerConversion) {
+    result.writesInteger := true.B
+    result.integerData := floatToIntegerData
+    when(floatToIntegerInvalid) {
+      result.flags := "b10000".U
+    }.elsewhen(floatToIntegerInexact) {
+      result.flags := "b00001".U
+    }
   }.elsewhen(comparison) {
     result.writesInteger := true.B
     result.integerData := comparisonData
@@ -221,9 +302,11 @@ class FloatingMovePipe(
         "FMV.X.W cannot target integer p0")
     }
     when(io.input.bits.operation === FloatingOperation.FcvtSW ||
-        io.input.bits.operation === FloatingOperation.FcvtSWu) {
+        io.input.bits.operation === FloatingOperation.FcvtSWu ||
+        io.input.bits.operation === FloatingOperation.FcvtWS ||
+        io.input.bits.operation === FloatingOperation.FcvtWuS) {
       assert(io.input.bits.roundingMode <= 4.U,
-        "FCVT.S.W/U received a reserved effective rounding mode")
+        "FCVT received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
