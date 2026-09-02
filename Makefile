@@ -192,8 +192,8 @@ test-m3-ordering:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "writes back dirty code before FENCE.I invalidates the I-side and refetches it"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "holds a younger cacheable load behind an aq atomic until its read response"'
 
-# Focused M4 E2 bit-move/sign-injection component tier. This does not claim
-# executable RV32F support until the retained result bridge reaches commit.
+# Focused M4 E2 bit-move/sign-injection tier. The AXI-fed CoreShell portion
+# exercises the executable commit path without claiming the full RV32F ISA.
 test-m4-fp-move:
 	./scripts/sbtw 'testOnly zircon.FloatingAdmissionSpec zircon.FloatingMovePipeSpec zircon.FloatingResultBridgeSpec'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "RV32F"'

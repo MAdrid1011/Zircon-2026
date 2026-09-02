@@ -675,6 +675,98 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("preserves FPR RAW, WAR, and WAW ownership across consecutive RV32F moves") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val fmvWX7FromX2 = opFp(0x78, rs2 = 0, rs1 = 2, funct3 = 0, rd = 7)
+        val fsgnj9From7 = opFp(0x10, rs2 = 7, rs1 = 7, funct3 = 0, rd = 9)
+        val fmvWX7FromX3 = opFp(0x78, rs2 = 0, rs1 = 3, funct3 = 0, rd = 7)
+        val fmvXW4From9 = opFp(0x70, rs2 = 0, rs1 = 9, funct3 = 0, rd = 4)
+        val fmvXW5From7 = opFp(0x70, rs2 = 0, rs1 = 7, funct3 = 0, rd = 5)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("11111137", 16), // x2=0x11111000
+          ResetVector + 12 -> BigInt("800001b7", 16), // x3=0x80000000
+          ResetVector + 16 -> fmvWX7FromX2,
+          ResetVector + 20 -> fsgnj9From7,
+          ResetVector + 24 -> fmvWX7FromX3,
+          ResetVector + 28 -> fmvXW4From9,
+          ResetVector + 32 -> fmvXW5From7,
+          ResetVector + 36 -> BigInt("00100073", 16)
+        ), cycles = 640))
+
+        val fprWrites = events.filter(_.fprWrite)
+        assert(fprWrites.map(event => (event.instruction, event.fprAddress, event.fprData)) == Seq(
+          (fmvWX7FromX2, BigInt(7), BigInt("11111000", 16)),
+          (fsgnj9From7, BigInt(9), BigInt("11111000", 16)),
+          (fmvWX7FromX3, BigInt(7), BigInt("80000000", 16))
+        ), s"FPR scoreboarding lost RAW/WAR/WAW ordering: $events")
+        assert(events.exists(event => event.instruction == fmvXW4From9 && event.gprWrite &&
+          event.gprAddress == 4 && event.gprData == BigInt("11111000", 16)),
+          s"RAW reader did not observe f9's older f7 value: $events")
+        assert(events.exists(event => event.instruction == fmvXW5From7 && event.gprWrite &&
+          event.gprAddress == 5 && event.gprData == BigInt("80000000", 16)),
+          s"WAR/WAW successor did not observe the final f7 value: $events")
+      }
+    }
+
+    it("cancels an in-flight RV32F result for MSI, then reexecutes it once after MRET") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val handler = ResetVector + 64
+        val fmvWX = BigInt("f00183d3", 16) // fmv.w.x f7,x3
+        var floatingStarted = false
+        var interruptTaken = false
+        val events = runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("00808093", 16), // set MIE
+          ResetVector + 8 -> BigInt("30009073", 16), // csrrw x0,mstatus,x1
+          ResetVector + 12 -> BigInt("80000237", 16), // x4=0x80000000
+          ResetVector + 16 -> BigInt("04020213", 16), // x4=mtvec handler
+          ResetVector + 20 -> BigInt("30521073", 16), // csrrw x0,mtvec,x4
+          ResetVector + 24 -> BigInt("00800113", 16), // x2=MIE.MSIE
+          ResetVector + 28 -> BigInt("30411073", 16), // csrrw x0,mie,x2
+          ResetVector + 32 -> BigInt("123451b7", 16), // x3=0x12345000
+          ResetVector + 36 -> fmvWX,
+          ResetVector + 40 -> BigInt("e0038253", 16), // fmv.x.w x4,f7
+          ResetVector + 44 -> BigInt("00100073", 16),
+          handler -> BigInt("30200073", 16) // mret
+        ), cycles = 768,
+          driveInterrupts = (core, observed) => {
+            interruptTaken ||= observed.exists(event => event.trap && event.interrupt)
+            core.io.interrupts.msip.poke(floatingStarted && !interruptTaken)
+          },
+          observeCycle = (core, _) => {
+            floatingStarted ||= core.io.m2Observation.get.e2Start.peek().litToBoolean
+          }
+        )
+
+        val interruptIndex = events.indexWhere(event => event.trap && event.interrupt)
+        val fprWriteIndices = events.zipWithIndex.collect {
+          case (event, index) if event.instruction == fmvWX && event.fprWrite => index
+        }
+        val mretIndex = events.indexWhere(_.instruction == BigInt("30200073", 16))
+        assert(floatingStarted && interruptIndex >= 0,
+          s"the test did not inject and observe MSI after E2 start: $events")
+        assert(events.count(_.trap) >= 2,
+          s"the program did not return from MSI to reach its terminal ebreak: $events")
+        assert(events(interruptIndex).pc >= ResetVector + 32 &&
+          events(interruptIndex).pc <= ResetVector + 36 &&
+          events(interruptIndex).cause == BigInt("80000003", 16),
+          s"MSI did not preserve the oldest speculative E2-prefix instruction as EPC: ${events(interruptIndex)}")
+        assert(fprWriteIndices.size == 1 && fprWriteIndices.head > mretIndex,
+          s"squashed floating execution committed before MRET or more than once: $events")
+        assert(events.exists(event => event.instruction == BigInt("e0038253", 16) &&
+          event.gprWrite && event.gprAddress == 4 && event.gprData == BigInt("12345000", 16)),
+          s"reexecuted FMV.X.W did not observe the sole post-MRET FPR commit: $events")
+      }
+    }
+
     it("squashes a wrong-path RV32F result before any architectural FPR write") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
