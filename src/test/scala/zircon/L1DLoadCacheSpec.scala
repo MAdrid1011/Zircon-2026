@@ -1241,6 +1241,51 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("flushes an unissued peer while draining the one accepted dual-miss probe") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val firstLine = BigInt("80007200", 16)
+        val secondLine = BigInt("80007300", 16)
+
+        presentLoad(dut, lane = 0, tag = 7, address = firstLine)
+        presentLoad(dut, lane = 1, tag = 3, address = secondLine + 12)
+        dut.io.request.foreach(_.ready.expect(true))
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        // Only this transfer has crossed the L2 boundary. A full flush must
+        // retain it as the unique response sink while removing its unissued
+        // peer before that peer can claim the serialized probe port.
+        dut.io.l2Lookup.valid.expect(true)
+        val acceptedLine = dut.io.l2Lookup.bits.lineAddress.peek().litValue
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(false)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(acceptedLine)
+        dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+
+        // The flushed accepted owner may drain but cannot produce an AXI
+        // fallback or completion; the peer was cancelled before probe issue.
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("drains a flushed L2 miss transfer without creating a fallback AXI refill") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
