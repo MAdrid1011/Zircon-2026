@@ -82,6 +82,7 @@ test-m3-axi-faults:
 # ID-5 owner before it or younger instructions may retire.
 test-m3-fence-pressure:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains every dirty line before a cache-global FENCE retires"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retries an errored dirty FENCE writeback before retirement"'
 
 # Fast RV32A ownership regression. It remains below the five-minute component
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and
