@@ -66,6 +66,11 @@ effect completion.
 `AXIOrderedIOEngineSpec` covers four-beat DeviceBurstable write ownership with
 W-before-AW and B-error fanout, three-beat read AR backpressure with per-beat
 RRESP attribution and response holding, plus one-beat DeviceStrong traffic.
+Its explicit-seed component tier (`0x5eed0101`--`0x5eed0104`) additionally
+covers every group size from one through four, read/write direction, independent
+AR/AW/W pressure, per-read-beat RRESP error, group BRESP error, and held local
+responses. A failure records the seed, group geometry, direction, fault choice,
+and base address under `target/zircon-failures`.
 `OrderedIOCombinerSpec` covers adjacency, force flush, strong-order groups, the
 4 KiB split, full four-member streaming, and pre-accept cancellation.
 `LoadStoreQueuesSpec` covers cross-generation ROB-wrap preview/acceptance.
