@@ -23,12 +23,14 @@ post-route timing report. Consequently FPGA timing support is **unverified**,
 not failed or passed. This does not block current RTL work, but it blocks the
 final `v1.0.0` release until the evidence above is committed.
 
-On 2026-09-03, a read-only local workspace audit found the LA32R Vivado project
-at `/home/madrid/LA32R/LA32R.xpr`, whose project metadata targets
-`xc7a200tfbg676-2L` and whose reference XDC applies a 10.000 ns clock to its
-own `clk` port. Its top-level ports, reset polarity, and peripheral wiring are
-not Zircon's, so it is reference evidence for the device and constraint form
-only. It is not a Zircon wrapper, XDC, timing report, or 100 MHz pass result.
+On 2026-09-03, a read-only local workspace audit found
+`/home/madrid/Desktop/LA32R-SIM/LA32R-pipeline-scala/doc/Sync.md`, which names
+`xc7a200tfbg676-2L`, and its companion `soc/cons/soc.xdc`, which applies a
+10.000 ns clock to its own `clk` port. No nearby LA32R `.xpr` or `set_part`
+metadata was found, so the source is only a reference for the documented
+device and clock-constraint form. Its top-level ports, reset polarity, and
+peripheral wiring are not Zircon's; it is not a Zircon wrapper, XDC, timing
+report, or 100 MHz pass result.
 The nearby `SCARF/Zircon-SCARF/build/fpga_2025_vu13p/stage_b_bd/project/scarf_stage_b_bd.xpr`
 instead targets `xcvu13p-fhgb2104-2-i`; its VU13P/DDR4 constraints likewise
 must not enter this project.
