@@ -29,9 +29,13 @@ class FloatingResultBridge(
   val pending = Reg(new CompletionResult(config))
   val recoveryBlocked = io.flush || io.squash.valid
   val inputFloatWrite = io.input.bits.writesFloat
+  // Integer-result F operations normally bypass FloatingResultQueue, but an
+  // IEEE exception flag is architectural floating state and therefore needs
+  // the same ROB-tagged commit ownership as an FPR write.
+  val requiresFloatingCommit = inputFloatWrite || io.input.bits.flags.orR
 
   io.completion.valid := !recoveryBlocked && (pendingCompletion ||
-    (io.input.valid && !inputFloatWrite && !pendingCompletion))
+    (io.input.valid && !requiresFloatingCommit && !pendingCompletion))
   io.completion.bits.robTag := Mux(pendingCompletion, pending.robTag,
     io.input.bits.robTag)
   io.completion.bits.writesInteger := Mux(pendingCompletion,
@@ -41,7 +45,7 @@ class FloatingResultBridge(
   io.completion.bits.data := Mux(pendingCompletion, pending.data,
     io.input.bits.integerData)
 
-  io.floatingResult.valid := io.input.valid && inputFloatWrite &&
+  io.floatingResult.valid := io.input.valid && requiresFloatingCommit &&
     !pendingCompletion && !recoveryBlocked
   io.floatingResult.bits.robTag := io.input.bits.robTag
   io.floatingResult.bits.writesFloat := io.input.bits.writesFloat
@@ -49,7 +53,7 @@ class FloatingResultBridge(
   io.floatingResult.bits.fprData := io.input.bits.floatData
   io.floatingResult.bits.flags := io.input.bits.flags
 
-  io.input.ready := !recoveryBlocked && !pendingCompletion && Mux(inputFloatWrite,
+  io.input.ready := !recoveryBlocked && !pendingCompletion && Mux(requiresFloatingCommit,
     io.floatingResult.ready, io.completion.ready)
 
   val pendingYounger = pendingCompletion && ROBTagOrder.isYounger(
@@ -62,12 +66,12 @@ class FloatingResultBridge(
     when(pendingCompletion && io.completion.fire) {
       pendingCompletion := false.B
     }
-    when(io.input.fire && inputFloatWrite) {
+    when(io.input.fire && requiresFloatingCommit) {
       pendingCompletion := true.B
       pending.robTag := io.input.bits.robTag
-      pending.writesInteger := false.B
-      pending.destinationPhysical := 0.U
-      pending.data := 0.U
+      pending.writesInteger := io.input.bits.writesInteger
+      pending.destinationPhysical := io.input.bits.integerDestinationPhysical
+      pending.data := io.input.bits.integerData
     }
   }
 
@@ -79,17 +83,13 @@ class FloatingResultBridge(
     assert(!(io.input.bits.writesInteger && io.input.bits.writesFloat),
       "floating result bridge cannot split a dual-namespace result")
   }
-  when(io.input.valid && inputFloatWrite) {
+  when(io.input.fire && requiresFloatingCommit) {
     assert(!io.completion.fire,
-      "float-writing result completed the ROB before entering the FPR queue")
+      "floating-state result completed the ROB before entering its retained queue")
   }
   when(io.floatingResult.fire) {
     assert(io.input.fire && !pendingCompletion,
       "floating result queue accepted a tag without capturing its completion")
-  }
-  when(pendingCompletion && io.completion.fire) {
-    assert(!io.completion.bits.writesInteger,
-      "FPR result completion unexpectedly wrote the integer PRF")
   }
   when(io.squash.valid) {
     assert(!io.input.fire && !io.floatingResult.fire && !io.completion.fire,

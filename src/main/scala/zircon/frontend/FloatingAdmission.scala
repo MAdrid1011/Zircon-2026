@@ -25,14 +25,20 @@ class FloatingAdmission extends Module {
     opcode === "b1000011".U || opcode === "b1000111".U ||
     opcode === "b1001011".U || opcode === "b1001111".U ||
     opcode === "b1010011".U
-  val bitMoveOrSign = decoder.io.decoded.operation === FloatingOperation.FmvWX ||
+  val nonRoundingE2 = decoder.io.decoded.operation === FloatingOperation.FmvWX ||
     decoder.io.decoded.operation === FloatingOperation.FmvXW ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjS ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjnS ||
-    decoder.io.decoded.operation === FloatingOperation.FsgnjxS
+    decoder.io.decoded.operation === FloatingOperation.FsgnjxS ||
+    decoder.io.decoded.operation === FloatingOperation.FminS ||
+    decoder.io.decoded.operation === FloatingOperation.FmaxS ||
+    decoder.io.decoded.operation === FloatingOperation.FleS ||
+    decoder.io.decoded.operation === FloatingOperation.FltS ||
+    decoder.io.decoded.operation === FloatingOperation.FeqS ||
+    decoder.io.decoded.operation === FloatingOperation.FclassS
 
   io.floatingOpcode := floatingOpcode
-  io.live := floatingOpcode && decoder.io.decoded.legal && bitMoveOrSign &&
+  io.live := floatingOpcode && decoder.io.decoded.legal && nonRoundingE2 &&
     io.mstatusFs =/= 0.U
   io.illegal := floatingOpcode && !io.live
 }

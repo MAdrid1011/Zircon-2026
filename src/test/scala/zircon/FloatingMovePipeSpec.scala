@@ -97,6 +97,72 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("implements min/max and comparison NaN, signed-zero, and NV rules") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, lhs: BigInt, rhs: BigInt,
+            writesFloat: Boolean, expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 3, operation = operation, integerDestination = 37,
+            floatSource0 = lhs, floatSource1 = rhs, floatDestination = 9)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(writesFloat)
+          dut.io.output.bits.writesInteger.expect(!writesFloat)
+          if (writesFloat) dut.io.output.bits.floatData.expect(expected)
+          else dut.io.output.bits.integerData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(FloatingOperation.FminS, BigInt("3f800000", 16), BigInt("40000000", 16),
+          writesFloat = true, BigInt("3f800000", 16), 0)
+        check(FloatingOperation.FmaxS, BigInt("80000000", 16), 0,
+          writesFloat = true, 0, 0)
+        check(FloatingOperation.FminS, BigInt("80000000", 16), 0,
+          writesFloat = true, BigInt("80000000", 16), 0)
+        check(FloatingOperation.FminS, BigInt("7f800001", 16), BigInt("3f800000", 16),
+          writesFloat = true, BigInt("3f800000", 16), BigInt(16))
+        check(FloatingOperation.FeqS, BigInt("80000000", 16), 0,
+          writesFloat = false, 1, 0)
+        check(FloatingOperation.FltS, BigInt("3f800000", 16), BigInt("40000000", 16),
+          writesFloat = false, 1, 0)
+        check(FloatingOperation.FleS, BigInt("7fc00001", 16), BigInt("3f800000", 16),
+          writesFloat = false, 0, BigInt(16))
+        check(FloatingOperation.FeqS, BigInt("7fc00001", 16), BigInt("3f800000", 16),
+          writesFloat = false, 0, 0)
+      }
+    }
+
+    it("classifies every floating category without modifying fflags") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        val cases = Seq(
+          BigInt("ff800000", 16) -> BigInt(1),
+          BigInt("80000001", 16) -> BigInt(4),
+          BigInt("80000000", 16) -> BigInt(8),
+          BigInt(0) -> BigInt(16),
+          BigInt("00000001", 16) -> BigInt(32),
+          BigInt("3f800000", 16) -> BigInt(64),
+          BigInt("7f800000", 16) -> BigInt(128),
+          BigInt("7f800001", 16) -> BigInt(256),
+          BigInt("7fc00001", 16) -> BigInt(512))
+        cases.zipWithIndex.foreach { case ((source, expected), index) =>
+          drive(dut, tag = index + 1, operation = FloatingOperation.FclassS,
+            integerDestination = 37, floatSource0 = source)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesInteger.expect(true)
+          dut.io.output.bits.integerData.expect(expected)
+          dut.io.output.bits.flags.expect(0)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+      }
+    }
+
     it("drops only younger retained work on squash and all work on flush") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

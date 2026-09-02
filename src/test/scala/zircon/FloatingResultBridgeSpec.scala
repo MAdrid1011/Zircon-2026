@@ -93,6 +93,39 @@ class FloatingResultBridgeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("retains an integer result when it carries an architectural fflags update") {
+      simulate(new FloatingResultBridge) { dut =>
+        clear(dut)
+        dut.io.input.valid.poke(true)
+        dut.io.input.bits.robTag.poke(7)
+        dut.io.input.bits.writesInteger.poke(true)
+        dut.io.input.bits.integerDestinationPhysical.poke(38)
+        dut.io.input.bits.integerData.poke(0)
+        dut.io.input.bits.writesFloat.poke(false)
+        dut.io.input.bits.floatDestination.poke(0)
+        dut.io.input.bits.floatData.poke(0)
+        dut.io.input.bits.flags.poke(16)
+        dut.io.completion.ready.poke(true)
+        dut.io.floatingResult.ready.poke(false)
+        dut.io.completion.valid.expect(false)
+        dut.io.floatingResult.valid.expect(true)
+        dut.io.input.ready.expect(false)
+
+        dut.io.floatingResult.ready.poke(true)
+        dut.io.input.ready.expect(true)
+        dut.io.floatingResult.bits.robTag.expect(7)
+        dut.io.floatingResult.bits.writesFloat.expect(false)
+        dut.io.floatingResult.bits.flags.expect(16)
+        dut.clock.step()
+        dut.io.input.valid.poke(false)
+        dut.io.floatingResult.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.writesInteger.expect(true)
+        dut.io.completion.bits.destinationPhysical.expect(38)
+        dut.clock.step()
+      }
+    }
+
     it("removes a pending float completion on squash or flush") {
       simulate(new FloatingResultBridge) { dut =>
         clear(dut)

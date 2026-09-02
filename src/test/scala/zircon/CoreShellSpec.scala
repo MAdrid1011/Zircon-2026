@@ -675,6 +675,59 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("commits non-rounding RV32F min/max, comparison, classification, and NV") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val fmvWX7 = opFp(0x78, rs2 = 0, rs1 = 2, funct3 = 0, rd = 7)
+        val fmvWX8 = opFp(0x78, rs2 = 0, rs1 = 3, funct3 = 0, rd = 8)
+        val fmin = opFp(0x14, rs2 = 8, rs1 = 7, funct3 = 0, rd = 9)
+        val fmax = opFp(0x14, rs2 = 8, rs1 = 7, funct3 = 1, rd = 10)
+        val flt = opFp(0x50, rs2 = 8, rs1 = 7, funct3 = 1, rd = 4)
+        val fclass = opFp(0x70, rs2 = 0, rs1 = 9, funct3 = 1, rd = 5)
+        val fmvWX11 = opFp(0x78, rs2 = 0, rs1 = 6, funct3 = 0, rd = 11)
+        val fleNaN = opFp(0x50, rs2 = 7, rs1 = 11, funct3 = 0, rd = 12)
+        val readFflags = BigInt((0x001L << 20) | (2L << 12) | (13L << 7) | 0x73L)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16),
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("3f800137", 16), // x2=1.0f
+          ResetVector + 12 -> BigInt("400001b7", 16), // x3=2.0f
+          ResetVector + 16 -> fmvWX7,
+          ResetVector + 20 -> fmvWX8,
+          ResetVector + 24 -> fmin,
+          ResetVector + 28 -> fmax,
+          ResetVector + 32 -> flt,
+          ResetVector + 36 -> fclass,
+          ResetVector + 40 -> BigInt("7fc00337", 16), // x6=qNaN
+          ResetVector + 44 -> fmvWX11,
+          ResetVector + 48 -> fleNaN,
+          ResetVector + 52 -> readFflags,
+          ResetVector + 56 -> BigInt("00100073", 16)
+        ), cycles = 1024))
+        assert(events.exists(event => event.instruction == fmin && event.fprWrite &&
+          event.fprAddress == 9 && event.fprData == BigInt("3f800000", 16)),
+          s"FMIN.S did not commit the lesser finite operand: $events")
+        assert(events.exists(event => event.instruction == fmax && event.fprWrite &&
+          event.fprAddress == 10 && event.fprData == BigInt("40000000", 16)),
+          s"FMAX.S did not commit the greater finite operand: $events")
+        assert(events.exists(event => event.instruction == flt && event.gprWrite &&
+          event.gprAddress == 4 && event.gprData == 1),
+          s"FLT.S did not commit its exact integer result: $events")
+        assert(events.exists(event => event.instruction == fclass && event.gprWrite &&
+          event.gprAddress == 5 && event.gprData == 64),
+          s"FCLASS.S did not identify the positive-normal result: $events")
+        assert(events.exists(event => event.instruction == fleNaN && event.gprWrite &&
+          event.gprAddress == 12 && event.gprData == 0),
+          s"FLE.S qNaN result was not false: $events")
+        assert(events.exists(event => event.instruction == readFflags && event.gprWrite &&
+          event.gprAddress == 13 && event.gprData == 16),
+          s"qNaN FLE.S did not commit fflags.NV through the retained result path: $events")
+      }
+    }
+
     it("preserves FPR RAW, WAR, and WAW ownership across consecutive RV32F moves") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

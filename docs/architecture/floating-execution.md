@@ -8,17 +8,20 @@ execution endpoint.
 
 ## Incremental admission
 
-The first executable slice admits only the bit-preserving operations
-`FMV.W.X`, `FMV.X.W`, `FSGNJ.S`, `FSGNJN.S`, and `FSGNJX.S`. These operations
-have no rounding mode and always produce zero floating-point exception flags.
-They exercise both register namespaces without claiming arithmetic, conversion,
-load/store, or IEEE-754 flag support. Every other F encoding remains an
-illegal-instruction exception until its complete execution and commit path is
-implemented.
+The first executable slice admits the non-rounding operations `FMV.W.X`,
+`FMV.X.W`, `FSGNJ.S`, `FSGNJN.S`, `FSGNJX.S`, `FMIN.S`, `FMAX.S`, `FEQ.S`,
+`FLT.S`, `FLE.S`, and `FCLASS.S`. It exercises both register namespaces
+without claiming arithmetic, conversion, or load/store support. `FMIN.S` and
+`FMAX.S` implement one-NaN/both-NaN selection, canonical NaN, and signed-zero
+rules; signaling NaN raises `fflags.NV`. `FEQ.S` raises NV only for signaling
+NaN, whereas `FLT.S` and `FLE.S` raise NV for every NaN. `FCLASS.S` never
+raises an exception. Every other F encoding remains an illegal-instruction
+exception until its complete execution and commit path is implemented.
 
 All admitted F operations are illegal when `mstatus.FS=Off`. A legal F
-operation that writes an FPR makes `FS=Dirty` only at its successful ROB
-commit. `FMV.X.W` does not change `FS` or `fflags`.
+operation that writes an FPR, or changes `fflags`, makes `FS=Dirty` only at
+its successful ROB commit. `FMV.X.W` and `FCLASS.S` do not change `FS` or
+`fflags`; a finite comparison leaves them unchanged as well.
 
 ## Dispatch and issue contract
 
@@ -54,15 +57,16 @@ retained record has accepted ownership. Thus a later squash can discard both
 records, while an older pending F result cannot be overwritten by a younger
 one.
 
-`FloatingResultBridge` is the ownership boundary for this rule. For a
-float-writing result it first holds the upstream E2 handshake until the result
-queue accepts the tag, then retains a one-entry ordinary completion until the
-ROB accepts it. This eliminates a ROB-completion/result-queue combinational
-loop while ensuring that a completed FPR-writing ROB entry always already has
-its exact result record. The bridge receives the same squash/flush boundary as
-the result queue and drops its pending completion for the same killed tag. For
-`FMV.X.W` it emits no FPR queue record and uses the ordinary completion path
-alone.
+`FloatingResultBridge` is the ownership boundary for this rule. For an
+FPR-writing result, or an integer-writing result carrying nonzero exception
+flags, it first holds the upstream E2 handshake until the result queue accepts
+the tag, then retains a one-entry ordinary completion until the ROB accepts it.
+This eliminates a ROB-completion/result-queue combinational loop while ensuring
+that a completed entry with floating architectural state already has its exact
+result record. The bridge receives the same squash/flush boundary as the result
+queue and drops its pending completion for the same killed tag. Integer-only,
+flag-free operations such as `FMV.X.W` and `FCLASS.S` use the ordinary
+completion path alone.
 
 At retirement, at most one FPR-writing instruction can commit in a cycle,
 matching the single FPR write port. The commit controller must hold a younger
@@ -75,7 +79,8 @@ may update an FPR or `fflags` merely because it completed E2.
 
 `FMV.X.W` has no FPR result record, but its FPR source reservation is released
 when E2 captures the source and its GPR result uses the ordinary completion
-path. The initial sign/move slice always reports zero flags. Later arithmetic,
+path. The move/sign/class slice always reports zero flags; min/max and compare
+may report NV through the retained-result protocol. Later arithmetic,
 conversion, divide, sqrt, and FMA must use the same retained-result protocol
 and may not add a direct FPR bypass around it.
 
@@ -114,11 +119,12 @@ The initial integration tests must run AXI-fed instructions through
   `mtval` and no FPR/GPR side effect;
 - enabling FS through committed `mstatus`, then `FMV.W.X` followed by
   `FMV.X.W`, including exact GPR/FPR retire metadata and `FS=Dirty`;
-- all three `FSGNJ` forms with sign-distinct operands;
+- all three `FSGNJ` forms with sign-distinct operands, min/max NaN and signed
+  zero cases, comparison NaN/NV behavior, and all ten `FCLASS.S` categories;
 - FPR RAW, WAR, WAW, two-wide dispatch, result-queue backpressure, and the
   single-write commit gate;
 - branch squash, trap/interrupt flush, and delayed E2 completion without an
-  FPR update or trace record for the killed tag; and
+  FPR update, `fflags` update, or trace record for the killed tag; and
 - explicit-seed top-level AXI backpressure while F instructions coexist with
   RV32I/M and M3 memory traffic.
 

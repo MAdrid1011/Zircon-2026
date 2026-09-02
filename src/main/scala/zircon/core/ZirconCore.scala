@@ -171,8 +171,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   floatingCommitState.io.flush := backend.io.globalFlush
   val floatingRetires = VecInit((0 until cfg.commitWidth).map(lane =>
     backend.io.retired(lane).valid &&
-      backend.io.retired(lane).bits.entry.floating.legal &&
-      backend.io.retired(lane).bits.entry.floating.writesFloatRd))
+      backend.io.retired(lane).bits.entry.floating.legal))
   floatingCommitState.io.commitEnable := floatingRetires.asUInt.orR
   floatingCommitState.io.commitTag := Mux(floatingRetires(0),
     backend.io.retired(0).bits.robTag, backend.io.retired(1).bits.robTag)
