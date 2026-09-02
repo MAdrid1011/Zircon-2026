@@ -1,0 +1,108 @@
+package zircon
+
+import chisel3.simulator.scalatest.ChiselSim
+import org.scalatest.funspec.AnyFunSpec
+import zircon.backend.FloatingScoreboard
+
+class FloatingScoreboardSpec extends AnyFunSpec with ChiselSim {
+  private def clear(dut: FloatingScoreboard): Unit = {
+    dut.io.allocate.foreach { allocation =>
+      allocation.valid.poke(false)
+      allocation.bits.sourceValid.foreach(_.poke(false))
+      allocation.bits.source.foreach(_.poke(0))
+      allocation.bits.destinationValid.poke(false)
+      allocation.bits.destination.poke(0)
+    }
+    dut.io.readRelease.valid.poke(false)
+    dut.io.readRelease.bits.sourceValid.foreach(_.poke(false))
+    dut.io.readRelease.bits.source.foreach(_.poke(0))
+    dut.io.readRelease.bits.destinationValid.poke(false)
+    dut.io.readRelease.bits.destination.poke(0)
+    dut.io.complete.valid.poke(false)
+    dut.io.complete.bits.poke(0)
+  }
+
+  private def allocation(
+      dut: FloatingScoreboard,
+      lane: Int,
+      sources: Seq[Int],
+      destination: Option[Int]
+  ): Unit = {
+    val request = dut.io.allocate(lane)
+    request.valid.poke(true)
+    request.bits.sourceValid.zipWithIndex.foreach { case (valid, index) =>
+      valid.poke(index < sources.length)
+      request.bits.source(index).poke(sources.lift(index).getOrElse(0))
+    }
+    request.bits.destinationValid.poke(destination.nonEmpty)
+    request.bits.destination.poke(destination.getOrElse(0))
+  }
+
+  private def release(dut: FloatingScoreboard, sources: Seq[Int]): Unit = {
+    dut.io.readRelease.valid.poke(true)
+    dut.io.readRelease.bits.sourceValid.zipWithIndex.foreach { case (valid, index) =>
+      valid.poke(index < sources.length)
+      dut.io.readRelease.bits.source(index).poke(sources.lift(index).getOrElse(0))
+    }
+  }
+
+  describe("FloatingScoreboard") {
+    it("blocks RAW, WAR, WAW, and duplicate FMA source hazards") {
+      simulate(new FloatingScoreboard) { dut =>
+        clear(dut)
+
+        allocation(dut, lane = 0, sources = Seq.empty, destination = Some(1))
+        dut.io.allocateReady(0).expect(true)
+        dut.clock.step()
+        clear(dut)
+
+        allocation(dut, lane = 0, sources = Seq(1), destination = None)
+        dut.io.allocateReady(0).expect(false) // RAW
+        clear(dut)
+        dut.io.complete.valid.poke(true)
+        dut.io.complete.bits.poke(1)
+        dut.clock.step()
+        clear(dut)
+
+        allocation(dut, lane = 0, sources = Seq(1), destination = None)
+        dut.io.allocateReady(0).expect(true)
+        dut.clock.step()
+        clear(dut)
+        allocation(dut, lane = 0, sources = Seq.empty, destination = Some(1))
+        dut.io.allocateReady(0).expect(false) // WAR
+        clear(dut)
+        release(dut, Seq(1))
+        dut.clock.step()
+        clear(dut)
+        allocation(dut, lane = 0, sources = Seq.empty, destination = Some(1))
+        dut.io.allocateReady(0).expect(true)
+        dut.clock.step()
+        clear(dut)
+
+        allocation(dut, lane = 0, sources = Seq.empty, destination = Some(2))
+        allocation(dut, lane = 1, sources = Seq.empty, destination = Some(2))
+        dut.io.allocateReady(0).expect(true)
+        dut.io.allocateReady(1).expect(false) // same-cycle WAW
+        dut.clock.step()
+        clear(dut)
+        dut.io.complete.valid.poke(true)
+        dut.io.complete.bits.poke(2)
+        dut.clock.step()
+        clear(dut)
+
+        allocation(dut, lane = 0, sources = Seq(5, 5, 5), destination = None)
+        dut.io.allocateReady(0).expect(true)
+        dut.clock.step()
+        clear(dut)
+        allocation(dut, lane = 0, sources = Seq.empty, destination = Some(5))
+        dut.io.allocateReady(0).expect(false)
+        clear(dut)
+        release(dut, Seq(5, 5, 5))
+        dut.clock.step()
+        clear(dut)
+        allocation(dut, lane = 0, sources = Seq.empty, destination = Some(5))
+        dut.io.allocateReady(0).expect(true)
+      }
+    }
+  }
+}
