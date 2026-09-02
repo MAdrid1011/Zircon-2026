@@ -49,6 +49,54 @@ class ExternalCoherenceControllerSpec extends AnyFunSpec with ChiselSim {
   }
 
   describe("ExternalCoherenceController") {
+    it("holds an acknowledgement under backpressure before accepting a replacement") {
+      simulate(new ExternalCoherenceController) { dut =>
+        clear(dut)
+        offer(dut, ExternalCoherenceKind.AtomicInvalidate.litValue)
+        dut.clock.step()
+        dut.io.request.valid.poke(false)
+        advanceClean(dut, l2Dirty = false)
+
+        // The invalidate cycle precedes the retained response state.
+        dut.clock.step()
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.kind.expect(ExternalCoherenceKind.AtomicInvalidate)
+        dut.io.response.bits.lineAddress.expect(Line)
+        dut.io.cacheableIngressBlocked.expect(true)
+
+        // A correct replacement request remains blocked while the first
+        // response is held, and cannot perturb the retained acknowledgement.
+        offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue,
+          BigInt("80002000", 16))
+        dut.io.request.ready.expect(false)
+        dut.clock.step(2)
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.kind.expect(ExternalCoherenceKind.AtomicInvalidate)
+        dut.io.response.bits.lineAddress.expect(Line)
+        dut.io.cacheableIngressBlocked.expect(true)
+
+        // Remove the pending offer before consuming the response so this
+        // cycle demonstrates the actual idle window. If it remained valid,
+        // `cacheableIngressBlocked` intentionally includes its next-cycle
+        // request fire.
+        dut.io.request.valid.poke(false)
+        dut.io.response.ready.poke(true)
+        dut.clock.step()
+        dut.io.response.ready.poke(false)
+        dut.io.request.ready.expect(true)
+        dut.io.cacheableIngressBlocked.expect(false)
+
+        // Re-offering the replacement now accepts it as a distinct request.
+        offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue,
+          BigInt("80002000", 16))
+        dut.io.request.ready.expect(true)
+        dut.clock.step()
+        dut.io.request.valid.poke(false)
+        dut.io.l1dCleanup.valid.expect(true)
+        dut.io.l1dCleanup.bits.expect(BigInt("80002000", 16))
+      }
+    }
+
     it("waits for an accepted instruction owner before touching data state") {
       simulate(new ExternalCoherenceController) { dut =>
         clear(dut)

@@ -85,5 +85,8 @@ selective squash, global flush, matching/disjoint LR reservations, and reset.
 Bounded formal properties must prove response uniqueness, owner exclusivity,
 acknowledgement-after-invalidation, and AXI credit conservation. The adapter
 unit test demonstrates that the external modifier cannot execute before its
-response. Integration still needs a concrete platform master, board wrapper,
-and full pressure matrix.
+response. `ExternalCoherenceControllerSpec` additionally holds a response under
+explicit backpressure while offering a second legal request, proving that the
+first kind/line payload remains stable, cacheable ingress stays blocked, and
+the replacement is accepted only after the original response fires. Integration
+still needs a concrete platform master, board wrapper, and full pressure matrix.
