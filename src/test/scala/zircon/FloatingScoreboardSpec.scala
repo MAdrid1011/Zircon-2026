@@ -78,6 +78,9 @@ class FloatingScoreboardSpec extends AnyFunSpec with ChiselSim {
         allocation(dut, lane = 0, sources = Seq(1), destination = None, tag = 2)
         dut.io.allocateReady(0).expect(false) // RAW
         clear(dut)
+        release(dut, Seq.empty, tag = 1, destination = Some(1))
+        dut.clock.step()
+        clear(dut)
         complete(dut, tag = 1, destination = 1)
         dut.clock.step()
         clear(dut)
@@ -101,6 +104,9 @@ class FloatingScoreboardSpec extends AnyFunSpec with ChiselSim {
         allocation(dut, lane = 1, sources = Seq.empty, destination = Some(2), tag = 5)
         dut.io.allocateReady(0).expect(true)
         dut.io.allocateReady(1).expect(false) // same-cycle WAW
+        dut.clock.step()
+        clear(dut)
+        release(dut, Seq.empty, tag = 4, destination = Some(2))
         dut.clock.step()
         clear(dut)
         complete(dut, tag = 4, destination = 2)
@@ -144,6 +150,9 @@ class FloatingScoreboardSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         clear(dut)
 
+        release(dut, Seq.empty, tag = 2, destination = Some(1))
+        dut.clock.step()
+        clear(dut)
         complete(dut, tag = 2, destination = 1)
         dut.clock.step()
         clear(dut)

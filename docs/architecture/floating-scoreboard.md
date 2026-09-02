@@ -16,8 +16,9 @@ RAW/WAR/WAW conflicts cannot enter independently.
 `readRelease` identifies a record by its ROB tag and releases all source
 reservations only when an operation has actually consumed its operands.
 `complete` identifies the same tag and clears its destination reservation only
-from the commit-qualified F result queue. This separates speculative source
-reads from architectural FPR mutation.
+from the commit-qualified F result queue after that release. An operation with
+no FPR source still emits an empty, matching `readRelease` before completion.
+This separates speculative source reads from architectural FPR mutation.
 
 ## Hazard rules
 

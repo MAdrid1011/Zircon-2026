@@ -126,6 +126,8 @@ class FloatingScoreboard(
       "floating scoreboard completed a non-live FPR destination")
     assert(PopCount(completeMatch) === 1.U,
       "floating scoreboard found duplicate completion ROB tags")
+    assert(sourceConsumed(completeIndex),
+      "floating scoreboard completed an FPR destination before source consumption")
     assert(reservation(completeIndex).destination === io.complete.bits.destination,
       "floating scoreboard completion destination did not match its reservation")
   }
