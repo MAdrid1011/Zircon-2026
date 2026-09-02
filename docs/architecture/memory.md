@@ -143,9 +143,12 @@ arbiter.
 A normal non-atomic `Memory`-PMA load reaches the executable L1D slice whether
 MemIQ issued it through M0 or M1; the retained `m1Owner` bit routes its real
 L1D completion to the matching endpoint. Device and atomic M0 owners do not
-enter that path. The current LQ-to-L1D forwarding boundary remains one request
-wide, so it serializes two ready cacheable loads. This restores M0 load
-correctness but does not claim the frozen dual-port hit/miss matrix.
+enter that path. ADR-0020 exposed the two retained candidates and ADR-0021
+replaces the active top-level arbiter with direct two-lane L1D ingress. The
+implemented first increment performs both tag lookups and captures two
+different-bank hit results. It deliberately serializes every pair containing a
+miss until MSHR, waiter, victim, and L2 resource allocation is made dual-safe;
+it must not claim frozen dual-port hit/miss throughput yet.
 
 ## PMA and precise exceptions
 
@@ -298,14 +301,19 @@ token rather than treating an L1D-local MSHR as an AXI ID.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,
-and same-line secondary merge. Its two LSU requests define an explicit conflict
-matrix: dual hit may proceed when bank/port resources allow; hit/miss, dual miss,
-same bank/set/line/address, MSHR full, and victim-full cases either allocate their
-specified resource or backpressure/replay deterministically.
-The executable slice currently preserves both M0 and M1 cacheable-load
-ownership but has one LQ-forward/L1D request port, so it deterministically
-serializes the pair. It cannot close this matrix until the request, bank, MSHR,
-and completion paths are widened with directed conflict evidence.
+and same-line secondary merge for its existing single-miss lifecycle. Its two
+LSU requests define an explicit conflict matrix: dual hit may proceed when bank
+and retained-result resources allow; hit/miss, dual miss, same bank/set/line/
+address, MSHR full, and victim-full cases must either allocate their specified
+resource or backpressure/replay deterministically.
+The executable slice now receives both M0 and M1 cacheable-load forwards
+directly. It accepts two cache hits only when their four-way word banks differ
+and both exact result slots are available; a same-bank or same-address pair
+accepts only the older ROB tag. A hit/miss or two-miss pair still accepts only
+the older request, so neither a second MSHR nor a second victim/L2 transfer is
+fabricated. Completing the remaining matrix requires directed hit/miss,
+same-line merge, dual-miss, MSHR/waiter/victim-full, L2-backpressure, and
+recovery evidence.
 
 L2 has four ways and four MSHRs. The 4 KiB (32-set) configuration is the default;
 8 KiB is solely the M5 A/B point. L2 dynamically serves I and D demand and does

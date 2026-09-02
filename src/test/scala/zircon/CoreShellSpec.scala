@@ -1824,8 +1824,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           val forward0 = observation.loadForwardValid(0).peek().litToBoolean
           val forward1 = observation.loadForwardValid(1).peek().litToBoolean
           if (forward0 || forward1) forwardCycles += ((cycle, forward0, forward1))
-          if (observation.l1dRequest.peek().litToBoolean) {
-            l1dRequests += observation.l1dRequestTag.peek().litValue
+          for (lane <- 0 until 2) {
+            if (observation.l1dRequest(lane).peek().litToBoolean) {
+              l1dRequests += observation.l1dRequestTag(lane).peek().litValue
+            }
           }
         }))
 

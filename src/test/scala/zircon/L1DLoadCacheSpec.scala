@@ -6,14 +6,16 @@ import zircon.memory.{L1DLoadCache, L2DemandClient}
 
 class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
   private def clear(dut: L1DLoadCache): Unit = {
-    dut.io.request.valid.poke(false)
-    dut.io.request.bits.robTag.poke(0)
-    dut.io.request.bits.address.poke(0)
-    dut.io.request.bits.readMask.poke(0)
-    dut.io.request.bits.forwardMask.poke(0)
-    dut.io.request.bits.forwardData.poke(0)
-    dut.io.request.bits.requiresCache.poke(false)
-    dut.io.request.bits.cacheable.poke(true)
+    dut.io.request.foreach { request =>
+      request.valid.poke(false)
+      request.bits.robTag.poke(0)
+      request.bits.address.poke(0)
+      request.bits.readMask.poke(0)
+      request.bits.forwardMask.poke(0)
+      request.bits.forwardData.poke(0)
+      request.bits.requiresCache.poke(false)
+      request.bits.cacheable.poke(true)
+    }
     dut.io.completion.ready.poke(false)
     dut.io.dataRequest.ready.poke(false)
     dut.io.dataResponse.valid.poke(false)
@@ -61,23 +63,35 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.flush.poke(false)
   }
 
-  private def submit(
+  private def presentLoad(
       dut: L1DLoadCache,
+      lane: Int,
       tag: Int,
       address: BigInt,
       requiresCache: Boolean = true
   ): Unit = {
-    dut.io.request.valid.poke(true)
-    dut.io.request.bits.robTag.poke(tag)
-    dut.io.request.bits.address.poke(address)
-    dut.io.request.bits.readMask.poke(15)
-    dut.io.request.bits.forwardMask.poke(if (requiresCache) 0 else 15)
-    dut.io.request.bits.forwardData.poke(0)
-    dut.io.request.bits.requiresCache.poke(requiresCache)
-    dut.io.request.bits.cacheable.poke(true)
-    dut.io.request.ready.expect(true)
+    val request = dut.io.request(lane)
+    request.valid.poke(true)
+    request.bits.robTag.poke(tag)
+    request.bits.address.poke(address)
+    request.bits.readMask.poke(15)
+    request.bits.forwardMask.poke(if (requiresCache) 0 else 15)
+    request.bits.forwardData.poke(0)
+    request.bits.requiresCache.poke(requiresCache)
+    request.bits.cacheable.poke(true)
+  }
+
+  private def submit(
+      dut: L1DLoadCache,
+      tag: Int,
+      address: BigInt,
+      requiresCache: Boolean = true,
+      lane: Int = 0
+  ): Unit = {
+    presentLoad(dut, lane, tag, address, requiresCache)
+    dut.io.request(lane).ready.expect(true)
     dut.clock.step()
-    dut.io.request.valid.poke(false)
+    dut.io.request(lane).valid.poke(false)
   }
 
   private def submitStore(
@@ -182,15 +196,15 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     it("rejects a non-cacheable M0 forward without a refill or completion") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
-        dut.io.request.valid.poke(true)
-        dut.io.request.bits.robTag.poke(3)
-        dut.io.request.bits.address.poke(BigInt("a0000000", 16))
-        dut.io.request.bits.readMask.poke(15)
-        dut.io.request.bits.forwardMask.poke(0)
-        dut.io.request.bits.forwardData.poke(0)
-        dut.io.request.bits.requiresCache.poke(true)
-        dut.io.request.bits.cacheable.poke(false)
-        dut.io.request.ready.expect(false)
+        dut.io.request(0).valid.poke(true)
+        dut.io.request(0).bits.robTag.poke(3)
+        dut.io.request(0).bits.address.poke(BigInt("a0000000", 16))
+        dut.io.request(0).bits.readMask.poke(15)
+        dut.io.request(0).bits.forwardMask.poke(0)
+        dut.io.request(0).bits.forwardData.poke(0)
+        dut.io.request(0).bits.requiresCache.poke(true)
+        dut.io.request(0).bits.cacheable.poke(false)
+        dut.io.request(0).ready.expect(false)
         dut.io.dataRequest.valid.expect(false)
         dut.io.completion.valid.expect(false)
         dut.clock.step(2)
@@ -269,16 +283,16 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         consumeStoreResult(dut, tag = 2, line + 12)
 
         dut.io.fenceDrain.poke(true)
-        dut.io.request.valid.poke(true)
-        dut.io.request.bits.cacheable.poke(true)
-        dut.io.request.ready.expect(false)
+        dut.io.request(0).valid.poke(true)
+        dut.io.request(0).bits.cacheable.poke(true)
+        dut.io.request(0).ready.expect(false)
         dut.io.l2Insert.valid.expect(true)
         dut.io.l2Insert.bits.lineAddress.expect(line)
         dut.io.l2Insert.bits.dirty.expect(true)
         dut.io.l2Insert.bits.lineData(3).expect(BigInt("deadbeef", 16))
         dut.io.fenceDrained.expect(false)
         dut.clock.step()
-        dut.io.request.valid.poke(false)
+        dut.io.request(0).valid.poke(false)
         dut.io.fenceDrained.expect(true)
         dut.io.l2Insert.valid.expect(false)
       }
@@ -475,21 +489,21 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         submitStore(dut, tag = 3, lineA, mask = 15, data = BigInt("decafbad", 16))
         consumeStoreResult(dut, tag = 3, lineA)
 
-        dut.io.request.valid.poke(true)
-        dut.io.request.bits.robTag.poke(4)
-        dut.io.request.bits.address.poke(lineC)
-        dut.io.request.bits.readMask.poke(15)
-        dut.io.request.bits.forwardMask.poke(0)
-        dut.io.request.bits.forwardData.poke(0)
-        dut.io.request.bits.requiresCache.poke(true)
-        dut.io.request.bits.cacheable.poke(true)
-        dut.io.request.ready.expect(true)
+        dut.io.request(0).valid.poke(true)
+        dut.io.request(0).bits.robTag.poke(4)
+        dut.io.request(0).bits.address.poke(lineC)
+        dut.io.request(0).bits.readMask.poke(15)
+        dut.io.request(0).bits.forwardMask.poke(0)
+        dut.io.request(0).bits.forwardData.poke(0)
+        dut.io.request(0).bits.requiresCache.poke(true)
+        dut.io.request(0).bits.cacheable.poke(true)
+        dut.io.request(0).ready.expect(true)
         dut.io.l2Insert.valid.expect(true)
         dut.io.l2Insert.bits.lineAddress.expect(lineA)
         dut.io.l2Insert.bits.dirty.expect(true)
         dut.io.l2Insert.bits.lineData(0).expect(BigInt("decafbad", 16))
         dut.clock.step()
-        dut.io.request.valid.poke(false)
+        dut.io.request(0).valid.poke(false)
       }
     }
 
@@ -563,6 +577,106 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.valid.expect(true)
         dut.io.completion.bits.robTag.expect(7)
         dut.io.completion.bits.cacheData.expect(words(3))
+      }
+    }
+
+    it("accepts two hit loads from different word banks and retains both exact results") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80005000", 16)
+        val words = Seq.tabulate(8)(word => BigInt("44000000", 16) + word)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // Lane 1 is older, proving result selection is by ROB age rather than
+        // input lane. Words 1 and 2 map to different four-way data banks.
+        presentLoad(dut, lane = 0, tag = 7, address = line + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = line + 8)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(1))
+      }
+    }
+
+    it("backpressures the younger same-bank hit until the older request is accepted") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80005400", 16)
+        val words = Seq.tabulate(8)(word => BigInt("55000000", 16) + word)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // Words 0 and 4 share bank 0. Lane 1 carries the older ROB tag.
+        presentLoad(dut, lane = 0, tag = 7, address = line)
+        presentLoad(dut, lane = 1, tag = 3, address = line + 16)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(4))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(0))
+      }
+    }
+
+    it("backpressures a same-address duplicate for its conflicting acceptance cycle") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80005800", 16)
+        val words = Seq.tabulate(8)(word => BigInt("66000000", 16) + word)
+        submit(dut, tag = 1, line)
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        presentLoad(dut, lane = 0, tag = 2, address = line + 8)
+        presentLoad(dut, lane = 1, tag = 6, address = line + 8)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(false)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        // The duplicate is blocked only while both ports contend for the same
+        // bank. It can use its own retained-result slot on the next cycle.
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(2)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(6)
+        dut.io.completion.bits.cacheData.expect(words(2))
       }
     }
 

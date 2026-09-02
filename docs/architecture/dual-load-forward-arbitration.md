@@ -1,8 +1,10 @@
 # M3 Dual Load-Forward Arbitration
 
-`DualLoadForwardArbiter` sits between the two LQ forward records and the
-current one-port `L1DLoadCache` request interface. It is the explicit M0/M1
-cacheable-load ownership boundary from ADR-0020.
+`DualLoadForwardArbiter` is the retained one-request boundary from ADR-0020.
+It remains unit-tested to preserve the LQ ready/valid ownership contract, but
+ADR-0021 removes it from the active `ZirconCore` path: both LQ forward records
+now enter `L1DLoadCache` directly. The active L1D accepts different-bank hit
+pairs and retains exact results; its miss-resource policy remains incomplete.
 
 | Interface | Rule |
 | --- | --- |
@@ -20,6 +22,6 @@ forwards are acknowledged by their existing ordered M0 paths and never enter
 L1D.
 
 This module does not create a second L1D read, MSHR allocation, or completion
-port. It is intentionally the verified deterministic backpressure stage before
-the later true dual-bank L1D implementation. It asserts unique candidate tags,
-stable locked ownership, and no grant during recovery.
+port. It remains a verified deterministic reference for stalled one-request
+consumers, asserting unique candidate tags, stable locked ownership, and no
+grant during recovery. It is not instantiated by the production top level.

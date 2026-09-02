@@ -27,14 +27,22 @@ class L1DLoadCache(
   private val mshrWidth = log2Ceil(mshrCount)
   private val waiterCount = config.loadQueueEntries
   private val waiterWidth = log2Ceil(waiterCount)
+  private val wordBanks = 4
+  private val wordBankWidth = log2Ceil(wordBanks)
 
   require(cache.bytes == 1024 && ways == 2 && cache.lineBytes == 32,
     "the frozen M3 L1D load slice is 1 KiB, two-way, and 32-byte-line")
   require(mshrCount == 4 && waiterCount == 8,
     "the frozen M3 load slice has four MSHRs and eight LQ waiters")
+  require(wordsPerLine % wordBanks == 0,
+    "the frozen M3 L1D data array must divide evenly across its word banks")
 
   val io = IO(new Bundle {
-    val request = Flipped(Decoupled(new LoadStoreForward(config)))
+    /** Two cacheable load candidates receive parallel tag/data lookups. The
+      * conflict policy may retain either candidate rather than fabricating a
+      * completion when a bank or miss resource is unavailable. */
+    val request = Flipped(Vec(config.decodeWidth,
+      Decoupled(new LoadStoreForward(config))))
     val completion = Decoupled(new LoadCompletion(config))
     /** L2 owns physical AXI demand slots; L1D carries only its local MSHR
       * token across this boundary. */
@@ -104,31 +112,56 @@ class L1DLoadCache(
     mshrHasDemand(mshr) := mshrHasWaiter(mshr) || mshrStorePending(mshr)
   }
 
-  val immediateValid = RegInit(false.B)
-  val immediateResponse = Reg(new LoadCompletion(config))
+  // Each read port has a retained hit/fully-forwarded result slot. The
+  // downstream LQ completion transport remains one-wide for this increment,
+  // but two accepted hits cannot overwrite one another while it drains.
+  val immediateValid = RegInit(VecInit.fill(config.decodeWidth)(false.B))
+  val immediateResponse = Reg(Vec(config.decodeWidth, new LoadCompletion(config)))
   val storeResultValid = RegInit(false.B)
   val storeResultBits = Reg(new StoreWriteResult(config))
   val l2ProbeActive = RegInit(false.B)
   val l2ProbeMshr = Reg(UInt(mshrWidth.W))
   val recoveryBlocked = io.flush || io.squash.valid
 
-  val requestSet = io.request.bits.address(lineOffsetWidth + setWidth - 1,
-    lineOffsetWidth)
-  val requestTag = io.request.bits.address(31, lineOffsetWidth + setWidth)
-  val requestWord = io.request.bits.address(lineOffsetWidth - 1, 2)
-  val requestLineAddress = Cat(io.request.bits.address(31, lineOffsetWidth),
-    0.U(lineOffsetWidth.W))
-  val cacheHit = VecInit((0 until ways).map(way =>
-    cacheValid(way)(requestSet) && cacheTag(way)(requestSet) === requestTag))
-  val anyCacheHit = cacheHit.asUInt.orR
-  val hitWay = PriorityEncoder(cacheHit.asUInt)
-  val hitData = Wire(UInt(32.W))
-  hitData := 0.U
-  for (way <- 0 until ways) {
-    when(cacheHit(way)) {
-      hitData := cacheData(way)(requestSet)(requestWord)
+  val firstRequestAge = ROBTagOrder.ageFromHead(io.request(0).bits.robTag,
+    io.robHeadTag, config)
+  val secondRequestAge = ROBTagOrder.ageFromHead(io.request(1).bits.robTag,
+    io.robHeadTag, config)
+  val selectFirstRequest = io.request(0).valid &&
+    (!io.request(1).valid || firstRequestAge <= secondRequestAge)
+  val selectedRequest = Wire(new LoadStoreForward(config))
+  selectedRequest := Mux(selectFirstRequest, io.request(0).bits,
+    io.request(1).bits)
+  val selectedRequestValid = io.request(0).valid || io.request(1).valid
+  val selectedRequestPort = Mux(selectFirstRequest, 0.U, 1.U)
+
+  val portSet = (0 until config.decodeWidth).map(port =>
+    io.request(port).bits.address(lineOffsetWidth + setWidth - 1, lineOffsetWidth))
+  val portTag = (0 until config.decodeWidth).map(port =>
+    io.request(port).bits.address(31, lineOffsetWidth + setWidth))
+  val portWord = (0 until config.decodeWidth).map(port =>
+    io.request(port).bits.address(lineOffsetWidth - 1, 2))
+  val portBank = portWord.map(_(wordBankWidth - 1, 0))
+  val portCacheHit = (0 until config.decodeWidth).map(port => VecInit(
+    (0 until ways).map(way => cacheValid(way)(portSet(port)) &&
+      cacheTag(way)(portSet(port)) === portTag(port))))
+  val portAnyCacheHit = portCacheHit.map(_.asUInt.orR)
+  val portHitData = (0 until config.decodeWidth).map { port =>
+    val data = Wire(UInt(32.W))
+    data := 0.U
+    for (way <- 0 until ways) {
+      when(portCacheHit(port)(way)) {
+        data := cacheData(way)(portSet(port))(portWord(port))
+      }
     }
+    data
   }
+
+  val requestSet = selectedRequest.address(lineOffsetWidth + setWidth - 1,
+    lineOffsetWidth)
+  val requestWord = selectedRequest.address(lineOffsetWidth - 1, 2)
+  val requestLineAddress = Cat(selectedRequest.address(31, lineOffsetWidth),
+    0.U(lineOffsetWidth.W))
 
   val matchingMshr = VecInit((0 until mshrCount).map(index =>
     mshrValid(index) && mshrLineAddress(index) === requestLineAddress))
@@ -185,8 +218,27 @@ class L1DLoadCache(
     mshrValid(index) && mshrLineAddress(index) === flushLineAddress)).asUInt.orR
   val flushL2Insert = io.flushLine.valid && flushDirty && !flushHasMshr
   val anyMshrValid = mshrValid.asUInt.orR
+
+  val immediateSlotWidth = log2Ceil(config.decodeWidth)
+  var selectedImmediateValid: Bool = false.B
+  var selectedImmediateIndex: UInt = 0.U(immediateSlotWidth.W)
+  var selectedImmediateAge: UInt = 0.U((config.robIndexWidth + 1).W)
+  for (slot <- 0 until config.decodeWidth) {
+    val age = ROBTagOrder.ageFromHead(immediateResponse(slot).robTag,
+      io.robHeadTag, config)
+    val take = immediateValid(slot) && (!selectedImmediateValid ||
+      age < selectedImmediateAge)
+    selectedImmediateIndex = Mux(take, slot.U, selectedImmediateIndex)
+    selectedImmediateAge = Mux(take, age, selectedImmediateAge)
+    selectedImmediateValid = selectedImmediateValid || immediateValid(slot)
+  }
+  val completionImmediateFire = io.completion.fire && selectedImmediateValid
+  val immediateSlotAvailable = VecInit((0 until config.decodeWidth).map(slot =>
+    !immediateValid(slot) || (completionImmediateFire &&
+      selectedImmediateIndex === slot.U)))
+
   val fenceCanTransfer = io.fenceDrain && !anyMshrValid && !storeResultValid &&
-    !immediateValid && !l2ProbeActive
+    !selectedImmediateValid && !l2ProbeActive
   var fenceDirtyFound: Bool = false.B
   var fenceDirtyWay: UInt = 0.U(log2Ceil(ways).W)
   var fenceDirtySet: UInt = 0.U(setWidth.W)
@@ -198,7 +250,7 @@ class L1DLoadCache(
     fenceDirtyFound = fenceDirtyFound || dirty
   }
   val fenceL2Insert = fenceCanTransfer && !io.flushLine.valid && fenceDirtyFound
-  io.fenceDrained := !anyMshrValid && !storeResultValid && !immediateValid &&
+  io.fenceDrained := !anyMshrValid && !storeResultValid && !selectedImmediateValid &&
     !l2ProbeActive && !fenceDirtyFound
   // An external atomic cannot observe a dirty L1D line until its later L2
   // writeback owner exists. Blocking preserves coherent memory semantics.
@@ -236,14 +288,22 @@ class L1DLoadCache(
   val storeVictimWay = PriorityEncoder(storeVictimWays)
   val storeVictimValid = cacheValid(storeVictimWay)(storeSet)
 
-  val immediateRequest = !io.request.bits.requiresCache ||
-    anyCacheHit
-  val immediateAvailable = !immediateValid || io.completion.ready
+  val portImmediateRequest = VecInit((0 until config.decodeWidth).map(port =>
+    !io.request(port).bits.requiresCache || portAnyCacheHit(port)))
+  val immediateRequest = Mux(selectFirstRequest, portImmediateRequest(0),
+    portImmediateRequest(1))
+  val sameWordBank = portBank(0) === portBank(1)
+  val dualImmediateCompatible = io.request(0).valid && io.request(1).valid &&
+    portImmediateRequest(0) && portImmediateRequest(1) &&
+    !(io.request(0).bits.requiresCache && io.request(1).bits.requiresCache &&
+      sameWordBank)
+  val selectedImmediateSlotAvailable = Mux(selectFirstRequest,
+    immediateSlotAvailable(0), immediateSlotAvailable(1))
   val newMissNeedsL2Insert = !anyMatchingMshr && anyFreeMshr && hasVictimWay &&
     victimValid
   val storeNewMissNeedsL2Insert = !anyStoreLineMshr && anyFreeMshr &&
     storeHasVictimWay && storeVictimValid
-  val loadL2Insert = io.request.valid && io.request.bits.cacheable &&
+  val loadL2Insert = selectedRequestValid && selectedRequest.cacheable &&
     !io.storeRequest.valid && !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked && !immediateRequest &&
     anyFreeWaiter && newMissNeedsL2Insert
   val storeL2Insert = io.storeRequest.valid && storeOwnerAvailable &&
@@ -270,9 +330,21 @@ class L1DLoadCache(
       (!storeNewMissNeedsL2Insert || io.l2Insert.ready))
   // Device and atomic requests retain their ordered M0 owner. Only a
   // commit-authorized cacheable non-atomic store may change L1D state.
-  io.request.ready := io.request.bits.cacheable && !io.fenceDrain && !recoveryBlocked &&
-    !io.storeRequest.valid && !io.flushLine.valid &&
-    Mux(immediateRequest, immediateAvailable, missResources)
+  // Miss ownership remains one-wide until MSHR/victim arbitration itself is
+  // widened. Two immediate hits may proceed together only when their data
+  // reads use different word banks and both retained result slots are free.
+  val requestAdmissionOpen = !io.fenceDrain && !recoveryBlocked &&
+    !io.storeRequest.valid && !io.flushLine.valid
+  val selectedRequestReady = selectedRequest.cacheable && requestAdmissionOpen &&
+    Mux(immediateRequest, selectedImmediateSlotAvailable, missResources)
+  val dualImmediateReady = dualImmediateCompatible && requestAdmissionOpen &&
+    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
+    immediateSlotAvailable(0) && immediateSlotAvailable(1)
+  for (port <- 0 until config.decodeWidth) {
+    val selected = selectedRequestPort === port.U
+    io.request(port).ready := Mux(dualImmediateCompatible, dualImmediateReady,
+      selected && selectedRequestReady)
+  }
   io.storeRequest.ready := !io.fenceDrain && !recoveryBlocked && !io.flushLine.valid && storeOwnerAvailable &&
     !io.storeRequest.bits.isAtomic &&
     (anyStoreCacheHit || storeMissResources)
@@ -348,17 +420,21 @@ class L1DLoadCache(
   }
 
   io.completion.valid := !recoveryBlocked &&
-    (immediateValid || selectedWaiterValid)
-  io.completion.bits.robTag := Mux(immediateValid, immediateResponse.robTag,
+    (selectedImmediateValid || selectedWaiterValid)
+  io.completion.bits.robTag := Mux(selectedImmediateValid,
+    immediateResponse(selectedImmediateIndex).robTag,
     waiterTag(selectedWaiterIndex))
-  io.completion.bits.cacheData := Mux(immediateValid, immediateResponse.cacheData,
+  io.completion.bits.cacheData := Mux(selectedImmediateValid,
+    immediateResponse(selectedImmediateIndex).cacheData,
     selectedWaiterData)
-  io.completion.bits.accessFault := Mux(immediateValid,
-    immediateResponse.accessFault, mshrFault(selectedWaiterMshr))
-  io.completion.bits.faultAddress := Mux(immediateValid,
-    immediateResponse.faultAddress, selectedWaiterAddress)
+  io.completion.bits.accessFault := Mux(selectedImmediateValid,
+    immediateResponse(selectedImmediateIndex).accessFault,
+    mshrFault(selectedWaiterMshr))
+  io.completion.bits.faultAddress := Mux(selectedImmediateValid,
+    immediateResponse(selectedImmediateIndex).faultAddress,
+    selectedWaiterAddress)
 
-  val completionWaiterFire = io.completion.fire && !immediateValid &&
+  val completionWaiterFire = io.completion.fire && !selectedImmediateValid &&
     selectedWaiterValid
   val waiterRemaining = (0 until mshrCount).map { mshr =>
     (0 until waiterCount).map { waiter =>
@@ -368,7 +444,7 @@ class L1DLoadCache(
   }
 
   when(io.flush) {
-    immediateValid := false.B
+    immediateValid.foreach(_ := false.B)
     waiterValid.foreach(_ := false.B)
     for (mshr <- 0 until mshrCount) {
       // A commit-authorized store cannot be cancelled by later recovery. It
@@ -382,9 +458,11 @@ class L1DLoadCache(
       }
     }
   }.elsewhen(io.squash.valid) {
-    when(immediateValid && ROBTagOrder.isYounger(
-      immediateResponse.robTag, io.squash.bits, io.robHeadTag, config)) {
-      immediateValid := false.B
+    for (slot <- 0 until config.decodeWidth) {
+      when(immediateValid(slot) && ROBTagOrder.isYounger(
+        immediateResponse(slot).robTag, io.squash.bits, io.robHeadTag, config)) {
+        immediateValid(slot) := false.B
+      }
     }
     for (waiter <- 0 until waiterCount) {
       when(waiterValid(waiter) && ROBTagOrder.isYounger(
@@ -409,43 +487,46 @@ class L1DLoadCache(
       storeResultValid := false.B
     }
     when(io.completion.fire) {
-      when(immediateValid) {
-        immediateValid := false.B
+      when(selectedImmediateValid) {
+        immediateValid(selectedImmediateIndex) := false.B
       }.otherwise {
         waiterValid(selectedWaiterIndex) := false.B
       }
     }
-    when(io.request.fire) {
-      when(immediateRequest) {
-        immediateValid := true.B
-        immediateResponse.robTag := io.request.bits.robTag
-        immediateResponse.cacheData := Mux(io.request.bits.requiresCache,
-          hitData, 0.U)
-        immediateResponse.accessFault := false.B
-        immediateResponse.faultAddress := io.request.bits.address
-      }.otherwise {
-        val chosenMshr = Mux(anyMatchingMshr, matchingMshrIndex, freeMshrIndex)
-        waiterValid(freeWaiterIndex) := true.B
-        waiterMshr(freeWaiterIndex) := chosenMshr
-        waiterTag(freeWaiterIndex) := io.request.bits.robTag
-        waiterWord(freeWaiterIndex) := requestWord
-        when(!anyMatchingMshr) {
-          mshrValid(chosenMshr) := true.B
-          mshrIssued(chosenMshr) := false.B
-          mshrFilled(chosenMshr) := false.B
-          mshrFault(chosenMshr) := false.B
-          mshrL2ProbeIssued(chosenMshr) := false.B
-          mshrL2Resolved(chosenMshr) := false.B
-          mshrLineAddress(chosenMshr) := requestLineAddress
-          mshrSet(chosenMshr) := requestSet
-          mshrWay(chosenMshr) := victimWay
-          // The old line cannot remain hit-visible while its way is reserved
-          // for an in-flight refill.
-          for (way <- 0 until ways) {
-            when(victimWay === way.U) {
-              cacheValid(way)(requestSet) := false.B
-              cacheDirty(way)(requestSet) := false.B
-            }
+    for (port <- 0 until config.decodeWidth) {
+      when(io.request(port).fire && portImmediateRequest(port)) {
+        immediateValid(port) := true.B
+        immediateResponse(port).robTag := io.request(port).bits.robTag
+        immediateResponse(port).cacheData := Mux(io.request(port).bits.requiresCache,
+          portHitData(port), 0.U)
+        immediateResponse(port).accessFault := false.B
+        immediateResponse(port).faultAddress := io.request(port).bits.address
+      }
+    }
+    val selectedRequestFire = selectedRequestValid && Mux(selectFirstRequest,
+      io.request(0).fire, io.request(1).fire)
+    when(selectedRequestFire && !immediateRequest) {
+      val chosenMshr = Mux(anyMatchingMshr, matchingMshrIndex, freeMshrIndex)
+      waiterValid(freeWaiterIndex) := true.B
+      waiterMshr(freeWaiterIndex) := chosenMshr
+      waiterTag(freeWaiterIndex) := selectedRequest.robTag
+      waiterWord(freeWaiterIndex) := requestWord
+      when(!anyMatchingMshr) {
+        mshrValid(chosenMshr) := true.B
+        mshrIssued(chosenMshr) := false.B
+        mshrFilled(chosenMshr) := false.B
+        mshrFault(chosenMshr) := false.B
+        mshrL2ProbeIssued(chosenMshr) := false.B
+        mshrL2Resolved(chosenMshr) := false.B
+        mshrLineAddress(chosenMshr) := requestLineAddress
+        mshrSet(chosenMshr) := requestSet
+        mshrWay(chosenMshr) := victimWay
+        // The old line cannot remain hit-visible while its way is reserved
+        // for an in-flight refill.
+        for (way <- 0 until ways) {
+          when(victimWay === way.U) {
+            cacheValid(way)(requestSet) := false.B
+            cacheDirty(way)(requestSet) := false.B
           }
         }
       }
@@ -614,14 +695,18 @@ class L1DLoadCache(
     }
   }
 
-  when(io.request.fire && !immediateRequest) {
+  val selectedRequestFire = selectedRequestValid && Mux(selectFirstRequest,
+    io.request(0).fire, io.request(1).fire)
+  when(selectedRequestFire && !immediateRequest) {
     assert(anyFreeWaiter, "L1D accepted a miss without a waiter owner")
     assert(anyMatchingMshr || (anyFreeMshr && hasVictimWay),
       "L1D accepted a miss without an MSHR and victim owner")
   }
-  when(io.request.fire) {
-    assert(io.request.bits.cacheable,
-      "the executable L1D slice accepted a non-cacheable M0 owner")
+  for (port <- 0 until config.decodeWidth) {
+    when(io.request(port).fire) {
+      assert(io.request(port).bits.cacheable,
+        "the executable L1D slice accepted a non-cacheable M0 owner")
+    }
   }
   when(io.storeRequest.fire && !anyStoreCacheHit) {
     assert(anyStoreMatchingMshr ||
