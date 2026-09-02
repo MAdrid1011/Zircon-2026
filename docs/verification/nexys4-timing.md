@@ -22,6 +22,14 @@ Consequently Nexys4 support is **unverified**, not failed or passed. This does
 not block current RTL work, but it blocks the final `v1.0.0` release until the
 evidence above is committed.
 
+On 2026-09-02, a read-only search of the local desktop workspaces found no
+`.xpr` or `.xdc` file naming Nexys4, `xc7a100t`, or `csg324`. The one
+nearby Vivado project that could otherwise be mistaken for Zircon evidence is
+`SCARF/Zircon-SCARF/build/fpga_2025_vu13p/stage_b_bd/project/scarf_stage_b_bd.xpr`;
+its project metadata identifies `xcvu13p-fhgb2104-2-i`, and its constraints
+are VU13P/DDR4-specific. It must not be used as a Nexys4 wrapper, XDC, timing
+result, or 100 MHz side evidence.
+
 ## Timing triage
 
 Timing fixes must preserve the frozen ISA, exact exception/interrupt behavior,
