@@ -86,4 +86,8 @@ clears the reservation: after MRET the SC retires `rd=1` with no ID-7 write.
 `make test-m3-lrsc-errors` uses three explicit seeds to inject a non-OKAY ID-7
 LR response at a non-line-base word address; it requires one exact cause-7/tval
 trap and proves that the following SC issues no write.
+`make test-m3-sc-errors` uses three explicit seeds to retain a successful LR,
+then inject an ID-7 SC `BRESP` error. It requires the LR metadata to retire,
+one SC write response, and the SC's exact cause-7/tval trap without an `rd`
+completion.
 Run `make test-m3-atomic` for the focused local regression.

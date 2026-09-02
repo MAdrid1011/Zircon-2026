@@ -47,6 +47,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf703L)
   private val M3LrScErrorSeeds = Seq(0x5eedf801L, 0x5eedf802L,
     0x5eedf803L)
+  private val M3ScErrorSeeds = Seq(0x5eedf901L, 0x5eedf902L,
+    0x5eedf903L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2708,6 +2710,74 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "random-lr-rresp-error", schedule, events,
+                Some(selectorSeed), Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("turns seeded non-line-base SC BRESP errors into one exact trap") {
+      for (seed <- M3ScErrorSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val random = new Random(seed)
+          val schedule = seededAxiSchedule(seed, 1400)
+          val selectorSeed = seed ^ 0x7a100L
+          val selectorRandom = new Random(selectorSeed)
+          val address = BigInt("80001004", 16)
+          val storeData = BigInt(random.nextInt(2048))
+          val initial = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("00408093", 16), // addi x1,x1,4
+            ResetVector + 8 -> ((storeData << 20) | (BigInt(2) << 7) | BigInt(0x13)),
+            ResetVector + 12 -> BigInt("1000a1af", 16), // lr.w x3,(x1)
+            ResetVector + 16 -> BigInt("1820a22f", 16), // sc.w x4,x2,(x1)
+            ResetVector + 20 -> BigInt("00100073", 16),
+            address -> initial)
+          var events = Seq.empty[TraceSample]
+          var id7Reads = 0
+          var id7Writes = 0
+          var id7Responses = 0
+          try {
+            events = throughFirstTrap(runProgram(dut, program, cycles = 1400,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              writeResponse = Some(2),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) id7Writes += 1
+                if (bFire && core.io.axi.b.bits.id.peek().litValue == 7) id7Responses += 1
+              }))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$events") {
+              assert(id7Reads == 1 && id7Writes == 1 && id7Responses == 1)
+              val lr = events.find(event => event.pc == ResetVector + 12 &&
+                event.gprWrite && event.gprAddress == 3).getOrElse(
+                fail(s"LR did not complete before SC fault: $events"))
+              assert(lr.gprData == initial && lr.memoryReadData == initial)
+              assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12, ResetVector + 16))
+              assert(events.last.trap && !events.last.gprWrite && events.last.cause == 7 &&
+                events.last.trapValue == address)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "random-sc-bresp-error", schedule, events,
                 Some(selectorSeed), Some(program))
               throw failure
           }
