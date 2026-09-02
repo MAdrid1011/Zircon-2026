@@ -94,6 +94,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       rValidForCycle: Int => Boolean = _ => true,
       readSelectForCycle: (Int, Seq[(BigInt, BigInt, BigInt, Boolean)]) => Int =
         (_, _) => 0,
+      readValidForCycle: (Int, BigInt, BigInt) => Boolean = (_, _, _) => true,
       rResponse: (BigInt, BigInt) => Int = (_, _) => 0,
       writeResponse: Option[Int] = None,
       observeCycle: (ZirconCore, Int) => Unit = (_, _) => (),
@@ -124,7 +125,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         val requested = readSelectForCycle(cycle, pendingReads.toSeq)
         requested.max(0).min(pendingReads.size - 1)
       }
-      val rOffered = pendingReads.nonEmpty && (rHeld || rValidForCycle(cycle))
+      val selectedReadPermitted = pendingReads.nonEmpty &&
+        readValidForCycle(cycle, pendingReads(selectedReadIndex)._1,
+          pendingReads(selectedReadIndex)._2)
+      val rOffered = pendingReads.nonEmpty &&
+        (rHeld || (rValidForCycle(cycle) && selectedReadPermitted))
       if (rOffered) {
         val (id, address, data, last) = pendingReads(selectedReadIndex)
         dut.io.axi.r.valid.poke(true)
@@ -1926,6 +1931,112 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "multi-owner-interleave", schedule, events,
+                Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("retains four data owners before seeded cross-ID AXI drain") {
+      val seeds = Seq(0x5eed6001L, 0x5eed6002L, 0x5eed6003L, 0x5eed6004L)
+      for (seed <- seeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1024
+          val schedule = seededAxiSchedule(seed, cycles)
+          val selectorSeed = seed ^ 0x2468ace0L
+          val selectorRandom = new Random(selectorSeed)
+          val observedDataIds = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val dataArIdsBeforeFirstResponse = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val dataOwnerBeats = scala.collection.mutable.Map.empty[BigInt, Int]
+          var firstDataResponseSeen = false
+          val lines = Seq(
+            BigInt("80001000", 16), BigInt("80001020", 16),
+            BigInt("80001040", 16), BigInt("80001060", 16))
+          val expected = Seq(
+            BigInt("11223344", 16), BigInt("55667788", 16),
+            BigInt("99aabbcc", 16), BigInt("ddeeff00", 16))
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
+              ResetVector + 12 -> BigInt("0400a203", 16), // lw x4,64(x1)
+              ResetVector + 16 -> BigInt("0600a283", 16), // lw x5,96(x1)
+              ResetVector + 20 -> BigInt("00100073", 16),
+              lines(0) -> expected(0), lines(1) -> expected(1),
+              lines(2) -> expected(2), lines(3) -> expected(3)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              // First complete L1I's initial burst, then withhold R long enough
+              // for all four independent data lines to claim physical owners.
+              rValidForCycle = cycle => cycle < 128 || schedule.rValid(cycle),
+              readSelectForCycle = (cycle, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                if (cycle < 128 && candidates.exists(index => pending(index)._1 == 0)) {
+                  candidates.find(index => pending(index)._1 == 0).get
+                } else if (candidates.isEmpty) 0
+                else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              readValidForCycle = (cycle, _, address) => {
+                val dataAddress = address >= lines.head && address < lines.last + 32
+                !dataAddress || cycle >= 128
+              },
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                if (arFire) {
+                  val id = core.io.axi.ar.bits.id.peek().litValue
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (lines.contains(address)) {
+                    dataOwnerBeats.update(id, 8)
+                    if (!firstDataResponseSeen) {
+                      dataArIdsBeforeFirstResponse += id
+                    }
+                  }
+                }
+                if (rFire) {
+                  val id = core.io.axi.r.bits.id.peek().litValue
+                  if (dataOwnerBeats.get(id).exists(_ > 0)) {
+                    firstDataResponseSeen = true
+                    observedDataIds += id
+                    val remaining = dataOwnerBeats(id) - 1
+                    if (remaining == 0) dataOwnerBeats.remove(id)
+                    else dataOwnerBeats.update(id, remaining)
+                  }
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val dataIdSwitch = observedDataIds.sliding(2).exists(pair => pair.head != pair.last)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"arBeforeDataR=$dataArIdsBeforeFirstResponse, dataIds=$observedDataIds, " +
+              s"trace=$retired") {
+              assert(dataArIdsBeforeFirstResponse.distinct.size == 4,
+                "four data owners did not become live before the first data response")
+              assert(observedDataIds.distinct.size == 4,
+                "the four physical data AXI owners were not all drained")
+              assert(dataIdSwitch,
+                "data AXI responses were not interleaved across the four owners")
+              for ((pc, register, value, address) <- Seq(
+                  (ResetVector + 4, 2, expected(0), lines(0)),
+                  (ResetVector + 8, 3, expected(1), lines(1)),
+                  (ResetVector + 12, 4, expected(2), lines(2)),
+                  (ResetVector + 16, 5, expected(3), lines(3)))) {
+                assert(retired.exists(event => event.pc == pc && event.gprWrite &&
+                  event.gprAddress == register && event.gprData == value &&
+                  event.memoryAddress == address && event.memoryReadData == value))
+              }
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "four-owner-interleave", schedule, events,
                 Some(selectorSeed))
               throw failure
           }
