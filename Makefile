@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-atomic test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-atomic test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -60,6 +60,12 @@ test-m3-axi-stress:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "starts clean AXI read and write owner epochs across reset"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ordered device writes through explicitly seeded all-channel AXI backpressure"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves exact data RRESP and device BRESP faults under seeded AXI backpressure"'
+
+# Separate reset-owner tier so the broad AXI stress target remains within its
+# five-minute component-simulation budget.
+test-m3-axi-reset:
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "resets an accepted ID-5 writeback before its response"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "resets an accepted ID-7 atomic write before its response"'
 
 # Fast RV32A ownership regression. It remains below the five-minute component
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and

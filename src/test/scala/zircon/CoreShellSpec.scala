@@ -15,6 +15,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eed3006L, 0x5eed3007L)
   private val M3AxiResetSeeds = Seq(0x5eed7001L, 0x5eed7002L,
     0x5eed7003L, 0x5eed7004L)
+  private val M3AxiWritebackResetSeeds = Seq(0x5eed8001L, 0x5eed8002L,
+    0x5eed8003L, 0x5eed8004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -2210,6 +2212,175 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "reset-read-write-epochs", schedule, events,
                 Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("resets an accepted ID-5 writeback before its response") {
+      for (seed <- M3AxiWritebackResetSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableHostFlush = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 896
+          val schedule = seededAxiSchedule(seed, cycles)
+          val storeAddress = BigInt("80000100", 16)
+          dut.io.hostFlush.get.enable.poke(true)
+          dut.io.hostFlush.get.address.poke(storeAddress)
+          var resetIssued = false
+          var preResetAw = false
+          var preResetWLast = false
+          var finalAw = false
+          var finalWLast = false
+          var finalB = false
+          var activeWriteId = Option.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("00000097", 16), // auipc x1,0
+              ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+              ResetVector + 8 -> BigInt("1020a023", 16), // sw x2,256(x1)
+              ResetVector + 12 -> BigInt("00100073", 16)
+            ), cycles = cycles, writeResponse = Some(0),
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => resetIssued && schedule.bValid(cycle),
+              resetForCycle = (_, _) => {
+                val assertReset = preResetAw && preResetWLast && !resetIssued
+                if (assertReset) resetIssued = true
+                assertReset
+              },
+              observeCycle = (core, _) => {
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (awFire) activeWriteId = Some(core.io.axi.aw.bits.id.peek().litValue)
+                if (!resetIssued && activeWriteId.contains(BigInt(5))) {
+                  preResetAw ||= awFire
+                  preResetWLast ||= wFire && core.io.axi.w.bits.last.peek().litToBoolean
+                } else if (resetIssued && activeWriteId.contains(BigInt(5))) {
+                  finalAw ||= awFire
+                  finalWLast ||= wFire && core.io.axi.w.bits.last.peek().litToBoolean
+                }
+                if (wFire && core.io.axi.w.bits.last.peek().litToBoolean) {
+                  activeWriteId = None
+                }
+                if (resetIssued && bFire && core.io.axi.b.bits.id.peek().litValue == 5) {
+                  finalB = true
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"preWrite=($preResetAw,$preResetWLast), " +
+              s"finalWrite=($finalAw,$finalWLast,$finalB), trace=$retired") {
+              assert(resetIssued && preResetAw && preResetWLast)
+              assert(finalAw && finalWLast && finalB)
+              assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12))
+              assert(retired.exists(event => event.pc == ResetVector + 8 &&
+                event.memoryAddress == storeAddress && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == 90 && !event.trap))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "id5-writeback-reset", schedule, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("resets an accepted ID-7 atomic write before its response") {
+      for (seed <- M3AxiWritebackResetSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 896
+          val schedule = seededAxiSchedule(seed, cycles)
+          val atomicAddress = BigInt("80001000", 16)
+          val initialData = BigInt("10000000", 16)
+          var resetIssued = false
+          var preResetAr = false
+          var preResetAw = false
+          var preResetWLast = false
+          var finalAr = false
+          var finalAw = false
+          var finalWLast = false
+          var finalB = false
+          var activeWriteId = Option.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("00500113", 16), // addi x2,x0,5
+              ResetVector + 8 -> BigInt("0020a1af", 16), // amoadd.w x3,x2,(x1)
+              ResetVector + 12 -> BigInt("00100073", 16),
+              atomicAddress -> initialData
+            ), cycles = cycles, writeResponse = Some(0),
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => resetIssued && schedule.bValid(cycle),
+              resetForCycle = (_, _) => {
+                val assertReset = preResetAr && preResetAw && preResetWLast && !resetIssued
+                if (assertReset) resetIssued = true
+                assertReset
+              },
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                val atomicAr = arFire && core.io.axi.ar.bits.id.peek().litValue == 7
+                if (awFire) activeWriteId = Some(core.io.axi.aw.bits.id.peek().litValue)
+                if (!resetIssued) {
+                  preResetAr ||= atomicAr
+                  preResetAw ||= activeWriteId.contains(BigInt(7)) && awFire
+                  preResetWLast ||= activeWriteId.contains(BigInt(7)) && wFire &&
+                    core.io.axi.w.bits.last.peek().litToBoolean
+                } else {
+                  finalAr ||= atomicAr
+                  finalAw ||= activeWriteId.contains(BigInt(7)) && awFire
+                  finalWLast ||= activeWriteId.contains(BigInt(7)) && wFire &&
+                    core.io.axi.w.bits.last.peek().litToBoolean
+                  finalB ||= bFire && core.io.axi.b.bits.id.peek().litValue == 7
+                }
+                if (wFire && core.io.axi.w.bits.last.peek().litToBoolean) {
+                  activeWriteId = None
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val afterFirstEpoch = initialData + 5
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"preAtomic=($preResetAr,$preResetAw,$preResetWLast), " +
+              s"finalAtomic=($finalAr,$finalAw,$finalWLast,$finalB), trace=$retired") {
+              assert(resetIssued && preResetAr && preResetAw && preResetWLast)
+              assert(finalAr && finalAw && finalWLast && finalB)
+              assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12))
+              assert(retired.exists(event => event.pc == ResetVector + 8 &&
+                event.gprWrite && event.gprAddress == 3 && event.gprData == afterFirstEpoch &&
+                event.memoryAddress == atomicAddress && event.memoryReadData == afterFirstEpoch &&
+                event.memoryWriteMask == 15 && event.memoryWriteData == afterFirstEpoch + 5 &&
+                !event.trap))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "id7-atomic-reset", schedule, events)
               throw failure
           }
         }
