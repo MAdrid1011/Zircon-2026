@@ -231,6 +231,11 @@ transfer handshake. The directed case passes 1/1 in 3.863 seconds. This closes
 one victim-backpressure cross-product cell only; saturated waiter and
 squash/flush combinations remain open.
 
+The same component spec also merges two same-line loads into one unissued MSHR,
+then squashes only the younger ROB tag before its L2 probe. The older waiter
+must retain the shared owner and complete exactly once after refill; no younger
+completion may remain. This recovery case passes 1/1 in 4.380 seconds.
+
 Each random failure bundle contains the generator and memory seeds, ELF and
 SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
 path. No timeout increase, response filtering, or seed replacement is a valid

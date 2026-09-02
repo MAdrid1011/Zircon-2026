@@ -1438,6 +1438,39 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("keeps an older same-line waiter while squashing its merged peer") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80006e00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("24000000", 16) + word)
+
+        // The two lanes deliberately merge into one unissued MSHR. Recovery
+        // may clear only the younger waiter; it must not release the shared
+        // demand owner that the older architectural load still needs.
+        presentLoad(dut, lane = 0, tag = 7, address = line + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = line + 12)
+        dut.io.request.foreach(_.ready.expect(true))
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(3)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(line)
+        issueRefill(dut, words, lineAddress = line)
+
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(3))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("drains an accepted younger dual-miss probe before serving the survivor") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
