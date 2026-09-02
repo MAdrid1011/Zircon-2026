@@ -23,6 +23,28 @@ The adapter must not issue the external modifier before response handshake. It
 must retry an unacknowledged request after reset. The port is not a shared-cache
 read protocol and supplies no implicit coherent external reads.
 
+## Controller Foundation
+
+`ExternalCoherenceController` now implements the retained one-request
+lifecycle as an independently tested M3 component. It blocks cacheable ingress
+from request acceptance through response, requests exact-line L1D then L2
+cleanup, waits for the matching ID-5 completion only when the L2 cleanup
+reported a dirty victim, invalidates I-side state and the line-scoped LR
+reservation, and finally presents the original `{kind, lineAddress}` response.
+The component accepts only 32-byte-aligned `WriteInvalidate` and
+`AtomicInvalidate` requests and does not accept a replacement request while
+the retained request is active.
+
+This is not yet an externally coherent core. `ZirconCore` has not yet exposed
+the port or connected its existing L1D/L2/atomic endpoints to the controller;
+the endpoint cleanup acknowledgement must first be widened to handle clean and
+absent target lines without disturbing in-flight owners. The current local
+foundation check is:
+
+```bash
+./scripts/sbtw 'testOnly zircon.ExternalCoherenceControllerSpec'
+```
+
 ## Required Invariants
 
 - One accepted coherence request has one exact response, except reset.
