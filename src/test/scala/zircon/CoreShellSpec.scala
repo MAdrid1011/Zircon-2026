@@ -57,6 +57,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedfc03L)
   private val M3PartialStoreForwardSeeds = Seq(0x5eedfd01L, 0x5eedfd02L,
     0x5eedfd03L)
+  private val M3MshrPressureSeeds = Seq(0x5eedfe01L, 0x5eedfe02L,
+    0x5eedfe03L, 0x5eedfe04L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -3527,6 +3529,101 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "four-owner-interleave", schedule, events,
+                Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("holds a fifth cache miss until a seeded live owner releases credit") {
+      for (seed <- M3MshrPressureSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1280
+          val schedule = seededAxiSchedule(seed, cycles)
+          val selectorSeed = seed ^ 0x6d736872L
+          val selectorRandom = new Random(selectorSeed)
+          val lines = (0 until 5).map(index => BigInt("80001000", 16) + index * 0x20)
+          val expected = (0 until 5).map(index => BigInt("30000000", 16) + index)
+          val dataArs = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val dataOwnerBeats = scala.collection.mutable.Map.empty[BigInt, Int]
+          var dataResponseReleased = false
+          var firstDataResponseSeen = false
+          var fifthBeforeRelease = false
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
+              ResetVector + 12 -> BigInt("0400a203", 16), // lw x4,64(x1)
+              ResetVector + 16 -> BigInt("0600a283", 16), // lw x5,96(x1)
+              ResetVector + 20 -> BigInt("0800a303", 16), // lw x6,128(x1)
+              ResetVector + 24 -> BigInt("00100073", 16),
+              lines(0) -> expected(0), lines(1) -> expected(1),
+              lines(2) -> expected(2), lines(3) -> expected(3),
+              lines(4) -> expected(4)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                if (candidates.isEmpty) 0
+                else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              readValidForCycle = (_, _, address) =>
+                !lines.contains(address) || dataResponseReleased,
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                val rId = core.io.axi.r.bits.id.peek().litValue
+                val dataRFire = rFire && dataOwnerBeats.contains(rId)
+                if (arFire) {
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (lines.contains(address)) {
+                    val id = core.io.axi.ar.bits.id.peek().litValue
+                    dataArs += ((address, id))
+                    dataOwnerBeats.update(id, 8)
+                    if (address == lines(4) && !firstDataResponseSeen && !dataRFire) {
+                      fifthBeforeRelease = true
+                    }
+                    if (dataArs.map(_._1).distinct.size == 4) {
+                      dataResponseReleased = true
+                    }
+                  }
+                }
+                if (dataRFire) {
+                  firstDataResponseSeen = true
+                  val remaining = dataOwnerBeats(rId) - 1
+                  if (remaining == 0) dataOwnerBeats.remove(rId)
+                  else dataOwnerBeats.update(rId, remaining)
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} selector=0x" +
+              s"${java.lang.Long.toHexString(selectorSeed)} ars=$dataArs trace=$retired") {
+              assert(dataArs.take(4).map(_._1).toSet == lines.take(4).toSet,
+                "four live MSHRs did not own the oldest four lines before release")
+              assert(!fifthBeforeRelease,
+                "fifth miss acquired an AXI owner before a live owner released credit")
+              assert(dataArs.map(_._1).toSet == lines.toSet,
+                "fifth miss did not acquire a reclaimed owner credit")
+              for (index <- lines.indices) {
+                val pc = ResetVector + 4 + index * 4
+                assert(retired.exists(event => event.pc == pc && event.gprWrite &&
+                  event.gprAddress == index + 2 && event.gprData == expected(index) &&
+                  event.memoryAddress == lines(index) && event.memoryReadData == expected(index)))
+              }
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "mshr-full-credit-reclaim", schedule, events,
                 Some(selectorSeed))
               throw failure
           }
