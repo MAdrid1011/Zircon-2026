@@ -6,6 +6,7 @@ import zircon.memory.{ExternalCoherenceController, ExternalCoherenceKind}
 
 class ExternalCoherenceControllerSpec extends AnyFunSpec with ChiselSim {
   private val Line = BigInt("80001000", 16)
+  private val SecondLine = BigInt("80002000", 16)
 
   private def clear(dut: ExternalCoherenceController): Unit = {
     dut.io.request.valid.poke(false)
@@ -170,6 +171,51 @@ class ExternalCoherenceControllerSpec extends AnyFunSpec with ChiselSim {
         dut.io.response.valid.expect(true)
         dut.io.response.bits.kind.expect(ExternalCoherenceKind.AtomicInvalidate)
         dut.io.response.bits.lineAddress.expect(Line)
+      }
+    }
+
+    it("drops a dirty cleanup epoch on reset before accepting a fresh request") {
+      simulate(new ExternalCoherenceController) { dut =>
+        clear(dut)
+        offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue)
+        dut.clock.step()
+        dut.io.request.valid.poke(false)
+        advanceClean(dut, l2Dirty = true)
+        dut.io.response.valid.expect(false)
+
+        // A reset between cleanup and the ID-5 completion discards the held
+        // request. A stale completion from that epoch must not authorize the
+        // next modifier.
+        dut.reset.poke(true)
+        dut.clock.step()
+        dut.reset.poke(false)
+        dut.io.response.valid.expect(false)
+        dut.io.request.ready.expect(true)
+        dut.io.writebackComplete.valid.poke(true)
+        dut.io.writebackComplete.bits.poke(Line)
+        dut.clock.step()
+        dut.io.writebackComplete.valid.poke(false)
+        dut.io.response.valid.expect(false)
+
+        offer(dut, ExternalCoherenceKind.AtomicInvalidate.litValue, SecondLine)
+        dut.io.request.ready.expect(true)
+        dut.clock.step()
+        dut.io.request.valid.poke(false)
+        dut.io.l1dCleanup.valid.expect(true)
+        dut.io.l1dCleanup.bits.expect(SecondLine)
+        dut.io.l1dCleanup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l1dCleanup.ready.poke(false)
+        dut.io.l2Cleanup.valid.expect(true)
+        dut.io.l2Cleanup.bits.expect(SecondLine)
+        dut.io.l2CleanupDirty.poke(false)
+        dut.io.l2Cleanup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Cleanup.ready.poke(false)
+        dut.clock.step()
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.kind.expect(ExternalCoherenceKind.AtomicInvalidate)
+        dut.io.response.bits.lineAddress.expect(SecondLine)
       }
     }
   }

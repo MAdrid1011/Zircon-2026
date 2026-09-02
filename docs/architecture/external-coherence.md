@@ -95,6 +95,10 @@ response. `ExternalCoherenceControllerSpec` additionally holds a response under
 explicit backpressure while offering a second legal request, proving that the
 first kind/line payload remains stable, cacheable ingress stays blocked, and
 the replacement is accepted only after the original response fires.
+The controller's dirty-cleanup reset case resets after L2 cleanup has created
+the writeback dependency, presents a stale completion from that discarded
+epoch, then completes a different clean request. The stale completion produces
+no response or authorization; the fresh request performs its own cleanup.
 `CoreShellSpec` applies the same rule at the production port: it holds an
 atomic-invalidate acknowledgement for three cycles, checks the exact retained
 payload every cycle, then permits one response and requires refetch through

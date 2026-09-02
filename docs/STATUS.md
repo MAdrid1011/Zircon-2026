@@ -90,8 +90,11 @@ reset; its two directed tests pass locally. A complete-core LR/SC slice adds
 three explicit AXI-backpressure seeds each for matching and disjoint external
 invalidations: the matching case clears the reservation and permits no ID-7
 write, while the disjoint case retains it and permits exactly one write only
-after the acknowledgement. `make test-m3-external-coherence` now covers six
-component and eleven core cases. Concrete
+after the acknowledgement. `ExternalCoherenceControllerSpec` additionally
+resets a dirty-cleanup epoch before its writeback completion, supplies that
+discarded epoch's stale completion, and requires a later request to perform
+its own cleanup before its only response. `make test-m3-external-coherence`
+now covers seven component and eleven core cases. Concrete
 `ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
 external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
