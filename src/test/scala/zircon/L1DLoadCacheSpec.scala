@@ -908,6 +908,77 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("holds a younger dirty-victim miss through L2 backpressure after an older hit") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("80008e00", 16)
+        val residentB = BigInt("80009000", 16)
+        val missLine = BigInt("80009200", 16)
+        val hitLine = BigInt("80008f00", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("66000000", 16) + word)
+        val hitWords = Seq.tabulate(8)(word => BigInt("67000000", 16) + word)
+        val refillWords = Seq.tabulate(8)(word => BigInt("68000000", 16) + word)
+
+        // The replacement set has two dirty residents; the independent old
+        // hit should not be held behind an unavailable L1D-to-L2 transfer.
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, residentWords, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, residentWords, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 3, address = hitLine)
+        issueRefill(dut, hitWords, lineAddress = hitLine)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 4, address = residentA + 4,
+          mask = 15, data = BigInt("dead0005", 16))
+        consumeStoreResult(dut, tag = 4, address = residentA + 4)
+        submitStore(dut, tag = 5, address = residentB + 4,
+          mask = 15, data = BigInt("dead0006", 16))
+        consumeStoreResult(dut, tag = 5, address = residentB + 4)
+
+        dut.io.l2Insert.ready.poke(false)
+        presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(false)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        // Once the old result owns its slot, the retained miss exposes its
+        // exact dirty victim but cannot allocate until that transfer fires.
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(1).expect(BigInt("dead0005", 16))
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(true)
+
+        dut.io.l2Insert.ready.poke(true)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Insert.ready.poke(false)
+        issueRefill(dut, refillWords, lineAddress = missLine)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(refillWords(1))
+      }
+    }
+
     it("replays a younger dirty-victim miss behind an older different-set miss") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

@@ -223,6 +223,14 @@ and the target `EBREAK` takes its exact trap. On 2026-09-02 this was 1/1 in
 12.545 seconds. The larger squash/flush and resource-pressure cross-product
 remains open.
 
+`L1DLoadCacheSpec` additionally holds the L1D-to-L2 insert boundary low for a
+younger dirty-victim miss while an older different-set hit arrives on the other
+lane. The hit must be accepted and complete independently; the retained miss
+must expose the exact dirty victim but cannot allocate an MSHR before the
+transfer handshake. The directed case passes 1/1 in 3.863 seconds. This closes
+one victim-backpressure cross-product cell only; saturated waiter and
+squash/flush combinations remain open.
+
 Each random failure bundle contains the generator and memory seeds, ELF and
 SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
 path. No timeout increase, response filtering, or seed replacement is a valid
