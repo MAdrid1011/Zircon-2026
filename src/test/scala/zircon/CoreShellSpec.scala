@@ -27,6 +27,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedc003L, 0x5eedc004L)
   private val M3FenceRetrySeeds = Seq(0x5eedd001L, 0x5eedd002L,
     0x5eedd003L, 0x5eedd004L)
+  private val M3AxiMixedTrafficSeeds = Seq(0x5eede001L, 0x5eede002L,
+    0x5eede003L, 0x5eede004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -1014,6 +1016,90 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "fence-writeback-retry", schedule, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("preserves mixed cache and device AXI traffic through seeded backpressure") {
+      for (seed <- M3AxiMixedTrafficSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1280
+          val schedule = seededAxiSchedule(seed, cycles)
+          val firstLine = BigInt("80001000", 16)
+          val secondLine = firstLine + 64
+          val deviceAddress = BigInt("b0000000", 16)
+          val dataArAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val writeAw = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val writeResponses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("b0000237", 16), // lui x4,0xb0000
+              ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 12 -> BigInt("0220a023", 16), // sw x2,32(x1)
+              ResetVector + 16 -> BigInt("00222023", 16), // sw x2,0(x4)
+              ResetVector + 20 -> BigInt("0400a283", 16), // lw x5,64(x1)
+              ResetVector + 24 -> BigInt("0000000f", 16), // fence
+              ResetVector + 28 -> BigInt("00100073", 16),
+              firstLine -> BigInt("11223344", 16),
+              secondLine -> BigInt("55667788", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire) {
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (address == firstLine || address == secondLine) dataArAddresses += address
+                }
+                if (awFire) {
+                  writeAw += ((core.io.axi.aw.bits.id.peek().litValue,
+                    core.io.axi.aw.bits.len.peek().litValue))
+                }
+                if (bFire) writeResponses += core.io.axi.b.bits.id.peek().litValue
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, dataAr=$dataArAddresses, " +
+              s"aw=$writeAw, b=$writeResponses, trace=$retired") {
+              assert(dataArAddresses.toSet == Set(firstLine, secondLine))
+              assert(writeAw.toSet == Set((BigInt(5), BigInt(7)), (BigInt(6), BigInt(0))))
+              assert(writeResponses.toSet == Set(BigInt(5), BigInt(6)))
+              assert(retired.exists(event => event.pc == ResetVector + 8 &&
+                event.gprWrite && event.gprAddress == 2 &&
+                event.gprData == BigInt("11223344", 16) &&
+                event.memoryAddress == firstLine && event.memoryReadData ==
+                  BigInt("11223344", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 12 &&
+                event.memoryAddress == firstLine + 32 && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == BigInt("11223344", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 16 &&
+                event.memoryAddress == deviceAddress && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == BigInt("11223344", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 20 &&
+                event.gprWrite && event.gprAddress == 5 &&
+                event.gprData == BigInt("55667788", 16) &&
+                event.memoryAddress == secondLine && event.memoryReadData ==
+                  BigInt("55667788", 16)))
+              assert(retired.exists(_.instruction == BigInt("0000000f", 16)))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "mixed-cache-device-traffic", schedule, events)
               throw failure
           }
         }
