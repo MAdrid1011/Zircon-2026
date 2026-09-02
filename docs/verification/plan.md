@@ -203,6 +203,10 @@ the second successful B.
 The reset slice accepts one request behind an in-flight instruction refill,
 resets before its RLAST, and then requires that no stale response appears: a
 new epoch must drain a fresh refill before one response for a different line.
+The matching-D-side-refill slice accepts the request after the target L1D AR
+but before its delayed RLAST, suppresses the response until that exact ID
+drains, and requires the original load's complete GPR and memory retirement
+metadata before EBREAK.
 `AtomicMemoryEngineSpec` verifies that line invalidation clears a reservation
 held at a non-base word. ZirconSim's production driver explicitly holds the
 sideband idle and the traced RV32A `tohost` run still exits 0 at 228 cycles/12

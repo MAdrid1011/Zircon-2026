@@ -78,6 +78,9 @@ cycles/12 retirements. A directed error slice retries the same target line
 after a failing ID-5 B and suppresses response until the retry succeeds.
 The reset slice drops an accepted request before its held instruction RLAST,
 then permits only a fresh-epoch request/response for a different line.
+The matching-L1D-refill slice accepts the request after target AR, delays the
+target RLAST, and verifies no response before that exact owner drains while
+the original load retains exact retire metadata.
 FPGA/SoC platform adapter, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
 
