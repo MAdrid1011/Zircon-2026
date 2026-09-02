@@ -65,10 +65,10 @@ killed request from being completed while also preventing an accepted transfer
 from being orphaned or reassigned to the survivor.
 
 The implementation must use a two-port FPGA-friendly tag/data organization.
-For the Nexys4 DDR point this is a registered RAM boundary or an equivalent
-inferred/instantiated true dual-port RAM with documented read-during-write
-semantics. It must not duplicate the complete cache array merely to shorten a
-combinational path.
+For the `xc7a200tfbg676-2L` release point this is a registered RAM boundary or
+an equivalent inferred/instantiated true dual-port RAM with documented
+read-during-write semantics. It must not duplicate the complete cache array
+merely to shorten a combinational path.
 
 ## Consequences
 

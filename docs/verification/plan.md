@@ -199,10 +199,10 @@ fix for an unexplained mismatch.
 
 ## FPGA and Throughput Gate
 
-[`nexys4-timing.md`](nexys4-timing.md) defines the mandatory Nexys4 DDR
-post-route 100 MHz timing gate and the component/full-core simulation throughput
-evidence. The current codebase has no FPGA wrapper/XDC/report, so this gate is
-unverified and remains a release blocker; it does not justify waiting instead
-of implementing the remaining M3--M6 work. `make test-m3-store` is the focused
-cacheable-store regression tier and must remain below the five-minute component
-simulation budget.
+[`fpga-timing.md`](fpga-timing.md) defines the mandatory
+`xc7a200tfbg676-2L` post-route 100 MHz timing gate and the component/full-core
+simulation throughput evidence. The current codebase has no FPGA wrapper/XDC/report,
+so this gate is unverified and remains a release blocker; it does not justify
+waiting instead of implementing the remaining M3--M6 work. `make test-m3-store`
+is the focused cacheable-store regression tier and must remain below the
+five-minute component simulation budget.

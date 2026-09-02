@@ -10,7 +10,7 @@
     "llvm": "22.1.8",
     "llvmAptPackage": "1:22.1.8~++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80",
     "vivado": "2026.1",
-    "fpgaPart": "xc7a100tcsg324-1"
+    "fpgaPart": "xc7a200tfbg676-2L"
   },
   "upstreams": {
     "verilator": "848d926ebd4addacacd294dc84e35d9d4ae8078c",
