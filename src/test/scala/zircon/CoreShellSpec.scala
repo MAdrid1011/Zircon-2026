@@ -13,6 +13,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eed2002L, 0x5eed3003L)
   private val M3AxiStressSeeds = Seq(0x5eed3004L, 0x5eed3005L,
     0x5eed3006L, 0x5eed3007L)
+  private val M3AxiResetSeeds = Seq(0x5eed7001L, 0x5eed7002L,
+    0x5eed7003L, 0x5eed7004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -100,7 +102,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       observeCycle: (ZirconCore, Int) => Unit = (_, _) => (),
       awReadyForCycle: Int => Boolean = _ => true,
       wReadyForCycle: Int => Boolean = _ => true,
-      bValidForCycle: Int => Boolean = _ => true
+      bValidForCycle: Int => Boolean = _ => true,
+      resetForCycle: (ZirconCore, Int) => Boolean = (_, _) => false
   ): Seq[TraceSample] = {
     val pendingReads = scala.collection.mutable.Queue.empty[(BigInt, BigInt, BigInt, Boolean)]
     val backingMemory = scala.collection.mutable.Map.empty[BigInt, BigInt] ++ program
@@ -117,10 +120,26 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
 
     dut.clock.step(128) // Deterministic bimodal/BTB scrubs.
     for (cycle <- 0 until cycles) {
-      driveInterrupts(dut, events.toSeq)
-      dut.io.axi.ar.ready.poke(arReadyForCycle(cycle))
-      dut.io.axi.aw.ready.poke(awReadyForCycle(cycle))
-      dut.io.axi.w.ready.poke(wReadyForCycle(cycle))
+      val resetActive = resetForCycle(dut, cycle)
+      dut.reset.poke(resetActive)
+      if (resetActive) {
+        // AXI reset starts a new ownership epoch. The external model drops
+        // responses for requests from the old epoch but retains memory data.
+        pendingReads.clear()
+        events.clear()
+        rHeld = false
+        awSeen = false
+        wLastSeen = false
+        bQueued = false
+        bHeld = false
+        heldReadIndex = 0
+        writeBeat = 0
+      } else {
+        driveInterrupts(dut, events.toSeq)
+      }
+      dut.io.axi.ar.ready.poke(!resetActive && arReadyForCycle(cycle))
+      dut.io.axi.aw.ready.poke(!resetActive && awReadyForCycle(cycle))
+      dut.io.axi.w.ready.poke(!resetActive && wReadyForCycle(cycle))
       val selectedReadIndex = if (rHeld) heldReadIndex else {
         val requested = readSelectForCycle(cycle, pendingReads.toSeq)
         requested.max(0).min(pendingReads.size - 1)
@@ -128,7 +147,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       val selectedReadPermitted = pendingReads.nonEmpty &&
         readValidForCycle(cycle, pendingReads(selectedReadIndex)._1,
           pendingReads(selectedReadIndex)._2)
-      val rOffered = pendingReads.nonEmpty &&
+      val rOffered = !resetActive && pendingReads.nonEmpty &&
         (rHeld || (rValidForCycle(cycle) && selectedReadPermitted))
       if (rOffered) {
         val (id, address, data, last) = pendingReads(selectedReadIndex)
@@ -140,14 +159,14 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       } else {
         dut.io.axi.r.valid.poke(false)
       }
-      val bOffered = writeResponse.nonEmpty && bQueued &&
+      val bOffered = !resetActive && writeResponse.nonEmpty && bQueued &&
         (bHeld || bValidForCycle(cycle))
       dut.io.axi.b.valid.poke(bOffered)
       dut.io.axi.b.bits.id.poke(writeId)
       dut.io.axi.b.bits.resp.poke(writeResponse.getOrElse(0))
 
       dut.io.trace.get.foreach { event =>
-        if (event.valid.peek().litToBoolean) {
+        if (!resetActive && event.valid.peek().litToBoolean) {
           events += TraceSample(
             order = event.order.peek().litValue,
             pc = event.pc.peek().litValue,
@@ -2037,6 +2056,118 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "four-owner-interleave", schedule, events,
+                Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("starts a clean AXI owner epoch after reset with a partial RRESP fault") {
+      for (seed <- M3AxiResetSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1280
+          val schedule = seededAxiSchedule(seed, cycles)
+          val selectorSeed = seed ^ 0x13579bdfL
+          val selectorRandom = new Random(selectorSeed)
+          val lines = Seq(
+            BigInt("80001000", 16), BigInt("80001020", 16),
+            BigInt("80001040", 16), BigInt("80001060", 16))
+          val expected = Seq(
+            BigInt("10203040", 16), BigInt("50607080", 16),
+            BigInt("90a0b0c0", 16), BigInt("d0e0f000", 16))
+          val preResetOwnerIds = scala.collection.mutable.Set.empty[BigInt]
+          var faultOfferId = Option.empty[BigInt]
+          var faultBeatAccepted = false
+          var resetIssued = false
+          var events = Seq.empty[TraceSample]
+
+          def isDataAddress(address: BigInt): Boolean =
+            address >= lines.head && address < lines.last + 32
+
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
+              ResetVector + 12 -> BigInt("0400a203", 16), // lw x4,64(x1)
+              ResetVector + 16 -> BigInt("0600a283", 16), // lw x5,96(x1)
+              ResetVector + 20 -> BigInt("00100073", 16),
+              lines(0) -> expected(0), lines(1) -> expected(1),
+              lines(2) -> expected(2), lines(3) -> expected(3)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                val dataCandidates = candidates.filter(index =>
+                  isDataAddress(pending(index)._2))
+                val instructionCandidates = candidates.filterNot(index =>
+                  isDataAddress(pending(index)._2))
+                if (!resetIssued && preResetOwnerIds.size == 4 &&
+                    !faultBeatAccepted && dataCandidates.nonEmpty) {
+                  val selected = dataCandidates(selectorRandom.nextInt(dataCandidates.size))
+                  faultOfferId = Some(pending(selected)._1)
+                  selected
+                } else if (!resetIssued && instructionCandidates.nonEmpty) {
+                  instructionCandidates.head
+                } else if (candidates.nonEmpty) {
+                  candidates(selectorRandom.nextInt(candidates.size))
+                } else 0
+              },
+              readValidForCycle = (_, _, address) => {
+                !isDataAddress(address) || resetIssued ||
+                  (preResetOwnerIds.size == 4 && !faultBeatAccepted)
+              },
+              rResponse = (_, address) =>
+                if (!resetIssued && isDataAddress(address)) 2 else 0,
+              resetForCycle = (_, _) => {
+                val assertReset = faultBeatAccepted && !resetIssued
+                if (assertReset) resetIssued = true
+                assertReset
+              },
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                if (!resetIssued && arFire &&
+                    isDataAddress(core.io.axi.ar.bits.addr.peek().litValue)) {
+                  preResetOwnerIds += core.io.axi.ar.bits.id.peek().litValue
+                }
+                if (!resetIssued && rFire && faultOfferId.contains(
+                    core.io.axi.r.bits.id.peek().litValue)) {
+                  faultBeatAccepted = true
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"preResetOwners=$preResetOwnerIds, faultBeat=$faultBeatAccepted, " +
+              s"reset=$resetIssued, trace=$retired") {
+              assert(preResetOwnerIds.size == 4)
+              assert(faultBeatAccepted && resetIssued)
+              assert(retired.map(_.pc) == Seq(ResetVector, ResetVector + 4,
+                ResetVector + 8, ResetVector + 12, ResetVector + 16,
+                ResetVector + 20))
+              for ((pc, register, value, address) <- Seq(
+                  (ResetVector + 4, 2, expected(0), lines(0)),
+                  (ResetVector + 8, 3, expected(1), lines(1)),
+                  (ResetVector + 12, 4, expected(2), lines(2)),
+                  (ResetVector + 16, 5, expected(3), lines(3)))) {
+                assert(retired.exists(event => event.pc == pc && event.gprWrite &&
+                  event.gprAddress == register && event.gprData == value &&
+                  event.memoryAddress == address && event.memoryReadData == value &&
+                  !event.trap))
+              }
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "reset-owner-epoch", schedule, events,
                 Some(selectorSeed))
               throw failure
           }

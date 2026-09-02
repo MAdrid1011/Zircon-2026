@@ -128,6 +128,48 @@ class AXIDataReadEngineSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("releases all owners and prior RRESP fault state across reset") {
+      simulate(new AXIDataReadEngine) { dut =>
+        clear(dut)
+        val base = BigInt("80010000", 16)
+        for (mshr <- 0 until 4) {
+          acceptRequest(dut, mshr, base + mshr * 0x20)
+        }
+        dut.io.request.ready.expect(false)
+
+        // Leave every physical owner live, with one owner already carrying a
+        // fault. Reset must discard both the external ownership epoch and all
+        // partial response state before an AXI ID can be reused.
+        for (owner <- 0 until 4) {
+          receiveBeat(dut, id = owner + 1,
+            data = BigInt("71000000", 16) + owner * 0x100,
+            last = false, response = if (owner == 2) 2 else 0)
+        }
+        dut.reset.poke(true)
+        dut.clock.step()
+        dut.reset.poke(false)
+        dut.clock.step()
+
+        dut.io.ar.valid.expect(false)
+        dut.io.response.valid.expect(false)
+        dut.io.request.ready.expect(true)
+
+        acceptRequest(dut, mshr = 3, base + 0x100, physicalId = 1)
+        for (beat <- 0 until 8) {
+          receiveBeat(dut, id = 1,
+            data = BigInt("72000000", 16) + beat,
+            last = beat == 7)
+        }
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.clientMshr.expect(3)
+        dut.io.response.bits.accessFault.expect(false)
+        for (beat <- 0 until 8) {
+          dut.io.response.bits.lineData(beat).expect(
+            BigInt("72000000", 16) + beat)
+        }
+      }
+    }
+
     it("keeps four live owners distinct across interleaved eight-beat refills") {
       simulate(new AXIDataReadEngine) { dut =>
         clear(dut)
