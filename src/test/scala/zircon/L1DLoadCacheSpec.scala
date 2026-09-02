@@ -1367,6 +1367,52 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("releases a fully squashed waiter MSHR before its L2 probe is accepted") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val killedLine = BigInt("80008800", 16)
+        val freshLine = BigInt("80008900", 16)
+
+        // Four same-line dual pairs consume every waiter while the serialized
+        // L2 probe remains unaccepted. Every tag is younger than the squash
+        // boundary, so no architectural waiter survives the recovery.
+        for (pair <- 0 until 4) {
+          presentLoad(dut, lane = 0, tag = 2 + pair * 2,
+            address = killedLine + pair * 8)
+          presentLoad(dut, lane = 1, tag = 3 + pair * 2,
+            address = killedLine + pair * 8 + 4)
+          dut.io.request.foreach(_.ready.expect(true))
+          dut.clock.step()
+          dut.io.request.foreach(_.valid.poke(false))
+        }
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(killedLine)
+
+        // This MSHR has not crossed the L2 boundary, hence squash must drop
+        // all eight waiters and release its credit without an L2/AXI drain or
+        // a fabricated completion.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(1)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // A fresh miss must reclaim the released MSHR instead of inheriting a
+        // stale waiter or serialized probe for the killed line.
+        presentLoad(dut, lane = 0, tag = 10, address = freshLine + 12)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(freshLine)
+      }
+    }
+
     it("holds a dirty-victim miss behind L2 transfer backpressure") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
