@@ -575,6 +575,108 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("takes FS-Off RV32F operations as exact illegal-instruction traps") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val fmvWX = BigInt("f00003d3", 16) // fmv.w.x f7,x0
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> fmvWX,
+          ResetVector + 4 -> BigInt("00100073", 16)
+        ), cycles = 192))
+        assert(events.size == 1 && events.head.trap && events.head.cause == 2 &&
+          events.head.pc == ResetVector && events.head.instruction == fmvWX &&
+          events.head.trapValue == fmvWX && !events.head.fprWrite,
+          s"FS-Off move did not produce an exact illegal trap: $events")
+      }
+    }
+
+    it("commits all RV32F sign-injection forms and marks FS dirty") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val fmvWX7 = opFp(0x78, rs2 = 0, rs1 = 2, funct3 = 0, rd = 7)
+        val fmvWX8 = opFp(0x78, rs2 = 0, rs1 = 3, funct3 = 0, rd = 8)
+        val fsgnj = opFp(0x10, rs2 = 8, rs1 = 7, funct3 = 0, rd = 9)
+        val fsgnjn = opFp(0x10, rs2 = 8, rs1 = 7, funct3 = 1, rd = 10)
+        val fsgnjx = opFp(0x10, rs2 = 8, rs1 = 7, funct3 = 2, rd = 11)
+        val fmvXW4 = opFp(0x70, rs2 = 0, rs1 = 9, funct3 = 0, rd = 4)
+        val fmvXW5 = opFp(0x70, rs2 = 0, rs1 = 10, funct3 = 0, rd = 5)
+        val fmvXW6 = opFp(0x70, rs2 = 0, rs1 = 11, funct3 = 0, rd = 6)
+        val readMstatus = BigInt((0x300L << 20) | (2L << 12) | (12L << 7) | 0x73L)
+        val program = Map(
+          ResetVector -> BigInt("000020b7", 16),
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("12345137", 16),
+          ResetVector + 12 -> BigInt("800001b7", 16),
+          ResetVector + 16 -> Nop,
+          ResetVector + 20 -> Nop,
+          ResetVector + 24 -> Nop,
+          ResetVector + 28 -> Nop,
+          ResetVector + 32 -> fmvWX7,
+          ResetVector + 36 -> fmvWX8,
+          ResetVector + 40 -> fsgnj,
+          ResetVector + 44 -> fsgnjn,
+          ResetVector + 48 -> fsgnjx,
+          ResetVector + 52 -> fmvXW4,
+          ResetVector + 56 -> fmvXW5,
+          ResetVector + 60 -> fmvXW6,
+          ResetVector + 64 -> readMstatus,
+          ResetVector + 68 -> BigInt("00100073", 16)
+        )
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 768))
+        val expectedFpr = Map(
+          fmvWX7 -> (7, BigInt("12345000", 16)),
+          fmvWX8 -> (8, BigInt("80000000", 16)),
+          fsgnj -> (9, BigInt("92345000", 16)),
+          fsgnjn -> (10, BigInt("12345000", 16)),
+          fsgnjx -> (11, BigInt("92345000", 16))
+        )
+        expectedFpr.foreach { case (instruction, (address, data)) =>
+          val event = events.find(_.instruction == instruction).getOrElse(
+            fail(s"missing RV32F sign event for 0x${instruction.toString(16)}: $events"))
+          assert(event.fprWrite && event.fprAddress == address && event.fprData == data,
+            s"wrong FPR result for 0x${instruction.toString(16)}: $event")
+        }
+        val expectedGpr = Seq(4 -> BigInt("92345000", 16),
+          5 -> BigInt("12345000", 16), 6 -> BigInt("92345000", 16))
+        expectedGpr.foreach { case (address, data) =>
+          assert(events.exists(event => event.gprWrite && event.gprAddress == address &&
+            event.gprData == data), s"missing exact FMV.X.W x$address value in $events")
+        }
+        assert(events.exists(event => event.instruction == readMstatus && event.gprWrite &&
+          event.gprAddress == 12 && (event.gprData & BigInt("00006000", 16)) ==
+            BigInt("00006000", 16)),
+          s"FPR commit did not set mstatus.FS=Dirty: $events")
+      }
+    }
+
+    it("squashes a wrong-path RV32F result before any architectural FPR write") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val fmvWX = BigInt("f00003d3", 16)
+        val program = Map(
+          ResetVector -> BigInt("000020b7", 16),
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> Nop,
+          ResetVector + 12 -> Nop,
+          ResetVector + 16 -> Nop,
+          ResetVector + 20 -> Nop,
+          ResetVector + 24 -> Nop,
+          ResetVector + 28 -> Nop,
+          ResetVector + 32 -> BigInt("00000463", 16), // beq x0,x0,+8
+          ResetVector + 36 -> fmvWX,
+          ResetVector + 40 -> BigInt("00100073", 16)
+        )
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 512))
+        assert(!events.exists(event => event.instruction == fmvWX || event.fprWrite),
+          s"wrong-path FPR state escaped branch recovery: $events")
+        assert(events.last.trap && events.last.pc == ResetVector + 40 &&
+          events.last.cause == 3)
+      }
+    }
+
     it("removes trace and M2 observation ports from the production configuration") {
       simulate(new ZirconCore(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)
