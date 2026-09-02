@@ -53,6 +53,14 @@ victim-transfer, or shared-set arbitration still use the older request only.
 This is explicitly not evidence that the remaining MSHR, victim, and L2 rows
 are done.
 
+Recovery preserves transfer ownership independently from waiter ownership. A
+flush or squash may release a killed MSHR only before its L2 probe fires. Once
+the probe is accepted, the MSHR remains the sole response sink until its L2
+response is consumed, even when all of its load waiters have been removed. A
+surviving older MSHR may then issue its own serialized probe. This prevents a
+killed request from being completed while also preventing an accepted transfer
+from being orphaned or reassigned to the survivor.
+
 The implementation must use a two-port FPGA-friendly tag/data organization.
 For the Nexys4 DDR point this is a registered RAM boundary or an equivalent
 inferred/instantiated true dual-port RAM with documented read-during-write
@@ -75,6 +83,10 @@ combinational path.
   retained hit and one exact miss waiter, and two distinct MSHR IDs for an
   invalid-way different-set dual miss. Same-set replay remains a conservative
   check, not evidence for victim-transfer-safe hit/miss or dual-miss rows.
+- Recovery coverage proves both dual-miss cases: a squashed younger MSHR that
+  has not issued an L2 probe is released, while a squashed younger MSHR with an
+  accepted probe drains its L2 response without a completion before the older
+  survivor probes and completes.
 - The static-area ledger must include added port state, result buffering,
   conflict comparators, and any RAM port replication. A later timing report
   must identify whether a failing path is dominated by RAM routing or logic.

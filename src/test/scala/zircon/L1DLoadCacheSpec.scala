@@ -843,6 +843,79 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drops only the younger dual-miss owner before L2 acceptance") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerLine = BigInt("80006c00", 16)
+        val olderLine = BigInt("80006d00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("22000000", 16) + word)
+
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine + 12)
+        dut.io.request.foreach(_.ready.expect(true))
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        // The younger MSHR has not crossed the L2 boundary, so recovery may
+        // release it. The older owner survives and becomes the sole probe.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(3)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(olderLine)
+        issueRefill(dut, words, lineAddress = olderLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(3))
+      }
+    }
+
+    it("drains an accepted younger dual-miss probe before serving the survivor") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerLine = BigInt("80007000", 16)
+        val olderLine = BigInt("80007100", 16)
+        val youngerWords = Seq.tabulate(8)(word => BigInt("11000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("10000000", 16) + word)
+
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine + 16)
+        dut.io.request.foreach(_.ready.expect(true))
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(youngerLine)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+
+        // This owner crossed the L2 boundary. Squash removes its waiter but
+        // not its transfer owner, which must consume its response first.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(3)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(true)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(youngerLine)
+        dut.io.l2Response.bits.transfer.lineData.zip(youngerWords).foreach {
+          case (word, data) => word.poke(data)
+        }
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+
+        dut.io.completion.valid.expect(false)
+        issueRefill(dut, olderWords, lineAddress = olderLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(olderWords(4))
+      }
+    }
+
     it("drains a flushed L2 miss transfer without creating a fallback AXI refill") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
