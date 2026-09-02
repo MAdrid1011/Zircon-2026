@@ -1124,6 +1124,71 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("squashes a younger dirty-victim replay after the older transfer fires") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerResidentA = BigInt("8000b800", 16)
+        val youngerResidentB = BigInt("8000ba00", 16)
+        val youngerLine = BigInt("8000bc00", 16)
+        val olderResidentA = BigInt("8000b900", 16)
+        val olderResidentB = BigInt("8000bb00", 16)
+        val olderLine = BigInt("8000bd00", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("94000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("95000000", 16) + word)
+
+        Seq(youngerResidentA, youngerResidentB, olderResidentA, olderResidentB)
+          .zipWithIndex.foreach { case (line, index) =>
+            submit(dut, tag = index + 1, address = line)
+            issueRefill(dut, residentWords, lineAddress = line)
+            dut.io.completion.ready.poke(true)
+            dut.clock.step()
+            dut.io.completion.ready.poke(false)
+          }
+        Seq(youngerResidentA, youngerResidentB, olderResidentA, olderResidentB)
+          .zipWithIndex.foreach { case (line, index) =>
+            submitStore(dut, tag = index + 5, address = line + 4,
+              mask = 15, data = BigInt("d00e0000", 16) + index)
+            consumeStoreResult(dut, tag = index + 5, address = line + 4)
+          }
+
+        // The older lane crosses the sole L1D-to-L2 transfer boundary. The
+        // younger lane remains an unaccepted replay and has not claimed an
+        // MSHR, victim, or L2 transaction of its own.
+        presentLoad(dut, lane = 0, tag = 13, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 11, address = olderLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(olderResidentA)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        // Selective recovery removes lane 0 while retaining the accepted
+        // older owner. No second dirty-victim transfer may appear for the
+        // killed line after the recovery boundary.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(11)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(olderLine)
+
+        issueRefill(dut, olderWords, lineAddress = olderLine)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(11)
+        dut.io.completion.bits.cacheData.expect(olderWords(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("accepts different-set dual misses with two exact MSHR owners") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
