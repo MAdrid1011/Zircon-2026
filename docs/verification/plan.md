@@ -204,9 +204,10 @@ two dirty-victim misses from different sets, checking that each accepted
 L1D-to-L2 transfer retains its own dirty word. A squashed younger owner that
 has already issued its AXI refill drains that response without a completion
 before its older survivor can probe. Its added
-dirty-victim hit/miss and dual-miss cases first accept an older different-set
-hit or invalid-way miss, hold the younger replacement miss, then check that its
-sole L1D-to-L2 transfer retains the dirty word. A dual-miss flush additionally
+dirty-victim hit/miss cases accept an older different-set hit and younger miss
+only with the exact sole L1D-to-L2 transfer, retaining the dirty word; the
+dual-miss cases still hold the younger replacement miss and check its later
+sole transfer. A dual-miss flush additionally
 proves that the accepted probe drains without a completion or AXI fallback
 while its unissued peer is cancelled. A separate issued-refill flush drains the
 accepted data response without a completion. The saturated-flush case releases
