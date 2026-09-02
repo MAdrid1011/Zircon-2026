@@ -19,6 +19,7 @@ progress.
 |---|---|---|
 | `retired[2]` | Commit controller | Actual normal retirement entries. |
 | `gprData[2]` | Integer PRF | Committed physical-destination data. |
+| `fprWrite` | Floating commit state | Commit-qualified `{robTag,address,data}` FPR write; it must match one normal retirement lane. |
 | `csrWrite` | Commit controller | The single committed M1 CSR write. |
 | `trapCommit` | Commit controller | Precise interrupt/cause/tval event. |
 | `trapEntry/trapLane` | ROB/commit | Real faulting entry or interrupted live head. |
@@ -38,9 +39,11 @@ older lane-0 retirement at `N` and the fault event at `N+1`; a lane-0 exception
 or interrupt produces only the lane-0 trap event. A trap and a normal
 retirement are prohibited in the same lane.
 
-M1 emits GPR and CSR state when implemented. FPR and memory fields are zero
-until M3/M4 provide their true commit metadata; no placeholder completion is
-allowed to synthesize a trace event.
+M1 emits GPR and CSR state when implemented. The formatter accepts a true
+commit-qualified FPR write and places it only in the matching normal retirement
+lane. The current top-level supplies no such write until the executable M4
+bridge is connected, so its FPR fields remain zero; no placeholder completion
+is allowed to synthesize a trace event.
 
 ## Flush, Exception, And Observability
 

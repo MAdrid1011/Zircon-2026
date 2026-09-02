@@ -52,6 +52,10 @@ class RetireTraceFormatterSpec extends AnyFunSpec with ChiselSim {
     dut.io.csrWrite.valid.poke(false)
     dut.io.csrWrite.bits.address.poke(0)
     dut.io.csrWrite.bits.data.poke(0)
+    dut.io.fprWrite.valid.poke(false)
+    dut.io.fprWrite.bits.robTag.poke(0)
+    dut.io.fprWrite.bits.address.poke(0)
+    dut.io.fprWrite.bits.data.poke(0)
     dut.io.trapCommit.valid.poke(false)
     dut.io.trapCommit.bits.interrupt.poke(false)
     dut.io.trapCommit.bits.cause.poke(0)
@@ -149,6 +153,25 @@ class RetireTraceFormatterSpec extends AnyFunSpec with ChiselSim {
         dut.io.events(1).interrupt.expect(false)
         dut.io.events(1).cause.expect(2)
         dut.io.events(1).trapValue.expect(BigInt("ffffffff", 16))
+      }
+    }
+
+    it("emits an FPR write only in the matching normal retirement lane") {
+      simulate(new RetireTraceFormatter) { dut =>
+        clearInputs(dut)
+        driveRetired(dut, 0, BigInt("80000060", 16), BigInt("00000013", 16),
+          destination = 0, data = 0)
+        driveRetired(dut, 1, BigInt("80000064", 16), BigInt("e00780d3", 16),
+          destination = 0, data = 0)
+        dut.io.fprWrite.valid.poke(true)
+        dut.io.fprWrite.bits.robTag.poke(1)
+        dut.io.fprWrite.bits.address.poke(15)
+        dut.io.fprWrite.bits.data.poke(BigInt("7fc00000", 16))
+
+        dut.io.events(0).fprWrite.expect(false)
+        dut.io.events(1).fprWrite.expect(true)
+        dut.io.events(1).fprAddress.expect(15)
+        dut.io.events(1).fprData.expect(BigInt("7fc00000", 16))
       }
     }
 

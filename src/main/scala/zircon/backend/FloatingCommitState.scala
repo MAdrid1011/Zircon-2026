@@ -4,6 +4,14 @@ import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
 
+/** One commit-qualified FPR write, including the retired ROB owner needed by
+  * the simulation trace boundary. */
+class FloatingRegisterWrite(config: ZirconCoreConfig) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val address = UInt(5.W)
+  val data = UInt(32.W)
+}
+
 /** Commit-qualified architectural state for retained floating results.
   *
   * This module deliberately owns no decode or execution path. A future E2 FPU
@@ -24,10 +32,7 @@ class FloatingCommitState(
 
     val readAddress = Input(Vec(2, UInt(5.W)))
     val readData = Output(Vec(2, UInt(32.W)))
-    val fprWrite = Output(Valid(new Bundle {
-      val address = UInt(5.W)
-      val data = UInt(32.W)
-    }))
+    val fprWrite = Output(Valid(new FloatingRegisterWrite(config)))
     val scoreboardComplete = Output(Valid(new FloatingScoreboardCompletion(config)))
     val fpCommit = Output(Valid(new FloatingStateCommit))
     val resultCount = Output(UInt(3.W))
@@ -49,7 +54,10 @@ class FloatingCommitState(
   fpr.io.write.valid := resultQueue.io.commit.fire && resultQueue.io.commit.bits.writesFloat
   fpr.io.write.bits.address := resultQueue.io.commit.bits.fprAddress
   fpr.io.write.bits.data := resultQueue.io.commit.bits.fprData
-  io.fprWrite := fpr.io.write
+  io.fprWrite.valid := fpr.io.write.valid
+  io.fprWrite.bits.robTag := resultQueue.io.commit.bits.robTag
+  io.fprWrite.bits.address := fpr.io.write.bits.address
+  io.fprWrite.bits.data := fpr.io.write.bits.data
 
   io.scoreboardComplete.valid := resultQueue.io.commit.fire &&
     resultQueue.io.commit.bits.writesFloat

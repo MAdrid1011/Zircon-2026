@@ -1,7 +1,7 @@
 package zircon.core
 
 import chisel3._
-import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter}
+import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter, Valid}
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
@@ -517,6 +517,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     formatter.io.retired := backend.io.retired
     formatter.io.memoryMetadata := lsuIngress.io.retireMetadata
     formatter.io.gprData := backend.io.auxReadData
+    formatter.io.fprWrite := 0.U.asTypeOf(Valid(new zircon.backend.FloatingRegisterWrite(cfg)))
     formatter.io.csrWrite := backend.io.csrWrite
     formatter.io.trapCommit := backend.io.trapCommit
     formatter.io.trapEntry := backend.io.trapEntry

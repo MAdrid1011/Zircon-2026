@@ -63,6 +63,7 @@ class FloatingCommitStateSpec extends AnyFunSpec with ChiselSim {
         dut.io.fpCommit.valid.expect(true)
         dut.io.fpCommit.bits.flags.expect(1)
         dut.io.fprWrite.valid.expect(true)
+        dut.io.fprWrite.bits.robTag.expect(3)
         dut.io.fprWrite.bits.address.expect(7)
         dut.io.fprWrite.bits.data.expect(BigInt("40400000", 16))
         dut.io.scoreboardComplete.valid.expect(true)

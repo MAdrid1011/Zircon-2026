@@ -3,7 +3,7 @@ package zircon.trace
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.backend.{CSRCommitWrite, ROBCommit, TrapCommit}
+import zircon.backend.{CSRCommitWrite, FloatingRegisterWrite, ROBCommit, TrapCommit}
 import zircon.memory.MemoryRetireMetadata
 
 /** Formats true commit and trap metadata into the simulation retire boundary.
@@ -19,6 +19,7 @@ class RetireTraceFormatter(
     val memoryMetadata = Input(Vec(config.commitWidth,
       Valid(new MemoryRetireMetadata(config))))
     val gprData = Input(Vec(config.commitWidth, UInt(32.W)))
+    val fprWrite = Input(Valid(new FloatingRegisterWrite(config)))
     val csrWrite = Input(Valid(new CSRCommitWrite))
     val trapCommit = Input(Valid(new TrapCommit))
     val trapEntry = Input(Valid(new ROBCommit(config)))
@@ -53,9 +54,11 @@ class RetireTraceFormatter(
     event.gprWrite := retired.valid && entry.allocatesPhysical && !isTrap
     event.gprAddress := entry.architecturalDestination
     event.gprData := io.gprData(lane)
-    event.fprWrite := false.B
-    event.fprAddress := 0.U
-    event.fprData := 0.U
+    val fprWriteInLane = io.fprWrite.valid && retired.valid &&
+      io.fprWrite.bits.robTag === retired.bits.robTag && !isTrap
+    event.fprWrite := fprWriteInLane
+    event.fprAddress := Mux(fprWriteInLane, io.fprWrite.bits.address, 0.U)
+    event.fprData := Mux(fprWriteInLane, io.fprWrite.bits.data, 0.U)
 
     event.csrWrite := retired.valid && lane.U === 0.U && io.csrWrite.valid &&
       !isTrap
@@ -85,6 +88,14 @@ class RetireTraceFormatter(
   for (lane <- 0 until config.commitWidth) {
     assert(!(io.retired(lane).valid && trapInLane(lane)),
       "one trace lane cannot retire and trap for different instructions")
+  }
+  val fprRetirementMatches = VecInit((0 until config.commitWidth).map(lane =>
+    io.retired(lane).valid && io.fprWrite.bits.robTag === io.retired(lane).bits.robTag))
+  when(io.fprWrite.valid) {
+    assert(PopCount(fprRetirementMatches) === 1.U,
+      "an FPR write must match exactly one real retirement")
+    assert(!(trapInLane.asUInt & fprRetirementMatches.asUInt).orR,
+      "an FPR write cannot share a trace lane with a trap")
   }
   assert(!eventValid(1) || eventValid(0),
     "retire trace lane 1 event cannot exist without a lane 0 event")
