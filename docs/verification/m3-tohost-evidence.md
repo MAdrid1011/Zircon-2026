@@ -130,6 +130,33 @@ touched backing-memory word was matched against the deterministic AXI snapshot.
 
 The comparisons are deliberately bounded to these four directed ELFs.
 
+## Current M3 RV32A revalidation
+
+On 2026-09-02, parent source
+`107873ce54aaaf7df72e0e9501eb6d0aadec3353`, ZirconSim
+`b22137e40c8331608930acc6494197bc72054840`, and RV-Software
+`11d6eae150d47aab32aca3340e30ba61ddcbb2f0` reran the directed RV32A
+`tohost` ELF with the locked local reference binaries. Both commands used
+explicit AXI seed `1` and the 2048-cycle bound:
+
+```bash
+make -C ZirconSim diff-memory-rv32a \
+  SPIKE=/home/madrid/.cache/zircon-2026-spike-c09c0cce/build/spike
+make -C ZirconSim diff-memory-sail-rv32a \
+  SAIL=/home/madrid/.cache/zircon-2026-sail-riscv-beaf4499/build/c_emulator/sail_riscv_sim
+```
+
+The RTL completed through `tohost` in 228 cycles with 12 retirements. Each
+comparator reported that all 12 ordered retirements and the final AXI
+backing-memory snapshot matched its respective reference. The regenerated
+retire trace, backing-memory, Spike log, and Sail memory log SHA256 values
+were respectively `f9e2ffbb07b4efcc72c7ada38752d1d259563a1a51a68c4dd7fa44f4279244a7`,
+`e5123413fd054435036ee98d7356c29de14101ba14ad0dac7878002b3b05028b`,
+`ad6e0bce0c695896484efc8a6ae13554d6fe0fe8e3665278b17e86bd40d869d2`, and
+`6e1048db60259e0097ff07b1c2e03489912a68ab638d6968e7b56e608c61ae70`.
+This is a current, bounded directed revalidation only; it does not close M3's
+remaining integration, coherence, formal, random, ACT4, or release gates.
+
 ## Cache-global FENCE/I-D coherence
 
 On 2026-09-01, the parent working tree added ADR-0019 production
