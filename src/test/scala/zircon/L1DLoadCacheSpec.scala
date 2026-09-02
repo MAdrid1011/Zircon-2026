@@ -1192,6 +1192,44 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("retries a ninth same-line request after a full waiter MSHR refills") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80008600", 16)
+        val words = Seq.tabulate(8)(word => BigInt("a5000000", 16) + word)
+
+        // Four same-line pairs consume every waiter credit while retaining one
+        // MSHR. The ninth request must remain held until the refill makes the
+        // line resident; it may then take the normal hit path without needing
+        // an extra speculative waiter.
+        for (pair <- 0 until 4) {
+          presentLoad(dut, lane = 0, tag = 2 + pair * 2,
+            address = line + pair * 8)
+          presentLoad(dut, lane = 1, tag = 3 + pair * 2,
+            address = line + pair * 8 + 4)
+          dut.io.request(0).ready.expect(true)
+          dut.io.request(1).ready.expect(true)
+          dut.clock.step()
+          dut.io.request.foreach(_.valid.poke(false))
+        }
+
+        presentLoad(dut, lane = 0, tag = 12, address = line + 28)
+        dut.io.request(0).ready.expect(false)
+
+        issueRefill(dut, words, lineAddress = line)
+
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(12)
+        dut.io.completion.bits.cacheData.expect(words(7))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+      }
+    }
+
     it("holds a dirty-victim miss behind L2 transfer backpressure") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

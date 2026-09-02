@@ -81,6 +81,12 @@ Its deterministic response-credit case holds one completed refill until a
 second owner's final R beat is visibly backpressured, then consumes both in
 order through the one-entry response buffer.
 
+The full `L1DLoadCacheSpec` now passes 40/40 tests in 138.1 seconds. Its
+waiter-credit recovery case holds a ninth same-line request while one MSHR owns
+all eight waiters, refills that line, and proves the retained request is
+accepted as a normal hit with its exact word rather than remaining blocked by
+the retired miss allocation.
+
 | Boundary | Required tests and properties |
 | --- | --- |
 | MemIQ/M0/M1 | `MemIssueQueueSpec` passes two enqueue, source wakeup, ROB-age selection, same-cycle recycle, free-only admission, recovery, and the live-atomic barrier against younger M0 and M1 issue before LSQ allocation. `DualLSUAdmissionSpec`, `M0RequestArbiterSpec`, `AuxiliaryReadArbiterSpec`, and `ReorderBufferSpec` cover exact-tag M0/M1 ownership and operand context. `CoreShellSpec` passes inaccessible M1 replay, cacheable AXI load plus L1D write-allocate store, ID-6 device operations, and executable ID-7 LR/SC/AMO. Full dual-LSU conflict integration remains required. |
