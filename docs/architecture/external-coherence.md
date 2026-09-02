@@ -62,6 +62,7 @@ current local checks are:
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drops a dirty coherence writeback"'
+./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains a faulting data refill before external invalidation responds"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves line-scoped LR reservations across seeded external coherence"'
 make test-m3-external-coherence
 make platform-verilog
@@ -107,3 +108,6 @@ payload every cycle, then permits one response and requires refetch through
 external write-invalidate request, then requires a later same-address load to
 own a new AXI read rather than reuse the invalidated local line. Integration
 still needs a concrete platform master, board wrapper, and full pressure matrix.
+The matching-refill error slice returns `SLVERR` for every target data beat,
+requires that accepted faulting owner to drain before one sideband response,
+and observes the load's exact cause-5/`tval` trap rather than a completion.

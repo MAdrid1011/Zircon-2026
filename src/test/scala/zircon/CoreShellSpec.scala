@@ -3864,6 +3864,77 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drains a faulting data refill before external invalidation responds") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val dataLine = BigInt("80001000", 16)
+        var dataArCycle = -1
+        var dataArId = BigInt(-1)
+        var requestAcceptedCycle = -1
+        var dataBurstDrained = false
+        var faultingBeatSeen = false
+        var responseBeforeDrain = false
+        var responseCount = 0
+        val program = Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+          ResetVector + 8 -> BigInt("00100073", 16),
+          dataLine -> BigInt("11223344", 16)
+        )
+        val events = runProgram(dut, program, cycles = 768,
+          readValidForCycle = (cycle, _, address) =>
+            (address & ~BigInt(31)) != dataLine ||
+              (dataArCycle >= 0 && cycle >= dataArCycle + 12),
+          rResponse = (_, address) =>
+            if ((address & ~BigInt(31)) == dataLine) 2 else 0,
+          driveExternalCoherence = (core, cycle) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (dataArCycle >= 0 && requestAcceptedCycle < 0) {
+              request.valid.poke(true)
+              request.bits.kind.poke(0)
+              request.bits.lineAddress.poke(dataLine)
+              if (request.ready.peek().litToBoolean) requestAcceptedCycle = cycle
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean && response.ready.peek().litToBoolean) {
+              response.bits.kind.expect(0)
+              response.bits.lineAddress.expect(dataLine)
+              responseBeforeDrain ||= !dataBurstDrained
+              responseCount += 1
+            }
+          }, observeCycle = (core, cycle) => {
+            val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean
+            val arAddress = core.io.axi.ar.bits.addr.peek().litValue
+            if (arFire && arAddress == dataLine && dataArCycle < 0) {
+              dataArCycle = cycle
+              dataArId = core.io.axi.ar.bits.id.peek().litValue
+            }
+            val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+              core.io.axi.r.ready.peek().litToBoolean
+            if (rFire && core.io.axi.r.bits.id.peek().litValue == dataArId) {
+              faultingBeatSeen ||= core.io.axi.r.bits.resp.peek().litValue == 2
+              if (core.io.axi.r.bits.last.peek().litToBoolean) dataBurstDrained = true
+            }
+          })
+        val retired = throughFirstTrap(events)
+        val load = retired.find(_.pc == ResetVector + 4).getOrElse(
+          fail(s"faulting matching refill load did not retire: $retired"))
+        withClue(s"dataAr=$dataArCycle id=$dataArId request=$requestAcceptedCycle " +
+          s"fault=$faultingBeatSeen drained=$dataBurstDrained response=$responseCount " +
+          s"beforeDrain=$responseBeforeDrain trace=$retired") {
+          assert(dataArCycle >= 0 && requestAcceptedCycle > dataArCycle)
+          assert(faultingBeatSeen && dataBurstDrained && !responseBeforeDrain &&
+            responseCount == 1)
+          assert(load.trap && !load.gprWrite && load.cause == 5 &&
+            load.trapValue == dataLine)
+        }
+      }
+    }
+
     it("waits for dirty external-coherence writeback before acknowledging") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

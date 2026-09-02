@@ -83,7 +83,10 @@ fresh-epoch request/response, and the latter proves a new writeback for the
 same dirty line completes normally.
 The matching-L1D-refill slice accepts the request after target AR, delays the
 target RLAST, and verifies no response before that exact owner drains while
-the original load retains exact retire metadata.
+the original load retains exact retire metadata. Its paired RRESP-fault slice
+returns `SLVERR` for every target beat, requires the full faulting burst to
+drain before one acknowledgement, and then observes the load's exact cause-5
+and `tval` trap.
 `ExternalCoherenceAdapter` now provides the reusable one-request platform
 gate: it retains a modifier until the matching core response and drops it on
 reset; its two directed tests pass locally. A complete-core LR/SC slice adds

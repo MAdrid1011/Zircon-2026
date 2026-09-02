@@ -225,7 +225,9 @@ fresh atomic invalidation of that same line.
 The matching-D-side-refill slice accepts the request after the target L1D AR
 but before its delayed RLAST, suppresses the response until that exact ID
 drains, and requires the original load's complete GPR and memory retirement
-metadata before EBREAK.
+metadata before EBREAK. A paired `SLVERR` slice drains the full target burst
+before its one acknowledgement and requires the original load to retire the
+exact cause-5/`tval` trap rather than fabricate a completion.
 `ExternalCoherenceAdapterSpec` holds a platform modifier across core-request
 backpressure and requires its exact core response before `authorized` can fire;
 its reset case drops the unacknowledged modifier and proves a fresh epoch can
