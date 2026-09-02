@@ -27,6 +27,16 @@ test_run_dir/
 *.rpt
 *.str
 *.xpr
+*.bit
+*.bin
+*.dcp
+*.ltx
+.Xil/
+fpga/.Xil/
+fpga/vivado/
+fpga/runs/
 *.zip
 sail_smt_cache
 !toolchain.lock.json
+!fpga/reports/
+!fpga/reports/**
