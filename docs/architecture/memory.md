@@ -297,7 +297,9 @@ four physical L2 demand slots. It probes resident L2 lines before AXI and
 cleanly allocates every non-faulting AXI I-fill into the same dynamic L2 ways;
 an exact refill collision returns the resident L2 data to L1I. Final I/D
 coherence, formal L1I proof, coherent external atomic handling, and general
-cache ordering remain unfinished. `AXIDataReadEngine` returns the exact client
+cache ordering remain unfinished. ADR-0023 now freezes the explicit sideband
+boundary required for external cacheable modifiers; its controller and platform
+adapter are not implemented. `AXIDataReadEngine` returns the exact client
 token rather than treating an L1D-local MSHR as an AXI ID.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
@@ -399,6 +401,17 @@ ID-5 drains the exclusive dirty copy, so it cannot read stale backing memory or
 discard dirty data. Externally attempted atomic writes invalidate only a clean
 L1D line. The exact protocol is [`atomic-axi-engine.md`](atomic-axi-engine.md);
 full coherent atomic integration remains unfinished M3 work.
+
+## External coherence
+
+The AXI master port is not a snoop interface. External cacheable writes and
+atomics must use the one-outstanding sideband protocol in
+[`external-coherence.md`](external-coherence.md); the platform adapter waits for
+the core acknowledgement before it starts the external modifier. The future
+controller drains matching live owners, writes back dirty D data, invalidates
+all matching local I/D/L2 copies, and clears an LR reservation before it
+acknowledges. No RTL currently implements this contract, so current M3 evidence
+is single-hart/private-memory evidence only.
 
 ## Recovery, drain, and counters
 
