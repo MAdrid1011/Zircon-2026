@@ -1556,6 +1556,73 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drains an accepted saturated waiter probe after selective squash") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80008c00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("d2000000", 16) + word)
+
+        // Fill every waiter credit on one MSHR, then let its serialized L2
+        // probe cross the irrevocable ownership boundary.
+        for (pair <- 0 until 4) {
+          presentLoad(dut, lane = 0, tag = 2 + pair * 2,
+            address = line + pair * 8)
+          presentLoad(dut, lane = 1, tag = 3 + pair * 2,
+            address = line + pair * 8 + 4)
+          dut.io.request.foreach(_.ready.expect(true))
+          dut.clock.step()
+          dut.io.request.foreach(_.valid.poke(false))
+        }
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(line)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+
+        // Tag 2 remains architectural. The seven younger waiters may be
+        // discarded, but the accepted probe and its later AXI owner cannot.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(2)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(false)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(line)
+        dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+
+        dut.io.dataRequest.valid.expect(true)
+        dut.io.dataRequest.bits.client.expect(L2DemandClient.Data)
+        dut.io.dataRequest.bits.clientMshr.expect(0)
+        dut.io.dataRequest.bits.lineAddress.expect(line)
+        dut.io.dataRequest.ready.poke(true)
+        dut.clock.step()
+        dut.io.dataRequest.ready.poke(false)
+        dut.io.dataResponse.valid.poke(true)
+        dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+        dut.io.dataResponse.bits.clientMshr.poke(0)
+        dut.io.dataResponse.bits.accessFault.poke(false)
+        words.zipWithIndex.foreach { case (word, index) =>
+          dut.io.dataResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.dataResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.dataResponse.valid.poke(false)
+
+        dut.io.completion.ready.poke(true)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(2)
+        dut.io.completion.bits.cacheData.expect(words(0))
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("holds a dirty-victim miss behind L2 transfer backpressure") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

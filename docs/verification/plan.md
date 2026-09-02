@@ -63,12 +63,14 @@ M3 is partially executable. The following records actual local directed
 evidence and the remaining required fail-to-pass coverage for Issue #47. Passing
 this table is not a memory release, ELF, or differential claim:
 
-The latest full `L1DLoadCacheSpec` run passes 52/52 tests in 149.512 seconds.
-Its saturated selective-squash case first assigns all eight waiter credits to
-one unissued MSHR, retains only the oldest ROB tag across recovery, and then
-admits a new same-line request using a reclaimed credit. One refill produces
-only the surviving older completion and the new completion in ROB-age order.
-This closes that waiter-recovery cross-product cell; broader victim/L2 pressure
+The latest full `L1DLoadCacheSpec` run passes 53/53 tests in 154 seconds. Its
+saturated selective-squash cases first assign all eight waiter credits to one
+MSHR and retain only the oldest ROB tag across recovery. Before L2-probe
+acceptance, a reclaimed credit admits a new same-line request and one refill
+produces only the survivor and new completion in ROB-age order. After
+L2-probe acceptance, recovery still discards the seven younger waiters but
+must drain the retained L2/AXI ownership before completing only the survivor.
+These close two waiter-recovery cross-product cells; broader victim/L2 pressure
 and squash/flush combinations remain release work.
 
 The latest L1D resource-pressure slice passes 30 tests in 1 minute 32 seconds:
