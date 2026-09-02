@@ -724,6 +724,37 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("merges same-address cold misses into one refill with duplicate-word waiters") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80005e00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("78000000", 16) + word)
+
+        // A cold same-address pair is a same-line miss, not a dual-hit bank
+        // conflict. Both ports may attach exact waiters to the one MSHR.
+        // Lane 1 is older, so completion still follows ROB age.
+        presentLoad(dut, lane = 0, tag = 7, address = line + 12)
+        presentLoad(dut, lane = 1, tag = 3, address = line + 12)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(3))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(3))
+      }
+    }
+
     it("accepts a same-set hit and miss when an invalid way is available") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
