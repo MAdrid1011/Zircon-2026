@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The standalone 32x32 FPR, four tagged floating-scoreboard reservations, and four retained floating result records are conservatively counted below; FPU, E2, LSU, CSR, and trace integration remain unimplemented and are not an area sign-off"
+    "The initial RV32F bit-move/sign-injection E2 path, FPR commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete rounding FPU, FMA source-read path, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
   ],
   "storage": [
     {
@@ -52,10 +52,73 @@
       "name": "issue_queue_uop_payload",
       "class": "register_payload",
       "entries": 24,
-      "bits_per_entry": 86,
+      "bits_per_entry": 111,
       "instances": 1,
       "replication_factor": 1,
-      "source": "UopFootprintSpec and frozen 12+4+8 IQ entries"
+      "source": "UopFootprintSpec-pinned 111-bit UopRef across frozen 12+4+8 integer/long/memory IQ entries"
+    },
+    {
+      "name": "floating_issue_queue_uop_payload",
+      "class": "register_payload",
+      "entries": 4,
+      "bits_per_entry": 111,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingIssueQueue: four retained UopRef records; UopFootprintSpec pins each record to 111 bits"
+    },
+    {
+      "name": "floating_issue_queue_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 7,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingIssueQueue: four entry-valid bits and a three-bit occupancy count"
+    },
+    {
+      "name": "floating_move_pipe_retained_request",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 118,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingMovePipe retained FloatingMoveRequest: six-bit ROB tag, five-bit operation, six-bit integer destination, 32-bit integer source, two 32-bit FPR sources, and five-bit FPR destination"
+    },
+    {
+      "name": "floating_move_pipe_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 1,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingMovePipe active request bit"
+    },
+    {
+      "name": "floating_result_bridge_completion_hold",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 45,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingResultBridge retained CompletionResult: six-bit ROB tag, GPR-write bit, six-bit physical destination, and 32-bit data"
+    },
+    {
+      "name": "floating_result_bridge_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 1,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingResultBridge pending-completion valid bit"
+    },
+    {
+      "name": "floating_admission_barrier",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 1,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "IntegerDispatchRecoveryBackend floatingAdmissionBlocked bit held across an unretired mstatus.FS write"
     },
     {
       "name": "l1i_data_shared_demand_slice",
