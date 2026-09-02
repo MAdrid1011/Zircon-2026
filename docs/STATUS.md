@@ -69,8 +69,10 @@ single-request port through `ExternalCoherenceController`: new cacheable
 ingress is blocked, I-side owners drain, exact L1D/L2 cleanup occurs, dirty
 targets wait for matching ID-5 B, L1I/BTB and line-scoped LR reservations are
 invalidated, then the original response returns. `CoreShellSpec` has clean and
-dirty complete-core paths; the latter observes one target ID-5 eight-beat burst
-and response only after B. `ZirconSim` gitlink `3023715` explicitly drives the
+dirty complete-core paths; its delayed instruction-refill slice accepts the
+request after AR and before RLAST, forbids a new AR or response until drain,
+then reaches EBREAK after invalidation. The dirty path observes one target ID-5
+eight-beat burst and response only after B. `ZirconSim` gitlink `3023715` explicitly drives the
 port idle in its private-memory model and its RV32A `tohost` run remains 228
 cycles/12 retirements. A directed error slice retries the same target line
 after a failing ID-5 B and suppresses response until the retry succeeds.

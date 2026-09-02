@@ -192,7 +192,10 @@ ADR-0023's one-request `ExternalCoherencePort` is now connected in
 request ownership, clean cleanup, dirty writeback matching, and response
 uniqueness. The complete-core clean case accepts one request during an AXI-fed
 instruction stream and reaches one exact response before continued EBREAK
-execution. The dirty case first retires a cacheable store, then requires one
+execution. A separate complete-core case accepts the request after the first
+instruction AR but before its delayed RLAST; it permits no further AR or
+sideband response until that existing instruction owner drains, then resumes
+to the exact EBREAK trap. The dirty case first retires a cacheable store, then requires one
 target ID-5 eight-beat burst and its successful B before the external response.
 The retry slice first returns an ID-5 `BRESP` error, requires the same target
 line to issue a second eight-beat burst, and permits the response only after
@@ -201,8 +204,8 @@ the second successful B.
 held at a non-base word. ZirconSim's production driver explicitly holds the
 sideband idle and the traced RV32A `tohost` run still exits 0 at 228 cycles/12
 retirements. This is directed local evidence only: external platform adapter,
-in-flight refill/reset/B-error stress, full L1I/L1D/L2 state matrix, and formal
-response/credit proofs remain M3 obligations.
+reset/B-error stress, full L1I/L1D/L2 state matrix, and formal response/credit
+proofs remain M3 obligations.
 
 The four-seed `0x5eee0001`--`0x5eee0004` fault tier first permits four
 logical data lines to obtain their shared physical AXI owners, then drains all

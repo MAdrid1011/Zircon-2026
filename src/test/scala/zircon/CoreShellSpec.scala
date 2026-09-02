@@ -3550,6 +3550,64 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drains an in-flight instruction refill before external-coherence response") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        var firstArCycle = -1
+        var requestAcceptedCycle = -1
+        var firstBurstDrained = false
+        var arWhileBlocked = false
+        var responseBeforeDrain = false
+        var responseCount = 0
+        val targetLine = ResetVector
+        val program = (0 until 64).map(index =>
+          ResetVector + index * 4 -> Nop).toMap ++ Map(
+          ResetVector + 64 * 4 -> BigInt("00100073", 16))
+        val events = runProgram(dut, program, cycles = 640,
+          rValidForCycle = cycle => firstArCycle >= 0 && cycle >= firstArCycle + 12,
+          driveExternalCoherence = (core, cycle) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (firstArCycle >= 0 && requestAcceptedCycle < 0) {
+              request.valid.poke(true)
+              request.bits.kind.poke(0)
+              request.bits.lineAddress.poke(targetLine)
+              if (request.ready.peek().litToBoolean) requestAcceptedCycle = cycle
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean && response.ready.peek().litToBoolean) {
+              responseBeforeDrain ||= !firstBurstDrained
+              response.bits.kind.expect(0)
+              response.bits.lineAddress.expect(targetLine)
+              responseCount += 1
+            }
+          }, observeCycle = (core, cycle) => {
+            val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean
+            if (arFire && firstArCycle < 0) firstArCycle = cycle
+            if (arFire && requestAcceptedCycle >= 0 && !firstBurstDrained) {
+              arWhileBlocked = true
+            }
+            val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+              core.io.axi.r.ready.peek().litToBoolean
+            if (rFire && core.io.axi.r.bits.last.peek().litToBoolean) {
+              firstBurstDrained = true
+            }
+          })
+        val retired = throughFirstTrap(events)
+        withClue(s"firstAr=$firstArCycle request=$requestAcceptedCycle " +
+          s"drained=$firstBurstDrained blockedAr=$arWhileBlocked " +
+          s"response=$responseCount beforeDrain=$responseBeforeDrain trace=$retired") {
+          assert(firstArCycle >= 0 && requestAcceptedCycle > firstArCycle)
+          assert(firstBurstDrained && !arWhileBlocked)
+          assert(responseCount == 1 && !responseBeforeDrain)
+          assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
     it("waits for dirty external-coherence writeback before acknowledging") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
