@@ -94,6 +94,9 @@ combinational path.
   has not issued an L2 probe is released, while a squashed younger MSHR with an
   accepted probe drains its L2 response without a completion before the older
   survivor probes and completes.
+- A dirty-victim miss held before an L2 transfer handshake is cancelled by full
+  flush without transferring the resident line or creating an MSHR/L2/AXI/
+  completion owner; the original dirty line remains locally hit-visible.
 - Same-set dual-miss coverage proves two independent MSHRs and ordered
   completions when both ways are invalid, plus oldest-only admission when both
   ways require a victim transfer.

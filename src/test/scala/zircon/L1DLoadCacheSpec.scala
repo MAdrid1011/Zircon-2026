@@ -1280,6 +1280,65 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("flushes a dirty-victim miss before its backpressured L2 transfer is accepted") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lineA = BigInt("80009600", 16)
+        val lineB = BigInt("80009800", 16)
+        val lineC = BigInt("80009a00", 16)
+        val wordsA = Seq.tabulate(8)(word => BigInt("83000000", 16) + word)
+        val wordsB = Seq.tabulate(8)(word => BigInt("84000000", 16) + word)
+        val dirtyWord = BigInt("dead0003", 16)
+
+        // Fill and dirty both ways of one set. A third line needs an L1D-to-L2
+        // dirty transfer, but the external boundary retains backpressure.
+        submit(dut, tag = 1, address = lineA)
+        issueRefill(dut, wordsA, lineAddress = lineA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = lineB)
+        issueRefill(dut, wordsB, lineAddress = lineB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 3, address = lineA + 4, mask = 15, data = dirtyWord)
+        consumeStoreResult(dut, tag = 3, address = lineA + 4)
+        submitStore(dut, tag = 4, address = lineB + 4,
+          mask = 15, data = BigInt("dead0004", 16))
+        consumeStoreResult(dut, tag = 4, address = lineB + 4)
+
+        dut.io.l2Insert.ready.poke(false)
+        presentLoad(dut, lane = 0, tag = 5, address = lineC)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(lineA)
+
+        // The request has not crossed any external ownership boundary. Flush
+        // must cancel it, retain the dirty resident owner, and leave no L2/AXI
+        // or completion work behind.
+        dut.io.flush.poke(true)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+
+        // The original dirty line remains its sole stable owner and is still a
+        // local hit after recovery.
+        submit(dut, tag = 6, address = lineA + 4)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(6)
+        dut.io.completion.bits.cacheData.expect(dirtyWord)
+      }
+    }
+
     it("drops only the younger dual-miss owner before L2 acceptance") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

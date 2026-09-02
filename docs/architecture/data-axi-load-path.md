@@ -87,9 +87,11 @@ can be interpreted as a fetch or data result.
 `AXIDataReadEngineSpec` covers client-token preservation, AR/R backpressure,
 four L2 owners, ID interleaving, response errors, and beat/`last` assertions.
 `L1DLoadCacheSpec` covers hit, miss, same-line secondary merge, four-MSHR
-backpressure, refill response
-backpressure, forwarding-only completion, non-cacheable rejection, and recovery
-drain. `CoreShellSpec` adds an AXI-fed cacheable RV32I load that writes the real
+backpressure, refill response backpressure, forwarding-only completion,
+non-cacheable rejection, and recovery drain. It also proves that a dirty-victim
+miss stalled before its L2 transfer handshake is cancelled by full flush without
+creating an MSHR, L2/AXI request, or completion; the resident dirty line remains
+the sole local owner. `CoreShellSpec` adds an AXI-fed cacheable RV32I load that writes the real
 returned value and retires exactly once, plus DeviceStrong, DeviceBurstable, and
 LR.W cases proving no L1D/data-AXI request or false retirement before M0 grows
 its required owners.
