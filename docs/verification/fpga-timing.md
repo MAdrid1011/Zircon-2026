@@ -70,8 +70,9 @@ trace under `target/zircon-failures` when a case fails.
 
 `make test-m3-external-coherence` is the focused sideband tier. It runs the
 retained core controller and platform gate, then clean/dirty/retry, in-flight
-I/D refill, and reset-epoch complete-core cases. On 2026-09-02 it completed
-five component tests plus seven core tests in about 83 seconds.
+I/D refill, and reset-epoch complete-core cases. On 2026-09-03 it completed
+eight component tests plus eleven core cases in about 177 seconds. This remains
+within the five-minute component simulation budget.
 
 ZirconSim full-core measurements must record wall time, retired instructions,
 retired instructions per second, ELF hash, seed, RTL/submodule/tool SHA, and
