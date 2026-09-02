@@ -135,7 +135,8 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       dut: L1DLoadCache,
       words: Seq[BigInt],
       fault: Boolean = false,
-      lineAddress: BigInt = BigInt("80001000", 16)
+      lineAddress: BigInt = BigInt("80001000", 16),
+      mshrIndex: Int = 0
   ): Unit = {
     dut.io.l2Lookup.valid.expect(true)
     dut.io.l2Lookup.bits.lineAddress.expect(lineAddress)
@@ -152,14 +153,14 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.valid.poke(false)
     dut.io.dataRequest.valid.expect(true)
     dut.io.dataRequest.bits.client.expect(L2DemandClient.Data)
-    dut.io.dataRequest.bits.clientMshr.expect(0)
+    dut.io.dataRequest.bits.clientMshr.expect(mshrIndex)
     dut.io.dataRequest.bits.lineAddress.expect(lineAddress)
     dut.io.dataRequest.ready.poke(true)
     dut.clock.step()
     dut.io.dataRequest.ready.poke(false)
     dut.io.dataResponse.valid.poke(true)
     dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
-    dut.io.dataResponse.bits.clientMshr.poke(0)
+    dut.io.dataResponse.bits.clientMshr.poke(mshrIndex)
     dut.io.dataResponse.bits.accessFault.poke(fault)
     for ((word, index) <- words.zipWithIndex) {
       dut.io.dataResponse.bits.lineData(index).poke(word)
@@ -787,15 +788,47 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("accepts only the older owner from a different-line dual-miss pair") {
+    it("accepts different-set dual misses with two exact MSHR owners") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lane0Line = BigInt("80006800", 16)
+        val lane1Line = BigInt("80006900", 16)
+        val lane0Words = Seq.tabulate(8)(word => BigInt("44000000", 16) + word)
+        val lane1Words = Seq.tabulate(8)(word => BigInt("33000000", 16) + word)
+
+        // Both misses use empty, different sets. Each must reserve its own
+        // invalid way and MSHR, while the downstream L2 probe remains one-wide.
+        presentLoad(dut, lane = 0, tag = 7, address = lane0Line + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = lane1Line + 20)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        issueRefill(dut, lane0Words, lineAddress = lane0Line, mshrIndex = 0)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(lane0Words(1))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        issueRefill(dut, lane1Words, lineAddress = lane1Line, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(lane1Words(5))
+      }
+    }
+
+    it("accepts only the older owner from a same-set different-line dual-miss pair") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val youngerLine = BigInt("80006000", 16)
-        val olderLine = BigInt("80006100", 16)
+        val olderLine = BigInt("80006400", 16)
 
-        // The simultaneous pair cannot allocate two independent miss owners
-        // yet. Port 1 wins by ROB age, and the younger port must neither fire
-        // nor create a second L2 probe before replay.
+        // The same-set pair cannot allocate two independent ways yet. Port 1
+        // wins by ROB age, and the younger port must neither fire nor create a
+        // second L2 probe before replay.
         presentLoad(dut, lane = 0, tag = 7, address = youngerLine)
         presentLoad(dut, lane = 1, tag = 3, address = olderLine)
         dut.io.request(0).ready.expect(false)

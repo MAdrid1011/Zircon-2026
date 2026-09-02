@@ -46,9 +46,12 @@ result slots, backpressures a same-bank or same-address younger request, and
 merges two same-line misses into one MSHR with two exact waiters. It also accepts
 a different-set cache-hit/miss pair when the hit has a retained result slot and
 the miss either joins an existing MSHR or reserves an invalid way. Same-set,
-resident/dirty-victim, and different-line miss pairs still use the older request
-only. This is explicitly not evidence that the remaining MSHR, victim, and L2
-rows are done.
+resident/dirty-victim pairs still use the older request only. It also accepts
+two different-set misses when each has an invalid way plus distinct free MSHR
+and waiter credits; L2 probes remain serialized. Pairs that need merge,
+victim-transfer, or shared-set arbitration still use the older request only.
+This is explicitly not evidence that the remaining MSHR, victim, and L2 rows
+are done.
 
 The implementation must use a two-port FPGA-friendly tag/data organization.
 For the Nexys4 DDR point this is a registered RAM boundary or an equivalent
@@ -69,7 +72,8 @@ combinational path.
 - The current directed matrix proves that a lane-1-old hit beats a lane-0-young
   miss, and that a lane-1-old different-line miss is the sole admitted owner.
   It also proves concurrent different-set hit/miss completion with one exact
-  retained hit and one exact miss waiter. Same-set replay remains a conservative
+  retained hit and one exact miss waiter, and two distinct MSHR IDs for an
+  invalid-way different-set dual miss. Same-set replay remains a conservative
   check, not evidence for victim-transfer-safe hit/miss or dual-miss rows.
 - The static-area ledger must include added port state, result buffering,
   conflict comparators, and any RAM port replication. A later timing report

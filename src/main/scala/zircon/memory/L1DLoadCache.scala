@@ -173,6 +173,10 @@ class L1DLoadCache(
   val freeMshr = VecInit((0 until mshrCount).map(index => !mshrValid(index)))
   val anyFreeMshr = freeMshr.asUInt.orR
   val freeMshrIndex = PriorityEncoder(freeMshr.asUInt)
+  val secondFreeMshr = VecInit((0 until mshrCount).map(index =>
+    !mshrValid(index) && index.U =/= freeMshrIndex))
+  val anySecondFreeMshr = secondFreeMshr.asUInt.orR
+  val secondFreeMshrIndex = PriorityEncoder(secondFreeMshr.asUInt)
   val freeWaiter = (~waiterValid.asUInt)(waiterCount - 1, 0)
   val anyFreeWaiter = freeWaiter.orR
   val freeWaiterIndex = PriorityEncoder(freeWaiter)
@@ -335,6 +339,34 @@ class L1DLoadCache(
     !dualHitMissReservedWay(way) && !cacheValid(way)(dualHitMissSet)))
   val dualHitMissHasInvalidWay = dualHitMissInvalidWay.asUInt.orR
   val dualHitMissWay = PriorityEncoder(dualHitMissInvalidWay.asUInt)
+  // Two different-set misses can reserve independent invalid ways and MSHRs
+  // without claiming the single L1D-to-L2 victim-transfer port. They remain
+  // independent owners while the existing L2 probe interface drains them.
+  val dualDifferentSetMissCandidate = io.request(0).valid && io.request(1).valid &&
+    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
+    !portImmediateRequest(0) && !portImmediateRequest(1) &&
+    portSet(0) =/= portSet(1)
+  val dualDifferentSetMissMatchingMshr = (0 until config.decodeWidth).map(port =>
+    VecInit((0 until mshrCount).map(index =>
+      mshrValid(index) && mshrLineAddress(index) === portLineAddress(port))))
+  val dualDifferentSetMissAnyMatchingMshr = dualDifferentSetMissMatchingMshr.map(
+    _.asUInt.orR)
+  val dualDifferentSetMissReservedWay = (0 until config.decodeWidth).map { port =>
+    val reserved = Wire(Vec(ways, Bool()))
+    for (way <- 0 until ways) {
+      reserved(way) := (0 until mshrCount).map(index =>
+        mshrValid(index) && mshrSet(index) === portSet(port) &&
+          mshrWay(index) === way.U).reduce(_ || _)
+    }
+    reserved
+  }
+  val dualDifferentSetMissInvalidWay = (0 until config.decodeWidth).map(port =>
+    VecInit((0 until ways).map(way =>
+      !dualDifferentSetMissReservedWay(port)(way) && !cacheValid(way)(portSet(port)))))
+  val dualDifferentSetMissHasInvalidWay = dualDifferentSetMissInvalidWay.map(
+    _.asUInt.orR)
+  val dualDifferentSetMissWay = dualDifferentSetMissInvalidWay.map(ways =>
+    PriorityEncoder(ways.asUInt))
   val sameLineDualMiss = io.request(0).valid && io.request(1).valid &&
     io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
     !portImmediateRequest(0) && !portImmediateRequest(1) &&
@@ -398,13 +430,22 @@ class L1DLoadCache(
     (dualHitMissAnyMatchingMshr || (anyFreeMshr && dualHitMissHasInvalidWay))
   val dualHitMissReady = dualHitMissCandidate && requestAdmissionOpen &&
     dualHitMissImmediateSlotAvailable && dualHitMissResources
+  val dualDifferentSetMissResources = sameLineDualWaiterCredits &&
+    anyFreeMshr && anySecondFreeMshr &&
+    !dualDifferentSetMissAnyMatchingMshr(0) &&
+    !dualDifferentSetMissAnyMatchingMshr(1) &&
+    dualDifferentSetMissHasInvalidWay(0) &&
+    dualDifferentSetMissHasInvalidWay(1)
+  val dualDifferentSetMissReady = dualDifferentSetMissCandidate &&
+    requestAdmissionOpen && dualDifferentSetMissResources
   val sameLineDualMissReady = sameLineDualMiss && requestAdmissionOpen &&
     sameLineDualMissResources
   for (port <- 0 until config.decodeWidth) {
     val selected = selectedRequestPort === port.U
     io.request(port).ready := Mux(dualImmediateCompatible, dualImmediateReady,
       Mux(dualHitMissReady, true.B,
-        Mux(sameLineDualMissReady, true.B, selected && selectedRequestReady)))
+        Mux(dualDifferentSetMissReady, true.B,
+          Mux(sameLineDualMissReady, true.B, selected && selectedRequestReady))))
   }
   io.storeRequest.ready := !io.fenceDrain && !recoveryBlocked && !io.flushLine.valid && storeOwnerAvailable &&
     !io.storeRequest.bits.isAtomic &&
@@ -570,9 +611,35 @@ class L1DLoadCache(
       io.request(1).fire
     val dualHitMissFire = dualHitMissReady && io.request(0).fire &&
       io.request(1).fire
+    val dualDifferentSetMissFire = dualDifferentSetMissReady &&
+      io.request(0).fire && io.request(1).fire
     val selectedMissFire = selectedRequestFire && !immediateRequest &&
-      !dualSameLineMissFire && !dualHitMissFire
-    when(dualSameLineMissFire || dualHitMissFire || selectedMissFire) {
+      !dualSameLineMissFire && !dualHitMissFire && !dualDifferentSetMissFire
+    when(dualDifferentSetMissFire) {
+      for (port <- 0 until config.decodeWidth) {
+        val allocatedMshr = if (port == 0) freeMshrIndex else secondFreeMshrIndex
+        val allocatedWaiter = if (port == 0) freeWaiterIndex else secondFreeWaiterIndex
+        waiterValid(allocatedWaiter) := true.B
+        waiterMshr(allocatedWaiter) := allocatedMshr
+        waiterTag(allocatedWaiter) := io.request(port).bits.robTag
+        waiterWord(allocatedWaiter) := portWord(port)
+        mshrValid(allocatedMshr) := true.B
+        mshrIssued(allocatedMshr) := false.B
+        mshrFilled(allocatedMshr) := false.B
+        mshrFault(allocatedMshr) := false.B
+        mshrL2ProbeIssued(allocatedMshr) := false.B
+        mshrL2Resolved(allocatedMshr) := false.B
+        mshrLineAddress(allocatedMshr) := portLineAddress(port)
+        mshrSet(allocatedMshr) := portSet(port)
+        mshrWay(allocatedMshr) := dualDifferentSetMissWay(port)
+        for (way <- 0 until ways) {
+          when(dualDifferentSetMissWay(port) === way.U) {
+            cacheValid(way)(portSet(port)) := false.B
+            cacheDirty(way)(portSet(port)) := false.B
+          }
+        }
+      }
+    }.elsewhen(dualSameLineMissFire || dualHitMissFire || selectedMissFire) {
       val chosenMshr = Mux(dualHitMissFire,
         Mux(dualHitMissAnyMatchingMshr, dualHitMissMatchingMshrIndex, freeMshrIndex),
         Mux(anyMatchingMshr, matchingMshrIndex, freeMshrIndex))
@@ -792,8 +859,10 @@ class L1DLoadCache(
     io.request(1).fire
   val dualHitMissFire = dualHitMissReady && io.request(0).fire &&
     io.request(1).fire
+  val dualDifferentSetMissFire = dualDifferentSetMissReady &&
+    io.request(0).fire && io.request(1).fire
   val selectedMissFire = selectedRequestFire && !immediateRequest &&
-    !dualSameLineMissFire && !dualHitMissFire
+    !dualSameLineMissFire && !dualHitMissFire && !dualDifferentSetMissFire
   when(selectedMissFire) {
     assert(anyFreeWaiter, "L1D accepted a miss without a waiter owner")
     assert(anyMatchingMshr || (anyFreeMshr && hasVictimWay),
@@ -814,6 +883,14 @@ class L1DLoadCache(
       "L1D accepted a dual hit/miss pair without an exact miss owner")
     assert(dualHitMissAnyMatchingMshr || dualHitMissHasInvalidWay,
       "L1D dual hit/miss allocation requires a merge or invalid way")
+  }
+  when(dualDifferentSetMissFire) {
+    assert(dualDifferentSetMissResources,
+      "L1D accepted dual misses without two exact MSHR/waiter/way credits")
+    assert(freeMshrIndex =/= secondFreeMshrIndex,
+      "L1D dual misses allocated one MSHR to two independent lines")
+    assert(portSet(0) =/= portSet(1),
+      "L1D dual-miss allocation requires independently reserved sets")
   }
   for (port <- 0 until config.decodeWidth) {
     when(io.request(port).fire) {

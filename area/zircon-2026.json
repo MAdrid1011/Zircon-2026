@@ -554,6 +554,30 @@
       "source": "L1DLoadCache four MSHR set comparisons while reserving an invalid way for the concurrently admitted miss"
     },
     {
+      "name": "l1d_dual_miss_set_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache different-set gate for concurrent dual-miss admission, conservatively charged as one 32-bit compare"
+    },
+    {
+      "name": "l1d_dual_miss_mshr_compare_units",
+      "metric": "comparator32_units",
+      "units": 8,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache two four-MSHR line-address comparison sets for independently admitted dual misses"
+    },
+    {
+      "name": "l1d_dual_miss_reserved_way_compare_units",
+      "metric": "comparator32_units",
+      "units": 8,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache two four-MSHR set comparison sets while reserving independent invalid ways"
+    },
+    {
       "name": "l1d_immediate_result_select",
       "metric": "priority_select_bits",
       "units": 1,
@@ -752,6 +776,22 @@
       "width": 3,
       "fanin": 4,
       "source": "L1DLoadCache matching-MSHR and invalid-way priority selectors for concurrent hit/miss admission"
+    },
+    {
+      "name": "l1d_dual_miss_second_free_mshr_select",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 2,
+      "fanin": 4,
+      "source": "L1DLoadCache second free-MSHR selector for atomic different-set dual-miss admission"
+    },
+    {
+      "name": "l1d_dual_miss_invalid_way_select",
+      "metric": "priority_select_bits",
+      "units": 2,
+      "width": 1,
+      "fanin": 2,
+      "source": "L1DLoadCache per-set invalid-way selectors for independently admitted dual misses"
     },
     {
       "name": "l2_demand_line_response_mux_inputs",

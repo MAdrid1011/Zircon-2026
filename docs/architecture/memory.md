@@ -314,12 +314,14 @@ accepts only the older ROB tag. Two same-line misses allocate or reuse one MSHR
 only when two waiter credits exist, then return both exact owners from one
 refill. A different-set cache-hit/miss pair now accepts both only when the hit
 has an exact result slot and the miss can reuse an MSHR or reserve an invalid
-way; it never creates a competing L1D-to-L2 victim transfer. Same-set pairs,
-resident/dirty-victim misses, and different-line dual misses still accept only
-the older request, so the younger candidate cannot create an unowned MSHR/L2
-owner before replay. Completing the frozen throughput matrix requires
-victim-transfer-safe hit/miss, different-line dual-miss admission, then
-MSHR/waiter/victim/L2 pressure and recovery evidence.
+way; it never creates a competing L1D-to-L2 victim transfer. Two different-set
+misses now also accept together only when both are new invalid-way allocations
+with two free MSHRs and two free waiters; their physical L2 probes remain
+one-wide. Same-set pairs, resident/dirty-victim misses, and pairs that need
+merge/transfer arbitration still accept only the older request, so the younger
+candidate cannot create an unowned MSHR/L2 owner before replay. Completing the
+frozen throughput matrix requires victim-transfer-safe hit/miss and dual-miss,
+then MSHR/waiter/victim/L2 pressure and recovery evidence.
 
 L2 has four ways and four MSHRs. The 4 KiB (32-set) configuration is the default;
 8 KiB is solely the M5 A/B point. L2 dynamically serves I and D demand and does
