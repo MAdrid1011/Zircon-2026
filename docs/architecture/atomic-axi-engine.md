@@ -90,4 +90,8 @@ trap and proves that the following SC issues no write.
 then inject an ID-7 SC `BRESP` error. It requires the LR metadata to retire,
 one SC write response, and the SC's exact cause-7/tval trap without an `rd`
 completion.
+`make test-m3-lrsc-granularity` uses three explicit seeds to prove the frozen
+word-granularity reservation rule: a disjoint local store must not invalidate
+an LR reservation, so the later SC has one successful ID-7 AW/B lifecycle and
+returns `rd=0` with exact write metadata.
 Run `make test-m3-atomic` for the focused local regression.
