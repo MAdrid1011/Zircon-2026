@@ -9,6 +9,11 @@ waits for its B response before the SQ effect completes. `DeviceStrong` remains
 one beat; `DeviceBurstable` collects one through four consecutive members before
 the first AXI acceptance.
 
+A younger independent cacheable load may acquire its data-read owner while a
+`DeviceStrong` store waits for ID-6 B. This legal transport overlap never makes
+the store visible early: its B-gated SQ effect and ROB age retire before those
+younger loads, whose results retain their own LQ/ROB tags.
+
 ## Parameters and interface
 
 The owner is fixed at four requests per `OrderedIOGroup`; each group has a

@@ -5100,6 +5100,56 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("retires a DeviceStrong store before overlapping younger cacheable loads") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val firstLine = BigInt("80001000", 16)
+        val secondLine = firstLine + 32
+        var deviceResponseSeen = false
+        var dataReadBeforeDeviceResponse = false
+        val dataReads = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("b00000b7", 16), // lui x1,0xb0000
+          ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+          ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+          ResetVector + 12 -> BigInt("80001237", 16), // lui x4,0x80001
+          ResetVector + 16 -> BigInt("00022183", 16), // lw x3,0(x4)
+          ResetVector + 20 -> BigInt("02022283", 16), // lw x5,32(x4)
+          ResetVector + 24 -> BigInt("00100073", 16),
+          firstLine -> BigInt("11223344", 16),
+          secondLine -> BigInt("55667788", 16)
+        ), cycles = 512, writeResponse = Some(0), bValidForCycle = cycle => cycle >= 80,
+          observeCycle = (core, _) => {
+            val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean
+            val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+              core.io.axi.b.ready.peek().litToBoolean
+            if (bFire && core.io.axi.b.bits.id.peek().litValue == 6) deviceResponseSeen = true
+            if (arFire) {
+              val address = core.io.axi.ar.bits.addr.peek().litValue
+              if (Set(firstLine, secondLine).contains(address)) {
+                dataReadBeforeDeviceResponse ||= !deviceResponseSeen
+                dataReads += address
+              }
+            }
+          }))
+        withClue(s"deviceB=$deviceResponseSeen earlyData=$dataReadBeforeDeviceResponse " +
+          s"dataReads=$dataReads trace=$events") {
+          assert(deviceResponseSeen && dataReadBeforeDeviceResponse)
+          assert(dataReads.toSet == Set(firstLine, secondLine))
+          val storeIndex = events.indexWhere(_.pc == ResetVector + 8)
+          val firstLoadIndex = events.indexWhere(_.pc == ResetVector + 16)
+          val secondLoadIndex = events.indexWhere(_.pc == ResetVector + 20)
+          assert(storeIndex >= 0 && storeIndex < firstLoadIndex && firstLoadIndex < secondLoadIndex)
+          assert(events(firstLoadIndex).gprWrite && events(firstLoadIndex).gprAddress == 3 &&
+            events(firstLoadIndex).gprData == BigInt("11223344", 16))
+          assert(events(secondLoadIndex).gprWrite && events(secondLoadIndex).gprAddress == 5 &&
+            events(secondLoadIndex).gprData == BigInt("55667788", 16))
+          assert(events.last.trap && events.last.cause == 3)
+        }
+      }
+    }
+
     it("starts clean AXI read and write owner epochs across reset") {
       for (seed <- M3AxiResetSeeds) {
         simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
