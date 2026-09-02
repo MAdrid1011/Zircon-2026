@@ -92,6 +92,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       driveInterrupts: (ZirconCore, Seq[TraceSample]) => Unit = (_, _) => (),
       arReadyForCycle: Int => Boolean = _ => true,
       rValidForCycle: Int => Boolean = _ => true,
+      readSelectForCycle: (Int, Seq[(BigInt, BigInt, BigInt, Boolean)]) => Int =
+        (_, _) => 0,
       rResponse: (BigInt, BigInt) => Int = (_, _) => 0,
       writeResponse: Option[Int] = None,
       observeCycle: (ZirconCore, Int) => Unit = (_, _) => (),
@@ -107,6 +109,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     var wLastSeen = false
     var bQueued = false
     var bHeld = false
+    var heldReadIndex = 0
     var writeId = BigInt(5)
     var writeAddress = BigInt(0)
     var writeBeat = 0
@@ -117,9 +120,13 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       dut.io.axi.ar.ready.poke(arReadyForCycle(cycle))
       dut.io.axi.aw.ready.poke(awReadyForCycle(cycle))
       dut.io.axi.w.ready.poke(wReadyForCycle(cycle))
+      val selectedReadIndex = if (rHeld) heldReadIndex else {
+        val requested = readSelectForCycle(cycle, pendingReads.toSeq)
+        requested.max(0).min(pendingReads.size - 1)
+      }
       val rOffered = pendingReads.nonEmpty && (rHeld || rValidForCycle(cycle))
       if (rOffered) {
-        val (id, address, data, last) = pendingReads.front
+        val (id, address, data, last) = pendingReads(selectedReadIndex)
         dut.io.axi.r.valid.poke(true)
         dut.io.axi.r.bits.id.poke(id)
         dut.io.axi.r.bits.data.poke(data)
@@ -181,10 +188,15 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       dut.clock.step()
 
       if (rFire) {
-        pendingReads.dequeue()
+        val remaining = pendingReads.toSeq.zipWithIndex.collect {
+          case (entry, index) if index != selectedReadIndex => entry
+        }
+        pendingReads.clear()
+        remaining.foreach(pendingReads.enqueue(_))
         rHeld = false
       } else if (rOffered) {
         rHeld = true
+        heldReadIndex = selectedReadIndex
       }
       if (arFire) {
         for (beat <- 0 until arBeats) {
@@ -285,7 +297,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       seed: Long,
       scenario: String,
       schedule: AxiSchedule,
-      events: Seq[TraceSample]
+      events: Seq[TraceSample],
+      responseSelectorSeed: Option[Long] = None
   ): Unit = {
     val directory = Paths.get("target", "zircon-failures")
     Files.createDirectories(directory)
@@ -296,6 +309,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         s"aw_ready=${schedule.awReady.map(value => if (value) '1' else '0').mkString}\n" +
         s"w_ready=${schedule.wReady.map(value => if (value) '1' else '0').mkString}\n" +
         s"b_valid=${schedule.bValid.map(value => if (value) '1' else '0').mkString}\n" +
+        responseSelectorSeed.map(selectorSeed =>
+          s"response_selector_seed=0x${java.lang.Long.toHexString(selectorSeed)}\n").getOrElse("") +
         events.mkString("retire_trace=\n", "\n", "\n")
     Files.writeString(directory.resolve(
       s"m3-axi-stress-$scenario-${java.lang.Long.toHexString(seed)}.txt"), evidence)
@@ -1847,6 +1862,74 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           secondLoad.memoryAddress == secondLine && secondLoad.memoryReadData ==
             BigInt("55667788", 16))
         assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("preserves cross-ID AXI read ownership under seeded response interleaving") {
+      val seeds = Seq(0x5eed5001L, 0x5eed5002L, 0x5eed5003L, 0x5eed5004L)
+      for (seed <- seeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 768
+          val schedule = seededAxiSchedule(seed, cycles)
+          val selectorRandom = new Random(seed ^ 0x13579bdfL)
+          val selectorSeed = seed ^ 0x13579bdfL
+          val observedDataIds = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val firstLine = BigInt("80001000", 16)
+          val secondLine = BigInt("80002000", 16)
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("80002237", 16), // lui x4,0x80002
+              ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 12 -> BigInt("00022183", 16), // lw x3,0(x4)
+              ResetVector + 16 -> BigInt("00100073", 16),
+              firstLine -> BigInt("11223344", 16),
+              secondLine -> BigInt("55667788", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                // Keep beats ordered within each AXI ID while allowing IDs to
+                // be selected in a deterministic, seed-controlled order.
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                if (candidates.isEmpty) 0
+                else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              observeCycle = (core, _) => {
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                if (rFire) {
+                  val id = core.io.axi.r.bits.id.peek().litValue
+                  if (id >= 1 && id <= 4) observedDataIds += id
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val dataIdSwitch = observedDataIds.sliding(2).exists(pair => pair.head != pair.last)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"dataIds=$observedDataIds, trace=$retired") {
+              assert(observedDataIds.distinct.size >= 2,
+                "the program did not create two data AXI owners")
+              assert(dataIdSwitch,
+                "data AXI responses were not interleaved across owner IDs")
+              assert(retired.exists(event => event.pc == ResetVector + 8 &&
+                event.gprWrite && event.gprAddress == 2 &&
+                event.gprData == BigInt("11223344", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 12 &&
+                event.gprWrite && event.gprAddress == 3 &&
+                event.gprData == BigInt("55667788", 16)))
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "multi-owner-interleave", schedule, events,
+                Some(selectorSeed))
+              throw failure
+          }
+        }
       }
     }
 

@@ -55,6 +55,7 @@ test-m3-device-io:
 # below the five-minute component budget.
 test-m3-axi-stress:
 	./scripts/sbtw 'testOnly zircon.AXIDataReadEngineSpec'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves cross-ID AXI read ownership under seeded response interleaving"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ordered device writes through explicitly seeded all-channel AXI backpressure"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves exact data RRESP and device BRESP faults under seeded AXI backpressure"'
 
