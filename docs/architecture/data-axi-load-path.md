@@ -87,7 +87,8 @@ can be interpreted as a fetch or data result.
 `AXIDataReadEngineSpec` covers client-token preservation, AR/R backpressure,
 four L2 owners, ID interleaving, response errors, and beat/`last` assertions.
 `L1DLoadCacheSpec` covers hit, miss, same-line secondary merge, four-MSHR
-backpressure, refill response backpressure, forwarding-only completion,
+backpressure, refill response backpressure including reverse MSHR response
+order, forwarding-only completion,
 non-cacheable rejection, and recovery drain. It also proves that a dirty-victim
 miss stalled before its L2 transfer handshake is cancelled by full flush without
 creating an MSHR, L2/AXI request, or completion; the resident dirty line remains

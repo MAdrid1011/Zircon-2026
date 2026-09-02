@@ -170,7 +170,11 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.dataResponse.valid.poke(false)
   }
 
-  private def startAxiRefill(dut: L1DLoadCache, lineAddress: BigInt): Unit = {
+  private def startAxiRefill(
+      dut: L1DLoadCache,
+      lineAddress: BigInt,
+      mshrIndex: Int = 0
+  ): Unit = {
     dut.io.l2Lookup.valid.expect(true)
     dut.io.l2Lookup.bits.lineAddress.expect(lineAddress)
     dut.io.l2Lookup.ready.poke(true)
@@ -186,7 +190,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
     dut.io.l2Response.valid.poke(false)
     dut.io.dataRequest.valid.expect(true)
     dut.io.dataRequest.bits.client.expect(L2DemandClient.Data)
-    dut.io.dataRequest.bits.clientMshr.expect(0)
+    dut.io.dataRequest.bits.clientMshr.expect(mshrIndex)
     dut.io.dataRequest.bits.lineAddress.expect(lineAddress)
     dut.io.dataRequest.ready.poke(true)
     dut.clock.step()
@@ -1149,6 +1153,63 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.valid.expect(true)
         dut.io.completion.bits.robTag.expect(3)
         dut.io.completion.bits.cacheData.expect(lane1Words(5))
+      }
+    }
+
+    it("keeps dual AXI refills bound to their MSHRs across reverse response order") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerLine = BigInt("80006a00", 16)
+        val olderLine = BigInt("80006b00", 16)
+        val youngerWords = Seq.tabulate(8)(word => BigInt("51000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("52000000", 16) + word)
+
+        // The two lanes reserve separate MSHRs in one cycle. Both requests
+        // then cross the serialized L2 probe and shared AXI boundaries before
+        // either response returns, so the physical response order is not an
+        // allocation-order proxy.
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine + 20)
+        dut.io.request.foreach(_.ready.expect(true))
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        startAxiRefill(dut, youngerLine, mshrIndex = 0)
+        startAxiRefill(dut, olderLine, mshrIndex = 1)
+
+        // ID/MSHR 0 returns first even though it is younger architecturally.
+        // Its data and completion must stay attached to tag 7 rather than the
+        // older waiter's tag or word offset.
+        dut.io.dataResponse.valid.poke(true)
+        dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+        dut.io.dataResponse.bits.clientMshr.poke(0)
+        dut.io.dataResponse.bits.accessFault.poke(false)
+        youngerWords.zipWithIndex.foreach { case (word, index) =>
+          dut.io.dataResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.dataResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.dataResponse.valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(youngerWords(1))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // The delayed older response remains live in MSHR 1 and produces its
+        // own exact word and tag after the first owner has drained.
+        dut.io.dataResponse.valid.poke(true)
+        dut.io.dataResponse.bits.clientMshr.poke(1)
+        olderWords.zipWithIndex.foreach { case (word, index) =>
+          dut.io.dataResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.dataResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.dataResponse.valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(olderWords(5))
       }
     }
 
