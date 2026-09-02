@@ -94,6 +94,12 @@ order through the one-entry response buffer.
 | MMIO/A | ID-6 strong/burstable groups plus LR/SC success and local/trap reservation failure, every AMO function, exact R/B fault conversion, and aq ordering have local directed evidence. Remaining: external reservation-loss cases, FENCE pressure, formal AXI/LSQ properties, random error injection, and committed-memory differential. |
 | Core/differential | deterministic RV32IMA ELF including `tohost`; explicit-seed stress starting at `0x5eed3004`; trace memory fields; Spike and Sail committed-memory comparison; applicable ACT4 IMA smoke |
 
+The four-seed `0x5eee0001`--`0x5eee0004` fault tier first permits four
+logical data lines to obtain their shared physical AXI owners, then drains all
+four RRESP-error bursts from youngest to oldest. Its retire trace still accepts
+only the oldest load's exact cause-5/tval trap. It runs with the existing two
+owner RRESP and ID-6 BRESP reversal cases through `make test-m3-axi-faults`.
+
 The four-seed `make test-m3-axi-mixed` tier (`0x5eede001`--`0x5eede004`)
 combines two cache refills, a cacheable store, an ID-6 device store, and a
 FENCE-triggered ID-5 writeback under independently randomized all-channel

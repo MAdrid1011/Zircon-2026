@@ -23,6 +23,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eeda003L, 0x5eeda004L)
   private val M3AxiMixedFaultSeeds = Seq(0x5eedb001L, 0x5eedb002L,
     0x5eedb003L, 0x5eedb004L)
+  private val M3AxiFourFaultOrderSeeds = Seq(0x5eee0001L, 0x5eee0002L,
+    0x5eee0003L, 0x5eee0004L)
   private val M3FencePressureSeeds = Seq(0x5eedc001L, 0x5eedc002L,
     0x5eedc003L, 0x5eedc004L)
   private val M3FenceRetrySeeds = Seq(0x5eedd001L, 0x5eedd002L,
@@ -2617,6 +2619,105 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "reverse-rresp-fault-order", schedule, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("keeps the oldest of four RRESP faults after reverse cross-ID drain") {
+      for (seed <- M3AxiFourFaultOrderSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1536
+          val schedule = seededAxiSchedule(seed, cycles)
+          val lines = Seq(
+            BigInt("80001000", 16), BigInt("80001020", 16),
+            BigInt("80001040", 16), BigInt("80001060", 16))
+          val ownerRemaining = scala.collection.mutable.Map.empty[BigInt, (BigInt, Int)]
+          val faultCompletionOrder = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          def dataLine(address: BigInt): Option[BigInt] =
+            lines.find(line => address >= line && address < line + 32)
+          var allDataOwnersObserved = false
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1), oldest
+              ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
+              ResetVector + 12 -> BigInt("0400a203", 16), // lw x4,64(x1)
+              ResetVector + 16 -> BigInt("0600a283", 16), // lw x5,96(x1), youngest
+              ResetVector + 20 -> BigInt("00100073", 16),
+              lines(0) -> BigInt("11111111", 16),
+              lines(1) -> BigInt("22222222", 16),
+              lines(2) -> BigInt("33333333", 16),
+              lines(3) -> BigInt("44444444", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => cycle < 128 || schedule.rValid(cycle),
+              readSelectForCycle = (cycle, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                val dataCandidates = candidates.filter(index =>
+                  dataLine(pending(index)._2).nonEmpty)
+                if (allDataOwnersObserved && dataCandidates.nonEmpty) {
+                  dataCandidates.maxBy(index => lines.indexOf(dataLine(pending(index)._2).get))
+                } else if (cycle < 128 &&
+                    candidates.exists(index => pending(index)._1 == 0)) {
+                  candidates.find(index => pending(index)._1 == 0).get
+                } else {
+                  candidates.find(index => dataLine(pending(index)._2).isEmpty).getOrElse(
+                    candidates.headOption.getOrElse(0))
+                }
+              },
+              readValidForCycle = (_, _, address) =>
+                dataLine(address).isEmpty || allDataOwnersObserved,
+              rResponse = (_, address) => if (dataLine(address).nonEmpty) 2 else 0,
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                if (arFire) {
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (lines.contains(address)) {
+                    ownerRemaining.update(core.io.axi.ar.bits.id.peek().litValue,
+                      (address, 8))
+                    allDataOwnersObserved ||= ownerRemaining.size == lines.size
+                  }
+                }
+                if (rFire) {
+                  val id = core.io.axi.r.bits.id.peek().litValue
+                  ownerRemaining.get(id).foreach { case (address, remaining) =>
+                    if (remaining == 1) {
+                      faultCompletionOrder += address
+                      ownerRemaining.remove(id)
+                    } else ownerRemaining.update(id, (address, remaining - 1))
+                  }
+                }
+              })
+
+            val retired = withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"ownersObserved=$allDataOwnersObserved, faultOrder=$faultCompletionOrder, " +
+              s"live=$ownerRemaining, trace=$events\n") {
+              throughFirstTrap(events)
+            }
+            val oldestTrap = retired.find(event => event.trap && event.pc == ResetVector + 4)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"faultOrder=$faultCompletionOrder, live=$ownerRemaining, trace=$retired") {
+              assert(faultCompletionOrder == lines.reverse)
+              assert(ownerRemaining.isEmpty)
+              assert(oldestTrap.exists(event => event.cause == 5 &&
+                event.trapValue == lines.head))
+              for (pc <- Seq(ResetVector + 8, ResetVector + 12, ResetVector + 16)) {
+                assert(!retired.exists(event => event.pc == pc && !event.trap))
+              }
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "four-owner-reverse-rresp-fault-order",
+                schedule, events)
               throw failure
           }
         }
