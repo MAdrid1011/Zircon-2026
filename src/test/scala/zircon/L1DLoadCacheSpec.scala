@@ -1509,6 +1509,53 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("reclaims saturated waiter credits after selective squash while retaining an older owner") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80008a00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("d1000000", 16) + word)
+
+        // One shared MSHR owns every waiter credit. Tag 2 is the sole
+        // architectural survivor; the other seven waiters are younger than
+        // the recovery boundary and must not pin the released credits.
+        for (pair <- 0 until 4) {
+          presentLoad(dut, lane = 0, tag = 2 + pair * 2,
+            address = line + pair * 8)
+          presentLoad(dut, lane = 1, tag = 3 + pair * 2,
+            address = line + pair * 8 + 4)
+          dut.io.request.foreach(_.ready.expect(true))
+          dut.clock.step()
+          dut.io.request.foreach(_.valid.poke(false))
+        }
+        dut.io.l2Lookup.valid.expect(true)
+
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(2)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+
+        // The MSHR stays live for tag 2, but its reclaimed waiter credits let
+        // a new same-line request merge before the serialized L2 probe fires.
+        presentLoad(dut, lane = 0, tag = 10, address = line + 28)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        issueRefill(dut, words, lineAddress = line)
+        dut.io.completion.ready.poke(true)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(2)
+        dut.io.completion.bits.cacheData.expect(words(0))
+        dut.clock.step()
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(10)
+        dut.io.completion.bits.cacheData.expect(words(7))
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("holds a dirty-victim miss behind L2 transfer backpressure") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

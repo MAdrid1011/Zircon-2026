@@ -2,7 +2,7 @@
 
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
-最新完整 `L1DLoadCacheSpec`（2026-09-03）为 51/51 tests、149.320 秒，仍低于五分钟组件门槛。除既有 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、反向 refill response order 和饱和 owner recovery 外，新增用例明确覆盖 dirty victim 已 transfer 到 L2、但本地 demand 尚未发 L2 probe 时的 global flush：flush 只能释放本地 MSHR，不能产生 stale probe、AXI refill 或 completion；后续 fresh miss 建立独立 owner。另一个新增 case 使两个 lane 在同一 cold word 上同时进入 one-MSHR merge，要求仅一次 refill、两个 exact waiter 和按 ROB age 的相同 word completion。
+最新完整 `L1DLoadCacheSpec`（2026-09-03）为 52/52 tests、149.512 秒，仍低于五分钟组件门槛。除既有 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、反向 refill response order 和饱和 owner recovery 外，新增用例明确覆盖 dirty victim 已 transfer 到 L2、但本地 demand 尚未发 L2 probe 时的 global flush：flush 只能释放本地 MSHR，不能产生 stale probe、AXI refill 或 completion；后续 fresh miss 建立独立 owner。另一个新增 case 使两个 lane 在同一 cold word 上同时进入 one-MSHR merge，要求仅一次 refill、两个 exact waiter 和按 ROB age 的相同 word completion。最新 waiter recovery case 则让一条 MSHR 用满八个 waiter 后仅保留最老 tag，选择性 squash 必须释放其余 credit、允许新同 line waiter 合并，并只完成 survivor 与新请求。
 最新完整 `ExclusiveL2TransferStoreSpec`（2026-09-03）为 12/12 tests、75 秒。新增 exact dirty-line cleanup 在两项 victim FIFO 已满时的回压与 dequeue/enqueue 时序验证：原 FIFO 头先 drain，下一周期 cleanup target 才进入 tail，三项 dirty line 的地址与 payload 顺序保持精确。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
 不同 set pair 中若年轻 miss 需要 resident victim，`L1DLoadCacheSpec` 证明较老 hit 单独握手，年轻 miss 只在下一周期得到唯一 L1D-to-L2 transfer owner。
