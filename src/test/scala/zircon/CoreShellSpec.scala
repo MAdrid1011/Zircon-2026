@@ -4281,6 +4281,96 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("replays seeded same-address resident hits without dual L1D acceptance") {
+      for (seed <- M3DualLoadMergeSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 768
+          val schedule = seededAxiSchedule(seed ^ 0x200L, cycles)
+          val line = BigInt("80001000", 16)
+          // The preload value is zero so the dependent ADD preserves the base
+          // address. This prevents the tested pair from reaching L1D until
+          // the line is resident, selecting the same-address hit policy rather
+          // than the legal same-line-miss merge policy.
+          val word = BigInt(0)
+          var m0Ingress = false
+          var m1Ingress = false
+          val dualIngressCycles = scala.collection.mutable.ArrayBuffer.empty[Int]
+          val dualL1dAcceptCycles = scala.collection.mutable.ArrayBuffer.empty[Int]
+          val l1dRequestTags = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val lineRefillAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("0000a383", 16), // lw x7,0(x1), preload
+            ResetVector + 8 -> BigInt("007082b3", 16), // add x5,x1,x7
+            ResetVector + 12 -> BigInt("0002a103", 16), // lw x2,0(x5)
+            ResetVector + 16 -> BigInt("0002a183", 16), // lw x3,0(x5), same address
+            ResetVector + 20 -> BigInt("00100073", 16),
+            line -> word)
+          try {
+            events = runProgram(dut, program, cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, cycle) => {
+                val observation = core.io.m2Observation.get
+                val m0Fire = observation.m0Ingress.peek().litToBoolean
+                val m1Fire = observation.m1Ingress.peek().litToBoolean
+                m0Ingress ||= m0Fire
+                m1Ingress ||= m1Fire
+                if (m0Fire && m1Fire) dualIngressCycles += cycle
+                val l1dFire0 = observation.l1dRequest(0).peek().litToBoolean
+                val l1dFire1 = observation.l1dRequest(1).peek().litToBoolean
+                if (l1dFire0 && l1dFire1) dualL1dAcceptCycles += cycle
+                for (lane <- 0 until 2) {
+                  if (observation.l1dRequest(lane).peek().litToBoolean) {
+                    l1dRequestTags += observation.l1dRequestTag(lane).peek().litValue
+                  }
+                }
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val id = core.io.axi.ar.bits.id.peek().litValue
+                val address = core.io.axi.ar.bits.addr.peek().litValue
+                if (arFire && id >= 1 && id <= 4 && address == line) {
+                  lineRefillAddresses += address
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} m0=$m0Ingress " +
+              s"m1=$m1Ingress dualIngress=$dualIngressCycles " +
+              s"dualL1d=$dualL1dAcceptCycles l1d=$l1dRequestTags " +
+              s"lineDataAr=$lineRefillAddresses trace=$retired") {
+              assert(m0Ingress && m1Ingress && dualIngressCycles.nonEmpty,
+                "same-address loads did not enter both LSU owners together")
+              assert(dualL1dAcceptCycles.isEmpty,
+                "same-address loads were accepted by both L1D ports in one cycle")
+              assert(l1dRequestTags.distinct.size == 3,
+                "the preload and two same-address L1D request owners were not all accepted")
+              assert(lineRefillAddresses == Seq(line),
+                "resident same-address hits issued an additional data-line AXI refill")
+              assert(retired.exists(event => event.pc == ResetVector + 12 &&
+                event.gprWrite && event.gprAddress == 2 && event.gprData == word &&
+                event.memoryAddress == line && event.memoryReadData == word))
+              assert(retired.exists(event => event.pc == ResetVector + 16 &&
+                event.gprWrite && event.gprAddress == 3 && event.gprData == word &&
+                event.memoryAddress == line && event.memoryReadData == word))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "dual-lsu-same-address-merge", schedule, events,
+                program = Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
     it("preserves cross-ID AXI read ownership under seeded response interleaving") {
       val seeds = Seq(0x5eed5001L, 0x5eed5002L, 0x5eed5003L, 0x5eed5004L)
       for (seed <- seeds) {

@@ -115,12 +115,14 @@ requires all five exact GPR/memory retire records. The latest local run passes
 retire trace.
 
 `make test-m3-dual-load-merge` runs three explicit seeds
-`0x5eedfc01`--`0x5eedfc03` with independent five-channel AXI backpressure.
-Each complete-core program issues two same-line, same-word-bank loads through
-M0 and M1, requires the younger request to replay, then requires two distinct
-L1D owners but exactly one target-line AXI refill and both exact GPR/memory
-retirement metadata. The latest local run passes 1/1 in 33.322 seconds;
-failures persist the seed, schedule, program, and retire trace.
+`0x5eedfc01`--`0x5eedfc03` for each of its same-bank and same-address resident-hit cases,
+with independent five-channel AXI backpressure. Each complete-core program
+issues two same-line loads through M0 and M1, requires two exact L1D owners but
+exactly one target-line AXI refill and both exact GPR/memory retirement
+metadata. The same-address case first fills a zero-valued line and derives its
+base from that load, then requires simultaneous M0/M1 ingress, no simultaneous
+dual-port L1D acceptance, and later replay of the younger resident-hit owner.
+Failures persist the seed, schedule, program, and retire trace.
 
 `DualLSUIngressSpec` also drives independent cacheable M0/M1 loads with two
 live ROB contexts and requires both LQ forward ports to assert in the same

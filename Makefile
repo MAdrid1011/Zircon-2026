@@ -32,11 +32,12 @@ test-m3-dual-load-forward:
 	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1"'
 
-# Three explicit-seed complete-core same-bank load replay/merge runs. Kept
-# separate from the broad component target so each M3 component simulation
-# remains bounded.
+# Six explicit-seed complete-core same-bank merge and same-address resident-hit
+# replay runs. Kept separate from the broad component target so each M3
+# component simulation remains bounded.
 test-m3-dual-load-merge:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-address resident hits"'
 
 # Six explicit-seed complete-core partial-store forwarding runs. They require
 # older SB and SH byte lanes to merge with the cacheable refill read by a younger LW.
