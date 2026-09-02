@@ -124,5 +124,49 @@ class AXIL2WritebackEngineSpec extends AnyFunSpec with ChiselSim {
         dut.io.busy.expect(false)
       }
     }
+
+    it("drops an errored partial retry and accepts a new owner after reset") {
+      simulate(new AXIL2WritebackEngine) { dut =>
+        clear(dut)
+        val firstWords = Seq.tabulate(8)(index => BigInt("aa000000", 16) + index)
+        offerDirtyVictim(dut, BigInt("80003000", 16), firstWords)
+        acceptBurst(dut, BigInt("80003000", 16), firstWords)
+        dut.io.b.valid.poke(true)
+        dut.io.b.bits.resp.poke(2)
+        dut.io.b.ready.expect(true)
+        dut.clock.step()
+        dut.io.b.valid.poke(false)
+        dut.io.retryObserved.expect(true)
+
+        // Accept the retry AW and a prefix of W before reset starts a new
+        // external ownership epoch.
+        dut.io.aw.ready.poke(true)
+        dut.io.w.ready.poke(true)
+        dut.clock.step(3)
+        dut.io.aw.ready.poke(false)
+        dut.io.w.ready.poke(false)
+        dut.io.busy.expect(true)
+        dut.reset.poke(true)
+        dut.clock.step()
+        dut.reset.poke(false)
+        dut.clock.step()
+        dut.io.busy.expect(false)
+        dut.io.retryObserved.expect(false)
+        dut.io.completed.valid.expect(false)
+        dut.io.victim.ready.expect(true)
+
+        val nextWords = Seq.tabulate(8)(index => BigInt("bb000000", 16) + index)
+        offerDirtyVictim(dut, BigInt("80004000", 16), nextWords)
+        acceptBurst(dut, BigInt("80004000", 16), nextWords)
+        dut.io.b.valid.poke(true)
+        dut.io.b.bits.resp.poke(0)
+        dut.io.b.ready.expect(true)
+        dut.io.completed.valid.expect(true)
+        dut.io.completed.bits.expect(BigInt("80004000", 16))
+        dut.clock.step()
+        dut.io.b.valid.poke(false)
+        dut.io.busy.expect(false)
+      }
+    }
   }
 }

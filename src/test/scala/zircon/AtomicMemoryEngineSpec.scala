@@ -238,5 +238,52 @@ class AtomicMemoryEngineSpec extends AnyFunSpec with ChiselSim {
         dut.io.busy.expect(false)
       }
     }
+
+    it("clears partial read/write owners and LR reservation across reset") {
+      simulate(new AtomicMemoryEngine) { dut =>
+        clear(dut)
+
+        // Reset while ID 7 is waiting for an accepted AR response.
+        offer(dut, IntOperation.LrW, tag = 1)
+        dut.io.ar.valid.expect(true)
+        dut.clock.step()
+        dut.io.busy.expect(true)
+        dut.reset.poke(true)
+        dut.clock.step()
+        dut.reset.poke(false)
+        dut.clock.step()
+        dut.io.busy.expect(false)
+        dut.io.result.valid.expect(false)
+        dut.io.effect.ready.expect(true)
+
+        // Establish a new reservation, then reset after AW but before W/B.
+        offer(dut, IntOperation.LrW, tag = 2)
+        acceptRead(dut, BigInt("01020304", 16))
+        consumeResult(dut, tag = 2, data = BigInt("01020304", 16))
+        dut.io.reservationLive.expect(true)
+        dut.io.w.ready.poke(false)
+        offer(dut, IntOperation.ScW, tag = 3,
+          writeData = BigInt("cafebabe", 16), destination = 33)
+        dut.io.aw.valid.expect(true)
+        dut.io.w.valid.expect(true)
+        dut.clock.step()
+        dut.io.aw.valid.expect(false)
+        dut.io.w.valid.expect(true)
+        dut.io.busy.expect(true)
+        dut.reset.poke(true)
+        dut.clock.step()
+        dut.reset.poke(false)
+        dut.io.w.ready.poke(true)
+        dut.clock.step()
+        dut.io.busy.expect(false)
+        dut.io.reservationLive.expect(false)
+        dut.io.result.valid.expect(false)
+        dut.io.effect.ready.expect(true)
+
+        offer(dut, IntOperation.LrW, tag = 4)
+        acceptRead(dut, BigInt("55667788", 16))
+        consumeResult(dut, tag = 4, data = BigInt("55667788", 16))
+      }
+    }
   }
 }
