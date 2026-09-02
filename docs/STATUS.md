@@ -1,7 +1,7 @@
 # Zircon-2026 实施状态
 
-最新本地全回归（2026-09-02）为 63 suites、374 tests，全部通过；
-`make test-m3-dual-load-forward` 为 5 suites、65 tests 加 1 条顶层 core 用例，耗时 3 分 36 秒。
+最新本地全回归（2026-09-02）为 63 suites、375 tests，全部通过；
+`make test-m3-dual-load-forward` 为 5 suites、66 tests 加 1 条顶层 core 用例，耗时 3 分 43 秒。
 最新 L1D resource-pressure slice 为 30/30 tests、1 分 32 秒，覆盖 MSHR、waiter 和 dirty-victim L2 backpressure。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
 

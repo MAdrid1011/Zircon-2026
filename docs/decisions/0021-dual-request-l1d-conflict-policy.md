@@ -50,7 +50,8 @@ same-set hit/miss pair it applies the same rule only when an invalid way distinc
 from the hit way is available; a resident or dirty-victim replacement still
 uses the older request only. It also accepts
 two different-set misses when each has an invalid way plus distinct free MSHR
-and waiter credits; L2 probes remain serialized. Pairs that need merge,
+and waiter credits; the same-set case additionally requires two distinct
+invalid ways. L2 probes remain serialized. Pairs that need merge,
 victim-transfer, or shared-set arbitration still use the older request only.
 This is explicitly not evidence that the remaining MSHR, victim, and L2 rows
 are done.
@@ -93,6 +94,9 @@ combinational path.
   has not issued an L2 probe is released, while a squashed younger MSHR with an
   accepted probe drains its L2 response without a completion before the older
   survivor probes and completes.
+- Same-set dual-miss coverage proves two independent MSHRs and ordered
+  completions when both ways are invalid, plus oldest-only admission when both
+  ways require a victim transfer.
 - The static-area ledger must include added port state, result buffering,
   conflict comparators, and any RAM port replication. A later timing report
   must identify whether a failing path is dominated by RAM routing or logic.

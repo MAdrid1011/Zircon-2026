@@ -342,13 +342,10 @@ class L1DLoadCache(
     // A same-set pair is safe only when the miss has an invalid way. The
     // replacement path below therefore never invalidates the hit-visible way.
     (portSet(0) =/= portSet(1) || dualHitMissHasInvalidWay)
-  // Two different-set misses can reserve independent invalid ways and MSHRs
-  // without claiming the single L1D-to-L2 victim-transfer port. They remain
-  // independent owners while the existing L2 probe interface drains them.
-  val dualDifferentSetMissCandidate = io.request(0).valid && io.request(1).valid &&
-    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
-    !portImmediateRequest(0) && !portImmediateRequest(1) &&
-    portSet(0) =/= portSet(1)
+  // Two different-line misses can reserve independent invalid ways and MSHRs
+  // without claiming the single L1D-to-L2 victim-transfer port. Same-set pairs
+  // need two distinct invalid ways; all accepted owners remain independent
+  // while the existing L2 probe interface drains them.
   val dualDifferentSetMissMatchingMshr = (0 until config.decodeWidth).map(port =>
     VecInit((0 until mshrCount).map(index =>
       mshrValid(index) && mshrLineAddress(index) === portLineAddress(port))))
@@ -370,6 +367,24 @@ class L1DLoadCache(
     _.asUInt.orR)
   val dualDifferentSetMissWay = dualDifferentSetMissInvalidWay.map(ways =>
     PriorityEncoder(ways.asUInt))
+  val dualDifferentSetMissSameSet = portSet(0) === portSet(1)
+  val dualDifferentSetMissSecondWayMask = VecInit((0 until ways).map(way =>
+    dualDifferentSetMissInvalidWay(1)(way) &&
+      way.U =/= dualDifferentSetMissWay(0)))
+  val dualDifferentSetMissHasDistinctWays = !dualDifferentSetMissSameSet ||
+    dualDifferentSetMissSecondWayMask.asUInt.orR
+  val dualDifferentSetMissSecondWay = PriorityEncoder(
+    dualDifferentSetMissSecondWayMask.asUInt)
+  val dualDifferentSetMissAllocatedWay = (0 until config.decodeWidth).map { port =>
+    if (port == 0) dualDifferentSetMissWay(0)
+    else Mux(dualDifferentSetMissSameSet,
+      dualDifferentSetMissSecondWay, dualDifferentSetMissWay(1))
+  }
+  val dualDifferentSetMissCandidate = io.request(0).valid && io.request(1).valid &&
+    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
+    !portImmediateRequest(0) && !portImmediateRequest(1) &&
+    portLineAddress(0) =/= portLineAddress(1) &&
+    (portSet(0) =/= portSet(1) || dualDifferentSetMissHasDistinctWays)
   val sameLineDualMiss = io.request(0).valid && io.request(1).valid &&
     io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
     !portImmediateRequest(0) && !portImmediateRequest(1) &&
@@ -438,7 +453,8 @@ class L1DLoadCache(
     !dualDifferentSetMissAnyMatchingMshr(0) &&
     !dualDifferentSetMissAnyMatchingMshr(1) &&
     dualDifferentSetMissHasInvalidWay(0) &&
-    dualDifferentSetMissHasInvalidWay(1)
+    dualDifferentSetMissHasInvalidWay(1) &&
+    dualDifferentSetMissHasDistinctWays
   val dualDifferentSetMissReady = dualDifferentSetMissCandidate &&
     requestAdmissionOpen && dualDifferentSetMissResources
   val sameLineDualMissReady = sameLineDualMiss && requestAdmissionOpen &&
@@ -634,9 +650,9 @@ class L1DLoadCache(
         mshrL2Resolved(allocatedMshr) := false.B
         mshrLineAddress(allocatedMshr) := portLineAddress(port)
         mshrSet(allocatedMshr) := portSet(port)
-        mshrWay(allocatedMshr) := dualDifferentSetMissWay(port)
+        mshrWay(allocatedMshr) := dualDifferentSetMissAllocatedWay(port)
         for (way <- 0 until ways) {
-          when(dualDifferentSetMissWay(port) === way.U) {
+          when(dualDifferentSetMissAllocatedWay(port) === way.U) {
             cacheValid(way)(portSet(port)) := false.B
             cacheDirty(way)(portSet(port)) := false.B
           }
@@ -892,8 +908,10 @@ class L1DLoadCache(
       "L1D accepted dual misses without two exact MSHR/waiter/way credits")
     assert(freeMshrIndex =/= secondFreeMshrIndex,
       "L1D dual misses allocated one MSHR to two independent lines")
-    assert(portSet(0) =/= portSet(1),
-      "L1D dual-miss allocation requires independently reserved sets")
+    when(portSet(0) === portSet(1)) {
+      assert(dualDifferentSetMissHasDistinctWays,
+        "L1D same-set dual misses require two independent invalid ways")
+    }
   }
   for (port <- 0 until config.decodeWidth) {
     when(io.request(port).fire) {

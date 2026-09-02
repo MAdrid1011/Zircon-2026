@@ -815,26 +815,74 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("accepts only the older owner from a same-set different-line dual-miss pair") {
+    it("accepts same-set dual misses when both ways are invalid") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val youngerLine = BigInt("80006000", 16)
         val olderLine = BigInt("80006400", 16)
 
-        // The same-set pair cannot allocate two independent ways yet. Port 1
-        // wins by ROB age, and the younger port must neither fire nor create a
-        // second L2 probe before replay.
+        // Both ways are invalid, so the pair can reserve one way per line and
+        // retain two independent owners while L2 probes remain one-wide.
         presentLoad(dut, lane = 0, tag = 7, address = youngerLine)
         presentLoad(dut, lane = 1, tag = 3, address = olderLine)
-        dut.io.request(0).ready.expect(false)
+        dut.io.request(0).ready.expect(true)
         dut.io.request(1).ready.expect(true)
         dut.clock.step()
         dut.io.request.foreach(_.valid.poke(false))
 
         dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(youngerLine)
+        issueRefill(dut,
+          Seq.tabulate(8)(word => BigInt("41000000", 16) + word),
+          lineAddress = youngerLine, mshrIndex = 0)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        issueRefill(dut,
+          Seq.tabulate(8)(word => BigInt("42000000", 16) + word),
+          lineAddress = olderLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+      }
+    }
+
+    it("admits only the older same-set miss when both ways need replacement") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("80006000", 16)
+        val residentB = BigInt("80006200", 16)
+        val youngerLine = BigInt("80006400", 16)
+        val olderLine = BigInt("80006600", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("43000000", 16) + word)
+
+        // Fill both ways of one set so neither dual-miss candidate has an
+        // invalid way. L2 insertion remains available for the single winner.
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, residentWords, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, residentWords, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // Lane 1 is older. Only it may cross the request boundary; the
+        // younger miss remains replayable and no second MSHR is fabricated.
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+        dut.io.l2Lookup.valid.expect(true)
         dut.io.l2Lookup.bits.lineAddress.expect(olderLine)
-        dut.io.dataRequest.valid.expect(false)
-        dut.io.completion.valid.expect(false)
       }
     }
 

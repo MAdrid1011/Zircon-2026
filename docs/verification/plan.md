@@ -53,7 +53,7 @@ ELF 或 differential 完成声明。
 | M2 E2 directed | `DecoderSpec`, `LongIssueQueueSpec`, `LongPipeSpec`, and `CoreShellSpec`: all eight OP/funct7=1 encodings; ROB-age issue, source-ready wakeup, squash/flush; 16x16 partial-product halves; iterative div/rem including zero and signed-overflow rules; two E2 result slots; E1->E2 and E2->E1 RAW through true retire trace; observed E0/E1/E2 three-start with recovery kill; simultaneous E1/E2 completion and dual retirement; four explicit-seed (`0x5eed`, `0x5eed1001`, `0x5eed2002`, `0x5eed3003`) AXI AR/R backpressure recovery runs that preserve failure seed/pattern/retire trace. ZirconSim PR #6 at `b51863c` runs `make diff` with the locked Spike revision: 17 RV32M events, plus the retained 17 RV32I/Zicsr and 32 RV32I ALU/branch events, matched at seed 1; `make diff-sail-rv32m` also matches the same 17 RV32M records against locked Sail-RISC-V `beaf44991eee362a062fcaaf6fcb78ca428ff710`. `make micro-ipc-rv32m` and `make baseline-ipc-rv32m` measure 0.07234 IPC (235 cycles) and 0.09140 IPC (186 cycles) on the same fixed prefix and seed, respectively; this is not the M0/M5 full workload profile. Each differential run then reaches only the expected unimplemented-LSU `tohost` timeout | M3 memory path, full IPC comparison, and `v0.3-rv32im` release evidence |
 
 The local evidence command is `./scripts/sbtw test`; the currently retained
-JUnit reports contain 63 reports and 374 tests with zero failures or errors.
+JUnit reports contain 63 reports and 375 tests with zero failures or errors.
 `make verilog` elaborates the same configuration. New randomized tests must declare a seed and persist the ELF,
 trace, tool SHA, and waveform on failure.
 
@@ -68,6 +68,8 @@ four live MSHRs backpressure a fifth miss, eight waiters backpressure a ninth
 same-line request, and a dirty-victim miss waits for an accepted L2 insert.
 The same-set hit/miss case also accepts both requests when the miss reserves the
 other invalid way; replacement with resident or dirty victims remains oldest-only.
+Same-set dual misses likewise require two distinct invalid ways; a full set
+admits only the older miss and transfers one victim through the single L2 port.
 
 | Boundary | Required tests and properties |
 | --- | --- |
