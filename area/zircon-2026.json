@@ -530,6 +530,30 @@
       "source": "L1DLoadCache two-lane line-address equality check for same-line dual-miss merge, conservatively charged as one 32-bit compare"
     },
     {
+      "name": "l1d_dual_hit_miss_set_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache different-set gate for concurrent cache-hit and miss admission, conservatively charged as one 32-bit compare"
+    },
+    {
+      "name": "l1d_dual_hit_miss_mshr_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache four MSHR line-address comparisons for the concurrently admitted miss"
+    },
+    {
+      "name": "l1d_dual_hit_miss_reserved_way_compare_units",
+      "metric": "comparator32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "L1DLoadCache four MSHR set comparisons while reserving an invalid way for the concurrently admitted miss"
+    },
+    {
       "name": "l1d_immediate_result_select",
       "metric": "priority_select_bits",
       "units": 1,
@@ -544,6 +568,22 @@
       "width": 1,
       "fanin": 2,
       "source": "L1DLoadCache two result-slot availability checks including same-cycle completion reuse"
+    },
+    {
+      "name": "l1d_dual_hit_miss_owner_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 2,
+      "width": 38,
+      "fanin": 2,
+      "source": "L1DLoadCache selects the concurrent miss address/tag and its allocated MSHR line/set/way record"
+    },
+    {
+      "name": "l1d_dual_hit_miss_immediate_slot_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 1,
+      "fanin": 2,
+      "source": "L1DLoadCache selects the retained hit result-slot availability for concurrent hit/miss admission"
     },
     {
       "name": "l1d_mshr_line_compare_units",
@@ -704,6 +744,14 @@
       "width": 3,
       "fanin": 8,
       "source": "L1DLoadCache second free-waiter priority selector for atomic same-line dual-miss admission"
+    },
+    {
+      "name": "l1d_dual_hit_miss_owner_select",
+      "metric": "priority_select_bits",
+      "units": 2,
+      "width": 3,
+      "fanin": 4,
+      "source": "L1DLoadCache matching-MSHR and invalid-way priority selectors for concurrent hit/miss admission"
     },
     {
       "name": "l2_demand_line_response_mux_inputs",

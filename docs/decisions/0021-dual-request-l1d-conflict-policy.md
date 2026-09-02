@@ -43,9 +43,12 @@ The first implementation increments have replaced the active top-level
 `DualLoadForwardArbiter` connection with direct two-lane L1D ingress. It
 performs both tag lookups, accepts different-bank hit pairs into two exact
 result slots, backpressures a same-bank or same-address younger request, and
-merges two same-line misses into one MSHR with two exact waiters. Hit/miss and
-different-line miss pairs still use the older request only. This is explicitly
-not evidence that the remaining MSHR, victim, and L2 rows are done.
+merges two same-line misses into one MSHR with two exact waiters. It also accepts
+a different-set cache-hit/miss pair when the hit has a retained result slot and
+the miss either joins an existing MSHR or reserves an invalid way. Same-set,
+resident/dirty-victim, and different-line miss pairs still use the older request
+only. This is explicitly not evidence that the remaining MSHR, victim, and L2
+rows are done.
 
 The implementation must use a two-port FPGA-friendly tag/data organization.
 For the Nexys4 DDR point this is a registered RAM boundary or an equivalent
@@ -65,8 +68,9 @@ combinational path.
   backpressure, response order, and squash/flush for each accepted owner.
 - The current directed matrix proves that a lane-1-old hit beats a lane-0-young
   miss, and that a lane-1-old different-line miss is the sole admitted owner.
-  These are conservative replay checks, not evidence for the eventual
-  resource-safe concurrent hit/miss or dual-miss rows.
+  It also proves concurrent different-set hit/miss completion with one exact
+  retained hit and one exact miss waiter. Same-set replay remains a conservative
+  check, not evidence for victim-transfer-safe hit/miss or dual-miss rows.
 - The static-area ledger must include added port state, result buffering,
   conflict comparators, and any RAM port replication. A later timing report
   must identify whether a failing path is dominated by RAM routing or logic.

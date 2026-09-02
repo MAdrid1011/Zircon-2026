@@ -710,11 +710,11 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("serializes a younger miss behind an older hit without losing either owner") {
+    it("serializes a same-set younger miss behind an older hit without losing either owner") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val hitLine = BigInt("80005c00", 16)
-        val missLine = BigInt("80005d00", 16)
+        val missLine = BigInt("80006000", 16)
         val words = Seq.tabulate(8)(word => BigInt("66000000", 16) + word)
 
         submit(dut, tag = 1, address = hitLine)
@@ -723,8 +723,9 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.completion.ready.poke(false)
 
-        // Lane 1 is older. It is a hit, while lane 0 must remain intact until
-        // the hit result is captured and the miss receives a real owner.
+        // Lane 1 is older. The same-set miss must remain intact until the hit
+        // result is captured; concurrent same-set allocation is deliberately
+        // deferred until its reserved-way policy is implemented.
         presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
         presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
         dut.io.request(0).ready.expect(false)
@@ -738,6 +739,42 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.request(0).valid.poke(false)
         issueRefill(dut, words, lineAddress = missLine)
 
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(1))
+      }
+    }
+
+    it("accepts a different-set hit and miss together with exact owners") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val hitLine = BigInt("80006400", 16)
+        val missLine = BigInt("80006500", 16)
+        val words = Seq.tabulate(8)(word => BigInt("55000000", 16) + word)
+
+        submit(dut, tag = 1, address = hitLine)
+        issueRefill(dut, words, lineAddress = hitLine)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // These lines use different L1D sets. The old hit owns one retained
+        // result slot and the young miss owns one waiter/MSHR; neither needs a
+        // victim transfer, so both handshakes are legal in the same cycle.
+        presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        issueRefill(dut, words, lineAddress = missLine)
         dut.io.completion.valid.expect(true)
         dut.io.completion.bits.robTag.expect(3)
         dut.io.completion.bits.cacheData.expect(words(2))
