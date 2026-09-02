@@ -1311,5 +1311,37 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.valid.expect(false)
       }
     }
+
+    it("drains an issued AXI refill after flush without completing its waiter") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80003c00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("44000000", 16) + word)
+        submit(dut, tag = 9, line + 8)
+        startAxiRefill(dut, line)
+
+        // The data request has crossed the AXI ownership boundary. Flush may
+        // remove its speculative waiter, but the retained owner must still
+        // drain the exact response instead of orphaning the physical credit.
+        dut.io.flush.poke(true)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.completion.valid.expect(false)
+        dut.io.dataResponse.valid.poke(true)
+        dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+        dut.io.dataResponse.bits.clientMshr.poke(0)
+        dut.io.dataResponse.bits.accessFault.poke(false)
+        words.zipWithIndex.foreach { case (word, index) =>
+          dut.io.dataResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.dataResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.dataResponse.valid.poke(false)
+
+        dut.io.completion.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(false)
+      }
+    }
   }
 }

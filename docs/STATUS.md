@@ -1,8 +1,8 @@
 # Zircon-2026 实施状态
 
 最新本地全回归（2026-09-02）为 63 suites、376 tests，全部通过；
-`make test-m3-dual-load-forward` 为 5 suites、70 tests 加 1 条顶层 core 用例，耗时约 4 分 19 秒。
-最新完整 `L1DLoadCacheSpec` 为 35/35 tests、1 分 52 秒，覆盖 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay，以及 flush 时已接受 L2 probe drain 与未发 probe peer 取消。
+`make test-m3-dual-load-forward` 为 5 suites、71 tests 加 1 条顶层 core 用例，耗时约 4 分 35 秒。
+最新完整 `L1DLoadCacheSpec` 为 36/36 tests、约 1 分 55 秒，覆盖 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay，以及 flush 时已接受 L2 probe 或 issued AXI refill 的 drain 与未发 probe peer 取消。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
 不同 set pair 中若年轻 miss 需要 resident victim，`L1DLoadCacheSpec` 证明较老 hit 单独握手，年轻 miss 只在下一周期得到唯一 L1D-to-L2 transfer owner。
 AXI data owner slice 为 8/8 tests（随机部分使用 4 个显式 seed，约 5 秒），并覆盖四 owner 尚未 drain、其中一个已记录 RRESP fault 时的 reset/ID reuse，以及 response credit 未释放时第二个 final R beat 的 backpressure；顶层 cross-ID 双 LSU、四-owner drain 和 reset-owner-epoch slice 各为 1/1（均为 4 个显式 seed）。`make test-m3-axi-stress` 实测约 4 分 16 秒；`make test-m3-axi-long` 为 1/1、约 52 秒，随机交错八条独立 cache-line load 并确认四 physical owner 回收复用；`make test-m3-axi-faults` 当前覆盖两条各 4-seed 的反向 fault-order 路径：年轻 RRESP fault burst 先完成仍保持更老 load 的精确 trap，且年轻 cacheable-load RRESP 先 drain 后仍由更老 ID-6 device-store BRESP 取得精确 trap。`make test-m3-axi-mixed` 以 `0x5eede001`--`0x5eede004` 混合两条 cache refill、cacheable store、ID-6 device store 和 FENCE ID-5 writeback；每个 seed 均要求两 data AR、ID-5/ID-6 AW/B owner 与精确 load/store/FENCE retirement，本地 1/1 为 50.5 秒。完整 `CoreShellSpec` 为 49/49、12 分 6 秒。reset slice 先 reset 四个 data owner 和一个 partial fault，再 reset ID-6 AW/W、ID-5 WLAST 和 ID-7 AMO AW/W（均在 B 前），最终冷启动重跑并检查无旧 owner/fault/credit 泄漏；`make test-m3-axi-reset` 两个顶层 slice 实测约 1 分 40 秒。ID-5 的 3/3 tests 覆盖 error retry 中的 partial AW/W reset，ID-7 的 7/7 tests 覆盖 AwaitRead、partial AW/W 和 LR reservation reset；两 suite 合计 10/10、约 9 秒。更长 multi-owner/组合错误 stress 仍未闭环。

@@ -108,13 +108,14 @@ exact load/store/FENCE retire metadata; the observed local result is 1/1 in
 50.5 seconds. Longer mixed streams and formal credit/protocol proofs remain
 open.
 
-The full `L1DLoadCacheSpec` is now 35/35 in 1 minute 52 seconds. Its added
+The full `L1DLoadCacheSpec` is now 36/36 in approximately 1 minute 55 seconds. Its added
 dirty-victim hit/miss and dual-miss cases first accept an older different-set
 hit or invalid-way miss, hold the younger replacement miss, then check that its
 sole L1D-to-L2 transfer retains the dirty word. A dual-miss flush additionally
 proves that the accepted probe drains without a completion or AXI fallback
-while its unissued peer is cancelled. The remaining response/recovery matrix
-under resource saturation remains open.
+while its unissued peer is cancelled. A separate issued-refill flush drains the
+accepted data response without a completion. The remaining response/recovery
+matrix under resource saturation remains open.
 
 Each random failure bundle contains the generator and memory seeds, ELF and
 SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
