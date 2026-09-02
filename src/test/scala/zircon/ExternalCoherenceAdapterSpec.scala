@@ -100,5 +100,25 @@ class ExternalCoherenceAdapterSpec extends AnyFunSpec with ChiselSim {
         dut.io.authorized.bits.lineAddress.expect(SecondLine)
       }
     }
+
+    it("rejects a core acknowledgement that does not match the held modifier") {
+      assertThrows[Throwable] {
+        simulate(new ExternalCoherenceAdapter) { dut =>
+          clear(dut)
+          offer(dut, ExternalCoherenceKind.WriteInvalidate.litValue, FirstLine)
+          dut.clock.step()
+          dut.io.modifier.valid.poke(false)
+          acceptCoreRequest(dut, ExternalCoherenceKind.WriteInvalidate.litValue, FirstLine)
+
+          // A response for another line must fail before the retained modifier
+          // can become externally authorized.
+          dut.io.core.response.valid.poke(true)
+          dut.io.core.response.bits.kind.poke(ExternalCoherenceKind.WriteInvalidate)
+          dut.io.core.response.bits.lineAddress.poke(SecondLine)
+          dut.io.core.response.ready.expect(true)
+          dut.clock.step()
+        }
+      }
+    }
   }
 }

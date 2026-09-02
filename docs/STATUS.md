@@ -94,7 +94,7 @@ after the acknowledgement. `ExternalCoherenceControllerSpec` additionally
 resets a dirty-cleanup epoch before its writeback completion, supplies that
 discarded epoch's stale completion, and requires a later request to perform
 its own cleanup before its only response. `make test-m3-external-coherence`
-now covers seven component and eleven core cases. Concrete
+now covers eight component and eleven core cases. Concrete
 `ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
 external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
