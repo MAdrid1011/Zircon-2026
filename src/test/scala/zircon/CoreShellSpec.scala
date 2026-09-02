@@ -65,6 +65,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf003L, 0x5eedf004L)
   private val M3ExternalCoherenceReservationSeeds = Seq(0x5eedf501L,
     0x5eedf502L, 0x5eedf503L)
+  private val M3ExternalCoherenceStoreSeeds = Seq(0x5eedec01L,
+    0x5eedec02L, 0x5eedec03L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -4007,6 +4009,93 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           assert(requestAccepted)
           assert(heldResponseCycles >= 4 && responseCount == 1)
           assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
+    it("holds cacheable store effects until a seeded external-coherence response releases") {
+      for (seed <- M3ExternalCoherenceStoreSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val firstAddress = BigInt("80001000", 16)
+          val secondAddress = firstAddress + 32
+          val coherenceLine = BigInt("80002000", 16)
+          val firstStorePc = ResetVector + 8
+          val secondStorePc = ResetVector + 12
+          val schedule = seededAxiSchedule(seed, 768)
+          var firstStoreRetired = false
+          var requestAccepted = false
+          var responseCount = 0
+          var heldResponseCycles = 0
+          var responseReleased = false
+          var secondStoreRetiredBeforeRelease = false
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("06d00113", 16), // addi x2,x0,109
+            firstStorePc -> BigInt("0020a023", 16), // sw x2,0(x1)
+            secondStorePc -> BigInt("0220a023", 16), // sw x2,32(x1)
+            ResetVector + 16 -> BigInt("00100073", 16),
+            firstAddress -> BigInt("11223344", 16),
+            secondAddress -> BigInt("55667788", 16)
+          )
+          try {
+            events = throughFirstTrap(runProgram(dut, program, cycles = 768,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              driveExternalCoherence = (core, _) => {
+                val request = core.io.externalCoherence.request
+                val response = core.io.externalCoherence.response
+                if (firstStoreRetired && !requestAccepted) {
+                  request.valid.poke(true)
+                  request.bits.kind.poke(0)
+                  request.bits.lineAddress.poke(coherenceLine)
+                  if (request.ready.peek().litToBoolean) requestAccepted = true
+                } else {
+                  request.valid.poke(false)
+                }
+                response.ready.poke(responseReleased)
+                if (response.valid.peek().litToBoolean) {
+                  response.bits.kind.expect(0)
+                  response.bits.lineAddress.expect(coherenceLine)
+                  heldResponseCycles += 1
+                  if (heldResponseCycles >= 8) responseReleased = true
+                  if (response.ready.peek().litToBoolean) responseCount += 1
+                }
+              }, observeCycle = (core, _) => {
+                firstStoreRetired ||= core.io.trace.get.exists(lane =>
+                  lane.valid.peek().litToBoolean && lane.pc.peek().litValue == firstStorePc &&
+                    !lane.trap.peek().litToBoolean)
+                val secondRetired = core.io.trace.get.exists(lane =>
+                  lane.valid.peek().litToBoolean && lane.pc.peek().litValue == secondStorePc &&
+                    !lane.trap.peek().litToBoolean)
+                secondStoreRetiredBeforeRelease ||= secondRetired && !responseReleased
+              }))
+            val firstStore = events.find(_.pc == firstStorePc).getOrElse(
+              fail(s"first store did not retire: seed=0x${java.lang.Long.toHexString(seed)} trace=$events"))
+            val secondStore = events.find(_.pc == secondStorePc).getOrElse(
+              fail(s"second store was consumed while coherence blocked: seed=0x${java.lang.Long.toHexString(seed)} trace=$events"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} request=$requestAccepted " +
+              s"held=$heldResponseCycles released=$responseReleased response=$responseCount " +
+              s"earlyStore=$secondStoreRetiredBeforeRelease trace=$events") {
+              assert(firstStoreRetired && requestAccepted)
+              assert(heldResponseCycles >= 8 && responseReleased && responseCount == 1)
+              assert(!secondStoreRetiredBeforeRelease)
+              assert(firstStore.memoryAddress == firstAddress && firstStore.memoryWriteMask == 15 &&
+                firstStore.memoryWriteData == 109)
+              assert(secondStore.memoryAddress == secondAddress && secondStore.memoryWriteMask == 15 &&
+                secondStore.memoryWriteData == 109)
+              assert(events.last.trap && events.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "external-coherence-store-effect", schedule, events,
+                program = Some(program))
+              throw failure
+          }
         }
       }
     }

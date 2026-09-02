@@ -100,7 +100,12 @@ and `tval` trap.
 gate: it retains a modifier until the matching core response, holds the exact
 authorized payload under downstream backpressure without accepting a
 replacement, and drops it on reset; its directed component tests pass locally.
-A complete-core LR/SC slice adds
+A complete-core cacheable-store pressure slice adds three explicit seeds
+(`0x5eedec01`--`0x5eedec03`): an external response is held for eight cycles
+after its request has been accepted while a younger, already fetched cacheable
+store reaches the ROB head. That store must not issue its local effect or retire
+until the response fires, then must retire with its exact address, mask, and
+data. A complete-core LR/SC slice adds
 three explicit AXI-backpressure seeds each for matching and disjoint external
 invalidations: the matching case clears the reservation and permits no ID-7
 write, while the disjoint case retains it and permits exactly one write only
@@ -108,7 +113,8 @@ after the acknowledgement. `ExternalCoherenceControllerSpec` additionally
 resets a dirty-cleanup epoch before its writeback completion, supplies that
 discarded epoch's stale completion, and requires a later request to perform
 its own cleanup before its only response. `make test-m3-external-coherence`
-now covers eight component and eleven core cases. Concrete
+includes the component, top-level cache-state, and explicit-seed store/atomic
+pressure tiers. Concrete
 `ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
 external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.

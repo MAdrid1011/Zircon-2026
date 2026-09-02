@@ -51,8 +51,9 @@ test-m3-mshr-pressure:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "holds a fifth cache miss until a seeded live owner releases credit"'
 
 # Fast external-coherence tier. It covers the reusable platform gate plus clean,
-# dirty/retry, I-side and D-side in-flight drain, reset epochs, and seeded
-# matching/disjoint LR reservation invalidation at the complete-core boundary.
+# dirty/retry, I-side and D-side in-flight drain, reset epochs, a blocked
+# cacheable-store effect, and seeded matching/disjoint LR reservation
+# invalidation at the complete-core boundary.
 test-m3-external-coherence:
 	./scripts/sbtw "testOnly zircon.ExternalCoherenceControllerSpec zircon.ExternalCoherenceAdapterSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external"'

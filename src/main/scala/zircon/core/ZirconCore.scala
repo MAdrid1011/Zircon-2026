@@ -371,7 +371,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     !externalCoherence.io.cacheableIngressBlocked
   l1dLoadCache.io.storeRequest.bits := lsuIngress.io.storeEffect.bits
   lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
-    l1dLoadCache.io.storeRequest.ready && !orderedIOEngine.io.busy,
+    l1dLoadCache.io.storeRequest.ready && !orderedIOEngine.io.busy &&
+      !externalCoherence.io.cacheableIngressBlocked,
     Mux(deviceStoreEffect,
       !singleDeviceGroupFromLoad && orderedGroupArbiter.io.in(0).ready &&
         !l1dLoadCache.io.storeBusy,
