@@ -61,6 +61,7 @@ current local checks are:
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external cacheable invalidation"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
+./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drops a dirty coherence writeback"'
 make test-m3-external-coherence
 make platform-verilog
 make -C ZirconSim tohost-rv32a

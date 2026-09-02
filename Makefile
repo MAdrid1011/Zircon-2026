@@ -55,6 +55,7 @@ test-m3-external-coherence:
 	./scripts/sbtw "testOnly zircon.ExternalCoherenceControllerSpec zircon.ExternalCoherenceAdapterSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drops a dirty coherence writeback"'
 
 # Fast, focused exclusive L1D-L2 transfer regression. It covers clean victim
 # handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery

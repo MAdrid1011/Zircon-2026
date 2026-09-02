@@ -76,15 +76,17 @@ eight-beat burst and response only after B. `ZirconSim` gitlink `3023715` explic
 port idle in its private-memory model and its RV32A `tohost` run remains 228
 cycles/12 retirements. A directed error slice retries the same target line
 after a failing ID-5 B and suppresses response until the retry succeeds.
-The reset slice drops an accepted request before its held instruction RLAST,
-then permits only a fresh-epoch request/response for a different line.
+The reset slices drop an accepted request before its held instruction RLAST,
+and separately reset after a dirty ID-5 AW/W but before B; each permits only a
+fresh-epoch request/response, and the latter proves a new writeback for the
+same dirty line completes normally.
 The matching-L1D-refill slice accepts the request after target AR, delays the
 target RLAST, and verifies no response before that exact owner drains while
 the original load retains exact retire metadata.
 `ExternalCoherenceAdapter` now provides the reusable one-request platform
 gate: it retains a modifier until the matching core response and drops it on
 reset; its two directed tests pass locally. `make test-m3-external-coherence`
-also passes five component and seven core cases in about 83 seconds. Concrete
+now covers five component and eight core cases. Concrete
 `ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
 external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.

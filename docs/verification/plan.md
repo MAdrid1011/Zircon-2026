@@ -200,9 +200,12 @@ target ID-5 eight-beat burst and its successful B before the external response.
 The retry slice first returns an ID-5 `BRESP` error, requires the same target
 line to issue a second eight-beat burst, and permits the response only after
 the second successful B.
-The reset slice accepts one request behind an in-flight instruction refill,
-resets before its RLAST, and then requires that no stale response appears: a
-new epoch must drain a fresh refill before one response for a different line.
+The reset slices accept one request behind an in-flight instruction refill,
+reset before its RLAST, and separately reset after the dirty coherence ID-5
+AW/W handshakes but before B. They require that no stale response appears: a
+new epoch must drain a fresh refill before one response for a different line,
+and must independently issue a new dirty-line writeback before acknowledging a
+fresh atomic invalidation of that same line.
 The matching-D-side-refill slice accepts the request after the target L1D AR
 but before its delayed RLAST, suppresses the response until that exact ID
 drains, and requires the original load's complete GPR and memory retirement
