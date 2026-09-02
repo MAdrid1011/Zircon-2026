@@ -86,8 +86,12 @@ target RLAST, and verifies no response before that exact owner drains while
 the original load retains exact retire metadata.
 `ExternalCoherenceAdapter` now provides the reusable one-request platform
 gate: it retains a modifier until the matching core response and drops it on
-reset; its two directed tests pass locally. `make test-m3-external-coherence`
-now covers six component and ten core cases. Concrete
+reset; its two directed tests pass locally. A complete-core LR/SC slice adds
+three explicit AXI-backpressure seeds each for matching and disjoint external
+invalidations: the matching case clears the reservation and permits no ID-7
+write, while the disjoint case retains it and permits exactly one write only
+after the acknowledgement. `make test-m3-external-coherence` now covers six
+component and eleven core cases. Concrete
 `ZirconPlatformCore` elaborates the adapter with production core I/O, but FPGA/SoC
 external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.

@@ -62,6 +62,7 @@ current local checks are:
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drops a dirty coherence writeback"'
+./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves line-scoped LR reservations across seeded external coherence"'
 make test-m3-external-coherence
 make platform-verilog
 make -C ZirconSim tohost-rv32a
@@ -81,7 +82,12 @@ make -C ZirconSim tohost-rv32a
 
 The eventual controller needs explicit tests for clean and dirty L1I/L1D/L2
 copies, L1D/L2 transfer pressure, issued refill/writeback drain, B-error retry,
-selective squash, global flush, matching/disjoint LR reservations, and reset.
+selective squash, global flush, and reset. Matching/disjoint LR reservations
+now have complete-core coverage under three explicit AXI-backpressure seeds per
+case: after a retired `LR.W`, a matching write-invalidate makes `SC.W` return
+failure without an ID-7 write; a disjoint atomic-invalidate retains the
+reservation and permits exactly one ID-7 write. Both cases require the write
+to remain behind the exact sideband acknowledgement.
 Bounded formal properties must prove response uniqueness, owner exclusivity,
 acknowledgement-after-invalidation, and AXI credit conservation. The adapter
 unit test demonstrates that the external modifier cannot execute before its

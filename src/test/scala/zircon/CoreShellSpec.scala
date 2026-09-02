@@ -63,6 +63,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eed0203L, 0x5eed0204L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
+  private val M3ExternalCoherenceReservationSeeds = Seq(0x5eedf501L,
+    0x5eedf502L, 0x5eedf503L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -4085,6 +4087,119 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           assert(writebackAddresses.toSeq == Seq(dirtyAddress, dirtyAddress))
           assert(staleResponseCount == 0 && postResetAw && postResetB && freshResponseCount == 1)
           assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
+    it("preserves line-scoped LR reservations across seeded external coherence") {
+      val address = BigInt("80001000", 16)
+      for ((matchingLine, kind, expectedSc, scenario) <- Seq(
+          (true, BigInt(0), BigInt(1), "matching-write-invalidate"),
+          (false, BigInt(1), BigInt(0), "disjoint-atomic-invalidate"))) {
+        for (seed <- M3ExternalCoherenceReservationSeeds) {
+          simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+            clearInputs(dut)
+            val random = new Random(seed ^ (if (matchingLine) 0x41L else 0x82L))
+            val schedule = seededAxiSchedule(seed ^ (if (matchingLine) 0x510L else 0x520L), 1200)
+            val selectorSeed = seed ^ (if (matchingLine) 0x7a1d0L else 0x7a1e0L)
+            val selectorRandom = new Random(selectorSeed)
+            val storeData = BigInt(random.nextInt(2048))
+            val initial = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+            val coherenceLine = if (matchingLine) address else address + 32
+            var lrRetired = false
+            var requestAccepted = false
+            var responseCount = 0
+            var id7Reads = 0
+            var id7Writes = 0
+            var id7Responses = 0
+            var atomicWriteBeforeAcknowledgement = false
+            var events = Seq.empty[TraceSample]
+            val program = Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> ((storeData << 20) | (BigInt(2) << 7) | BigInt(0x13)),
+              ResetVector + 8 -> BigInt("1000a1af", 16), // lr.w x3,(x1)
+              ResetVector + 12 -> BigInt("1820a22f", 16), // sc.w x4,x2,(x1)
+              ResetVector + 16 -> BigInt("00100073", 16),
+              address -> initial,
+              address + 32 -> (BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)))
+            try {
+              events = throughFirstTrap(runProgram(dut, program, cycles = 1200,
+                arReadyForCycle = cycle => schedule.arReady(cycle),
+                rValidForCycle = cycle => schedule.rValid(cycle),
+                readSelectForCycle = (_, pending) => {
+                  val candidates = pending.indices.filter(index =>
+                    !pending.take(index).exists(_._1 == pending(index)._1))
+                  if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+                },
+                writeResponse = Some(0),
+                awReadyForCycle = cycle => schedule.awReady(cycle),
+                wReadyForCycle = cycle => schedule.wReady(cycle),
+                bValidForCycle = cycle => schedule.bValid(cycle),
+                driveExternalCoherence = (core, _) => {
+                  val request = core.io.externalCoherence.request
+                  val response = core.io.externalCoherence.response
+                  response.ready.poke(true)
+                  if (lrRetired && !requestAccepted) {
+                    request.valid.poke(true)
+                    request.bits.kind.poke(kind)
+                    request.bits.lineAddress.poke(coherenceLine)
+                    if (request.ready.peek().litToBoolean) requestAccepted = true
+                  } else {
+                    request.valid.poke(false)
+                  }
+                  if (response.valid.peek().litToBoolean && response.ready.peek().litToBoolean) {
+                    response.bits.kind.expect(kind)
+                    response.bits.lineAddress.expect(coherenceLine)
+                    responseCount += 1
+                  }
+                }, observeCycle = (core, _) => {
+                  lrRetired ||= core.io.trace.get.exists(lane =>
+                    lane.valid.peek().litToBoolean && lane.pc.peek().litValue == ResetVector + 8 &&
+                      lane.gprWrite.peek().litToBoolean && lane.gprAddress.peek().litValue == 3)
+                  val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                    core.io.axi.ar.ready.peek().litToBoolean
+                  val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                    core.io.axi.aw.ready.peek().litToBoolean
+                  val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                    core.io.axi.b.ready.peek().litToBoolean
+                  if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                  if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) {
+                    id7Writes += 1
+                    atomicWriteBeforeAcknowledgement ||= responseCount == 0
+                  }
+                  if (bFire && core.io.axi.b.bits.id.peek().litValue == 7) id7Responses += 1
+                }))
+              val lr = events.find(event => event.pc == ResetVector + 8 &&
+                event.gprWrite && event.gprAddress == 3).getOrElse(
+                fail(s"LR did not retire: seed=0x${java.lang.Long.toHexString(seed)} trace=$events"))
+              val sc = events.find(event => event.pc == ResetVector + 12 &&
+                event.gprWrite && event.gprAddress == 4).getOrElse(
+                fail(s"SC did not retire: seed=0x${java.lang.Long.toHexString(seed)} trace=$events"))
+              withClue(s"scenario=$scenario seed=0x${java.lang.Long.toHexString(seed)} " +
+                s"request=$requestAccepted response=$responseCount id7=($id7Reads,$id7Writes,$id7Responses) " +
+                s"earlyWrite=$atomicWriteBeforeAcknowledgement trace=$events") {
+                assert(lrRetired && requestAccepted && responseCount == 1)
+                assert(lr.gprData == initial && lr.memoryAddress == address &&
+                  lr.memoryReadMask == 15 && lr.memoryReadData == initial)
+                assert(!atomicWriteBeforeAcknowledgement,
+                  "SC write bypassed the retained external-coherence acknowledgement")
+                assert(sc.gprData == expectedSc && sc.memoryAddress == address)
+                if (matchingLine) {
+                  assert(id7Reads == 1 && id7Writes == 0 && id7Responses == 0)
+                  assert(sc.memoryWriteMask == 0 && sc.memoryWriteData == 0)
+                } else {
+                  assert(id7Reads == 1 && id7Writes == 1 && id7Responses == 1)
+                  assert(sc.memoryWriteMask == 15 && sc.memoryWriteData == storeData)
+                }
+                assert(events.last.trap && events.last.cause == 3)
+              }
+            } catch {
+              case failure: Throwable =>
+                saveM3AxiStressFailure(seed, s"external-coherence-reservation-$scenario", schedule,
+                  events, Some(selectorSeed), Some(program))
+                throw failure
+            }
+          }
         }
       }
     }
