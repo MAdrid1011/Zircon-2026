@@ -173,6 +173,7 @@ class BackendDispatch(
     entry.instruction := io.input(lane).bits.instruction
     entry.privilege := io.input(lane).bits.privilege
     entry.decoded := decoded(lane)
+    entry.floating := 0.U.asTypeOf(new zircon.frontend.FloatingDecodedInstruction)
     entry.architecturalDestination := decoded(lane).rd
     entry.oldPhysicalDestination := Mux(response.allocates,
       response.oldDestinationPhysical, 0.U)

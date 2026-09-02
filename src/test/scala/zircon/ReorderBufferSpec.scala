@@ -3,7 +3,7 @@ package zircon
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
 import zircon.backend.{EndpointMask, ReorderBuffer, UopClass}
-import zircon.frontend.IntOperation
+import zircon.frontend.{FloatingOperation, IntOperation}
 
 class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
   private def clearInputs(dut: ReorderBuffer): Unit = {
@@ -65,9 +65,57 @@ class ReorderBufferSpec extends AnyFunSpec with ChiselSim {
     decoded.isFenceI.poke(false)
     decoded.atomicAq.poke(false)
     decoded.atomicRl.poke(false)
+
+    val floating = entry.floating
+    floating.legal.poke(false)
+    floating.operation.poke(FloatingOperation.Invalid)
+    floating.rs1.poke(0)
+    floating.rs2.poke(0)
+    floating.rs3.poke(0)
+    floating.rd.poke(0)
+    floating.readsIntegerRs1.poke(false)
+    floating.readsIntegerRs2.poke(false)
+    floating.readsFloatRs1.poke(false)
+    floating.readsFloatRs2.poke(false)
+    floating.readsFloatRs3.poke(false)
+    floating.writesIntegerRd.poke(false)
+    floating.writesFloatRd.poke(false)
+    floating.isMemory.poke(false)
+    floating.memoryWrite.poke(false)
+    floating.roundingMode.poke(0)
+    floating.usesRoundingMode.poke(false)
+    floating.dynamicRounding.poke(false)
   }
 
   describe("ReorderBuffer") {
+    it("retains floating metadata with the exact ROB entry") {
+      simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
+        clearInputs(dut)
+        driveEnqueue(dut, 0, BigInt("80000000", 16), initiallyComplete = true)
+        dut.io.enqueue(0).bits.entry.floating.legal.poke(true)
+        dut.io.enqueue(0).bits.entry.floating.operation.poke(FloatingOperation.FsgnjxS)
+        dut.io.enqueue(0).bits.entry.floating.rs1.poke(3)
+        dut.io.enqueue(0).bits.entry.floating.rs2.poke(7)
+        dut.io.enqueue(0).bits.entry.floating.rd.poke(11)
+        dut.io.enqueue(0).bits.entry.floating.readsFloatRs1.poke(true)
+        dut.io.enqueue(0).bits.entry.floating.readsFloatRs2.poke(true)
+        dut.io.enqueue(0).bits.entry.floating.writesFloatRd.poke(true)
+        dut.clock.step()
+
+        dut.io.enqueue(0).valid.poke(false)
+        dut.io.commit(0).valid.expect(true)
+        val floating = dut.io.commit(0).bits.entry.floating
+        floating.legal.expect(true)
+        floating.operation.expect(FloatingOperation.FsgnjxS)
+        floating.rs1.expect(3)
+        floating.rs2.expect(7)
+        floating.rd.expect(11)
+        floating.readsFloatRs1.expect(true)
+        floating.readsFloatRs2.expect(true)
+        floating.writesFloatRd.expect(true)
+      }
+    }
+
     it("accepts two entries, completes out of order, and only commits a contiguous prefix") {
       simulate(new ReorderBuffer(ZirconCoreConfig.default)) { dut =>
         clearInputs(dut)

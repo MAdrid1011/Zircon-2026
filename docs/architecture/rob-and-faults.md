@@ -1,8 +1,13 @@
 # ROB、completion 与 FirstFaultRecord
 
 M1 ROB 固定为 24 项、双入队、双完成、双提交。ROB 保存 PC、原始 instruction、
-完整译码、逻辑/物理目的寄存器和 BDB 引用；IQ 不复制这些字段。分支预测完整元数据
-保存在 8 项 BDB，store/load side effect 保存在 SQ/LQ。
+完整整数译码、独立的 RV32F metadata、逻辑/物理目的寄存器和 BDB 引用；IQ 不复制这些
+字段。分支预测完整元数据保存在 8 项 BDB，store/load side effect 保存在 SQ/LQ。
+
+F metadata 使用独立 `FloatingDecodedInstruction`，保留 FPR source/destination、
+operation、memory direction 与 rounding 信息，不能借由重解码当前 fetch word 恢复。当前
+整数 dispatch 显式写入零 metadata，且尚未把 F opcode admission 到 ROB；该存储字段仅是
+后续 M4 executable path 的精确状态前提，绝不使未接入指令产生 completion。
 
 ## ROB tag
 

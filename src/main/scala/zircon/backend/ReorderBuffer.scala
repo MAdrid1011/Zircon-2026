@@ -3,13 +3,16 @@ package zircon.backend
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.frontend.DecodedInstruction
+import zircon.frontend.{DecodedInstruction, FloatingDecodedInstruction}
 
 class ROBEntry(config: ZirconCoreConfig) extends Bundle {
   val pc = UInt(32.W)
   val instruction = UInt(32.W)
   val privilege = UInt(2.W)
   val decoded = new DecodedInstruction
+  // Kept separately until M4 dispatch selects a live F decode. This preserves
+  // FPR namespace and rounding metadata without overloading the integer path.
+  val floating = new FloatingDecodedInstruction
 
   val architecturalDestination = UInt(5.W)
   val oldPhysicalDestination = UInt(log2Ceil(config.intPhysicalRegisters).W)
