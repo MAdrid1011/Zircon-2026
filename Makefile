@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-dual-load-merge test-m3-partial-store-forward test-m3-mshr-pressure test-m3-l2 test-m3-ordered-io test-m3-ordered-io-top test-m3-device-io test-m3-axi-stress test-m3-axi-wrong-path-drain test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-lrsc-random test-m3-lrsc-interrupt test-m3-lrsc-errors test-m3-sc-errors test-m3-lrsc-granularity test-m3-lrsc-replacement test-m3-atomic-errors test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-dual-load-merge test-m3-partial-store-forward test-m3-mshr-pressure test-m3-l2 test-m3-ordered-io test-m3-ordered-io-top test-m3-device-io test-m3-axi-stress test-m3-axi-wrong-path-drain test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-lrsc-random test-m3-lrsc-interrupt test-m3-lrsc-errors test-m3-sc-errors test-m3-lrsc-granularity test-m3-lrsc-replacement test-m3-atomic-errors test-m3-external-coherence test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -48,6 +48,13 @@ test-m3-partial-store-forward:
 # retained owners; a fifth cannot send AR before one exact data R handshake.
 test-m3-mshr-pressure:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "holds a fifth cache miss until a seeded live owner releases credit"'
+
+# Fast external-coherence tier. It covers the reusable platform gate plus clean,
+# dirty/retry, I-side and D-side in-flight drain, and reset-epoch core cases.
+test-m3-external-coherence:
+	./scripts/sbtw "testOnly zircon.ExternalCoherenceControllerSpec zircon.ExternalCoherenceAdapterSpec"
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
 
 # Fast, focused exclusive L1D-L2 transfer regression. It covers clean victim
 # handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery

@@ -2,10 +2,10 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 direct two-lane L1D ingress with parallel tags/different-bank hit slots, cache-global FENCE drain through exclusive L1D-L2 transfer and ID-5, four L2 demand-read MSHRs, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 direct two-lane L1D ingress with parallel tags/different-bank hit slots, cache-global FENCE drain through exclusive L1D-L2 transfer and ID-5, four L2 demand-read MSHRs, ID-7 RV32A, exact-head 1-4 beat device slices, and the retained external-coherence controller/platform gate",
   "completeness": "partial",
   "known_omissions": [
-    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof and external coherency remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; cache-global FENCE drains dirty L1D/L2 state through retained ID-5 writeback. Four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger",
+    "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof and concrete board integration remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; cache-global FENCE drains dirty L1D/L2 state through retained ID-5 writeback. Four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
@@ -406,6 +406,24 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "CacheFenceDrainController four-state L1D/L2/ID-5 completion sequencer"
+    },
+    {
+      "name": "external_coherence_controller_retained_request",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 36,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExternalCoherenceController retained {six-state control, kind, 32-bit line address}"
+    },
+    {
+      "name": "external_coherence_adapter_retained_modifier",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 35,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ExternalCoherenceAdapter retained {four-state control, kind, 32-bit line address}"
     }
   ],
   "logic": [
@@ -960,6 +978,22 @@
       "width": 7,
       "fanin": 128,
       "source": "ExclusiveL2TransferStore default-4-KiB global FENCE first-dirty selector across four ways x thirty-two sets"
+    },
+    {
+      "name": "external_coherence_controller_line_match_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "ExternalCoherenceController exact ID-5 writeback line match"
+    },
+    {
+      "name": "external_coherence_adapter_response_match_compare_units",
+      "metric": "comparator32_units",
+      "units": 1,
+      "width": 1,
+      "fanin": 1,
+      "source": "ExternalCoherenceAdapter retained modifier versus core response line match"
     }
   ]
 }

@@ -28,7 +28,9 @@ demand/lookahead owner drain，清理目标 L1D 和 L2 line。dirty L2 cleanup �
 ID-5 successful B 后继续；随后 invalidates L1I/BTB 并清除同一 cache line 内所有
 LR reservation word，最后返回 response。clean 或 absent target 不产生虚假
 writeback。ZirconSim 作为 single-hart/private-memory 平台将该端口显式保持 idle；
-FPGA/SoC adapter 负责在真正的外部 cacheable modifier 前驱动该协议。
+`ExternalCoherenceAdapter` 为 FPGA/SoC wrapper 提供可综合的 one-request gate：它
+锁存 modifier，驱动此协议，并只在 matching `response` fire 后产生 `authorized`。具体
+板级 wrapper 仍负责承载真正的外部 cacheable modifier 与 pin mapping。
 
 ## RetireEvent
 

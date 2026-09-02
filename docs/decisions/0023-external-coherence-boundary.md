@@ -1,6 +1,6 @@
 # ADR-0023: External cache-coherence boundary
 
-Status: Accepted; implementation pending
+Status: Accepted; core controller and generic platform gate implemented; board integration pending
 
 Related Issue: #47
 
@@ -58,5 +58,7 @@ behavior.
 - Verification must cover clean/dirty copies in L1I/L1D/L2, in-flight refill and
   writeback, selective squash/global flush, ID-5 retry, matching/non-matching
   reservation loss, and no external action before acknowledgement.
-- This interface is a required M3 release item. The current absence of its RTL,
-  platform adapter, formal proof, and tests remains explicitly incomplete.
+- This interface is a required M3 release item. `ExternalCoherenceController`
+  and `ExternalCoherenceAdapter` implement the reusable core and platform-gate
+  halves, with directed tests. Concrete board/SoC wiring, full pressure matrix,
+  and formal proof remain explicitly incomplete.

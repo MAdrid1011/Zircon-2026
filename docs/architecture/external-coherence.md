@@ -44,17 +44,21 @@ acknowledge exact dirty, clean, and absent targets: dirty L1D cleanup transfers
 to L2, dirty L2 cleanup reports its ID-5 obligation through `flushLineDirty`,
 and clean/absent targets create no victim. Matching in-flight L1D owners still
 block cleanup. ZirconSim drives the sideband explicitly idle because it remains
-a single-hart/private-memory model; a board/SoC adapter is still required to
-serialize a real external master before its modifier. The current local checks
-are:
+a single-hart/private-memory model. `ExternalCoherenceAdapter` is the
+synthesizable one-request platform gate: it retains a modifier, sends the core
+request, and only exposes `authorized` after the exact response handshake. A
+board/SoC wrapper must still connect that authorization to its real external
+master and to verified board pins. The current local checks are:
 
 ```bash
 ./scripts/sbtw 'testOnly zircon.ExternalCoherenceControllerSpec'
+./scripts/sbtw 'testOnly zircon.ExternalCoherenceAdapterSpec'
 ./scripts/sbtw 'testOnly zircon.L1DLoadCacheSpec zircon.ExclusiveL2TransferStoreSpec'
 ./scripts/sbtw 'testOnly zircon.AtomicMemoryEngineSpec'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external cacheable invalidation"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "dirty external-coherence writeback"'
 ./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "failing coherence writeback"'
+make test-m3-external-coherence
 make -C ZirconSim tohost-rv32a
 ```
 
@@ -74,6 +78,7 @@ The eventual controller needs explicit tests for clean and dirty L1I/L1D/L2
 copies, L1D/L2 transfer pressure, issued refill/writeback drain, B-error retry,
 selective squash, global flush, matching/disjoint LR reservations, and reset.
 Bounded formal properties must prove response uniqueness, owner exclusivity,
-acknowledgement-after-invalidation, and AXI credit conservation. Integration
-tests must drive a platform-side request and demonstrate that the external
-modifier cannot execute before its response.
+acknowledgement-after-invalidation, and AXI credit conservation. The adapter
+unit test demonstrates that the external modifier cannot execute before its
+response. Integration still needs a concrete platform master, board wrapper,
+and full pressure matrix.

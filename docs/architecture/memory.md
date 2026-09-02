@@ -409,11 +409,13 @@ full coherent atomic integration remains unfinished M3 work.
 The AXI master port is not a snoop interface. External cacheable writes and
 atomics must use the one-outstanding sideband protocol in
 [`external-coherence.md`](external-coherence.md); the platform adapter waits for
-the core acknowledgement before it starts the external modifier. The future
-controller drains matching live owners, writes back dirty D data, invalidates
-all matching local I/D/L2 copies, and clears an LR reservation before it
-acknowledges. No RTL currently implements this contract, so current M3 evidence
-is single-hart/private-memory evidence only.
+the core acknowledgement before it starts the external modifier.
+`ExternalCoherenceController` drains matching live owners, writes back dirty D
+data, invalidates all matching local I/D/L2 copies, and clears an LR reservation
+before it acknowledges. `ExternalCoherenceAdapter` is the synthesizable
+one-request platform gate that retains the modifier until that exact response;
+the concrete board/SoC wrapper that carries the actual external transaction is
+still required, so current ZirconSim evidence remains single-hart/private-memory.
 
 ## Recovery, drain, and counters
 
