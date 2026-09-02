@@ -1648,6 +1648,66 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drops a flushed dirty-victim demand after its transfer reaches L2") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("8000a400", 16)
+        val residentB = BigInt("8000a600", 16)
+        val flushedLine = BigInt("8000a800", 16)
+        val freshLine = BigInt("8000aa00", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("86000000", 16) + word)
+
+        // Both residents map to the same set and become dirty. Admission of
+        // flushedLine transfers exactly one victim to L2 before the demand
+        // itself has crossed the serialized L2-probe boundary.
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, residentWords, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, residentWords, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 3, address = residentA + 4,
+          mask = 15, data = BigInt("dead0009", 16))
+        consumeStoreResult(dut, tag = 3, address = residentA + 4)
+        submitStore(dut, tag = 4, address = residentB + 4,
+          mask = 15, data = BigInt("dead000a", 16))
+        consumeStoreResult(dut, tag = 4, address = residentB + 4)
+
+        presentLoad(dut, lane = 0, tag = 7, address = flushedLine + 4)
+        dut.io.request(0).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        // The transferred victim remains owned by L2, but the local MSHR
+        // never issued a probe. Global flush must release it without a stale
+        // probe, AXI refill, or architectural completion.
+        dut.io.flush.poke(true)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // The released local owner may not be resurrected by the next miss.
+        presentLoad(dut, lane = 0, tag = 10, address = freshLine + 8)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(freshLine)
+      }
+    }
+
     it("drops only the younger dual-miss owner before L2 acceptance") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

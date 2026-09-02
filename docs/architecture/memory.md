@@ -298,9 +298,10 @@ cleanly allocates every non-faulting AXI I-fill into the same dynamic L2 ways;
 an exact refill collision returns the resident L2 data to L1I. Final I/D
 coherence, formal L1I proof, coherent external atomic handling, and general
 cache ordering remain unfinished. ADR-0023 now freezes the explicit sideband
-boundary required for external cacheable modifiers; its controller and platform
-adapter are not implemented. `AXIDataReadEngine` returns the exact client
-token rather than treating an L1D-local MSHR as an AXI ID.
+boundary required for external cacheable modifiers; its controller and generic
+platform adapter are implemented, while concrete platform-master wiring and
+the full pressure/formal matrix remain unfinished. `AXIDataReadEngine` returns
+the exact client token rather than treating an L1D-local MSHR as an AXI ID.
 
 L1I and L1D use 32-byte lines and two ways. L1D is write-back/write-allocate,
 has four word banks and four MSHRs, and supports hit-under-miss, miss-under-miss,

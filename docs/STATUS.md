@@ -2,7 +2,7 @@
 
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
-最新完整 `L1DLoadCacheSpec` 为 49/49 tests、140.593 秒，覆盖 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、两个不同 set dirty-victim miss 的单 transfer owner 串行化、四 MSHR 满载时的第五 miss replay/drain/re-admission，以及 flush/squash 时已接受 L2 probe 或 issued AXI refill 的 drain 与未发 probe peer 取消。新增的双 AXI refill 反向 response-order 用例让两个 different-set miss 同时持有 MSHR 0/1，再先返回较年轻的 MSHR 0，确认每条 response 仍产生自己的 exact tag、word 和 completion；满八 waiter、未接受 L2 probe 的 MSHR 在 selective squash 后会释放，且 fresh miss 获得干净 owner；dirty victim 已转移给 L2 后，squash 仅释放本地 MSHR，不产生 stale probe/refill/completion；双 dirty-victim pair 在较老 transfer 已接收后可 squash 较年轻 replay，不产生第二笔 transfer。
+最新完整 `L1DLoadCacheSpec`（2026-09-03）为 50/50 tests、144 秒，仍低于五分钟组件门槛。除既有 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、反向 refill response order 和饱和 owner recovery 外，新增用例明确覆盖 dirty victim 已 transfer 到 L2、但本地 demand 尚未发 L2 probe 时的 global flush：flush 只能释放本地 MSHR，不能产生 stale probe、AXI refill 或 completion；后续 fresh miss 建立独立 owner。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
 不同 set pair 中若年轻 miss 需要 resident victim，`L1DLoadCacheSpec` 证明较老 hit 单独握手，年轻 miss 只在下一周期得到唯一 L1D-to-L2 transfer owner。
 
