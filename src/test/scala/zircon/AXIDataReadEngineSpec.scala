@@ -128,6 +128,60 @@ class AXIDataReadEngineSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("backpressures a second final beat until the response credit is released") {
+      simulate(new AXIDataReadEngine) { dut =>
+        clear(dut)
+        val firstBase = BigInt("80005000", 16)
+        val secondBase = BigInt("80005020", 16)
+        acceptRequest(dut, mshr = 0, firstBase)
+        acceptRequest(dut, mshr = 1, secondBase)
+
+        for (beat <- 0 until 7) {
+          receiveBeat(dut, id = 1, data = BigInt("81000000", 16) + beat,
+            last = false)
+        }
+        receiveBeat(dut, id = 1, data = BigInt("81000007", 16), last = true)
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.clientMshr.expect(0)
+        dut.io.response.ready.poke(false)
+
+        // The second owner may continue through non-final beats, but cannot
+        // retire its line into the one-entry response buffer until the first
+        // response is consumed.
+        for (beat <- 0 until 7) {
+          receiveBeat(dut, id = 2, data = BigInt("82000000", 16) + beat,
+            last = false)
+        }
+        dut.io.r.valid.poke(true)
+        dut.io.r.bits.id.poke(2)
+        dut.io.r.bits.data.poke(BigInt("82000007", 16))
+        dut.io.r.bits.resp.poke(0)
+        dut.io.r.bits.last.poke(true)
+        dut.io.r.ready.expect(false)
+        dut.clock.step(2)
+        dut.io.r.ready.expect(false)
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.clientMshr.expect(0)
+        for (beat <- 0 until 8) {
+          dut.io.response.bits.lineData(beat).expect(BigInt("81000000", 16) + beat)
+        }
+
+        // A simultaneous response dequeue and last beat is legal: it must
+        // release the retained first owner and publish only the second owner.
+        dut.io.response.ready.poke(true)
+        dut.io.r.ready.expect(true)
+        dut.clock.step()
+        dut.io.r.valid.poke(false)
+        dut.io.response.ready.poke(false)
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.clientMshr.expect(1)
+        dut.io.response.bits.accessFault.expect(false)
+        for (beat <- 0 until 8) {
+          dut.io.response.bits.lineData(beat).expect(BigInt("82000000", 16) + beat)
+        }
+      }
+    }
+
     it("releases all owners and prior RRESP fault state across reset") {
       simulate(new AXIDataReadEngine) { dut =>
         clear(dut)

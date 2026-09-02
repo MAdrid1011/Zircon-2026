@@ -77,6 +77,9 @@ cycle; the retained miss may claim the one-wide L1D-to-L2 transfer only later.
 `0x5eed4004`) covering randomized AR backpressure, four-owner ID/beat
 interleaving, response backpressure, and one deterministic RRESP fault per
 seed; this is short-run evidence, not the required long top-level stress.
+Its deterministic response-credit case holds one completed refill until a
+second owner's final R beat is visibly backpressured, then consumes both in
+order through the one-entry response buffer.
 
 | Boundary | Required tests and properties |
 | --- | --- |
