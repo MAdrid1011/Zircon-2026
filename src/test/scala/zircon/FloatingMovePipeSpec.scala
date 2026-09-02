@@ -25,11 +25,12 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
   private def drive(dut: FloatingMovePipe, tag: Int,
       operation: FloatingOperation.Type, integerDestination: Int = 0,
       integerSource: BigInt = 0, floatSource0: BigInt = 0,
-      floatSource1: BigInt = 0, floatDestination: Int = 0): Unit = {
+      floatSource1: BigInt = 0, floatDestination: Int = 0,
+      roundingMode: Int = 0): Unit = {
     dut.io.input.valid.poke(true)
     dut.io.input.bits.robTag.poke(tag)
     dut.io.input.bits.operation.poke(operation)
-    dut.io.input.bits.roundingMode.poke(0)
+    dut.io.input.bits.roundingMode.poke(roundingMode)
     dut.io.input.bits.integerDestinationPhysical.poke(integerDestination)
     dut.io.input.bits.integerSource.poke(integerSource)
     dut.io.input.bits.floatSource(0).poke(floatSource0)
@@ -162,6 +163,51 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
           dut.clock.step()
           dut.io.output.ready.poke(false)
         }
+      }
+    }
+
+    it("converts signed and unsigned integers with every architectural rounding mode") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, source: BigInt, rounding: Int,
+            expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 3, operation = operation, integerSource = source,
+            floatDestination = 9, roundingMode = rounding)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatDestination.expect(9)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(FloatingOperation.FcvtSW, 0, rounding = 0, 0, 0)
+        check(FloatingOperation.FcvtSW, 1, rounding = 0, BigInt("3f800000", 16), 0)
+        check(FloatingOperation.FcvtSW, BigInt("ffffffff", 16), rounding = 0,
+          BigInt("bf800000", 16), 0)
+        check(FloatingOperation.FcvtSW, BigInt("01000001", 16), rounding = 0,
+          BigInt("4b800000", 16), BigInt(1))
+        check(FloatingOperation.FcvtSW, BigInt("01000001", 16), rounding = 1,
+          BigInt("4b800000", 16), BigInt(1))
+        check(FloatingOperation.FcvtSW, BigInt("01000001", 16), rounding = 2,
+          BigInt("4b800000", 16), BigInt(1))
+        check(FloatingOperation.FcvtSW, BigInt("01000001", 16), rounding = 3,
+          BigInt("4b800001", 16), BigInt(1))
+        check(FloatingOperation.FcvtSW, BigInt("01000001", 16), rounding = 4,
+          BigInt("4b800001", 16), BigInt(1))
+        check(FloatingOperation.FcvtSW, BigInt("feffffff", 16), rounding = 2,
+          BigInt("cb800001", 16), BigInt(1))
+        check(FloatingOperation.FcvtSW, BigInt("feffffff", 16), rounding = 3,
+          BigInt("cb800000", 16), BigInt(1))
+        check(FloatingOperation.FcvtSWu, BigInt("ffffffff", 16), rounding = 1,
+          BigInt("4f7fffff", 16), BigInt(1))
+        check(FloatingOperation.FcvtSWu, BigInt("ffffffff", 16), rounding = 3,
+          BigInt("4f800000", 16), BigInt(1))
+        check(FloatingOperation.FcvtSWu, BigInt("80000000", 16), rounding = 0,
+          BigInt("4f000000", 16), 0)
       }
     }
 

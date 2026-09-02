@@ -598,6 +598,65 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("commits dynamic-RUP RV32F FCVT.S.W only after the preceding frm write") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val writeFrmRup = BigInt((0x002L << 20) | (3L << 15) | (5L << 12) | 0x73L)
+        val fcvtDynamic = opFp(0x68, rs2 = 0, rs1 = 2, funct3 = 7, rd = 7)
+        val fmvXW = opFp(0x70, rs2 = 0, rs1 = 7, funct3 = 0, rd = 3)
+        val readFflags = BigInt((0x001L << 20) | (2L << 12) | (4L << 7) | 0x73L)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("01000137", 16), // x2=0x01000000
+          ResetVector + 12 -> BigInt("00110113", 16), // x2=0x01000001
+          ResetVector + 16 -> writeFrmRup,
+          ResetVector + 20 -> fcvtDynamic,
+          ResetVector + 24 -> fmvXW,
+          ResetVector + 28 -> readFflags,
+          ResetVector + 32 -> BigInt("00100073", 16)
+        ), cycles = 512))
+        assert(events.exists(event => event.instruction == writeFrmRup && event.csrWrite &&
+          event.csrAddress == 2 && event.csrData == 3),
+          s"frm write did not retire before FCVT: $events")
+        assert(events.exists(event => event.instruction == fcvtDynamic && event.fprWrite &&
+          event.fprAddress == 7 && event.fprData == BigInt("4b800001", 16)),
+          s"dynamic-RUP FCVT.S.W did not commit its rounded FPR result: $events")
+        assert(events.exists(event => event.instruction == fmvXW && event.gprWrite &&
+          event.gprAddress == 3 && event.gprData == BigInt("4b800001", 16)),
+          s"FMV.X.W did not observe the FCVT result: $events")
+        assert(events.exists(event => event.instruction == readFflags && event.gprWrite &&
+          event.gprAddress == 4 && event.gprData == 1),
+          s"inexact FCVT did not commit fflags.NX: $events")
+      }
+    }
+
+    it("takes dynamic RV32F FCVT.S.W with reserved frm as an exact illegal instruction") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val writeReservedFrm = BigInt((0x002L << 20) | (5L << 15) | (5L << 12) | 0x73L)
+        val fcvtDynamic = opFp(0x68, rs2 = 0, rs1 = 2, funct3 = 7, rd = 7)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16),
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("00100113", 16),
+          ResetVector + 12 -> writeReservedFrm,
+          ResetVector + 16 -> fcvtDynamic,
+          ResetVector + 20 -> BigInt("00100073", 16)
+        ), cycles = 384))
+        assert(events.last.trap && events.last.cause == 2 &&
+          events.last.pc == ResetVector + 16 && events.last.instruction == fcvtDynamic &&
+          events.last.trapValue == fcvtDynamic && !events.last.fprWrite,
+          s"reserved dynamic frm did not cause an exact FCVT illegal trap: $events")
+      }
+    }
+
     it("takes FS-Off RV32F operations as exact illegal-instruction traps") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

@@ -28,7 +28,7 @@ class FloatingAdmission extends Module {
     opcode === "b1000011".U || opcode === "b1000111".U ||
     opcode === "b1001011".U || opcode === "b1001111".U ||
     opcode === "b1010011".U
-  val nonRoundingE2 = decoder.io.decoded.operation === FloatingOperation.FmvWX ||
+  val executableE2 = decoder.io.decoded.operation === FloatingOperation.FmvWX ||
     decoder.io.decoded.operation === FloatingOperation.FmvXW ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjS ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjnS ||
@@ -38,7 +38,9 @@ class FloatingAdmission extends Module {
     decoder.io.decoded.operation === FloatingOperation.FleS ||
     decoder.io.decoded.operation === FloatingOperation.FltS ||
     decoder.io.decoded.operation === FloatingOperation.FeqS ||
-    decoder.io.decoded.operation === FloatingOperation.FclassS
+    decoder.io.decoded.operation === FloatingOperation.FclassS ||
+    decoder.io.decoded.operation === FloatingOperation.FcvtSW ||
+    decoder.io.decoded.operation === FloatingOperation.FcvtSWu
   val effectiveRoundingMode = Mux(decoder.io.decoded.dynamicRounding,
     io.currentFrm, decoder.io.decoded.roundingMode)
   val roundingLegal = !decoder.io.decoded.usesRoundingMode ||
@@ -47,7 +49,7 @@ class FloatingAdmission extends Module {
   io.floatingOpcode := floatingOpcode
   io.effectiveRoundingMode := effectiveRoundingMode
   io.roundingLegal := roundingLegal
-  io.live := floatingOpcode && decoder.io.decoded.legal && nonRoundingE2 &&
+  io.live := floatingOpcode && decoder.io.decoded.legal && executableE2 &&
     roundingLegal && io.mstatusFs =/= 0.U
   io.illegal := floatingOpcode && !io.live
 }

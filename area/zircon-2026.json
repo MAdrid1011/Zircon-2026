@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The initial non-rounding RV32F E2 path, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete rounding FPU, FMA source-read path, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
+    "The initial RV32F E2 path, including five-mode/dynamic integer-to-single conversion, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete arithmetic FPU, FMA source-read path, float-to-integer conversion, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
   ],
   "storage": [
     {
@@ -1092,6 +1092,54 @@
       "width": 1,
       "fanin": 1,
       "source": "Two reserved-effective-rm checks plus one conservative ROB-tag squash check for the floating CSR-control barrier"
+    },
+    {
+      "name": "floating_fcvt_compare_units",
+      "metric": "comparator32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe leading-one alignment chooses the left/right and nonzero-discarded paths; conservatively charged as 32-bit compares"
+    },
+    {
+      "name": "floating_fcvt_leading_one_select",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 5,
+      "fanin": 32,
+      "source": "FloatingMovePipe highest-set-bit selection for FCVT.S.W/U magnitude normalization"
+    },
+    {
+      "name": "floating_fcvt_alignment_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 24,
+      "fanin": 2,
+      "source": "FloatingMovePipe selects left-aligned exact or right-shifted rounded FCVT significand"
+    },
+    {
+      "name": "floating_fcvt_rounding_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 203,
+      "fanin": 1,
+      "source": "FloatingMovePipe guard/sticky selection, five-mode increment, zero/carry result formation, exponent/fraction selections for FCVT.S.W/U"
+    },
+    {
+      "name": "floating_fcvt_adders",
+      "metric": "adder32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe signed-magnitude negate, significand increment, exponent bias, and carry increment for FCVT.S.W/U"
+    },
+    {
+      "name": "floating_fcvt_align_shifters",
+      "metric": "shifter32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe variable left and right alignment shifts for FCVT.S.W/U"
     }
   ]
 }

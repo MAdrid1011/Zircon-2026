@@ -5,7 +5,7 @@ import chisel3.util._
 import zircon.ZirconCoreConfig
 import zircon.frontend.FloatingOperation
 
-/** Captured operands for the first non-rounding RV32F E2 slice. */
+/** Captured operands for the executable RV32F E2 slice. */
 class FloatingMoveRequest(config: ZirconCoreConfig) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
   val operation = FloatingOperation()
@@ -30,8 +30,8 @@ class FloatingMoveResult(config: ZirconCoreConfig) extends Bundle {
   val flags = UInt(5.W)
 }
 
-/** E2 execution for non-rounding RV32F moves, sign injection, min/max,
-  * comparisons, and classification.
+/** E2 execution for RV32F moves, sign injection, min/max, comparisons,
+  * classification, and integer-to-single conversions.
   *
   * This module has no direct FPR, CSR, or ROB mutation path. Its retained
   * result is deliberately an internal boundary until the owner bridge can
@@ -55,7 +55,8 @@ class FloatingMovePipe(
       operation === FloatingOperation.FsgnjxS || operation === FloatingOperation.FminS ||
       operation === FloatingOperation.FmaxS || operation === FloatingOperation.FleS ||
       operation === FloatingOperation.FltS || operation === FloatingOperation.FeqS ||
-      operation === FloatingOperation.FclassS
+      operation === FloatingOperation.FclassS || operation === FloatingOperation.FcvtSW ||
+      operation === FloatingOperation.FcvtSWu
 
   val active = RegInit(false.B)
   val request = Reg(new FloatingMoveRequest(config))
@@ -117,6 +118,52 @@ class FloatingMovePipe(
     true.B -> "h00000040".U(32.W)
   ))
 
+  val integerConversion = request.operation === FloatingOperation.FcvtSW ||
+    request.operation === FloatingOperation.FcvtSWu
+  val conversionSigned = request.operation === FloatingOperation.FcvtSW
+  val conversionSign = conversionSigned && request.integerSource(31)
+  val conversionMagnitude = Mux(conversionSign,
+    (~request.integerSource).asUInt + 1.U, request.integerSource)
+  val conversionMsb = WireDefault(0.U(5.W))
+  for (bit <- 0 until 32) {
+    when(conversionMagnitude(bit)) { conversionMsb := bit.U }
+  }
+  val conversionRightShift = Mux(conversionMsb > 23.U,
+    conversionMsb - 23.U, 0.U(5.W))
+  val conversionLeftShift = Mux(conversionMsb <= 23.U,
+    23.U - conversionMsb, 0.U(5.W))
+  val conversionSignificand = Mux(conversionMsb <= 23.U,
+    conversionMagnitude << conversionLeftShift,
+    conversionMagnitude >> conversionRightShift)(23, 0)
+  val conversionDiscarded = WireDefault(false.B)
+  val conversionGuard = WireDefault(false.B)
+  val conversionSticky = WireDefault(false.B)
+  for (shift <- 1 to 8) {
+    when(conversionRightShift === shift.U) {
+      conversionDiscarded := conversionMagnitude(shift - 1, 0).orR
+      conversionGuard := conversionMagnitude(shift - 1)
+      if (shift > 1) {
+        conversionSticky := conversionMagnitude(shift - 2, 0).orR
+      }
+    }
+  }
+  val conversionRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (conversionGuard && (conversionSticky || conversionSignificand(0))),
+    1.U -> false.B,
+    2.U -> (conversionSign && conversionDiscarded),
+    3.U -> (!conversionSign && conversionDiscarded),
+    4.U -> conversionGuard
+  ))
+  val roundedConversionSignificand = Cat(0.U(1.W), conversionSignificand) +
+    conversionRoundUp.asUInt
+  val conversionCarry = roundedConversionSignificand(24)
+  val conversionExponent = Cat(0.U(3.W), conversionMsb) + 127.U(8.W)
+  val roundedConversionExponent = Mux(conversionCarry,
+    conversionExponent + 1.U, conversionExponent)
+  val conversionData = Mux(conversionMagnitude === 0.U, 0.U(32.W),
+    Cat(conversionSign, roundedConversionExponent(7, 0),
+      Mux(conversionCarry, 0.U(23.W), roundedConversionSignificand(22, 0))))
+
   val result = WireDefault(0.U.asTypeOf(new FloatingMoveResult(config)))
   result.robTag := request.robTag
   result.integerDestinationPhysical := request.integerDestinationPhysical
@@ -131,6 +178,10 @@ class FloatingMovePipe(
   }.elsewhen(request.operation === FloatingOperation.FclassS) {
     result.writesInteger := true.B
     result.integerData := fclassData
+  }.elsewhen(integerConversion) {
+    result.writesFloat := true.B
+    result.floatData := conversionData
+    when(conversionDiscarded) { result.flags := "b00001".U }
   }.elsewhen(comparison) {
     result.writesInteger := true.B
     result.integerData := comparisonData
@@ -164,17 +215,22 @@ class FloatingMovePipe(
 
   when(io.input.fire) {
     assert(supported(io.input.bits.operation),
-      "FloatingMovePipe accepted an operation outside the bit-move/sign slice")
+      "FloatingMovePipe accepted an operation outside the executable E2 slice")
     when(io.input.bits.operation === FloatingOperation.FmvXW) {
       assert(io.input.bits.integerDestinationPhysical =/= 0.U,
         "FMV.X.W cannot target integer p0")
+    }
+    when(io.input.bits.operation === FloatingOperation.FcvtSW ||
+        io.input.bits.operation === FloatingOperation.FcvtSWu) {
+      assert(io.input.bits.roundingMode <= 4.U,
+        "FCVT.S.W/U received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
     assert(supported(request.operation),
       "FloatingMovePipe retained an unsupported operation")
     assert(!(result.writesInteger && result.writesFloat),
-      "bit-move/sign operation cannot write both register namespaces")
+      "floating E2 operation cannot write both register namespaces")
   }
   when(io.squash.valid) {
     assert(!io.input.fire && !io.output.fire,

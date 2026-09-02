@@ -8,15 +8,18 @@ execution endpoint.
 
 ## Incremental admission
 
-The first executable slice admits the non-rounding operations `FMV.W.X`,
-`FMV.X.W`, `FSGNJ.S`, `FSGNJN.S`, `FSGNJX.S`, `FMIN.S`, `FMAX.S`, `FEQ.S`,
-`FLT.S`, `FLE.S`, and `FCLASS.S`. It exercises both register namespaces
-without claiming arithmetic, conversion, or load/store support. `FMIN.S` and
-`FMAX.S` implement one-NaN/both-NaN selection, canonical NaN, and signed-zero
-rules; signaling NaN raises `fflags.NV`. `FEQ.S` raises NV only for signaling
-NaN, whereas `FLT.S` and `FLE.S` raise NV for every NaN. `FCLASS.S` never
-raises an exception. Every other F encoding remains an illegal-instruction
-exception until its complete execution and commit path is implemented.
+The first executable slice admits `FMV.W.X`, `FMV.X.W`, `FSGNJ.S`, `FSGNJN.S`,
+`FSGNJX.S`, `FMIN.S`, `FMAX.S`, `FEQ.S`, `FLT.S`, `FLE.S`, `FCLASS.S`,
+`FCVT.S.W`, and `FCVT.S.WU`. It exercises both register namespaces without
+claiming arithmetic, float-to-integer conversion, or load/store support.
+`FMIN.S` and `FMAX.S` implement one-NaN/both-NaN selection, canonical NaN, and
+signed-zero rules; signaling NaN raises `fflags.NV`. `FEQ.S` raises NV only for
+signaling NaN, whereas `FLT.S` and `FLE.S` raise NV for every NaN. `FCLASS.S`
+never raises an exception. `FCVT.S.W/U` uses integer leading-one alignment and
+guard/sticky rounding for RNE/RTZ/RDN/RUP/RMM; it raises only `fflags.NX` when
+nonzero low bits are discarded. Every other F encoding remains an
+illegal-instruction exception until its complete execution and commit path is
+implemented.
 
 All admitted F operations are illegal when `mstatus.FS=Off`. A legal F
 operation that writes an FPR, or changes `fflags`, makes `FS=Dirty` only at
@@ -90,9 +93,10 @@ may update an FPR or `fflags` merely because it completed E2.
 `FMV.X.W` has no FPR result record, but its FPR source reservation is released
 when E2 captures the source and its GPR result uses the ordinary completion
 path. The move/sign/class slice always reports zero flags; min/max and compare
-may report NV through the retained-result protocol. Later arithmetic,
-conversion, divide, sqrt, and FMA must use the same retained-result protocol
-and may not add a direct FPR bypass around it.
+may report NV, and `FCVT.S.W/U` may report NX, through the retained-result
+protocol. Later arithmetic, float-to-integer conversion, divide, sqrt, and FMA
+must use the same retained-result protocol and may not add a direct FPR bypass
+around it.
 
 ## Trace, recovery, and memory boundaries
 
@@ -129,6 +133,10 @@ The initial integration tests must run AXI-fed instructions through
   `mtval` and no FPR/GPR side effect;
 - enabling FS through committed `mstatus`, then `FMV.W.X` followed by
   `FMV.X.W`, including exact GPR/FPR retire metadata and `FS=Dirty`;
+- static and dynamic `FCVT.S.W/U` over exact, tie, signed-negative, and
+  unsigned-maximum operands for every rounding mode, including committed NX;
+- a preceding `frm/fcsr` write with no artificial fetch gap, plus dynamic
+  reserved `frm=5/6` exact illegal-instruction traps;
 - all three `FSGNJ` forms with sign-distinct operands, min/max NaN and signed
   zero cases, comparison NaN/NV behavior, and all ten `FCLASS.S` categories;
 - FPR RAW, WAR, WAW, two-wide dispatch, result-queue backpressure, and the
