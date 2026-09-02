@@ -378,6 +378,49 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("matches seeded finite RNE add/sub data against the host IEEE oracle") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        val seed = 0x5eedfaddL
+        val random = new java.util.Random(seed)
+        def finiteBits(): Long = {
+          val sign = random.nextInt() & 0x80000000
+          val exponent = random.nextInt(255) << 23
+          val fraction = random.nextInt() & 0x007fffff
+          Integer.toUnsignedLong(sign | exponent | fraction)
+        }
+        def check(operation: FloatingOperation.Type, index: Int, lhs: Long,
+            rhs: Long, expected: Long): Unit = {
+          drive(dut, tag = 6, operation = operation, floatSource0 = BigInt(lhs),
+            floatSource1 = BigInt(rhs), floatDestination = 11, roundingMode = 0)
+          accept(dut)
+          val actual = dut.io.output.bits.floatData.peek().litValue
+          assert(actual == BigInt(expected),
+            f"seed=0x$seed%x index=$index operation=$operation lhs=0x$lhs%08x " +
+              f"rhs=0x$rhs%08x expected=0x$expected%08x actual=0x$actual%08x")
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        // Java 17+ evaluates float arithmetic strictly as IEEE-754 binary32.
+        // The corpus keeps all inputs finite; canonical-NaN and flags are
+        // covered by the fixed TestFloat vectors above.
+        for (index <- 0 until 256) {
+          val lhs = finiteBits()
+          val rhs = finiteBits()
+          val lhsFloat = java.lang.Float.intBitsToFloat(lhs.toInt)
+          val rhsFloat = java.lang.Float.intBitsToFloat(rhs.toInt)
+          val addExpected = Integer.toUnsignedLong(java.lang.Float.floatToRawIntBits(
+            lhsFloat + rhsFloat))
+          val subExpected = Integer.toUnsignedLong(java.lang.Float.floatToRawIntBits(
+            lhsFloat - rhsFloat))
+          check(FloatingOperation.FaddS, index, lhs, rhs, addExpected)
+          check(FloatingOperation.FsubS, index, lhs, rhs, subExpected)
+        }
+      }
+    }
+
     it("drops only younger retained work on squash and all work on flush") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

@@ -64,9 +64,9 @@ cache-global FENCE 的四 seed 压力用例使两条不同 dirty L1D line 依次
 
 ### M4 Executable F Update
 
-The current `make test-m4-fp-move` evidence is 16 component tests plus 12
+The current `make test-m4-fp-move` evidence is 17 component tests plus 12
 AXI-fed CoreShell tests, all locally passing; the CoreShell RV32F phase took
-128.753 seconds. It covers dynamic `FCVT.S.W` and `FCVT.W.S` with no fetch gap
+128.891 seconds. It covers dynamic `FCVT.S.W` and `FCVT.W.S` with no fetch gap
 after an `frm=RUP` write, exact GPR/FPR retirement, committed `NX`, qNaN
 `FCVT.WU.S` invalid result plus accumulated `NV`, and an exact illegal trap for
 dynamic `FCVT.W.S` with reserved `frm=5`. The added add/sub set covers ordinary
@@ -77,7 +77,10 @@ checked through the retire path. `FloatingMovePipeSpec` additionally checks a
 20-vector non-NaN `f32_add`/`f32_sub` corpus generated with explicit seed
 `149130`, locked TestFloat `a9c849f`, and locked SoftFloat `a0c6494`, spanning
 all five rounding modes. This fixed corpus is diagnostic component evidence,
-not the full TestFloat release campaign.
+not the full TestFloat release campaign. A separate 256-pair finite-input RNE
+check uses explicit seed `0x5eedfadd` and Java's strict binary32 arithmetic as
+a data-only oracle for both `FADD.S` and `FSUB.S`; a mismatch reports the seed,
+index, operation, operands, expected word, and actual word.
 
 ### M3 External Coherence Update
 
