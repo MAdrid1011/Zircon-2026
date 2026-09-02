@@ -970,6 +970,80 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("serializes two dirty-victim misses while preserving both transfer owners") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerResidentA = BigInt("8000b000", 16)
+        val youngerResidentB = BigInt("8000b200", 16)
+        val youngerLine = BigInt("8000b400", 16)
+        val olderResidentA = BigInt("8000b100", 16)
+        val olderResidentB = BigInt("8000b300", 16)
+        val olderLine = BigInt("8000b500", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("91000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("92000000", 16) + word)
+        val youngerWords = Seq.tabulate(8)(word => BigInt("93000000", 16) + word)
+
+        // Fill both ways in two separate sets, then dirty the selected
+        // replacement way in each set. Both pending lines therefore need the
+        // single L1D-to-L2 transfer boundary, even though they own distinct
+        // MSHR/waiter resources.
+        Seq(youngerResidentA, youngerResidentB, olderResidentA, olderResidentB)
+          .zipWithIndex.foreach { case (line, index) =>
+            submit(dut, tag = index + 1, address = line)
+            issueRefill(dut, residentWords, lineAddress = line)
+            dut.io.completion.ready.poke(true)
+            dut.clock.step()
+            dut.io.completion.ready.poke(false)
+          }
+        Seq(
+          (youngerResidentA, BigInt("d00d0001", 16)),
+          (youngerResidentB, BigInt("d00d0002", 16)),
+          (olderResidentA, BigInt("d00d0003", 16)),
+          (olderResidentB, BigInt("d00d0004", 16))
+        ).zipWithIndex.foreach { case ((line, data), index) =>
+          submitStore(dut, tag = 5 + index, address = line + 4, mask = 15, data = data)
+          consumeStoreResult(dut, tag = 5 + index, address = line + 4)
+        }
+
+        // Lane 1 is older. The L2 transfer port admits only its dirty victim;
+        // the younger lane remains replayable without consuming an unowned
+        // MSHR or overwriting the first transfer payload.
+        presentLoad(dut, lane = 0, tag = 13, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 11, address = olderLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(olderResidentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(1).expect(BigInt("d00d0003", 16))
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        // Once the oldest transfer is owned, the younger replay receives the
+        // next cycle's sole transfer credit and must carry its own dirty word.
+        dut.io.request(0).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(youngerResidentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(1).expect(BigInt("d00d0001", 16))
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        issueRefill(dut, olderWords, lineAddress = olderLine, mshrIndex = 0)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(11)
+        dut.io.completion.bits.cacheData.expect(olderWords(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        issueRefill(dut, youngerWords, lineAddress = youngerLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(13)
+        dut.io.completion.bits.cacheData.expect(youngerWords(1))
+      }
+    }
+
     it("accepts different-set dual misses with two exact MSHR owners") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
