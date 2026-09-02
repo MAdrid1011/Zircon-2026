@@ -72,10 +72,11 @@ test-m3-axi-reset:
 test-m3-axi-long:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "reuses all data AXI owners across a seeded long cross-ID load stream"'
 
-# Precise-fault tier. It reverses legal cross-ID RRESP arrival order and checks
-# that the older ROB entry remains the only architectural trap.
+# Precise-fault tier. It reverses legal cross-ID RRESP order, then exercises
+# an older ID-6 BRESP against a younger RRESP fault, preserving ROB age.
 test-m3-axi-faults:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps the older load fault when a younger RRESP fault drains first"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps an older device BRESP fault when a younger RRESP fault drains first"'
 
 # Fast RV32A ownership regression. It remains below the five-minute component
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and

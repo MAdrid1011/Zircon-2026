@@ -21,6 +21,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eed9003L, 0x5eed9004L)
   private val M3AxiFaultOrderSeeds = Seq(0x5eeda001L, 0x5eeda002L,
     0x5eeda003L, 0x5eeda004L)
+  private val M3AxiMixedFaultSeeds = Seq(0x5eedb001L, 0x5eedb002L,
+    0x5eedb003L, 0x5eedb004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -2261,6 +2263,98 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           } catch {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "reverse-rresp-fault-order", schedule, events)
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("keeps an older device BRESP fault when a younger RRESP fault drains first") {
+      for (seed <- M3AxiMixedFaultSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1280
+          val schedule = seededAxiSchedule(seed, cycles)
+          val deviceAddress = BigInt("b0000000", 16)
+          val dataAddress = BigInt("80001000", 16)
+          val dataOwnerBeats = scala.collection.mutable.Map.empty[BigInt, Int]
+          var deviceAwAccepted = false
+          var deviceWLastAccepted = false
+          var youngerFaultDrained = false
+          var youngerFaultDrainCycle = Option.empty[Int]
+          var olderFaultDrainCycle = Option.empty[Int]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("b00000b7", 16), // lui x1,0xb0000
+              ResetVector + 4 -> BigInt("05a00113", 16), // addi x2,x0,90
+              ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1), older
+              ResetVector + 12 -> BigInt("80001237", 16), // lui x4,0x80001
+              ResetVector + 16 -> BigInt("00022183", 16), // lw x3,0(x4), younger
+              ResetVector + 20 -> BigInt("00100073", 16),
+              dataAddress -> BigInt("11223344", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readValidForCycle = (_, _, address) =>
+                address < dataAddress || address >= dataAddress + 32 ||
+                  (deviceAwAccepted && deviceWLastAccepted),
+              rResponse = (_, address) =>
+                if (address >= dataAddress && address < dataAddress + 32) 2 else 0,
+              writeResponse = Some(2),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              // The older device transaction has been accepted, but its B
+              // response cannot win merely because it has a separate channel.
+              bValidForCycle = cycle => youngerFaultDrained && schedule.bValid(cycle),
+              observeCycle = (core, cycle) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val wFire = core.io.axi.w.valid.peek().litToBoolean &&
+                  core.io.axi.w.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.addr.peek().litValue == dataAddress) {
+                  dataOwnerBeats.update(core.io.axi.ar.bits.id.peek().litValue, 8)
+                }
+                if (rFire) {
+                  val id = core.io.axi.r.bits.id.peek().litValue
+                  dataOwnerBeats.get(id).foreach { remaining =>
+                    if (remaining == 1) {
+                      youngerFaultDrained = true
+                      youngerFaultDrainCycle = Some(cycle)
+                      dataOwnerBeats.remove(id)
+                    } else dataOwnerBeats.update(id, remaining - 1)
+                  }
+                }
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 6) {
+                  deviceAwAccepted = true
+                }
+                if (wFire && core.io.axi.w.bits.last.peek().litToBoolean) {
+                  deviceWLastAccepted = true
+                }
+                if (bFire) olderFaultDrainCycle = Some(cycle)
+              })
+
+            val retired = throughFirstTrap(events)
+            val trap = retired.find(event => event.trap && event.pc == ResetVector + 8)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, dataBeats=$dataOwnerBeats, " +
+              s"youngerR=$youngerFaultDrainCycle, olderB=$olderFaultDrainCycle, trace=$retired") {
+              assert(deviceAwAccepted && deviceWLastAccepted)
+              assert(youngerFaultDrained)
+              assert(youngerFaultDrainCycle.exists(younger =>
+                olderFaultDrainCycle.exists(older => younger < older)))
+              assert(trap.exists(event => event.cause == 7 &&
+                event.trapValue == deviceAddress))
+              assert(!retired.exists(event => event.pc == ResetVector + 16 && !event.trap))
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "reverse-rresp-bresp-fault-order", schedule, events)
               throw failure
           }
         }
