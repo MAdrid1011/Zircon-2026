@@ -1,9 +1,10 @@
 # Zircon-2026 实施状态
 
-最新本地全回归（2026-09-02）为 63 suites、375 tests，全部通过；
+最新本地全回归（2026-09-02）为 63 suites、376 tests，全部通过；
 `make test-m3-dual-load-forward` 为 5 suites、66 tests 加 1 条顶层 core 用例，耗时 3 分 43 秒。
 最新 L1D resource-pressure slice 为 30/30 tests、1 分 32 秒，覆盖 MSHR、waiter 和 dirty-victim L2 backpressure。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
+AXI data owner 随机 slice 为 6/6 tests（4 个显式 seed，约 4 秒）；长期 top-level multi-owner/reset/error stress 仍未闭环。
 
 本页按研发计划顺序记录可由代码、测试或报告验证的状态。`completed` 表示已有实现和自动测试，`partially completed` 表示公共契约或局部模块已存在，`missing` 表示尚无可运行实现。
 
