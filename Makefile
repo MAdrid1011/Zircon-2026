@@ -195,7 +195,7 @@ test-m3-ordering:
 # Focused M4 E2 bit-move/sign-injection component tier. This does not claim
 # executable RV32F support until the retained result bridge reaches commit.
 test-m4-fp-move:
-	./scripts/sbtw 'testOnly zircon.FloatingMovePipeSpec'
+	./scripts/sbtw 'testOnly zircon.FloatingMovePipeSpec zircon.FloatingResultBridgeSpec'
 
 verilog:
 	./scripts/sbtw "runMain zircon.Elaborate --target-dir generated"

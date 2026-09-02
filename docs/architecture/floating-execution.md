@@ -54,6 +54,16 @@ retained record has accepted ownership. Thus a later squash can discard both
 records, while an older pending F result cannot be overwritten by a younger
 one.
 
+`FloatingResultBridge` is the ownership boundary for this rule. For a
+float-writing result it first holds the upstream E2 handshake until the result
+queue accepts the tag, then retains a one-entry ordinary completion until the
+ROB accepts it. This eliminates a ROB-completion/result-queue combinational
+loop while ensuring that a completed FPR-writing ROB entry always already has
+its exact result record. The bridge receives the same squash/flush boundary as
+the result queue and drops its pending completion for the same killed tag. For
+`FMV.X.W` it emits no FPR queue record and uses the ordinary completion path
+alone.
+
 At retirement, at most one FPR-writing instruction can commit in a cycle,
 matching the single FPR write port. The commit controller must hold a younger
 second FPR writer for a later cycle rather than retire it without a matching
