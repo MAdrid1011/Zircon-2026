@@ -3152,7 +3152,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("merges seeded same-line M0 and M1 loads into one exact AXI refill") {
+    it("replays seeded same-bank M0 and M1 loads into one exact AXI refill") {
       for (seed <- M3DualLoadMergeSeeds) {
         simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
           enableM2Observation = true))) { dut =>
@@ -3170,10 +3170,10 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           val program = Map(
             ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
             ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
-            ResetVector + 8 -> BigInt("0040a183", 16), // lw x3,4(x1)
+            ResetVector + 8 -> BigInt("0100a183", 16), // lw x3,16(x1), same word bank
             ResetVector + 12 -> BigInt("00100073", 16),
             line -> firstWord,
-            line + 4 -> secondWord
+            line + 16 -> secondWord
           )
           try {
             events = runProgram(dut, program, cycles = cycles,
@@ -3207,7 +3207,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
               s"m0=$m0Ingress m1=$m1Ingress l1d=$l1dRequestTags " +
               s"lineDataAr=$lineRefillAddresses trace=$retired") {
               assert(m0Ingress && m1Ingress,
-                "same-line loads did not reach both M0 and M1 ingress")
+                "same-bank loads did not reach both M0 and M1 ingress")
               assert(l1dRequestTags.distinct.size == 2,
                 "the two exact L1D request owners were not both accepted")
               assert(lineRefillAddresses == Seq(line),
@@ -3217,7 +3217,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
                 event.memoryAddress == line && event.memoryReadData == firstWord))
               assert(retired.exists(event => event.pc == ResetVector + 8 &&
                 event.gprWrite && event.gprAddress == 3 && event.gprData == secondWord &&
-                event.memoryAddress == line + 4 && event.memoryReadData == secondWord))
+                event.memoryAddress == line + 16 && event.memoryReadData == secondWord))
             }
           } catch {
             case failure: Throwable =>

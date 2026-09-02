@@ -32,10 +32,11 @@ test-m3-dual-load-forward:
 	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1"'
 
-# Three explicit-seed complete-core same-line load merges. Kept separate from
-# the broad component target so each M3 component simulation remains bounded.
+# Three explicit-seed complete-core same-bank load replay/merge runs. Kept
+# separate from the broad component target so each M3 component simulation
+# remains bounded.
 test-m3-dual-load-merge:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges seeded same-line M0 and M1 loads"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
 
 # Fast, focused exclusive L1D-L2 transfer regression. It covers clean victim
 # handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery

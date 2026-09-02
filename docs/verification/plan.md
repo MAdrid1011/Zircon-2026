@@ -106,11 +106,11 @@ credit. This closes that resource-saturation recovery cell only.
 
 `make test-m3-dual-load-merge` runs three explicit seeds
 `0x5eedfc01`--`0x5eedfc03` with independent five-channel AXI backpressure.
-Each complete-core program issues two same-line loads through M0 and M1,
-requires two distinct L1D request owners but exactly one target-line AXI
-refill, and checks both exact GPR and memory retirement metadata. The latest
-local run passes 1/1 in 32.696 seconds; failures persist the seed, schedule,
-program, and retire trace.
+Each complete-core program issues two same-line, same-word-bank loads through
+M0 and M1, requires the younger request to replay, then requires two distinct
+L1D owners but exactly one target-line AXI refill and both exact GPR/memory
+retirement metadata. The latest local run passes 1/1 in 33.322 seconds;
+failures persist the seed, schedule, program, and retire trace.
 
 `CoreShellSpec` additionally runs three explicit RV32A program seeds
 (`0x5eedf401`--`0x5eedf403`). Each randomizes all nine AMO.W operation order,
