@@ -92,6 +92,13 @@ independent miss is held while four MSHRs are live, then admitted only after an
 actual AXI refill returns and its sole exact waiter completion releases the
 physical MSHR credit.
 
+`CoreShellSpec` additionally runs three explicit RV32A program seeds
+(`0x5eedf401`--`0x5eedf403`). Each randomizes all nine AMO.W operation order,
+initial word values, operands, legal cross-ID read selection, and all five AXI
+channel schedules. It requires nine ID-7 AR/AW/B lifecycles and exact old/new
+memory metadata for every retirement; failures retain the generated program,
+selector seed, AXI schedule, and retire trace.
+
 | Boundary | Required tests and properties |
 | --- | --- |
 | MemIQ/M0/M1 | `MemIssueQueueSpec` passes two enqueue, source wakeup, ROB-age selection, same-cycle recycle, free-only admission, recovery, and the live-atomic barrier against younger M0 and M1 issue before LSQ allocation. `DualLSUAdmissionSpec`, `M0RequestArbiterSpec`, `AuxiliaryReadArbiterSpec`, and `ReorderBufferSpec` cover exact-tag M0/M1 ownership and operand context. `CoreShellSpec` passes inaccessible M1 replay, cacheable AXI load plus L1D write-allocate store, ID-6 device operations, and executable ID-7 LR/SC/AMO. Full dual-LSU conflict integration remains required. |

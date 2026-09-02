@@ -37,6 +37,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf203L, 0x5eedf204L)
   private val M3AtomicMixedTrafficSeeds = Seq(0x5eedf301L, 0x5eedf302L,
     0x5eedf303L)
+  private val M3AtomicRandomSeeds = Seq(0x5eedf401L, 0x5eedf402L,
+    0x5eedf403L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -349,7 +351,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       scenario: String,
       schedule: AxiSchedule,
       events: Seq[TraceSample],
-      responseSelectorSeed: Option[Long] = None
+      responseSelectorSeed: Option[Long] = None,
+      program: Option[Map[BigInt, BigInt]] = None
   ): Unit = {
     val directory = Paths.get("target", "zircon-failures")
     Files.createDirectories(directory)
@@ -362,6 +365,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         s"b_valid=${schedule.bValid.map(value => if (value) '1' else '0').mkString}\n" +
         responseSelectorSeed.map(selectorSeed =>
           s"response_selector_seed=0x${java.lang.Long.toHexString(selectorSeed)}\n").getOrElse("") +
+        program.map(words => words.toSeq.sortBy(_._1).map { case (address, word) =>
+          f"program[0x$address%08x]=0x$word%08x"
+        }.mkString("program=\n", "\n", "\n")).getOrElse("") +
         events.mkString("retire_trace=\n", "\n", "\n")
     Files.writeString(directory.resolve(
       s"m3-axi-stress-$scenario-${java.lang.Long.toHexString(seed)}.txt"), evidence)
@@ -2378,6 +2384,110 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "atomic-mixed-axi-traffic", schedule, events,
                 Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("runs seeded random RV32A AMO programs through the ID-7 owner") {
+      val mask = (BigInt(1) << 32) - 1
+      val operations = Seq(1, 0, 4, 12, 8, 16, 20, 24, 28)
+      def amoInstruction(funct5: Int, rd: Int): BigInt =
+        (BigInt(funct5) << 27) | (BigInt(2) << 20) | (BigInt(1) << 15) |
+          (BigInt(2) << 12) | (BigInt(rd) << 7) | BigInt(0x2f)
+      def signed(value: BigInt): BigInt =
+        if ((value & (BigInt(1) << 31)) != 0) value - (BigInt(1) << 32) else value
+      def applyAmo(funct5: Int, oldValue: BigInt, operand: BigInt): BigInt =
+        (funct5 match {
+          case 1 => operand
+          case 0 => oldValue + operand
+          case 4 => oldValue ^ operand
+          case 12 => oldValue & operand
+          case 8 => oldValue | operand
+          case 16 => if (signed(oldValue) < signed(operand)) oldValue else operand
+          case 20 => if (signed(oldValue) > signed(operand)) oldValue else operand
+          case 24 => if (oldValue < operand) oldValue else operand
+          case 28 => if (oldValue > operand) oldValue else operand
+        }) & mask
+
+      for (seed <- M3AtomicRandomSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val random = new Random(seed)
+          val schedule = seededAxiSchedule(seed, 3000)
+          val selectorSeed = seed ^ 0x7a0b0L
+          val selectorRandom = new Random(selectorSeed)
+          val base = BigInt("80001000", 16)
+          val operand = BigInt(random.nextInt(2048))
+          val shuffled = random.shuffle(operations)
+          val initial = shuffled.indices.map(_ => BigInt(random.nextInt()) & mask)
+          val program = scala.collection.mutable.Map[BigInt, BigInt](
+            ResetVector -> BigInt("800010b7", 16),
+            ResetVector + 4 -> ((operand << 20) | (BigInt(2) << 7) | BigInt(0x13)))
+          var pc = ResetVector + 8
+          val expected = shuffled.zipWithIndex.map { case (funct5, index) =>
+            val address = base + index * 4
+            val instruction = amoInstruction(funct5, index + 3)
+            program.update(pc, instruction)
+            val operationPc = pc
+            pc += 4
+            if (index != shuffled.size - 1) {
+              program.update(pc, BigInt("00408093", 16)) // addi x1,x1,4
+              pc += 4
+            }
+            program.update(address, initial(index))
+            (operationPc, instruction, index + 3, address, initial(index),
+              applyAmo(funct5, initial(index), operand))
+          }
+          program.update(pc, BigInt("00100073", 16))
+          var events = Seq.empty[TraceSample]
+          var id7Reads = 0
+          var id7Writes = 0
+          var id7Responses = 0
+          try {
+            events = runProgram(dut, program.toMap, cycles = 3000,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) id7Writes += 1
+                if (bFire && core.io.axi.b.bits.id.peek().litValue == 7) id7Responses += 1
+              })
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$retired") {
+              assert(id7Reads == operations.size && id7Writes == operations.size &&
+                id7Responses == operations.size)
+              expected.foreach { case (operationPc, instruction, rd, address, oldValue, writeValue) =>
+                val event = retired.find(_.pc == operationPc).getOrElse(
+                  fail(s"AMO at pc=0x${operationPc.toString(16)} did not retire"))
+                assert(event.instruction == instruction && event.gprWrite &&
+                  event.gprAddress == rd && event.gprData == oldValue &&
+                  event.memoryAddress == address && event.memoryReadMask == 15 &&
+                  event.memoryReadData == oldValue && event.memoryWriteMask == 15 &&
+                  event.memoryWriteData == writeValue)
+              }
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "random-rv32a-amo", schedule, events,
+                Some(selectorSeed), Some(program.toMap))
               throw failure
           }
         }

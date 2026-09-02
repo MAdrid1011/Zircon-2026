@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -106,6 +106,11 @@ test-m3-atomic:
 # while retaining a short standalone reproduction path.
 test-m3-atomic-axi:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ID-7 AMO ownership through seeded mixed AXI traffic"'
+
+# Seeded RV32A programs cover every AMO.W encoding under independently varied
+# AXI channels. Failure bundles include the generated instruction stream.
+test-m3-atomic-random:
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "runs seeded random RV32A AMO programs through the ID-7 owner"'
 
 # Fast FENCE/aq/rl ordering tier. It covers pre-LSQ atomic gating, age-tagged
 # LQ/SQ FENCE drain, and the executable FENCE/aq pressure cases below five minutes.

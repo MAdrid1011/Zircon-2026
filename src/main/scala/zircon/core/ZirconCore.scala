@@ -284,7 +284,10 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // atomic invalidates a clean L2 copy before its AXI read/modify/write.
   l2TransferStore.io.invalidate.valid := atomicEngine.io.effect.fire &&
     atomicEngine.io.externalWriteRequired
-  l2TransferStore.io.invalidate.bits := lsuIngress.io.atomicEffect.bits.address
+  // L2 ownership is line-granular even though an AMO's AXI and retire address
+  // remain its naturally aligned word address.
+  l2TransferStore.io.invalidate.bits := lsuIngress.io.atomicEffect.bits.address &
+    "hffffffe0".U
 
   val deviceLoadCompletion = Wire(Decoupled(new LoadCompletion(cfg)))
   val deviceStoreResult = Wire(Decoupled(new StoreWriteResult(cfg)))
