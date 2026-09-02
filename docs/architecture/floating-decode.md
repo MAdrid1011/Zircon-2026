@@ -26,6 +26,12 @@ release support; every operation outside that documented live subset stays on
 the precise illegal-instruction path until its FPR scoreboard, source-read,
 E2, result-queue, `FS`/`fflags`, and trace connections are verified together.
 
+`FloatingAdmission` is the shared classifier for that boundary. It identifies
+the RV32F opcode namespace separately from integer instructions, admits only
+`FMV.W.X`, `FMV.X.W`, and the three `FSGNJ.S` forms when `mstatus.FS != Off`,
+and marks every other F encoding, reserved encoding, or `FS=Off` operation
+illegal. It creates no completion or state mutation by itself.
+
 ## Verification mapping
 
 `FloatingDecoderSpec` checks memory namespace selection, arithmetic/FMA source
