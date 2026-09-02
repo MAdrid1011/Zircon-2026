@@ -24,8 +24,13 @@ class M1BackendSubsystem(
 
     val longCapacity = Input(UInt(2.W))
     val memCapacity = Input(UInt(2.W))
+    val floatingCapacity = Input(UInt(2.W))
     val longEnqueue = Vec(config.decodeWidth, Decoupled(new UopRef(config)))
     val memEnqueue = Vec(config.decodeWidth, Decoupled(new UopRef(config)))
+    val floatingEnqueue = Vec(config.decodeWidth, Decoupled(new UopRef(config)))
+    val floatingAllocate = Output(Vec(config.decodeWidth,
+      Valid(new FloatingScoreboardAllocation(config))))
+    val floatingScoreboardEmpty = Input(Bool())
     val otherCompletion = Flipped(Vec(3,
       Decoupled(new CompletionResult(config))))
     val otherFault = Input(Vec(3, new FaultCandidate(config)))
@@ -90,9 +95,13 @@ class M1BackendSubsystem(
     backend.io.input(lane) <> io.input(lane)
     io.longEnqueue(lane) <> backend.io.longEnqueue(lane)
     io.memEnqueue(lane) <> backend.io.memEnqueue(lane)
+    io.floatingEnqueue(lane) <> backend.io.floatingEnqueue(lane)
+    io.floatingAllocate(lane) := backend.io.floatingAllocate(lane)
   }
   backend.io.longCapacity := io.longCapacity
   backend.io.memCapacity := io.memCapacity
+  backend.io.floatingCapacity := io.floatingCapacity
+  backend.io.floatingScoreboardEmpty := io.floatingScoreboardEmpty
   for (endpoint <- 0 until 3) {
     backend.io.otherCompletion(endpoint) <> io.otherCompletion(endpoint)
     backend.io.otherFault(endpoint) := io.otherFault(endpoint)
@@ -117,6 +126,7 @@ class M1BackendSubsystem(
   commit.io.interruptBlocked := io.interruptBlocked
   commit.io.fpCommit := io.fpCommit
   backend.io.globalFlush := commit.io.globalFlush
+  backend.io.mstatusFs := commit.io.mstatusFs
 
   backend.io.auxReadPhysical := io.auxReadPhysical
   io.auxReadData := backend.io.auxReadData

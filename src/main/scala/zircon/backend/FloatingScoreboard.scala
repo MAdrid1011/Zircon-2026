@@ -29,6 +29,7 @@ class FloatingScoreboard(
     val allocateReady = Output(Vec(2, Bool()))
     val readRelease = Input(Valid(new FloatingScoreboardAllocation(config)))
     val complete = Input(Valid(new FloatingScoreboardCompletion(config)))
+    val empty = Output(Bool())
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
@@ -38,6 +39,7 @@ class FloatingScoreboard(
   val reservation = Reg(Vec(maxOutstanding, new FloatingScoreboardAllocation(config)))
   val sourceConsumed = RegInit(VecInit.fill(maxOutstanding)(false.B))
   val recoveryBlocked = io.flush || io.squash.valid
+  io.empty := !valid.asUInt.orR
 
   def anyEntry(predicate: Int => Bool): Bool =
     (0 until maxOutstanding).map(predicate).reduce(_ || _)

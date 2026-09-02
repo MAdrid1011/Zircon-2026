@@ -23,11 +23,17 @@ class IntegerDispatchRecoveryBackend(
   val io = IO(new Bundle {
     val input = Flipped(Vec(config.decodeWidth,
       Decoupled(new FetchQueueEntry(config))))
+    val mstatusFs = Input(UInt(2.W))
 
     val longCapacity = Input(UInt(2.W))
     val memCapacity = Input(UInt(2.W))
+    val floatingCapacity = Input(UInt(2.W))
     val longEnqueue = Vec(config.decodeWidth, Decoupled(new UopRef(config)))
     val memEnqueue = Vec(config.decodeWidth, Decoupled(new UopRef(config)))
+    val floatingEnqueue = Vec(config.decodeWidth, Decoupled(new UopRef(config)))
+    val floatingAllocate = Output(Vec(config.decodeWidth,
+      Valid(new FloatingScoreboardAllocation(config))))
+    val floatingScoreboardEmpty = Input(Bool())
     val otherCompletion = Flipped(Vec(3,
       Decoupled(new CompletionResult(config))))
     val otherFault = Input(Vec(3, new FaultCandidate(config)))
@@ -99,6 +105,10 @@ class IntegerDispatchRecoveryBackend(
     io.memEnqueue(lane).valid := dispatch.io.memEnqueue(lane).valid
     io.memEnqueue(lane).bits := dispatch.io.memEnqueue(lane).bits
     dispatch.io.memEnqueue(lane).ready := io.memEnqueue(lane).ready
+    io.floatingEnqueue(lane).valid := dispatch.io.floatingEnqueue(lane).valid
+    io.floatingEnqueue(lane).bits := dispatch.io.floatingEnqueue(lane).bits
+    dispatch.io.floatingEnqueue(lane).ready := io.floatingEnqueue(lane).ready
+    io.floatingAllocate(lane) := dispatch.io.floatingAllocate(lane)
 
     rename.io.request(lane) := dispatch.io.renameRequest(lane)
     dispatch.io.renameResponse(lane) := rename.io.response(lane)
@@ -112,6 +122,9 @@ class IntegerDispatchRecoveryBackend(
   dispatch.io.intCapacity := execution.io.intCapacity
   dispatch.io.longCapacity := io.longCapacity
   dispatch.io.memCapacity := io.memCapacity
+  dispatch.io.floatingCapacity := io.floatingCapacity
+  dispatch.io.floatingScoreboardEmpty := io.floatingScoreboardEmpty
+  dispatch.io.mstatusFs := io.mstatusFs
   dispatch.io.integerReady := execution.io.integerReady
   dispatch.io.blocked := io.globalFlush || recovery.io.dispatchBlocked ||
     execution.io.rollbackActive

@@ -9,15 +9,19 @@ class BackendDispatchSpec extends AnyFunSpec with ChiselSim {
   private val AddX6X5X2 = BigInt("00228333", 16)
   private val LoadWordX7X1 = BigInt("0000a383", 16)
   private val BranchPlusEight = BigInt("00000463", 16)
+  private val FmvWXF7X4 = BigInt((0x78L << 25) | (4L << 15) | (7L << 7) | 0x53L)
 
   private def clearInputs(dut: BackendDispatch): Unit = {
     dut.io.blocked.poke(false)
+    dut.io.mstatusFs.poke(0)
     dut.io.renameFreeCount.poke(24)
     dut.io.renameReady.poke(true)
     dut.io.robCapacity.poke(2)
     dut.io.intCapacity.poke(2)
     dut.io.longCapacity.poke(2)
     dut.io.memCapacity.poke(2)
+    dut.io.floatingCapacity.poke(2)
+    dut.io.floatingScoreboardEmpty.poke(true)
     dut.io.integerReady.poke((BigInt(1) << 56) - 1)
 
     for (lane <- 0 until 2) {
@@ -57,6 +61,7 @@ class BackendDispatchSpec extends AnyFunSpec with ChiselSim {
       dut.io.intEnqueue(lane).ready.poke(true)
       dut.io.longEnqueue(lane).ready.poke(true)
       dut.io.memEnqueue(lane).ready.poke(true)
+      dut.io.floatingEnqueue(lane).ready.poke(true)
     }
 
     dut.io.bdbAllocate.ready.poke(true)
@@ -216,6 +221,33 @@ class BackendDispatchSpec extends AnyFunSpec with ChiselSim {
         dut.io.faultCandidate(1).record.cause.expect(2)
         dut.io.faultCandidate(1).record.trapValue.expect(
           BigInt("ffffffff", 16))
+      }
+    }
+
+    it("admits only enabled move/sign RV32F instructions into the isolated queue") {
+      simulate(new BackendDispatch) { dut =>
+        clearInputs(dut)
+        driveInstruction(dut, 0, FmvWXF7X4)
+        dut.io.input(1).valid.poke(false)
+        dut.io.renameResponse(0).allocates.poke(false)
+
+        // FS=Off creates a normal precise illegal-instruction ROB fault.
+        dut.io.acceptedCount.expect(1)
+        dut.io.robEnqueue(0).bits.initiallyComplete.expect(true)
+        dut.io.faultCandidate(0).valid.expect(true)
+        dut.io.floatingEnqueue(0).valid.expect(false)
+
+        dut.io.mstatusFs.poke(1)
+        dut.io.acceptedCount.expect(1)
+        dut.io.robEnqueue(0).bits.initiallyComplete.expect(false)
+        dut.io.robEnqueue(0).bits.entry.floating.legal.expect(true)
+        dut.io.floatingEnqueue(0).valid.expect(true)
+        dut.io.floatingEnqueue(0).bits.writesFloat.expect(true)
+        dut.io.floatingEnqueue(0).bits.floatingDestination.expect(7)
+        dut.io.floatingAllocate(0).valid.expect(true)
+        dut.io.floatingAllocate(0).bits.destinationValid.expect(true)
+        dut.io.floatingAllocate(0).bits.destination.expect(7)
+        dut.io.faultCandidate(0).valid.expect(false)
       }
     }
 

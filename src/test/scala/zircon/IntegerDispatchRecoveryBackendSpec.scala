@@ -38,6 +38,7 @@ class IntegerDispatchRecoveryBackendSpec extends AnyFunSpec with ChiselSim {
 
       dut.io.longEnqueue(lane).ready.poke(true)
       dut.io.memEnqueue(lane).ready.poke(true)
+      dut.io.floatingEnqueue(lane).ready.poke(true)
       dut.io.commit(lane).ready.poke(false)
       dut.io.renameCommit(lane).valid.poke(false)
       dut.io.renameCommit(lane).architectural.poke(0)
@@ -47,6 +48,9 @@ class IntegerDispatchRecoveryBackendSpec extends AnyFunSpec with ChiselSim {
 
     dut.io.longCapacity.poke(2)
     dut.io.memCapacity.poke(2)
+    dut.io.floatingCapacity.poke(2)
+    dut.io.floatingScoreboardEmpty.poke(true)
+    dut.io.mstatusFs.poke(0)
     for (endpoint <- 0 until 3) {
       dut.io.otherCompletion(endpoint).valid.poke(false)
       dut.io.otherCompletion(endpoint).bits.robTag.poke(endpoint)

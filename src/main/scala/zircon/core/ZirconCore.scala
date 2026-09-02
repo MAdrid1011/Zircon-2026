@@ -3,8 +3,9 @@ package zircon.core
 import chisel3._
 import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter, Valid}
 import zircon.{PMARegionKind, ZirconCoreConfig}
-import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPipe,
-  M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
+import zircon.backend.{CompletionResult, FaultCandidate, FloatingIssueQueue,
+  FloatingScoreboard, LongIssueQueue, LongPipe, M1BackendSubsystem, MemIssueQueue,
+  ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
   AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress,
@@ -31,6 +32,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val backend = Module(new M1BackendSubsystem(cfg))
   val longQueue = Module(new LongIssueQueue(cfg))
   val longPipe = Module(new LongPipe(cfg))
+  val floatingQueue = Module(new FloatingIssueQueue(cfg))
+  val floatingScoreboard = Module(new FloatingScoreboard(cfg))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
   val lsuIngress = Module(new DualLSUIngress(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
@@ -69,8 +72,26 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   for (lane <- 0 until cfg.decodeWidth) {
     longQueue.io.enqueue(lane) <> backend.io.longEnqueue(lane)
+    floatingQueue.io.enqueue(lane) <> backend.io.floatingEnqueue(lane)
+    floatingScoreboard.io.allocate(lane) := backend.io.floatingAllocate(lane)
   }
   backend.io.longCapacity := longQueue.io.enqueueCapacity
+  backend.io.floatingCapacity := floatingQueue.io.enqueueCapacity
+  backend.io.floatingScoreboardEmpty := floatingScoreboard.io.empty
+  floatingQueue.io.integerReady := backend.io.integerReady
+  floatingQueue.io.robHeadTag := backend.io.robHead.bits.robTag
+  floatingQueue.io.squash := backend.io.squash
+  floatingQueue.io.flush := backend.io.globalFlush
+  floatingScoreboard.io.robHeadTag := backend.io.robHead.bits.robTag
+  floatingScoreboard.io.squash := backend.io.squash
+  floatingScoreboard.io.flush := backend.io.globalFlush
+  floatingScoreboard.io.readRelease.valid := false.B
+  floatingScoreboard.io.readRelease.bits := 0.U.asTypeOf(
+    new zircon.backend.FloatingScoreboardAllocation(cfg))
+  floatingScoreboard.io.complete.valid := false.B
+  floatingScoreboard.io.complete.bits := 0.U.asTypeOf(
+    new zircon.backend.FloatingScoreboardCompletion(cfg))
+  floatingQueue.io.issue.ready := false.B
   longQueue.io.integerReady := backend.io.integerReady
   longQueue.io.robHeadTag := backend.io.robHead.bits.robTag
   longQueue.io.squash := backend.io.squash
