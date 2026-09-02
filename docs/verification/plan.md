@@ -104,6 +104,11 @@ response-gated LR/SC followed by a second LR, a conflicting same-hart store,
 and a failed no-write SC under the same independently varied AXI channels.
 They require exactly two ID-7 reads but only one ID-7 AW/B lifecycle.
 
+Three explicit non-line-base AMO error seeds (`0x5eedf601`--`0x5eedf603`)
+inject an ID-7 `BRESP` error after accepted AR/AW/W under the same independent
+channel schedules. Each requires one exact cause-7 trap at the retained word
+address, no GPR completion, and no duplicate ID-7 transaction.
+
 | Boundary | Required tests and properties |
 | --- | --- |
 | MemIQ/M0/M1 | `MemIssueQueueSpec` passes two enqueue, source wakeup, ROB-age selection, same-cycle recycle, free-only admission, recovery, and the live-atomic barrier against younger M0 and M1 issue before LSQ allocation. `DualLSUAdmissionSpec`, `M0RequestArbiterSpec`, `AuxiliaryReadArbiterSpec`, and `ReorderBufferSpec` cover exact-tag M0/M1 ownership and operand context. `CoreShellSpec` passes inaccessible M1 replay, cacheable AXI load plus L1D write-allocate store, ID-6 device operations, and executable ID-7 LR/SC/AMO. Full dual-LSU conflict integration remains required. |
