@@ -29,6 +29,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedd003L, 0x5eedd004L)
   private val M3AxiMixedTrafficSeeds = Seq(0x5eede001L, 0x5eede002L,
     0x5eede003L, 0x5eede004L)
+  private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
+    0x5eedf003L, 0x5eedf004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -1068,6 +1070,78 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             "FENCE retired while the dirty victim FIFO and ID-5 owner were not drained")
           assert(!events.exists(_.instruction == BigInt("00100073", 16)),
             "younger work retired while the cache-global FENCE was blocked")
+        }
+      }
+    }
+
+    it("retries the oldest dirty FENCE writeback before draining the next victim") {
+      for (seed <- M3FenceFifoRetrySeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1280
+          val schedule = seededAxiSchedule(seed, cycles)
+          val firstLine = BigInt("80001000", 16)
+          val secondLine = firstLine + 32
+          val writebackAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var bResponses = 0
+          var bErrors = 0
+          var successfulResponses = 0
+          var fenceBeforeAllSuccess = false
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("00100113", 16), // addi x2,x0,1
+              ResetVector + 8 -> BigInt("0020a023", 16), // sw x2,0(x1)
+              ResetVector + 12 -> BigInt("0220a023", 16), // sw x2,32(x1)
+              ResetVector + 16 -> BigInt("0000000f", 16), // fence
+              ResetVector + 20 -> BigInt("00100073", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              writeResponse = Some(0),
+              writeResponseForCycle = Some((_, _) => if (bResponses == 0) 2 else 0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+                  core.io.axi.aw.bits.len.expect(7)
+                  writebackAddresses += core.io.axi.aw.bits.addr.peek().litValue
+                }
+                if (bFire && core.io.axi.b.bits.id.peek().litValue == 5) {
+                  bResponses += 1
+                  if (core.io.axi.b.bits.resp.peek().litValue == 0) successfulResponses += 1
+                  else bErrors += 1
+                }
+                core.io.trace.get.foreach { event =>
+                  if (event.valid.peek().litToBoolean &&
+                      event.instruction.peek().litValue == BigInt("0000000f", 16) &&
+                      successfulResponses < 2) {
+                    fenceBeforeAllSuccess = true
+                  }
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"writebacks=$writebackAddresses, b=$bResponses, errors=$bErrors, " +
+              s"success=$successfulResponses, trace=$retired") {
+              assert(writebackAddresses.toSeq == Seq(firstLine, firstLine, secondLine))
+              assert(bResponses == 3 && bErrors == 1 && successfulResponses == 2)
+              assert(!fenceBeforeAllSuccess)
+              assert(retired.exists(_.instruction == BigInt("0000000f", 16)))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "fence-fifo-writeback-retry", schedule, events)
+              throw failure
+          }
         }
       }
     }
