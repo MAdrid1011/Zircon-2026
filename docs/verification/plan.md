@@ -106,9 +106,13 @@ ID-6 device store, and a FENCE-triggered ID-5 writeback under independently
 randomized all-channel backpressure. `0x5eedf101`--`0x5eedf104` extends that
 stream to three cache refills, two distinct dirty cache lines, an ID-6 device
 store, and a FENCE which must drain exactly two ID-5 bursts and one ID-6
-transaction. Both require exact load/store/FENCE retire metadata; observed
-local result is 2/2 in 98.7 seconds. Longer mixed error streams and formal
-credit/protocol proofs remain open.
+transaction. `0x5eedf201`--`0x5eedf204` repeats the long stream with the
+first ID-5 `BRESP` set to error, requiring that exact dirty line to retry,
+the second dirty line to wait behind the retry, and FENCE to wait for two
+successful ID-5 completions plus the ID-6 completion. All require exact
+load/store/FENCE retire metadata; observed local result is 3/3 in 143.0
+seconds. Longer mixed error streams and formal credit/protocol proofs remain
+open.
 
 The full `L1DLoadCacheSpec` is now 37/37 in approximately 1 minute 59 seconds. It holds
 a fifth independent miss while all four MSHRs are live, then allows it only after the
