@@ -1220,6 +1220,72 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("flushes an unaccepted dirty-victim replay after the older transfer fires") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerResidentA = BigInt("8000be00", 16)
+        val youngerResidentB = BigInt("8000c000", 16)
+        val youngerLine = BigInt("8000c200", 16)
+        val olderResidentA = BigInt("8000bf00", 16)
+        val olderResidentB = BigInt("8000c100", 16)
+        val olderLine = BigInt("8000c300", 16)
+        val freshLine = BigInt("8000c500", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("96000000", 16) + word)
+
+        Seq(youngerResidentA, youngerResidentB, olderResidentA, olderResidentB)
+          .zipWithIndex.foreach { case (line, index) =>
+            submit(dut, tag = index + 1, address = line)
+            issueRefill(dut, residentWords, lineAddress = line)
+            dut.io.completion.ready.poke(true)
+            dut.clock.step()
+            dut.io.completion.ready.poke(false)
+          }
+        Seq(youngerResidentA, youngerResidentB, olderResidentA, olderResidentB)
+          .zipWithIndex.foreach { case (line, index) =>
+            submitStore(dut, tag = index + 5, address = line + 4,
+              mask = 15, data = BigInt("d00f0000", 16) + index)
+            consumeStoreResult(dut, tag = index + 5, address = line + 4)
+          }
+
+        // Lane 1 owns the only accepted dirty-victim transfer. Lane 0 remains
+        // replayable and cannot acquire a second transfer in the same cycle.
+        presentLoad(dut, lane = 0, tag = 13, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 11, address = olderLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(olderResidentA)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        // Global flush must remove both local demand records. The accepted
+        // victim transfer remains L2-owned, but neither demand may emit a
+        // stale probe, AXI refill, or completion after the recovery boundary.
+        dut.io.flush.poke(true)
+        dut.io.request(0).ready.expect(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step()
+        dut.io.flush.poke(false)
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Insert.valid.expect(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // A new demand establishes that the flushed owner and the replay did
+        // not leak either an MSHR or waiter credit.
+        presentLoad(dut, lane = 0, tag = 15, address = freshLine + 4)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(freshLine)
+      }
+    }
+
     it("accepts different-set dual misses with two exact MSHR owners") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

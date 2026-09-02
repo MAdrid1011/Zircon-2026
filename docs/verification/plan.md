@@ -76,6 +76,11 @@ all local demand owners release without a stale lookup, AXI refill, or
 completion, while a fresh miss receives a new credit. This closes one
 dirty-transfer-plus-saturation recovery cell; broader victim/L2 pressure and
 squash/flush combinations remain release work.
+It separately offers two dirty-victim misses with the older lane accepted at
+the sole L1D-to-L2 transfer port and the younger lane still replayable, then
+applies global flush. The transferred victim remains L2-owned, while both local
+demands disappear without a stale probe/refill/completion and a fresh request
+obtains a new MSHR credit.
 
 The latest L1D resource-pressure slice passes 30 tests in 1 minute 32 seconds:
 four live MSHRs backpressure a fifth miss, eight waiters backpressure a ninth
