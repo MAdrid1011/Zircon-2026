@@ -35,6 +35,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf103L, 0x5eedf104L)
   private val M3AxiLongMixedRetrySeeds = Seq(0x5eedf201L, 0x5eedf202L,
     0x5eedf203L, 0x5eedf204L)
+  private val M3AtomicMixedTrafficSeeds = Seq(0x5eedf301L, 0x5eedf302L,
+    0x5eedf303L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2286,6 +2288,99 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           events(2).memoryReadData == BigInt("800000b7", 16) &&
           events(2).memoryWriteMask == 15 &&
           events(2).memoryWriteData == BigInt("800000bc", 16))
+      }
+    }
+
+    it("preserves ID-7 AMO ownership through seeded mixed AXI traffic") {
+      for (seed <- M3AtomicMixedTrafficSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1600
+          val schedule = seededAxiSchedule(seed, cycles)
+          val selectorSeed = seed ^ 0x7a0a0L
+          val selectorRandom = new Random(selectorSeed)
+          val cacheLine = BigInt("80001000", 16)
+          val deviceAddress = BigInt("b0000000", 16)
+          val observedAr = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val observedAw = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+          val observedB = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("b0000237", 16), // lui x4,0xb0000
+              ResetVector + 8 -> BigInt("0000a103", 16), // lw x2,0(x1)
+              ResetVector + 12 -> BigInt("00500193", 16), // addi x3,x0,5
+              ResetVector + 16 -> BigInt("0030a2af", 16), // amoadd.w x5,x3,(x1)
+              ResetVector + 20 -> BigInt("0220a023", 16), // sw x2,32(x1)
+              ResetVector + 24 -> BigInt("00222023", 16), // sw x2,0(x4)
+              ResetVector + 28 -> BigInt("0000000f", 16), // fence
+              ResetVector + 32 -> BigInt("00100073", 16),
+              cacheLine -> BigInt("11223344", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                if (candidates.isEmpty) 0
+                else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (arFire) observedAr += ((core.io.axi.ar.bits.id.peek().litValue,
+                  core.io.axi.ar.bits.addr.peek().litValue))
+                if (awFire) observedAw += ((core.io.axi.aw.bits.id.peek().litValue,
+                  core.io.axi.aw.bits.len.peek().litValue))
+                if (bFire) observedB += core.io.axi.b.bits.id.peek().litValue
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, ar=$observedAr, " +
+              s"aw=$observedAw, b=$observedB, trace=$retired") {
+              assert(observedAr.exists(_ == (BigInt(7), cacheLine)),
+                "the AMO did not acquire the reserved ID-7 read owner")
+              assert(observedAw.contains((BigInt(7), BigInt(0))),
+                "the AMO did not complete with an ID-7 single-beat write")
+              assert(observedAw.contains((BigInt(6), BigInt(0))),
+                "the device store did not retain its ID-6 write owner")
+              assert(observedAw.contains((BigInt(5), BigInt(7))),
+                "FENCE did not drain the dirty cache line through ID-5")
+              assert(observedB.toSet == Set(BigInt(5), BigInt(6), BigInt(7)),
+                "one mixed write owner did not receive its exact B response")
+              assert(retired.exists(event => event.pc == ResetVector + 16 &&
+                event.gprWrite && event.gprAddress == 5 &&
+                event.gprData == BigInt("11223344", 16) &&
+                event.memoryAddress == cacheLine && event.memoryReadMask == 15 &&
+                event.memoryReadData == BigInt("11223344", 16) &&
+                event.memoryWriteMask == 15 && event.memoryWriteData ==
+                  BigInt("11223349", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 20 &&
+                event.memoryAddress == cacheLine + 32 && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == BigInt("11223344", 16)))
+              assert(retired.exists(event => event.pc == ResetVector + 24 &&
+                event.memoryAddress == deviceAddress && event.memoryWriteMask == 15 &&
+                event.memoryWriteData == BigInt("11223344", 16)))
+              assert(retired.exists(_.instruction == BigInt("0000000f", 16)))
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "atomic-mixed-axi-traffic", schedule, events,
+                Some(selectorSeed))
+              throw failure
+          }
+        }
       }
     }
 

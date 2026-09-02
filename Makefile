@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -100,6 +100,12 @@ test-m3-atomic:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "atomic"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "LR/SC"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "reservation"'
+
+# Three deterministic full-channel RV32A streams. Each mixes cache refill,
+# ID-7 AMO read/modify/write, ID-6 device traffic, and FENCE ID-5 writeback
+# while retaining a short standalone reproduction path.
+test-m3-atomic-axi:
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ID-7 AMO ownership through seeded mixed AXI traffic"'
 
 # Fast FENCE/aq/rl ordering tier. It covers pre-LSQ atomic gating, age-tagged
 # LQ/SQ FENCE drain, and the executable FENCE/aq pressure cases below five minutes.
