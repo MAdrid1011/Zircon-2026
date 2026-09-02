@@ -19,6 +19,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eed8003L, 0x5eed8004L)
   private val M3AxiLongStreamSeeds = Seq(0x5eed9001L, 0x5eed9002L,
     0x5eed9003L, 0x5eed9004L)
+  private val M3AxiFaultOrderSeeds = Seq(0x5eeda001L, 0x5eeda002L,
+    0x5eeda003L, 0x5eeda004L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -2176,6 +2178,89 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "long-owner-reuse", schedule, events,
                 Some(selectorSeed))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("keeps the older load fault when a younger RRESP fault drains first") {
+      for (seed <- M3AxiFaultOrderSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 1024
+          val schedule = seededAxiSchedule(seed, cycles)
+          val olderAddress = BigInt("80001000", 16)
+          val youngerAddress = BigInt("80001020", 16)
+          val dataOwnerAddress = scala.collection.mutable.Map.empty[BigInt, BigInt]
+          val dataOwnerBeats = scala.collection.mutable.Map.empty[BigInt, Int]
+          val faultCompletionOrder = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          def isOlderLine(address: BigInt): Boolean =
+            address >= olderAddress && address < olderAddress + 32
+          def isYoungerLine(address: BigInt): Boolean =
+            address >= youngerAddress && address < youngerAddress + 32
+          try {
+            events = runProgram(dut, Map(
+              ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+              ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1), older
+              ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1), younger
+              ResetVector + 12 -> BigInt("00100073", 16),
+              olderAddress -> BigInt("11111111", 16),
+              youngerAddress -> BigInt("22222222", 16)
+            ), cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter { index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1)
+                }
+                val younger = candidates.find(index =>
+                  isYoungerLine(pending(index)._2))
+                younger.getOrElse(candidates.headOption.getOrElse(0))
+              },
+              readValidForCycle = (_, _, address) =>
+                (!isOlderLine(address) && !isYoungerLine(address)) ||
+                  dataOwnerAddress.size == 2,
+              rResponse = (_, address) =>
+                if (isOlderLine(address) || isYoungerLine(address)) 2 else 0,
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+                  core.io.axi.r.ready.peek().litToBoolean
+                if (arFire) {
+                  val id = core.io.axi.ar.bits.id.peek().litValue
+                  val address = core.io.axi.ar.bits.addr.peek().litValue
+                  if (address == olderAddress || address == youngerAddress) {
+                    dataOwnerAddress.update(id, address)
+                    dataOwnerBeats.update(id, 8)
+                  }
+                }
+                if (rFire) {
+                  val id = core.io.axi.r.bits.id.peek().litValue
+                  dataOwnerBeats.get(id).foreach { remaining =>
+                    if (remaining == 1) {
+                      faultCompletionOrder += dataOwnerAddress(id)
+                      dataOwnerBeats.remove(id)
+                    } else dataOwnerBeats.update(id, remaining - 1)
+                  }
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val trap = retired.find(event => event.trap && event.pc == ResetVector + 4)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, owners=$dataOwnerAddress, " +
+              s"faultOrder=$faultCompletionOrder, trace=$retired") {
+              assert(dataOwnerAddress.values.toSet == Set(olderAddress, youngerAddress))
+              assert(faultCompletionOrder.take(2) == Seq(youngerAddress, olderAddress))
+              assert(trap.exists(event => event.cause == 5 &&
+                event.trapValue == olderAddress))
+              assert(!retired.exists(event => event.pc == ResetVector + 8 && !event.trap))
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "reverse-rresp-fault-order", schedule, events)
               throw failure
           }
         }
