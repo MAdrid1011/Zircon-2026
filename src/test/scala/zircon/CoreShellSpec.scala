@@ -55,6 +55,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedfb03L)
   private val M3DualLoadMergeSeeds = Seq(0x5eedfc01L, 0x5eedfc02L,
     0x5eedfc03L)
+  private val M3DualDifferentSetMissSeeds = Seq(0x5eeddb01L, 0x5eeddb02L,
+    0x5eeddb03L)
   private val M3PartialStoreForwardSeeds = Seq(0x5eedfd01L, 0x5eedfd02L,
     0x5eedfd03L)
   private val M3MshrPressureSeeds = Seq(0x5eedfe01L, 0x5eedfe02L,
@@ -3992,6 +3994,91 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           secondLoad.memoryAddress == secondLine && secondLoad.memoryReadData ==
             BigInt("55667788", 16))
         assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("accepts seeded different-set M0 and M1 cold misses before either refill returns") {
+      for (seed <- M3DualDifferentSetMissSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 768
+          val schedule = seededAxiSchedule(seed, cycles)
+          val firstLine = BigInt("80001000", 16)
+          val secondLine = firstLine + 32
+          val firstWord = BigInt("11223344", 16)
+          val secondWord = BigInt("55667788", 16)
+          var m0Ingress = false
+          var m1Ingress = false
+          val dualL1dAcceptCycles = scala.collection.mutable.ArrayBuffer.empty[Int]
+          val dataArAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+            ResetVector + 8 -> BigInt("0200a183", 16), // lw x3,32(x1)
+            ResetVector + 12 -> BigInt("00100073", 16), // ebreak
+            firstLine -> firstWord,
+            secondLine -> secondWord
+          )
+          try {
+            events = runProgram(dut, program, cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readValidForCycle = (_, _, address) => {
+                val dataLine = address & ~BigInt(31)
+                (dataLine != firstLine && dataLine != secondLine) ||
+                  dataArAddresses.distinct.size == 2
+              },
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, cycle) => {
+                val observation = core.io.m2Observation.get
+                m0Ingress ||= observation.m0Ingress.peek().litToBoolean
+                m1Ingress ||= observation.m1Ingress.peek().litToBoolean
+                if (observation.l1dRequest(0).peek().litToBoolean &&
+                    observation.l1dRequest(1).peek().litToBoolean) {
+                  dualL1dAcceptCycles += cycle
+                }
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val address = core.io.axi.ar.bits.addr.peek().litValue
+                val id = core.io.axi.ar.bits.id.peek().litValue
+                if (arFire && id >= 1 && id <= 4 &&
+                    (address == firstLine || address == secondLine)) {
+                  dataArAddresses += address
+                }
+              })
+            val retired = throughFirstTrap(events)
+            val firstLoad = retired.find(_.pc == ResetVector + 4).getOrElse(
+              fail(s"first cold miss did not retire: seed=0x${java.lang.Long.toHexString(seed)} " +
+                s"trace=$retired"))
+            val secondLoad = retired.find(_.pc == ResetVector + 8).getOrElse(
+              fail(s"second cold miss did not retire: seed=0x${java.lang.Long.toHexString(seed)} " +
+                s"trace=$retired"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} m0=$m0Ingress " +
+              s"m1=$m1Ingress dualL1d=$dualL1dAcceptCycles ar=$dataArAddresses " +
+              s"trace=$retired") {
+              assert(m0Ingress && m1Ingress && dualL1dAcceptCycles.nonEmpty)
+              assert(dataArAddresses.toSet == Set(firstLine, secondLine) &&
+                dataArAddresses.size == 2,
+                "each different-set cold miss must own one data AXI request before refill")
+              assert(firstLoad.gprWrite && firstLoad.gprAddress == 2 &&
+                firstLoad.gprData == firstWord && firstLoad.memoryAddress == firstLine &&
+                firstLoad.memoryReadData == firstWord)
+              assert(secondLoad.gprWrite && secondLoad.gprAddress == 3 &&
+                secondLoad.gprData == secondWord && secondLoad.memoryAddress == secondLine &&
+                secondLoad.memoryReadData == secondWord)
+              assert(retired.last.trap && retired.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "dual-lsu-different-set-cold-miss", schedule, events,
+                program = Some(program))
+              throw failure
+          }
+        }
       }
     }
 

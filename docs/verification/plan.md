@@ -150,9 +150,12 @@ Failures persist the seed, schedule, program, and retire trace.
 live ROB contexts and requires both LQ forward ports to assert in the same
 cycle, in ROB-age order. The corresponding deterministic `CoreShellSpec`
 program requires simultaneous M0/M1 ingress and simultaneous two-port L1D
-request handshakes before checking both exact load retirements. This proves
-the uncontented top-level dual-LSU path; bank/set/victim and recovery conflict
-matrices remain separate obligations.
+request handshakes before checking both exact load retirements. Three explicit
+seeds `0x5eeddb01`--`0x5eeddb03` additionally issue two different-set cold
+misses, withhold their data responses until both exact AR requests have been
+accepted, then require two L1D handshakes and both exact retirements. This
+proves the uncontented and invalid-way top-level dual-LSU paths; victim and
+recovery conflict matrices remain separate obligations.
 
 `make test-m3-partial-store-forward` runs byte and both aligned halfword lane
 pairs for each of three explicit seeds `0x5eedfd01`--`0x5eedfd03` through

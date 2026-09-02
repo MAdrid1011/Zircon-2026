@@ -31,6 +31,7 @@ test-m3-load-boundary:
 test-m3-dual-load-forward:
 	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "accepts seeded different-set M0 and M1 cold misses"'
 
 # Six explicit-seed complete-core same-bank merge and same-address resident-hit
 # replay runs. Kept separate from the broad component target so each M3
