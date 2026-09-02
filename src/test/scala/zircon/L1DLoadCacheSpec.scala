@@ -1522,6 +1522,67 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("releases a squashed dirty-victim owner after its L2 transfer fires") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("80009c00", 16)
+        val residentB = BigInt("80009e00", 16)
+        val killedLine = BigInt("8000a000", 16)
+        val freshLine = BigInt("8000a200", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("85000000", 16) + word)
+
+        // Make both ways dirty. The killed miss must hand the chosen victim
+        // to L2 before it can reserve the replacement way in L1D.
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, residentWords, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, residentWords, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 3, address = residentA + 4,
+          mask = 15, data = BigInt("dead0007", 16))
+        consumeStoreResult(dut, tag = 3, address = residentA + 4)
+        submitStore(dut, tag = 4, address = residentB + 4,
+          mask = 15, data = BigInt("dead0008", 16))
+        consumeStoreResult(dut, tag = 4, address = residentB + 4)
+
+        presentLoad(dut, lane = 0, tag = 7, address = killedLine + 4)
+        dut.io.request(0).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        // L2 now owns the victim, while the speculative L1D miss has not
+        // issued a lookup. Selective recovery must release only the local
+        // owner: no later probe, refill, or completion may represent tag 7.
+        dut.io.squash.valid.poke(true)
+        dut.io.squash.bits.poke(3)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+        dut.clock.step()
+        dut.io.squash.valid.poke(false)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+
+        // The former reservation is reusable, but the fresh request must own
+        // a new line and must not revive the cancelled demand.
+        presentLoad(dut, lane = 0, tag = 10, address = freshLine + 8)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(freshLine)
+      }
+    }
+
     it("drops only the younger dual-miss owner before L2 acceptance") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
