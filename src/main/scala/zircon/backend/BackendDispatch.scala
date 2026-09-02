@@ -3,7 +3,7 @@ package zircon.backend
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.frontend.{FetchQueueEntry, IntOperation, RV32IDecoder}
+import zircon.frontend.{FetchQueueEntry, FloatingOperation, IntOperation, RV32IDecoder}
 
 /** Stateless two-wide longest-prefix rename/dispatch coordinator. */
 class BackendDispatch(
@@ -163,6 +163,9 @@ class BackendDispatch(
     laneUop(lane).destinationPhysical := response.newDestinationPhysical
     laneUop(lane).writesInteger := response.allocates
     laneUop(lane).writesFloat := false.B
+    laneUop(lane).floatingOperation := FloatingOperation.Invalid
+    laneUop(lane).floatingSource.foreach(_ := 0.U)
+    laneUop(lane).floatingDestination := 0.U
     laneUop(lane).immediate := decoded(lane).immediate
 
     val entry = io.robEnqueue(lane).bits.entry

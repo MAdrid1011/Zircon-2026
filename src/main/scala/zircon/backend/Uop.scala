@@ -3,6 +3,7 @@ package zircon.backend
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
+import zircon.frontend.FloatingOperation
 
 object ExecutionEndpoint extends ChiselEnum {
   val E0IntCtrl, E1IntSimple, E2LongPipe, M0General, M1Load = Value
@@ -42,5 +43,10 @@ class UopRef(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle
   val destinationPhysical = UInt(6.W)
   val writesInteger = Bool()
   val writesFloat = Bool()
+  // Floating operands are architectural FPR indexes. They deliberately stay
+  // separate from the renamed integer physical-source namespace.
+  val floatingOperation = FloatingOperation()
+  val floatingSource = Vec(3, UInt(5.W))
+  val floatingDestination = UInt(5.W)
   val immediate = UInt(32.W)
 }
