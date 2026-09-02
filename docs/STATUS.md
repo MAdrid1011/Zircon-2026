@@ -11,7 +11,9 @@
 最新完整 `L1DLoadCacheSpec`（2026-09-02）为 `42/42`、128.0 秒，取代上述 `41/41` 记录；四 MSHR 满载时的第五条独立 miss 现已证明会持续回压，直到真实 AXI refill 返回且该 owner 的唯一 completion 释放 MSHR credit 后才重新受理。新增 dirty-victim miss 在 L2 insert backpressure 下被 full flush 取消的用例，证明未接受 transfer 不会保留 MSHR/L2/AXI/completion owner，原 dirty line 仍为可命中的唯一 L1D owner。
 最新完整 `L1DLoadCacheSpec`（2026-09-02）为 `43/43`、127.877 秒，取代上述 `42/42` 记录；新增 full-flush 饱和 case 让四个 MSHR 已满、仅最老 L2 probe 已被接受，证明 flush 会释放三个未发 probe owner，同时把已接受 probe 的 L2 miss response 作为 drain-only 事件消费，不发 AXI refill/不产生 completion；该 owner 释放 credit 后新 miss 可重新受理。
 
-最新完整 `L1DLoadCacheSpec`（2026-09-02）为 `45/45`、134 秒，取代上述 `43/43` 记录；新增较老 different-set hit 在 L2 transfer backpressure 下独立完成、较年轻 dirty-victim miss 保持精确 payload 且不提前分配 owner，以及 same-line merged MSHR 在 squash 仅删除较年轻 waiter 后继续为较老 waiter 唯一完成。组件仿真保持低于五分钟门槛。
+最新完整 `L1DLoadCacheSpec`（2026-09-02）为 `45/45`、132 秒，取代上述 `43/43` 记录；新增较老 different-set hit 在 L2 transfer backpressure 下独立完成、较年轻 dirty-victim miss 保持精确 payload 且不提前分配 owner，以及 same-line merged MSHR 在 squash 仅删除较年轻 waiter 后继续为较老 waiter 唯一完成。组件仿真保持低于五分钟门槛。
+
+different-set 的较老 hit 加较年轻 clean-victim miss 现可在同一周期接收：hit 进入其 retained result slot，miss 只有在唯一 `l2Insert` 真正握手时才得到 MSHR/waiter 和 clean victim transfer；`L1DLoadCacheSpec` 完整 `45/45` 本地为 132 秒。dirty-victim hit/miss 与 dual-miss 仍执行 oldest-only replay，未被此 clean-victim increment 放开。
 
 新增 `L1DLoadCacheSpec` 双 lane 资源交叉：L2 insert 被 backpressure 时，较年轻 dirty-victim miss 必须保持其精确 victim payload 且不能提前分配 MSHR；同拍的较老不同 set hit 仍独立被接收和完成。该 directed case 本地为 1/1、3.863 秒；waiter 饱和和 squash/flush 的交叉矩阵仍待完成。
 

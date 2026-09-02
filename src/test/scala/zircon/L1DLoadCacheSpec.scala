@@ -783,7 +783,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("replays a younger victim miss behind an older different-set hit") {
+    it("accepts a younger clean-victim miss beside an older different-set hit") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val residentA = BigInt("80008000", 16)
@@ -812,23 +812,19 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.completion.ready.poke(false)
 
-        // Lane 0 is younger and requires a resident victim transfer; lane 1
-        // is an immediate hit in another set. The dual fast path may not
-        // fabricate a second L2 transfer, so only the older hit fires.
+        // Lane 0 is younger and requires the sole clean L1D-to-L2 transfer;
+        // lane 1 is an immediate hit in another set. The hit retains its own
+        // result while the miss transfers its exact clean victim in the same
+        // acceptance cycle.
         presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
         presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
-        dut.io.request(0).ready.expect(false)
-        dut.io.request(1).ready.expect(true)
-        dut.io.l2Insert.valid.expect(false)
-        dut.clock.step()
-        dut.io.request(1).valid.poke(false)
-
-        // With the hit accepted, the retained younger request can now claim
-        // the single victim-transfer path and issue its exact MSHR owner.
         dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
         dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(false)
         dut.clock.step()
-        dut.io.request(0).valid.poke(false)
+        dut.io.request.foreach(_.valid.poke(false))
 
         issueRefill(dut, refillWords, lineAddress = missLine)
         dut.io.completion.valid.expect(true)

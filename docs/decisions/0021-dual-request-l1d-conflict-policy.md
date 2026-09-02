@@ -45,14 +45,16 @@ performs both tag lookups, accepts different-bank hit pairs into two exact
 result slots, backpressures a same-bank or same-address younger request, and
 merges two same-line misses into one MSHR with two exact waiters. It also accepts
 a different-set cache-hit/miss pair when the hit has a retained result slot and
-the miss either joins an existing MSHR or reserves an invalid way. For a
+the miss either joins an existing MSHR, reserves an invalid way, or transfers
+one clean resident victim through the sole L1D-to-L2 boundary in the same
+acceptance cycle. For a
 same-set hit/miss pair it applies the same rule only when an invalid way distinct
-from the hit way is available; a resident or dirty-victim replacement still
+from the hit way is available; a dirty-victim replacement still
 uses the older request only. It also accepts
 two different-set misses when each has an invalid way plus distinct free MSHR
 and waiter credits; the same-set case additionally requires two distinct
 invalid ways. L2 probes remain serialized. Pairs that need merge,
-victim-transfer, or shared-set arbitration still use the older request only.
+dirty-victim transfer, or shared-set arbitration still use the older request only.
 This is explicitly not evidence that the remaining MSHR, victim, and L2 rows
 are done.
 
@@ -83,13 +85,12 @@ merely to shorten a combinational path.
 - The current resource-pressure tests prove that a fifth live miss, a ninth
   waiter on one MSHR, and a dirty-victim miss behind a backpressured L2 insert
   are all held at ready/valid without creating an unowned transaction.
-- The current directed matrix proves that a lane-1-old hit beats a lane-0-young
-  miss, and that a lane-1-old different-line miss is the sole admitted owner.
-  It also proves concurrent different-set hit/miss completion with one exact
-  retained hit and one exact miss waiter, and two distinct MSHR IDs for an
-  invalid-way different-set dual miss. Same-set replay remains conservative
-  when both ways require replacement; the invalid-way same-set hit/miss case is
-  covered separately and does not claim victim-transfer safety.
+- The current directed matrix proves that a lane-1-old hit and lane-0-young
+  different-set miss retain two exact owners when the miss either has an
+  invalid way or transfers one clean resident victim through the sole L1D-to-L2
+  port. It also proves two distinct MSHR IDs for an invalid-way different-set
+  dual miss. Same-set replay remains conservative when both ways require
+  replacement; dirty-victim hit/miss and dual-miss transfer safety remain open.
 - Recovery coverage proves both dual-miss cases: a squashed younger MSHR that
   has not issued an L2 probe is released, while a squashed younger MSHR with an
   accepted probe drains its L2 response without a completion before the older

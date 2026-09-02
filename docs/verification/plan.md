@@ -197,7 +197,7 @@ load/store/FENCE retire metadata; observed local result is 3/3 in 143.0
 seconds. Longer mixed error streams and formal credit/protocol proofs remain
 open.
 
-The full `L1DLoadCacheSpec` is now 45/45 in 134 seconds (2026-09-02). It holds
+The full `L1DLoadCacheSpec` is now 45/45 in 132 seconds (2026-09-02). It holds
 a fifth independent miss while all four MSHRs are live, then allows it only after the
 oldest L2-hit owner drains and releases its exact MSHR credit. It also serializes
 two dirty-victim misses from different sets, checking that each accepted
@@ -212,7 +212,10 @@ while its unissued peer is cancelled. A separate issued-refill flush drains the
 accepted data response without a completion. The saturated-flush case releases
 three unissued MSHRs while draining the sole accepted L2 miss response, then
 checks a fresh miss reclaims the released credit. The remaining response/recovery
-matrix under resource saturation remains open.
+matrix under resource saturation remains open. Its different-set hit/miss
+matrix now also accepts one clean resident victim beside an older hit only when
+the sole L1D-to-L2 insert fires in the same cycle; dirty-victim pairs retain
+their oldest-only replay policy.
 
 `make test-m3-axi-wrong-path-drain` runs the explicit-seed `0x5eed0301`
 complete-core recovery case. An older cache-miss load supplies a taken branch
