@@ -313,9 +313,6 @@ class L1DLoadCache(
   // L1D-to-L2 transfer port, so it remains on the deterministic replay path.
   val dualHitMissPort0Hit = portAnyCacheHit(0) && !portImmediateRequest(1)
   val dualHitMissPort1Hit = portAnyCacheHit(1) && !portImmediateRequest(0)
-  val dualHitMissCandidate = io.request(0).valid && io.request(1).valid &&
-    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
-    (dualHitMissPort0Hit || dualHitMissPort1Hit) && portSet(0) =/= portSet(1)
   val dualHitMissMissAddress = Mux(dualHitMissPort0Hit,
     io.request(1).bits.address, io.request(0).bits.address)
   val dualHitMissLineAddress = Cat(dualHitMissMissAddress(31, lineOffsetWidth),
@@ -339,6 +336,12 @@ class L1DLoadCache(
     !dualHitMissReservedWay(way) && !cacheValid(way)(dualHitMissSet)))
   val dualHitMissHasInvalidWay = dualHitMissInvalidWay.asUInt.orR
   val dualHitMissWay = PriorityEncoder(dualHitMissInvalidWay.asUInt)
+  val dualHitMissCandidate = io.request(0).valid && io.request(1).valid &&
+    io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
+    (dualHitMissPort0Hit || dualHitMissPort1Hit) &&
+    // A same-set pair is safe only when the miss has an invalid way. The
+    // replacement path below therefore never invalidates the hit-visible way.
+    (portSet(0) =/= portSet(1) || dualHitMissHasInvalidWay)
   // Two different-set misses can reserve independent invalid ways and MSHRs
   // without claiming the single L1D-to-L2 victim-transfer port. They remain
   // independent owners while the existing L2 probe interface drains them.

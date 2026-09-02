@@ -66,6 +66,8 @@ this table is not a memory release, ELF, or differential claim:
 The latest L1D resource-pressure slice passes 30 tests in 1 minute 32 seconds:
 four live MSHRs backpressure a fifth miss, eight waiters backpressure a ninth
 same-line request, and a dirty-victim miss waits for an accepted L2 insert.
+The same-set hit/miss case also accepts both requests when the miss reserves the
+other invalid way; replacement with resident or dirty victims remains oldest-only.
 
 | Boundary | Required tests and properties |
 | --- | --- |

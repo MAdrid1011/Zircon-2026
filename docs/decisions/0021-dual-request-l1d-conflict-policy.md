@@ -45,8 +45,10 @@ performs both tag lookups, accepts different-bank hit pairs into two exact
 result slots, backpressures a same-bank or same-address younger request, and
 merges two same-line misses into one MSHR with two exact waiters. It also accepts
 a different-set cache-hit/miss pair when the hit has a retained result slot and
-the miss either joins an existing MSHR or reserves an invalid way. Same-set,
-resident/dirty-victim pairs still use the older request only. It also accepts
+the miss either joins an existing MSHR or reserves an invalid way. For a
+same-set hit/miss pair it applies the same rule only when an invalid way distinct
+from the hit way is available; a resident or dirty-victim replacement still
+uses the older request only. It also accepts
 two different-set misses when each has an invalid way plus distinct free MSHR
 and waiter credits; L2 probes remain serialized. Pairs that need merge,
 victim-transfer, or shared-set arbitration still use the older request only.
@@ -84,8 +86,9 @@ combinational path.
   miss, and that a lane-1-old different-line miss is the sole admitted owner.
   It also proves concurrent different-set hit/miss completion with one exact
   retained hit and one exact miss waiter, and two distinct MSHR IDs for an
-  invalid-way different-set dual miss. Same-set replay remains a conservative
-  check, not evidence for victim-transfer-safe hit/miss or dual-miss rows.
+  invalid-way different-set dual miss. Same-set replay remains conservative
+  when both ways require replacement; the invalid-way same-set hit/miss case is
+  covered separately and does not claim victim-transfer safety.
 - Recovery coverage proves both dual-miss cases: a squashed younger MSHR that
   has not issued an L2 probe is released, while a squashed younger MSHR with an
   accepted probe drains its L2 response without a completion before the older

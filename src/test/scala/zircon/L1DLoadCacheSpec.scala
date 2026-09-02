@@ -711,7 +711,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("serializes a same-set younger miss behind an older hit without losing either owner") {
+    it("accepts a same-set hit and miss when an invalid way is available") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val hitLine = BigInt("80005c00", 16)
@@ -724,20 +724,15 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.completion.ready.poke(false)
 
-        // Lane 1 is older. The same-set miss must remain intact until the hit
-        // result is captured; concurrent same-set allocation is deliberately
-        // deferred until its reserved-way policy is implemented.
+        // Lane 1 is older. The other way is invalid, so the miss can reserve
+        // it without invalidating the hit-visible line.
         presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
         presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
-        dut.io.request(0).ready.expect(false)
+        dut.io.request(0).ready.expect(true)
         dut.io.request(1).ready.expect(true)
         dut.io.l2Lookup.valid.expect(false)
         dut.clock.step()
-        dut.io.request(1).valid.poke(false)
-
-        dut.io.request(0).ready.expect(true)
-        dut.clock.step()
-        dut.io.request(0).valid.poke(false)
+        dut.io.request.foreach(_.valid.poke(false))
         issueRefill(dut, words, lineAddress = missLine)
 
         dut.io.completion.valid.expect(true)
