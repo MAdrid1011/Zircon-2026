@@ -214,8 +214,10 @@ three unissued MSHRs while draining the sole accepted L2 miss response, then
 checks a fresh miss reclaims the released credit. The remaining response/recovery
 matrix under resource saturation remains open. Its different-set hit/miss
 matrix now also accepts one clean resident victim beside an older hit only when
-the sole L1D-to-L2 insert fires in the same cycle; dirty-victim pairs retain
-their oldest-only replay policy.
+the sole L1D-to-L2 insert fires in the same cycle. The same directed matrix
+accepts a dirty resident victim with its exact retained payload, while L2
+backpressure holds the offer and keeps the miss unaccepted until that insert
+fires. Dirty-victim dual-miss transfer safety remains open.
 
 `make test-m3-axi-wrong-path-drain` runs the explicit-seed `0x5eed0301`
 complete-core recovery case. An older cache-miss load supplies a taken branch

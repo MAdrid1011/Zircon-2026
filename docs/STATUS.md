@@ -15,6 +15,8 @@
 
 different-set 的较老 hit 加较年轻 clean-victim miss 现可在同一周期接收：hit 进入其 retained result slot，miss 只有在唯一 `l2Insert` 真正握手时才得到 MSHR/waiter 和 clean victim transfer；`L1DLoadCacheSpec` 完整 `45/45` 本地为 132 秒。dirty-victim hit/miss 与 dual-miss 仍执行 oldest-only replay，未被此 clean-victim increment 放开。
 
+同一 different-set row 已扩展到 dirty victim：较老 hit 与较年轻 miss 同拍接收时，唯一 `l2Insert` 保留 dirty line 和精确 word payload；L2 backpressure 期间 offer 保持、较年轻 request `ready=0`，只有 transfer fire 才能分配 MSHR/waiter。完整 `L1DLoadCacheSpec` 为 `45/45`、132 秒。dirty-victim dual-miss 仍为 oldest-only replay。
+
 新增 `L1DLoadCacheSpec` 双 lane 资源交叉：L2 insert 被 backpressure 时，较年轻 dirty-victim miss 必须保持其精确 victim payload 且不能提前分配 MSHR；同拍的较老不同 set hit 仍独立被接收和完成。该 directed case 本地为 1/1、3.863 秒；waiter 饱和和 squash/flush 的交叉矩阵仍待完成。
 
 新增同 line secondary-merge recovery：两个 waiter 合并到一个未发 L2 probe 的 MSHR 后，squash 仅清除较年轻 ROB tag；较老 waiter 保留该 owner 并在 refill 后唯一完成，错误路径 waiter 不产生 completion。该 directed case 本地为 1/1、4.380 秒。

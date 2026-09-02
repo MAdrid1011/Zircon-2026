@@ -309,10 +309,9 @@ class L1DLoadCache(
     !(io.request(0).bits.requiresCache && io.request(1).bits.requiresCache &&
       sameWordBank)
   // A different-set hit may retain its result alongside one miss. The miss
-  // either reserves an invalid way or, for the clean-victim increment, owns
-  // the sole L1D-to-L2 transfer in the same acceptance cycle. Dirty victims
-  // remain on the deterministic replay path until their transfer/writeback
-  // pressure matrix is widened separately.
+  // either reserves an invalid way or owns the sole L1D-to-L2 transfer in the
+  // same acceptance cycle. The transfer record retains clean or dirty payload
+  // exactly; no second victim can enter until its ready/valid handshake.
   val dualHitMissPort0Hit = portAnyCacheHit(0) && !portImmediateRequest(1)
   val dualHitMissPort1Hit = portAnyCacheHit(1) && !portImmediateRequest(0)
   val dualHitMissMissAddress = Mux(dualHitMissPort0Hit,
@@ -344,8 +343,6 @@ class L1DLoadCache(
   val dualHitMissHasVictimWay = dualHitMissVictimWays.orR
   val dualHitMissWay = PriorityEncoder(dualHitMissVictimWays)
   val dualHitMissVictimValid = cacheValid(dualHitMissWay)(dualHitMissSet)
-  val dualHitMissVictimDirty = dualHitMissVictimValid &&
-    cacheDirty(dualHitMissWay)(dualHitMissSet)
   val dualHitMissCandidate = io.request(0).valid && io.request(1).valid &&
     io.request(0).bits.cacheable && io.request(1).bits.cacheable &&
     (dualHitMissPort0Hit || dualHitMissPort1Hit) &&
@@ -429,7 +426,7 @@ class L1DLoadCache(
   val dualHitMissL2Insert = dualHitMissCandidate &&
     !io.storeRequest.valid && !io.flushLine.valid && !io.fenceDrain &&
     !recoveryBlocked && dualHitMissImmediateSlotAvailable && anyFreeWaiter &&
-    dualHitMissNewNeedsL2Insert && !dualHitMissVictimDirty
+    dualHitMissNewNeedsL2Insert
   val l2InsertForStore = !flushL2Insert && !fenceL2Insert && storeL2Insert
   val l2InsertWay = Mux(flushL2Insert, flushWay,
     Mux(fenceL2Insert, fenceDirtyWay, Mux(l2InsertForStore, storeVictimWay,
@@ -468,7 +465,6 @@ class L1DLoadCache(
     immediateSlotAvailable(0) && immediateSlotAvailable(1)
   val dualHitMissResources = anyFreeWaiter &&
     (dualHitMissAnyMatchingMshr || (anyFreeMshr && dualHitMissHasVictimWay &&
-      !dualHitMissVictimDirty &&
       (!dualHitMissNewNeedsL2Insert || io.l2Insert.ready)))
   val dualHitMissReady = dualHitMissCandidate && requestAdmissionOpen &&
     dualHitMissImmediateSlotAvailable && dualHitMissResources
@@ -925,8 +921,8 @@ class L1DLoadCache(
     assert(dualHitMissResources,
       "L1D accepted a dual hit/miss pair without an exact miss owner")
     assert(dualHitMissAnyMatchingMshr || dualHitMissHasInvalidWay ||
-      (dualHitMissHasVictimWay && !dualHitMissVictimDirty && io.l2Insert.fire),
-      "L1D dual hit/miss allocation requires a merge, invalid way, or clean victim transfer")
+      (dualHitMissHasVictimWay && io.l2Insert.fire),
+      "L1D dual hit/miss allocation requires a merge, invalid way, or victim transfer")
   }
   when(dualDifferentSetMissFire) {
     assert(dualDifferentSetMissResources,

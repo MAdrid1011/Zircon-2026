@@ -87,10 +87,10 @@ merely to shorten a combinational path.
   are all held at ready/valid without creating an unowned transaction.
 - The current directed matrix proves that a lane-1-old hit and lane-0-young
   different-set miss retain two exact owners when the miss either has an
-  invalid way or transfers one clean resident victim through the sole L1D-to-L2
-  port. It also proves two distinct MSHR IDs for an invalid-way different-set
-  dual miss. Same-set replay remains conservative when both ways require
-  replacement; dirty-victim hit/miss and dual-miss transfer safety remain open.
+  invalid way or transfers one clean or dirty resident victim through the sole
+  L1D-to-L2 port. It also proves two distinct MSHR IDs for an invalid-way
+  different-set dual miss. Same-set replay remains conservative when both ways
+  require replacement; dirty-victim dual-miss transfer safety remains open.
 - Recovery coverage proves both dual-miss cases: a squashed younger MSHR that
   has not issued an L2 probe is released, while a squashed younger MSHR with an
   accepted probe drains its L2 response without a completion before the older

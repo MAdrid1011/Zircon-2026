@@ -839,7 +839,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("replays a younger dirty-victim miss behind an older different-set hit") {
+    it("accepts a younger dirty-victim miss beside an older different-set hit") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val residentA = BigInt("80008800", 16)
@@ -866,8 +866,8 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.completion.ready.poke(false)
 
-        // Both replacement candidates are dirty. The younger miss must wait
-        // while the older independent hit uses its retained result slot.
+        // The miss transfers one dirty victim through the sole L1D-to-L2
+        // record while the older independent hit retains its exact result.
         submitStore(dut, tag = 4, address = residentA + 4,
           mask = 15, data = BigInt("dead0001", 16))
         consumeStoreResult(dut, tag = 4, address = residentA + 4)
@@ -877,19 +877,14 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
 
         presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
         presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
-        dut.io.request(0).ready.expect(false)
-        dut.io.request(1).ready.expect(true)
-        dut.io.l2Insert.valid.expect(false)
-        dut.clock.step()
-        dut.io.request(1).valid.poke(false)
-
         dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(true)
         dut.io.l2Insert.valid.expect(true)
         dut.io.l2Insert.bits.lineAddress.expect(residentA)
         dut.io.l2Insert.bits.dirty.expect(true)
         dut.io.l2Insert.bits.lineData(1).expect(BigInt("dead0001", 16))
         dut.clock.step()
-        dut.io.request(0).valid.poke(false)
+        dut.io.request.foreach(_.valid.poke(false))
         issueRefill(dut, refillWords, lineAddress = missLine)
 
         dut.io.completion.valid.expect(true)
@@ -944,7 +939,12 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
         dut.io.request(0).ready.expect(false)
         dut.io.request(1).ready.expect(true)
-        dut.io.l2Insert.valid.expect(false)
+        // The dirty transfer may be offered while L2 is backpressured, but
+        // the younger miss cannot allocate until that held offer fires.
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(1).expect(BigInt("dead0005", 16))
         dut.clock.step()
         dut.io.request(1).valid.poke(false)
 
