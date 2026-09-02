@@ -3167,6 +3167,71 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("merges an older halfword store forward with a cacheable refill") {
+      for (seed <- M3PartialStoreForwardSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 512
+          val schedule = seededAxiSchedule(seed, cycles)
+          val line = BigInt("80001000", 16)
+          val initialWord = BigInt("11223344", 16)
+          val mergedWord = BigInt("aabb3344", 16)
+          val dataLineRefills = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("0000b137", 16), // lui x2,0xb
+            ResetVector + 8 -> BigInt("abb10113", 16), // addi x2,x2,-1349
+            ResetVector + 12 -> BigInt("00209123", 16), // sh x2,2(x1)
+            ResetVector + 16 -> BigInt("0000a183", 16), // lw x3,0(x1)
+            ResetVector + 20 -> BigInt("00100073", 16), // ebreak
+            line -> initialWord
+          )
+          try {
+            events = runProgram(dut, program, cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val id = core.io.axi.ar.bits.id.peek().litValue
+                val address = core.io.axi.ar.bits.addr.peek().litValue
+                if (arFire && id >= 1 && id <= 4 && address == line) {
+                  dataLineRefills += address
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            val store = retired.find(_.pc == ResetVector + 12).getOrElse(
+              fail(s"partial halfword store did not retire: seed=0x${java.lang.Long.toHexString(seed)} " +
+                s"trace=$retired"))
+            val load = retired.find(_.pc == ResetVector + 16).getOrElse(
+              fail(s"partial halfword forwarded load did not retire: " +
+                s"seed=0x${java.lang.Long.toHexString(seed)} trace=$retired"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} " +
+              s"lineRefills=$dataLineRefills trace=$retired") {
+              assert(dataLineRefills == Seq(line),
+                "partial-halfword forwarding miss did not use exactly one data-line refill")
+              assert(store.memoryAddress == line + 2 && store.memoryWriteMask == 12 &&
+                store.memoryWriteData == BigInt("aabb0000", 16) && !store.trap)
+              assert(load.gprWrite && load.gprAddress == 3 && load.gprData == mergedWord &&
+                load.memoryAddress == line && load.memoryReadMask == 15 &&
+                load.memoryReadData == mergedWord && !load.trap)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "partial-halfword-store-forward-refill", schedule,
+                events, program = Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
     it("executes independent cacheable loads through both M0 and M1 ownership") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
         enableM2Observation = true))) { dut =>

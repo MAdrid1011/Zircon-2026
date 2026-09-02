@@ -38,10 +38,11 @@ test-m3-dual-load-forward:
 test-m3-dual-load-merge:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
 
-# Three explicit-seed complete-core partial-store forwarding runs. They require
-# an older SB byte lane to merge with the cacheable refill read by a younger LW.
+# Six explicit-seed complete-core partial-store forwarding runs. They require
+# older SB and SH byte lanes to merge with the cacheable refill read by a younger LW.
 test-m3-partial-store-forward:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older partial store forward with a cacheable refill"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older halfword store forward with a cacheable refill"'
 
 # Fast, focused exclusive L1D-L2 transfer regression. It covers clean victim
 # handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery
