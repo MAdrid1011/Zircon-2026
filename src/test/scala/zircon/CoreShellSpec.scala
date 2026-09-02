@@ -53,6 +53,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedfa03L)
   private val M3LrScReplacementSeeds = Seq(0x5eedfb01L, 0x5eedfb02L,
     0x5eedfb03L)
+  private val M3DualLoadMergeSeeds = Seq(0x5eedfc01L, 0x5eedfc02L,
+    0x5eedfc03L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -3147,6 +3149,83 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           secondLoad.memoryAddress == secondLine && secondLoad.memoryReadData ==
             BigInt("55667788", 16))
         assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
+    it("merges seeded same-line M0 and M1 loads into one exact AXI refill") {
+      for (seed <- M3DualLoadMergeSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+          enableM2Observation = true))) { dut =>
+          clearInputs(dut)
+          val cycles = 768
+          val schedule = seededAxiSchedule(seed, cycles)
+          val line = BigInt("80001000", 16)
+          val firstWord = BigInt("11223344", 16)
+          val secondWord = BigInt("55667788", 16)
+          var m0Ingress = false
+          var m1Ingress = false
+          val l1dRequestTags = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          val lineRefillAddresses = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1)
+            ResetVector + 8 -> BigInt("0040a183", 16), // lw x3,4(x1)
+            ResetVector + 12 -> BigInt("00100073", 16),
+            line -> firstWord,
+            line + 4 -> secondWord
+          )
+          try {
+            events = runProgram(dut, program, cycles = cycles,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val observation = core.io.m2Observation.get
+                m0Ingress ||= observation.m0Ingress.peek().litToBoolean
+                m1Ingress ||= observation.m1Ingress.peek().litToBoolean
+                for (lane <- 0 until 2) {
+                  if (observation.l1dRequest(lane).peek().litToBoolean) {
+                    l1dRequestTags += observation.l1dRequestTag(lane).peek().litValue
+                  }
+                }
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val id = core.io.axi.ar.bits.id.peek().litValue
+                val address = core.io.axi.ar.bits.addr.peek().litValue
+                // Physical data-owner IDs overlap the instruction side's AXI
+                // IDs, so identify this refill by the exact data-line address.
+                if (arFire && id >= 1 && id <= 4 && address == line) {
+                  lineRefillAddresses += address
+                }
+              })
+
+            val retired = throughFirstTrap(events)
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, " +
+              s"m0=$m0Ingress m1=$m1Ingress l1d=$l1dRequestTags " +
+              s"lineDataAr=$lineRefillAddresses trace=$retired") {
+              assert(m0Ingress && m1Ingress,
+                "same-line loads did not reach both M0 and M1 ingress")
+              assert(l1dRequestTags.distinct.size == 2,
+                "the two exact L1D request owners were not both accepted")
+              assert(lineRefillAddresses == Seq(line),
+                "same-line loads did not merge into one data-line AXI refill")
+              assert(retired.exists(event => event.pc == ResetVector + 4 &&
+                event.gprWrite && event.gprAddress == 2 && event.gprData == firstWord &&
+                event.memoryAddress == line && event.memoryReadData == firstWord))
+              assert(retired.exists(event => event.pc == ResetVector + 8 &&
+                event.gprWrite && event.gprAddress == 3 && event.gprData == secondWord &&
+                event.memoryAddress == line + 4 && event.memoryReadData == secondWord))
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "dual-lsu-same-line-merge", schedule, events,
+                program = Some(program))
+              throw failure
+          }
+        }
       }
     }
 
