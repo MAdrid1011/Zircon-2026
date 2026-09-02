@@ -43,6 +43,8 @@ class BackendDispatch(
     val floatingAllocate = Output(Vec(config.decodeWidth,
       Valid(new FloatingScoreboardAllocation(config))))
     val floatingScoreboardEmpty = Input(Bool())
+    val floatingAdmissionBlocked = Input(Bool())
+    val fsControlWriteAccepted = Output(Bool())
 
     val bdbAllocate = Decoupled(new BranchDataAllocation(config))
     val bdbAllocatedIndex = Input(Valid(
@@ -71,6 +73,9 @@ class BackendDispatch(
   }
 
   val fetchFault = VecInit(io.input.map(_.bits.fault.valid))
+  val floatingOpcode = VecInit((0 until config.decodeWidth).map(lane =>
+    io.input(lane).valid && !fetchFault(lane) &&
+      floatingAdmissions(lane).io.floatingOpcode))
   val liveFloating = VecInit((0 until config.decodeWidth).map(lane =>
     io.input(lane).valid && !fetchFault(lane) && floatingAdmissions(lane).io.live))
   val executes = VecInit((0 until config.decodeWidth).map(lane =>
@@ -91,6 +96,10 @@ class BackendDispatch(
     executes(lane) && !liveFloating(lane) && decoded(lane).allowedEndpoints(4, 3).orR))
   val needsFloating = VecInit((0 until config.decodeWidth).map(lane =>
     executes(lane) && liveFloating(lane)))
+  val mstatusWrite = VecInit((0 until config.decodeWidth).map(lane =>
+    executes(lane) && !liveFloating(lane) &&
+      decoded(lane).uopClass === UopClass.Csr && decoded(lane).csrWrite &&
+      decoded(lane).csrAddress === "h300".U))
 
   private def countFor(mask: Seq[Bool], needs: Vec[Bool]): UInt =
     PopCount(mask.zip(needs).map { case (selected, needed) => selected && needed })
@@ -102,6 +111,8 @@ class BackendDispatch(
     val longCount = countFor(mask, needsLong)
     val memCount = countFor(mask, needsMem)
     val floatingCount = countFor(mask, needsFloating)
+    val floatingOpcodeCount = countFor(mask, floatingOpcode)
+    val mstatusWriteCount = countFor(mask, mstatusWrite)
     io.robCapacity >= instructionCount.U &&
       io.renameFreeCount >= physicalCount &&
       io.intCapacity >= intCount &&
@@ -110,10 +121,12 @@ class BackendDispatch(
       io.floatingCapacity >= floatingCount &&
       bdbCount <= 1.U && floatingCount <= 1.U &&
       (bdbCount === 0.U || io.bdbAllocate.ready) &&
-      // The first live slice serializes F admission at an empty scoreboard.
-      // This removes the dispatch/scoreboard payload-ready cycle while the
-      // capture path is still being connected, without weakening any hazard.
-      (floatingCount === 0.U || io.floatingScoreboardEmpty)
+      // Any F opcode behind an unretired mstatus writer must wait for the
+      // committed FS value. Once FS is known, unsupported encodings may take
+      // their normal precise illegal-instruction path.
+      (floatingOpcodeCount === 0.U || (!io.floatingAdmissionBlocked &&
+        mstatusWriteCount === 0.U && (floatingCount === 0.U ||
+          io.floatingScoreboardEmpty)))
   }
 
   val oneMask = Seq(true.B, false.B)
@@ -279,6 +292,9 @@ class BackendDispatch(
 
   val selectedFloating = VecInit((0 until config.decodeWidth).map(lane =>
     selected(lane) && needsFloating(lane)))
+  val selectedMstatusWrite = VecInit((0 until config.decodeWidth).map(lane =>
+    selected(lane) && mstatusWrite(lane)))
+  io.fsControlWriteAccepted := dispatchFire && selectedMstatusWrite.asUInt.orR
   val floatingLane = Mux(selectedFloating(0), 0.U, 1.U)
   val floatingDecoded = Mux(selectedFloating(0),
     floatingAdmissions(0).io.decoded, floatingAdmissions(1).io.decoded)

@@ -89,6 +89,7 @@ class IntegerDispatchRecoveryBackend(
   val recovery = Module(new BranchRecoverySubsystem(config))
   val firstFault = Module(new FirstFaultTracker(
     candidateWidth = config.decodeWidth + 1 + 3, config = config))
+  val floatingAdmissionBlocked = RegInit(false.B)
 
   for (lane <- 0 until config.decodeWidth) {
     dispatch.io.input(lane).valid := io.input(lane).valid
@@ -124,6 +125,7 @@ class IntegerDispatchRecoveryBackend(
   dispatch.io.memCapacity := io.memCapacity
   dispatch.io.floatingCapacity := io.floatingCapacity
   dispatch.io.floatingScoreboardEmpty := io.floatingScoreboardEmpty
+  dispatch.io.floatingAdmissionBlocked := floatingAdmissionBlocked
   dispatch.io.mstatusFs := io.mstatusFs
   dispatch.io.integerReady := execution.io.integerReady
   dispatch.io.blocked := io.globalFlush || recovery.io.dispatchBlocked ||
@@ -198,6 +200,18 @@ class IntegerDispatchRecoveryBackend(
   io.e1Start := execution.io.e1Start
   io.e1Completion := execution.io.e1Completion
   io.e2Completion := execution.io.e2Completion
+
+  val mstatusRetires = io.commit.map(commit => commit.fire &&
+    commit.bits.entry.decoded.uopClass === UopClass.Csr &&
+    commit.bits.entry.decoded.csrWrite &&
+    commit.bits.entry.decoded.csrAddress === "h300".U).reduce(_ || _)
+  when(io.globalFlush) {
+    floatingAdmissionBlocked := false.B
+  }.elsewhen(mstatusRetires) {
+    floatingAdmissionBlocked := false.B
+  }.elsewhen(dispatch.io.fsControlWriteAccepted) {
+    floatingAdmissionBlocked := true.B
+  }
 
   when(io.globalFlush) {
     assert(!dispatch.io.acceptedCount.orR,

@@ -22,6 +22,7 @@ class BackendDispatchSpec extends AnyFunSpec with ChiselSim {
     dut.io.memCapacity.poke(2)
     dut.io.floatingCapacity.poke(2)
     dut.io.floatingScoreboardEmpty.poke(true)
+    dut.io.floatingAdmissionBlocked.poke(false)
     dut.io.integerReady.poke((BigInt(1) << 56) - 1)
 
     for (lane <- 0 until 2) {

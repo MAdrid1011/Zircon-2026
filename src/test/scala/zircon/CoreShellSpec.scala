@@ -575,6 +575,29 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("waits for a committed mstatus.FS update before admitting adjacent RV32F") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val fmvWX = BigInt("f00083d3", 16)
+        val fmvXW = BigInt("e0038153", 16)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16),
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> fmvWX,
+          ResetVector + 12 -> fmvXW,
+          ResetVector + 16 -> BigInt("00100073", 16)
+        ), cycles = 384))
+        assert(events.exists(event => event.instruction == fmvWX && event.fprWrite &&
+          event.fprAddress == 7 && event.fprData == BigInt("00002000", 16)),
+          s"adjacent FMV.W.X was not held until FS committed: $events")
+        assert(events.exists(event => event.instruction == fmvXW && event.gprWrite &&
+          event.gprAddress == 2 && event.gprData == BigInt("00002000", 16)),
+          s"adjacent FMV.X.W did not consume committed FPR data: $events")
+        assert(!events.exists(event => event.trap && event.pc >= ResetVector + 8 &&
+          event.pc <= ResetVector + 12), s"FS admission produced a spurious trap: $events")
+      }
+    }
+
     it("takes FS-Off RV32F operations as exact illegal-instruction traps") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
