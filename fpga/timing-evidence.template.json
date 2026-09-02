@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "status": "unverified",
+  "target": {
+    "part": "xc7a200tfbg676-2L"
+  },
+  "top": null,
+  "vivadoVersion": null,
+  "clock": {
+    "name": "clk",
+    "periodNs": 10.0
+  },
+  "source": {
+    "rtlRevision": null,
+    "submoduleRevisions": {}
+  },
+  "artifacts": {
+    "xdc": {
+      "path": null,
+      "sha256": null
+    },
+    "timingReport": {
+      "path": null,
+      "sha256": null
+    },
+    "utilizationReport": {
+      "path": null,
+      "sha256": null
+    }
+  },
+  "timing": {
+    "setupWnsNs": null,
+    "setupTnsNs": null,
+    "worstHoldSlackNs": null
+  },
+  "utilization": {
+    "lut": null,
+    "ff": null,
+    "bram": null,
+    "dsp": null
+  },
+  "command": null
+}
