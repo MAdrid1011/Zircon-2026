@@ -9,6 +9,7 @@ import zircon.frontend.FloatingOperation
 class FloatingMoveRequest(config: ZirconCoreConfig) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
   val operation = FloatingOperation()
+  val roundingMode = UInt(3.W)
   val integerDestinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
   val integerSource = UInt(32.W)
   val floatSource = Vec(2, UInt(32.W))

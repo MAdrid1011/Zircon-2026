@@ -6,8 +6,10 @@ M1 ROB 固定为 24 项、双入队、双完成、双提交。ROB 保存 PC、�
 
 F metadata 使用独立 `FloatingDecodedInstruction`，保留 FPR source/destination、
 operation、memory direction 与 rounding 信息，不能借由重解码当前 fetch word 恢复。当前
-整数 dispatch 显式写入零 metadata，且尚未把 F opcode admission 到 ROB；该存储字段仅是
-后续 M4 executable path 的精确状态前提，绝不使未接入指令产生 completion。
+dispatch 对每条 F opcode 写入该 metadata，并只把已验证的 non-rounding E2 子集 admission
+到 ROB；其余 F opcode 仍以 precise illegal-instruction 入队。动态 rounding 的 effective
+`frm` snapshot 位于 `UopRef`，不得在 issue 时重读 CSR。metadata 存储字段本身绝不使
+未接入指令产生 completion。
 
 ## ROB tag
 

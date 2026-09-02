@@ -48,5 +48,8 @@ class UopRef(config: ZirconCoreConfig = ZirconCoreConfig.default) extends Bundle
   val floatingOperation = FloatingOperation()
   val floatingSource = Vec(3, UInt(5.W))
   val floatingDestination = UInt(5.W)
+  // Static rm is copied from the instruction; dynamic rm is resolved from the
+  // committed frm value at dispatch, after all older FP-control CSR writes.
+  val floatingRoundingMode = UInt(3.W)
   val immediate = UInt(32.W)
 }

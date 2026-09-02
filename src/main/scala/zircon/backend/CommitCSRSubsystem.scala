@@ -54,6 +54,7 @@ class CommitCSRSubsystem(
     val mstatusMie = Output(Bool())
     val mstatusFs = Output(UInt(2.W))
     val currentFflags = Output(UInt(5.W))
+    val currentFrm = Output(UInt(3.W))
   })
 
   require(config.commitWidth == 2,
@@ -123,6 +124,7 @@ class CommitCSRSubsystem(
   io.mstatusMie := csr.io.mstatusMie
   io.mstatusFs := csr.io.mstatusFs
   io.currentFflags := csr.io.currentFflags
+  io.currentFrm := csr.io.currentFrm
 
   assert(PopCount(retiredBranch) <= 1.U,
     "the single-port BDB schedule retired two branches")

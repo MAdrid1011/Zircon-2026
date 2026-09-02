@@ -143,6 +143,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   floatingMovePipe.io.input.bits.floatSource := floatingCommitState.io.readData
   floatingMovePipe.io.input.bits.floatDestination :=
     floatingQueue.io.issue.bits.floatingDestination
+  floatingMovePipe.io.input.bits.roundingMode :=
+    floatingQueue.io.issue.bits.floatingRoundingMode
   floatingQueue.io.issue.ready := selectFloatingE2 && floatingMovePipe.io.input.ready &&
     auxiliaryRead.io.grant(0)
 

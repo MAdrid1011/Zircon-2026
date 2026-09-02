@@ -30,8 +30,10 @@ entries. The main interfaces are:
 | `frontendRecovery/branchTraining` | output | Execute-stage mispredict recovery and commit-stage predictor training |
 | maps, PRF auxiliary read, occupancy | debug/performance | Directed-test observation and future performance counter sources |
 
-`fpCommit` preserves the frozen CSR integration contract, but no F instruction
-can be dispatched until M4.
+`floatingEnqueue`、`floatingAllocate` 和 `fpCommit` 已承载 M4 的已验证非舍入
+RV32F E2 子集；`mstatusFs` 与 committed `frm` 从 Commit/CSR 域回送到 dispatch，
+使 F admission 在未退休的 `mstatus`/`frm`/`fcsr` writer 后保持阻塞。其余 F 指令
+仍不可 dispatch，直到其执行和精确 commit 路径完整实现。
 
 ## Dataflow and state ownership
 

@@ -18,6 +18,7 @@ class BackendDispatch(
       Decoupled(new FetchQueueEntry(config))))
     val blocked = Input(Bool())
     val mstatusFs = Input(UInt(2.W))
+    val currentFrm = Input(UInt(3.W))
 
     val renameRequest = Output(Vec(config.decodeWidth, new RenameRequest))
     val renameResponse = Input(Vec(config.decodeWidth,
@@ -44,7 +45,7 @@ class BackendDispatch(
       Valid(new FloatingScoreboardAllocation(config))))
     val floatingScoreboardEmpty = Input(Bool())
     val floatingAdmissionBlocked = Input(Bool())
-    val fsControlWriteAccepted = Output(Bool())
+    val floatingControlWriteAccepted = Output(Valid(UInt(config.robTagWidth.W)))
 
     val bdbAllocate = Decoupled(new BranchDataAllocation(config))
     val bdbAllocatedIndex = Input(Valid(
@@ -70,6 +71,7 @@ class BackendDispatch(
     decoded(lane) := decoders(lane).io.decoded
     floatingAdmissions(lane).io.instruction := io.input(lane).bits.instruction
     floatingAdmissions(lane).io.mstatusFs := io.mstatusFs
+    floatingAdmissions(lane).io.currentFrm := io.currentFrm
   }
 
   val fetchFault = VecInit(io.input.map(_.bits.fault.valid))
@@ -96,10 +98,12 @@ class BackendDispatch(
     executes(lane) && !liveFloating(lane) && decoded(lane).allowedEndpoints(4, 3).orR))
   val needsFloating = VecInit((0 until config.decodeWidth).map(lane =>
     executes(lane) && liveFloating(lane)))
-  val mstatusWrite = VecInit((0 until config.decodeWidth).map(lane =>
+  val floatingControlWrite = VecInit((0 until config.decodeWidth).map(lane =>
     executes(lane) && !liveFloating(lane) &&
       decoded(lane).uopClass === UopClass.Csr && decoded(lane).csrWrite &&
-      decoded(lane).csrAddress === "h300".U))
+      (decoded(lane).csrAddress === "h300".U ||
+        decoded(lane).csrAddress === MachineCSRAddress.Frm.U ||
+        decoded(lane).csrAddress === MachineCSRAddress.Fcsr.U)))
 
   private def countFor(mask: Seq[Bool], needs: Vec[Bool]): UInt =
     PopCount(mask.zip(needs).map { case (selected, needed) => selected && needed })
@@ -112,7 +116,14 @@ class BackendDispatch(
     val memCount = countFor(mask, needsMem)
     val floatingCount = countFor(mask, needsFloating)
     val floatingOpcodeCount = countFor(mask, floatingOpcode)
-    val mstatusWriteCount = countFor(mask, mstatusWrite)
+    val floatingControlWriteCount = countFor(mask, floatingControlWrite)
+    val noFloatingStateDependency = floatingOpcodeCount === 0.U &&
+      floatingControlWriteCount === 0.U
+    val controlWriteAllowed = !io.floatingAdmissionBlocked &&
+      floatingOpcodeCount === 0.U && floatingControlWriteCount <= 1.U
+    val floatingOpcodeAllowed = !io.floatingAdmissionBlocked &&
+      floatingControlWriteCount === 0.U &&
+      (floatingCount === 0.U || io.floatingScoreboardEmpty)
     io.robCapacity >= instructionCount.U &&
       io.renameFreeCount >= physicalCount &&
       io.intCapacity >= intCount &&
@@ -121,12 +132,9 @@ class BackendDispatch(
       io.floatingCapacity >= floatingCount &&
       bdbCount <= 1.U && floatingCount <= 1.U &&
       (bdbCount === 0.U || io.bdbAllocate.ready) &&
-      // Any F opcode behind an unretired mstatus writer must wait for the
-      // committed FS value. Once FS is known, unsupported encodings may take
-      // their normal precise illegal-instruction path.
-      (floatingOpcodeCount === 0.U || (!io.floatingAdmissionBlocked &&
-        mstatusWriteCount === 0.U && (floatingCount === 0.U ||
-          io.floatingScoreboardEmpty)))
+      // F instructions observe only committed FS/frm state. A control write
+      // is isolated from F dispatch and only one may remain in flight.
+      (noFloatingStateDependency || controlWriteAllowed || floatingOpcodeAllowed)
   }
 
   val oneMask = Seq(true.B, false.B)
@@ -234,6 +242,8 @@ class BackendDispatch(
     laneUop(lane).floatingSource(2) := floatingAdmissions(lane).io.decoded.rs3
     laneUop(lane).floatingDestination := Mux(liveFloating(lane),
       floatingAdmissions(lane).io.decoded.rd, 0.U)
+    laneUop(lane).floatingRoundingMode :=
+      floatingAdmissions(lane).io.effectiveRoundingMode
     laneUop(lane).immediate := decoded(lane).immediate
 
     val entry = io.robEnqueue(lane).bits.entry
@@ -292,9 +302,12 @@ class BackendDispatch(
 
   val selectedFloating = VecInit((0 until config.decodeWidth).map(lane =>
     selected(lane) && needsFloating(lane)))
-  val selectedMstatusWrite = VecInit((0 until config.decodeWidth).map(lane =>
-    selected(lane) && mstatusWrite(lane)))
-  io.fsControlWriteAccepted := dispatchFire && selectedMstatusWrite.asUInt.orR
+  val selectedFloatingControlWrite = VecInit((0 until config.decodeWidth).map(lane =>
+    selected(lane) && floatingControlWrite(lane)))
+  val floatingControlLane = Mux(selectedFloatingControlWrite(0), 0.U, 1.U)
+  io.floatingControlWriteAccepted.valid := dispatchFire &&
+    selectedFloatingControlWrite.asUInt.orR
+  io.floatingControlWriteAccepted.bits := io.robTags(floatingControlLane).bits
   val floatingLane = Mux(selectedFloating(0), 0.U, 1.U)
   val floatingDecoded = Mux(selectedFloating(0),
     floatingAdmissions(0).io.decoded, floatingAdmissions(1).io.decoded)

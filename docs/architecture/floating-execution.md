@@ -32,6 +32,16 @@ the integer source or destination when applicable. The ROB retains this record
 and the compact E2 issue reference retains only tags, source names/readiness,
 and destination metadata.
 
+For an operation using a rounding mode, dispatch also freezes an effective
+three-bit mode in the E2 uop. A static instruction `rm` is copied directly;
+`rm=111` resolves from the committed `frm` output of `MachineCSRFile`. Effective
+values 0--4 denote RNE/RTZ/RDN/RUP/RMM, while 5 and 6 are reserved and take the
+precise illegal-instruction path when a rounding operation is admitted. An
+unretired CSR write to `mstatus`, `frm`, or `fcsr` blocks all following F
+opcodes. Exactly one such write may be in flight; its ROB tag clears the block
+on retirement or if branch recovery squashes that writer. This makes the
+captured dynamic mode independent of later CSR commits and recovery.
+
 Before a live F instruction enters E2, `FloatingScoreboard` must atomically
 reserve each FPR source and its optional FPR destination. It rejects RAW, WAR,
 and WAW hazards and has a hard four-live-operation limit. The scoreboard sees

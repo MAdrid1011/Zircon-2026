@@ -72,6 +72,7 @@ class M1BackendSubsystem(
     val mstatusMie = Output(Bool())
     val mstatusFs = Output(UInt(2.W))
     val currentFflags = Output(UInt(5.W))
+    val currentFrm = Output(UInt(3.W))
 
     val acceptedCount = Output(UInt(2.W))
     val renameFreeCount = Output(UInt(
@@ -127,6 +128,7 @@ class M1BackendSubsystem(
   commit.io.fpCommit := io.fpCommit
   backend.io.globalFlush := commit.io.globalFlush
   backend.io.mstatusFs := commit.io.mstatusFs
+  backend.io.currentFrm := commit.io.currentFrm
 
   backend.io.auxReadPhysical := io.auxReadPhysical
   io.auxReadData := backend.io.auxReadData
@@ -154,6 +156,7 @@ class M1BackendSubsystem(
   io.mstatusMie := commit.io.mstatusMie
   io.mstatusFs := commit.io.mstatusFs
   io.currentFflags := commit.io.currentFflags
+  io.currentFrm := commit.io.currentFrm
 
   io.acceptedCount := backend.io.acceptedCount
   io.renameFreeCount := backend.io.renameFreeCount

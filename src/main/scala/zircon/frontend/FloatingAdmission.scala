@@ -10,8 +10,11 @@ class FloatingAdmission extends Module {
   val io = IO(new Bundle {
     val instruction = Input(UInt(32.W))
     val mstatusFs = Input(UInt(2.W))
+    val currentFrm = Input(UInt(3.W))
     val decoded = Output(new FloatingDecodedInstruction)
     val floatingOpcode = Output(Bool())
+    val effectiveRoundingMode = Output(UInt(3.W))
+    val roundingLegal = Output(Bool())
     val live = Output(Bool())
     val illegal = Output(Bool())
   })
@@ -36,9 +39,15 @@ class FloatingAdmission extends Module {
     decoder.io.decoded.operation === FloatingOperation.FltS ||
     decoder.io.decoded.operation === FloatingOperation.FeqS ||
     decoder.io.decoded.operation === FloatingOperation.FclassS
+  val effectiveRoundingMode = Mux(decoder.io.decoded.dynamicRounding,
+    io.currentFrm, decoder.io.decoded.roundingMode)
+  val roundingLegal = !decoder.io.decoded.usesRoundingMode ||
+    effectiveRoundingMode <= 4.U
 
   io.floatingOpcode := floatingOpcode
+  io.effectiveRoundingMode := effectiveRoundingMode
+  io.roundingLegal := roundingLegal
   io.live := floatingOpcode && decoder.io.decoded.legal && nonRoundingE2 &&
-    io.mstatusFs =/= 0.U
+    roundingLegal && io.mstatusFs =/= 0.U
   io.illegal := floatingOpcode && !io.live
 }

@@ -15,6 +15,7 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
         val fmvwx = opFp(0x78, rs2 = 0, rs1 = 4, funct3 = 0, rd = 7)
         dut.io.instruction.poke(fmvwx)
         dut.io.mstatusFs.poke(0)
+        dut.io.currentFrm.poke(0)
         dut.io.floatingOpcode.expect(true)
         dut.io.live.expect(false)
         dut.io.illegal.expect(true)
@@ -41,6 +42,7 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
     it("keeps unsupported, reserved, and non-F encodings outside the live path") {
       simulate(new FloatingAdmission) { dut =>
         dut.io.mstatusFs.poke(3)
+        dut.io.currentFrm.poke(0)
         dut.io.instruction.poke(opFp(0x00, rs2 = 2, rs1 = 1, funct3 = 0, rd = 3))
         dut.io.floatingOpcode.expect(true)
         dut.io.live.expect(false)
@@ -55,6 +57,25 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
         dut.io.floatingOpcode.expect(false)
         dut.io.live.expect(false)
         dut.io.illegal.expect(false)
+      }
+    }
+
+    it("resolves dynamic rounding from frm and rejects reserved effective modes") {
+      simulate(new FloatingAdmission) { dut =>
+        // FADD.S is not yet live, but this shared classifier owns the exact
+        // effective-rm contract needed before it can be admitted.
+        dut.io.instruction.poke(opFp(0x00, rs2 = 2, rs1 = 1, funct3 = 7, rd = 3))
+        dut.io.mstatusFs.poke(3)
+        dut.io.currentFrm.poke(4)
+        dut.io.effectiveRoundingMode.expect(4)
+        dut.io.roundingLegal.expect(true)
+        dut.io.live.expect(false)
+
+        dut.io.currentFrm.poke(5)
+        dut.io.effectiveRoundingMode.expect(5)
+        dut.io.roundingLegal.expect(false)
+        dut.io.live.expect(false)
+        dut.io.illegal.expect(true)
       }
     }
   }

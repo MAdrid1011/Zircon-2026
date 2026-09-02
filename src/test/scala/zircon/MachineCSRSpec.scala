@@ -89,6 +89,7 @@ class MachineCSRSpec extends AnyFunSpec with ChiselSim {
         writeCSR(dut, MachineCSRAddress.Frm, 5)
         expectRead(dut, MachineCSRAddress.Frm, 5)
         expectRead(dut, MachineCSRAddress.Fcsr, BigInt("000000a7", 16))
+        dut.io.currentFrm.expect(5)
       }
     }
 

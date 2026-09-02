@@ -52,19 +52,19 @@
       "name": "issue_queue_uop_payload",
       "class": "register_payload",
       "entries": 24,
-      "bits_per_entry": 111,
+      "bits_per_entry": 114,
       "instances": 1,
       "replication_factor": 1,
-      "source": "UopFootprintSpec-pinned 111-bit UopRef across frozen 12+4+8 integer/long/memory IQ entries"
+      "source": "UopFootprintSpec-pinned 114-bit UopRef across frozen 12+4+8 integer/long/memory IQ entries, including effective floating rounding mode"
     },
     {
       "name": "floating_issue_queue_uop_payload",
       "class": "register_payload",
       "entries": 4,
-      "bits_per_entry": 111,
+      "bits_per_entry": 114,
       "instances": 1,
       "replication_factor": 1,
-      "source": "FloatingIssueQueue: four retained UopRef records; UopFootprintSpec pins each record to 111 bits"
+      "source": "FloatingIssueQueue: four retained UopRef records; UopFootprintSpec pins each record to 114 bits"
     },
     {
       "name": "floating_issue_queue_control",
@@ -79,10 +79,10 @@
       "name": "floating_move_pipe_retained_request",
       "class": "register_payload",
       "entries": 1,
-      "bits_per_entry": 118,
+      "bits_per_entry": 121,
       "instances": 1,
       "replication_factor": 1,
-      "source": "FloatingMovePipe retained FloatingMoveRequest: six-bit ROB tag, five-bit operation, six-bit integer destination, 32-bit integer source, two 32-bit FPR sources, and five-bit FPR destination"
+      "source": "FloatingMovePipe retained FloatingMoveRequest: six-bit ROB tag, five-bit operation, three-bit effective rounding mode, six-bit integer destination, 32-bit integer source, two 32-bit FPR sources, and five-bit FPR destination"
     },
     {
       "name": "floating_move_pipe_control",
@@ -112,13 +112,13 @@
       "source": "FloatingResultBridge pending-completion valid bit"
     },
     {
-      "name": "floating_admission_barrier",
+      "name": "floating_control_admission_barrier",
       "class": "register_control",
       "entries": 1,
-      "bits_per_entry": 1,
+      "bits_per_entry": 7,
       "instances": 1,
       "replication_factor": 1,
-      "source": "IntegerDispatchRecoveryBackend floatingAdmissionBlocked bit held across an unretired mstatus.FS write"
+      "source": "IntegerDispatchRecoveryBackend floatingAdmissionBlocked bit plus six-bit ROB owner tag held across an unretired mstatus/frm/fcsr write"
     },
     {
       "name": "l1i_data_shared_demand_slice",
@@ -1076,6 +1076,22 @@
       "width": 1,
       "fanin": 1,
       "source": "ExternalCoherenceAdapter retained modifier versus core response line match"
+    },
+    {
+      "name": "floating_rounding_control_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 2,
+      "width": 3,
+      "fanin": 2,
+      "source": "Two FloatingAdmission lanes select static rm or committed frm for the frozen E2 uop"
+    },
+    {
+      "name": "floating_rounding_control_compare_units",
+      "metric": "comparator32_units",
+      "units": 3,
+      "width": 1,
+      "fanin": 1,
+      "source": "Two reserved-effective-rm checks plus one conservative ROB-tag squash check for the floating CSR-control barrier"
     }
   ]
 }

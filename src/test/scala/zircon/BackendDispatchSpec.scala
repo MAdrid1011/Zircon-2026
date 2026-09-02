@@ -10,10 +10,12 @@ class BackendDispatchSpec extends AnyFunSpec with ChiselSim {
   private val LoadWordX7X1 = BigInt("0000a383", 16)
   private val BranchPlusEight = BigInt("00000463", 16)
   private val FmvWXF7X4 = BigInt((0x78L << 25) | (4L << 15) | (7L << 7) | 0x53L)
+  private val CsrrwiFrmRdn = BigInt((0x002L << 20) | (2L << 15) | (5L << 12) | 0x73L)
 
   private def clearInputs(dut: BackendDispatch): Unit = {
     dut.io.blocked.poke(false)
     dut.io.mstatusFs.poke(0)
+    dut.io.currentFrm.poke(0)
     dut.io.renameFreeCount.poke(24)
     dut.io.renameReady.poke(true)
     dut.io.robCapacity.poke(2)
@@ -249,6 +251,34 @@ class BackendDispatchSpec extends AnyFunSpec with ChiselSim {
         dut.io.floatingAllocate(0).bits.destinationValid.expect(true)
         dut.io.floatingAllocate(0).bits.destination.expect(7)
         dut.io.faultCandidate(0).valid.expect(false)
+      }
+    }
+
+    it("isolates frm writes from floating dispatch and preserves static rm metadata") {
+      simulate(new BackendDispatch) { dut =>
+        clearInputs(dut)
+        dut.io.mstatusFs.poke(1)
+        dut.io.currentFrm.poke(4)
+        driveInstruction(dut, 0, CsrrwiFrmRdn)
+        driveInstruction(dut, 1, FmvWXF7X4)
+        dut.io.renameResponse.foreach(_.allocates.poke(false))
+
+        // The CSR write may enter alone, but the following F operation must
+        // wait for the committed frm value rather than observe it speculatively.
+        dut.io.acceptedCount.expect(1)
+        dut.io.floatingControlWriteAccepted.valid.expect(true)
+        dut.io.floatingControlWriteAccepted.bits.expect(10)
+        dut.io.floatingEnqueue(0).valid.expect(false)
+
+        dut.io.input(1).valid.poke(false)
+        driveInstruction(dut, 0, FmvWXF7X4)
+        dut.io.floatingAdmissionBlocked.poke(true)
+        dut.io.acceptedCount.expect(0)
+
+        dut.io.floatingAdmissionBlocked.poke(false)
+        dut.io.acceptedCount.expect(1)
+        dut.io.floatingEnqueue(0).valid.expect(true)
+        dut.io.floatingEnqueue(0).bits.floatingRoundingMode.expect(0)
       }
     }
 

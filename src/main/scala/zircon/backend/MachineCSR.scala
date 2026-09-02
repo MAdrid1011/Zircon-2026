@@ -152,6 +152,7 @@ class MachineCSRFile(config: ZirconCoreConfig = ZirconCoreConfig.default) extend
     val mstatusMie = Output(Bool())
     val mstatusFs = Output(UInt(2.W))
     val currentFflags = Output(UInt(5.W))
+    val currentFrm = Output(UInt(3.W))
   })
 
   private val misaValue = "h40001121".U(32.W) // RV32 plus A/F/I/M
@@ -263,6 +264,7 @@ class MachineCSRFile(config: ZirconCoreConfig = ZirconCoreConfig.default) extend
   io.mstatusMie := mstatusMie
   io.mstatusFs := mstatusFs
   io.currentFflags := fflags
+  io.currentFrm := frm
 
   assert(PopCount(Seq(io.commitWrite.valid, io.trapCommit.valid, io.mretCommit)) <= 1.U,
     "CSR write, trap, and MRET commit events must be mutually exclusive")
