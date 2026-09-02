@@ -908,6 +908,68 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("replays a younger dirty-victim miss behind an older different-set miss") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentA = BigInt("8000a000", 16)
+        val residentB = BigInt("8000a200", 16)
+        val youngerLine = BigInt("8000a400", 16)
+        val olderLine = BigInt("8000a100", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("71000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("72000000", 16) + word)
+        val youngerWords = Seq.tabulate(8)(word => BigInt("73000000", 16) + word)
+
+        submit(dut, tag = 1, address = residentA)
+        issueRefill(dut, residentWords, lineAddress = residentA)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submit(dut, tag = 2, address = residentB)
+        issueRefill(dut, residentWords, lineAddress = residentB)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        submitStore(dut, tag = 4, address = residentA + 4,
+          mask = 15, data = BigInt("face0001", 16))
+        consumeStoreResult(dut, tag = 4, address = residentA + 4)
+        submitStore(dut, tag = 5, address = residentB + 4,
+          mask = 15, data = BigInt("face0002", 16))
+        consumeStoreResult(dut, tag = 5, address = residentB + 4)
+
+        // The older request can use its invalid way. The younger request needs
+        // the sole dirty-victim transfer, so it remains replayable until the
+        // older miss has crossed the ingress boundary.
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(false)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        dut.io.request(0).ready.expect(true)
+        dut.io.l2Insert.valid.expect(true)
+        dut.io.l2Insert.bits.lineAddress.expect(residentA)
+        dut.io.l2Insert.bits.dirty.expect(true)
+        dut.io.l2Insert.bits.lineData(1).expect(BigInt("face0001", 16))
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        issueRefill(dut, olderWords, lineAddress = olderLine, mshrIndex = 0)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(olderWords(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        issueRefill(dut, youngerWords, lineAddress = youngerLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(youngerWords(1))
+      }
+    }
+
     it("accepts different-set dual misses with two exact MSHR owners") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
