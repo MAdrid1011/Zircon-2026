@@ -19,10 +19,12 @@ dispatch, the ROB, E2, either LSU, or commit. Consequently all RV32F opcode
 encodings remain illegal in executable Zircon RTL. It creates no issue,
 completion, FPR write, CSR flag update, AXI request, or retire event.
 
-M4 integration may consume this metadata only after the FPR scoreboard,
-two-cycle FMA source acquisition, E2 FPU operations, result queue, precise
-FPR/`fflags` commit, `FS` legality, and trace fields are connected as one
-verified path.
+M4 integration may consume this metadata only through the end-to-end protocol
+in [Executable floating-point path](floating-execution.md). The initial
+bit-preserving move/sign slice remains deliberately narrower than RV32F
+release support; every operation outside that documented live subset stays on
+the precise illegal-instruction path until its FPR scoreboard, source-read,
+E2, result-queue, `FS`/`fflags`, and trace connections are verified together.
 
 ## Verification mapping
 
