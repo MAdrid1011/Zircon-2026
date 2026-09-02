@@ -87,6 +87,11 @@ all eight waiters, refills that line, and proves the retained request is
 accepted as a normal hit with its exact word rather than remaining blocked by
 the retired miss allocation.
 
+The latest full `L1DLoadCacheSpec` run passes 41/41 in 137.2 seconds. A fifth
+independent miss is held while four MSHRs are live, then admitted only after an
+actual AXI refill returns and its sole exact waiter completion releases the
+physical MSHR credit.
+
 | Boundary | Required tests and properties |
 | --- | --- |
 | MemIQ/M0/M1 | `MemIssueQueueSpec` passes two enqueue, source wakeup, ROB-age selection, same-cycle recycle, free-only admission, recovery, and the live-atomic barrier against younger M0 and M1 issue before LSQ allocation. `DualLSUAdmissionSpec`, `M0RequestArbiterSpec`, `AuxiliaryReadArbiterSpec`, and `ReorderBufferSpec` cover exact-tag M0/M1 ownership and operand context. `CoreShellSpec` passes inaccessible M1 replay, cacheable AXI load plus L1D write-allocate store, ID-6 device operations, and executable ID-7 LR/SC/AMO. Full dual-LSU conflict integration remains required. |

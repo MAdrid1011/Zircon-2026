@@ -1542,5 +1542,39 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("replays a fifth miss until an AXI-refill waiter releases its MSHR") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lines = Seq.tabulate(5)(index => BigInt("80004400", 16) + index * 32)
+        val words = Seq.tabulate(8)(word => BigInt("c3000000", 16) + word)
+
+        // Four independent misses consume every MSHR while their serialized
+        // L2 probes are retained. The fifth request must survive this
+        // backpressure and cannot claim an owner early.
+        lines.take(4).zipWithIndex.foreach { case (line, index) =>
+          submit(dut, tag = index + 1, line)
+        }
+        presentLoad(dut, lane = 0, tag = 5, lines(4))
+        dut.io.request(0).ready.expect(false)
+
+        // Unlike the L2-hit recovery case, this owner crosses the physical
+        // AXI refill boundary. Credit is not free until its exact completion
+        // consumes the only waiter.
+        issueRefill(dut, words, lineAddress = lines.head)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(1)
+        dut.io.completion.bits.cacheData.expect(words.head)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(lines(4))
+      }
+    }
+
   }
 }
