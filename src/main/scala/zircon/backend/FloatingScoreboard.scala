@@ -2,103 +2,172 @@ package zircon.backend
 
 import chisel3._
 import chisel3.util._
+import zircon.ZirconCoreConfig
 
-class FloatingScoreboardAllocation extends Bundle {
+class FloatingScoreboardAllocation(config: ZirconCoreConfig) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
   val sourceValid = Vec(3, Bool())
   val source = Vec(3, UInt(5.W))
   val destinationValid = Bool()
   val destination = UInt(5.W)
 }
 
+class FloatingScoreboardCompletion(config: ZirconCoreConfig) extends Bundle {
+  val robTag = UInt(config.robTagWidth.W)
+  val destination = UInt(5.W)
+}
+
 /** Hazard scoreboard for the unrenamed architectural floating register file. */
-class FloatingScoreboard(maxOutstanding: Int = 4) extends Module {
+class FloatingScoreboard(
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    maxOutstanding: Int = 4
+) extends Module {
   require(maxOutstanding > 0)
-  private val readCountWidth = log2Ceil(maxOutstanding * 3 + 1)
 
   val io = IO(new Bundle {
-    val allocate = Input(Vec(2, Valid(new FloatingScoreboardAllocation)))
+    val allocate = Input(Vec(2, Valid(new FloatingScoreboardAllocation(config))))
     val allocateReady = Output(Vec(2, Bool()))
-    /** Asserted when an issued F operation has consumed its source operands. */
-    val readRelease = Input(Valid(new FloatingScoreboardAllocation))
-    /** Asserted only by the commit-qualified F result queue. */
-    val complete = Input(Valid(UInt(5.W)))
+    val readRelease = Input(Valid(new FloatingScoreboardAllocation(config)))
+    val complete = Input(Valid(new FloatingScoreboardCompletion(config)))
+    val robHeadTag = Input(UInt(config.robTagWidth.W))
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
+    val flush = Input(Bool())
   })
 
-  val writeBusy = RegInit(VecInit.fill(32)(false.B))
-  val readCount = RegInit(VecInit.fill(32)(0.U(readCountWidth.W)))
+  val valid = RegInit(VecInit.fill(maxOutstanding)(false.B))
+  val reservation = Reg(Vec(maxOutstanding, new FloatingScoreboardAllocation(config)))
+  val sourceConsumed = RegInit(VecInit.fill(maxOutstanding)(false.B))
+  val recoveryBlocked = io.flush || io.squash.valid
 
-  private def sourceHazard(allocation: FloatingScoreboardAllocation,
-      busy: Vec[Bool]): Bool =
-    allocation.sourceValid.zip(allocation.source).map { case (valid, source) =>
-      valid && busy(source)
+  def anyEntry(predicate: Int => Bool): Bool =
+    (0 until maxOutstanding).map(predicate).reduce(_ || _)
+
+  def sourceBusy(register: UInt): Bool = anyEntry { entry =>
+    valid(entry) && reservation(entry).destinationValid &&
+      reservation(entry).destination === register
+  }
+
+  def readBusy(register: UInt): Bool = anyEntry { entry =>
+    valid(entry) && !sourceConsumed(entry) &&
+      reservation(entry).sourceValid.zip(reservation(entry).source).map {
+        case (present, source) => present && source === register
+      }.reduce(_ || _)
+  }
+
+  def allocationSourceHazard(allocation: FloatingScoreboardAllocation,
+      extraDestination: Valid[UInt]): Bool =
+    allocation.sourceValid.zip(allocation.source).map { case (present, source) =>
+      present && (sourceBusy(source) ||
+        (extraDestination.valid && extraDestination.bits === source))
     }.reduce(_ || _)
 
-  private def destinationHazard(allocation: FloatingScoreboardAllocation,
-      reads: Vec[UInt], writes: Vec[Bool]): Bool =
-    allocation.destinationValid &&
-      (reads(allocation.destination).orR || writes(allocation.destination))
+  def allocationDestinationHazard(allocation: FloatingScoreboardAllocation,
+      extraReads: Vec[Bool], extraDestination: Valid[UInt]): Bool =
+    allocation.destinationValid && (readBusy(allocation.destination) ||
+      sourceBusy(allocation.destination) || extraReads(allocation.destination) ||
+      (extraDestination.valid && extraDestination.bits === allocation.destination))
 
-  val lane0Allowed = !sourceHazard(io.allocate(0).bits, writeBusy) &&
-    !destinationHazard(io.allocate(0).bits, readCount, writeBusy)
-  val lane0Fire = io.allocate(0).valid && lane0Allowed
+  val free = VecInit((0 until maxOutstanding).map(entry => !valid(entry)))
+  val hasFree = free.asUInt.orR
+  val freeIndex = PriorityEncoder(free.asUInt)
+  val noExtraDestination = Wire(Valid(UInt(5.W)))
+  noExtraDestination.valid := false.B
+  noExtraDestination.bits := 0.U
+  val noExtraReads = Wire(Vec(32, Bool()))
+  noExtraReads.foreach(_ := false.B)
 
-  val writeBusyAfterLane0 = Wire(Vec(32, Bool()))
-  val readCountAfterLane0 = Wire(Vec(32, UInt(readCountWidth.W)))
+  val lane0Allowed = hasFree && !allocationSourceHazard(io.allocate(0).bits,
+    noExtraDestination) && !allocationDestinationHazard(io.allocate(0).bits,
+    noExtraReads, noExtraDestination)
+  val lane0Fire = io.allocate(0).valid && lane0Allowed && !recoveryBlocked
+  val lane0Destination = Wire(Valid(UInt(5.W)))
+  lane0Destination.valid := lane0Fire && io.allocate(0).bits.destinationValid
+  lane0Destination.bits := io.allocate(0).bits.destination
+  val lane0Reads = Wire(Vec(32, Bool()))
   for (register <- 0 until 32) {
-    writeBusyAfterLane0(register) := writeBusy(register) ||
-      (lane0Fire && io.allocate(0).bits.destinationValid &&
-        io.allocate(0).bits.destination === register.U)
-    val lane0Reads = PopCount(io.allocate(0).bits.sourceValid.zip(
-      io.allocate(0).bits.source).map { case (valid, source) =>
-      lane0Fire && valid && source === register.U
-    })
-    readCountAfterLane0(register) := readCount(register) + lane0Reads
+    lane0Reads(register) := lane0Fire && io.allocate(0).bits.sourceValid.zip(
+      io.allocate(0).bits.source).map { case (present, source) =>
+        present && source === register.U
+      }.reduce(_ || _)
   }
+  val secondFree = VecInit((0 until maxOutstanding).map(entry =>
+    !valid(entry) && entry.U =/= freeIndex))
+  val hasSecondFree = secondFree.asUInt.orR
+  val secondFreeIndex = PriorityEncoder(secondFree.asUInt)
+  val lane1HasSlot = Mux(lane0Fire, hasSecondFree, hasFree)
+  val lane1Index = Mux(lane0Fire, secondFreeIndex, freeIndex)
+  val lane1Allowed = (!io.allocate(0).valid || lane0Fire) && lane1HasSlot &&
+    !allocationSourceHazard(io.allocate(1).bits, lane0Destination) &&
+    !allocationDestinationHazard(io.allocate(1).bits, lane0Reads, lane0Destination)
+  val lane1Fire = io.allocate(1).valid && lane1Allowed && !recoveryBlocked
+  io.allocateReady(0) := lane0Allowed && !recoveryBlocked
+  io.allocateReady(1) := lane1Allowed && !recoveryBlocked
 
-  val lane1Allowed = (!io.allocate(0).valid || lane0Fire) &&
-    !sourceHazard(io.allocate(1).bits, writeBusyAfterLane0) &&
-    !destinationHazard(io.allocate(1).bits, readCountAfterLane0, writeBusyAfterLane0)
-  val lane1Fire = io.allocate(1).valid && lane1Allowed
-  io.allocateReady(0) := lane0Allowed
-  io.allocateReady(1) := lane1Allowed
+  val releaseMatch = VecInit((0 until maxOutstanding).map(entry =>
+    valid(entry) && reservation(entry).robTag === io.readRelease.bits.robTag))
+  val releaseIndex = PriorityEncoder(releaseMatch.asUInt)
+  val completeMatch = VecInit((0 until maxOutstanding).map(entry =>
+    valid(entry) && reservation(entry).destinationValid &&
+      reservation(entry).robTag === io.complete.bits.robTag))
+  val completeIndex = PriorityEncoder(completeMatch.asUInt)
 
   when(io.readRelease.valid) {
-    io.readRelease.bits.sourceValid.zip(io.readRelease.bits.source).foreach {
-      case (valid, source) => when(valid) {
-        assert(readCount(source) =/= 0.U,
-          "floating scoreboard released a source without a pending read")
-      }
-    }
+    assert(releaseMatch.asUInt.orR,
+      "floating scoreboard released a non-live ROB-tagged reservation")
+    assert(PopCount(releaseMatch) === 1.U,
+      "floating scoreboard found duplicate reservations for one ROB tag")
+    assert(!sourceConsumed(releaseIndex),
+      "floating scoreboard released FPR operands more than once")
+    assert(io.readRelease.bits.asUInt === reservation(releaseIndex).asUInt,
+      "floating scoreboard release payload did not match its reservation")
   }
   when(io.complete.valid) {
-    assert(writeBusy(io.complete.bits),
-      "floating scoreboard completed an FPR without a pending write")
+    assert(completeMatch.asUInt.orR,
+      "floating scoreboard completed a non-live FPR destination")
+    assert(PopCount(completeMatch) === 1.U,
+      "floating scoreboard found duplicate completion ROB tags")
+    assert(reservation(completeIndex).destination === io.complete.bits.destination,
+      "floating scoreboard completion destination did not match its reservation")
+  }
+  when(recoveryBlocked) {
+    assert(!io.readRelease.valid && !io.complete.valid,
+      "floating scoreboard transferred a release or completion during recovery")
   }
 
-  for (register <- 0 until 32) {
-    val allocatedReads = PopCount(
-      io.allocate(0).bits.sourceValid.zip(io.allocate(0).bits.source).map {
-        case (valid, source) => lane0Fire && valid && source === register.U
-      } ++ io.allocate(1).bits.sourceValid.zip(io.allocate(1).bits.source).map {
-        case (valid, source) => lane1Fire && valid && source === register.U
-      })
-    val releasedReads = PopCount(io.readRelease.bits.sourceValid.zip(
-      io.readRelease.bits.source).map { case (valid, source) =>
-      io.readRelease.valid && valid && source === register.U
-    })
-    readCount(register) := readCount(register) + allocatedReads - releasedReads
-    assert(readCount(register) + allocatedReads >= releasedReads,
-      "floating scoreboard read count underflow")
-    assert(readCount(register) + allocatedReads <= (maxOutstanding * 3).U,
-      "floating scoreboard exceeded its configured read reservation budget")
-    when(lane0Fire && io.allocate(0).bits.destinationValid &&
-        io.allocate(0).bits.destination === register.U) {
-      writeBusy(register) := true.B
-    }.elsewhen(lane1Fire && io.allocate(1).bits.destinationValid &&
-        io.allocate(1).bits.destination === register.U) {
-      writeBusy(register) := true.B
-    }.elsewhen(io.complete.valid && io.complete.bits === register.U) {
-      writeBusy(register) := false.B
+  when(io.flush) {
+    valid.foreach(_ := false.B)
+    sourceConsumed.foreach(_ := false.B)
+  }.elsewhen(io.squash.valid) {
+    for (entry <- 0 until maxOutstanding) {
+      when(valid(entry) && ROBTagOrder.isYounger(reservation(entry).robTag,
+          io.squash.bits, io.robHeadTag, config)) {
+        valid(entry) := false.B
+        sourceConsumed(entry) := false.B
+      }
+    }
+  }.otherwise {
+    when(io.readRelease.valid) {
+      sourceConsumed(releaseIndex) := true.B
+      when(!reservation(releaseIndex).destinationValid) {
+        valid(releaseIndex) := false.B
+      }
+    }
+    when(io.complete.valid) {
+      valid(completeIndex) := false.B
+      sourceConsumed(completeIndex) := false.B
+    }
+    when(lane0Fire) {
+      valid(freeIndex) := true.B
+      reservation(freeIndex) := io.allocate(0).bits
+      sourceConsumed(freeIndex) := false.B
+    }
+    when(lane1Fire) {
+      valid(lane1Index) := true.B
+      reservation(lane1Index) := io.allocate(1).bits
+      sourceConsumed(lane1Index) := false.B
     }
   }
+
+  assert(PopCount(valid) <= maxOutstanding.U,
+    "floating scoreboard occupancy exceeded its configured reservation budget")
 }

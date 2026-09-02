@@ -8,7 +8,8 @@
     "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof and concrete board integration remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; cache-global FENCE drains dirty L1D/L2 state through retained ID-5 writeback. Four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger",
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
-    "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried"
+    "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
+    "The standalone 32x32 FPR and four tagged floating-scoreboard reservations are conservatively counted below; FPU, result-queue, E2, LSU, CSR, and trace integration remain unimplemented and are not an area sign-off"
   ],
   "storage": [
     {
@@ -28,6 +29,15 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "frozen 32x32 2R1W FPR contract"
+    },
+    {
+      "name": "floating_scoreboard_tagged_reservations",
+      "class": "register_control",
+      "entries": 4,
+      "bits_per_entry": 31,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingScoreboard: 30-bit {ROB tag, three source-valid/source pairs, destination-valid/destination} reservation plus sourceConsumed"
     },
     {
       "name": "issue_queue_uop_payload",
