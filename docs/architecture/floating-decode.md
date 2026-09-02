@@ -25,8 +25,9 @@ identifies the RV32F namespace separately from integer instructions. With
 `mstatus.FS != Off`, it admits the verified E2 subset:
 `FMV.W.X`, `FMV.X.W`, `FSGNJ.S`, `FSGNJN.S`, `FSGNJX.S`, `FMIN.S`, `FMAX.S`,
 `FEQ.S`, `FLT.S`, `FLE.S`, `FCLASS.S`, `FCVT.S.W`, `FCVT.S.WU`, `FCVT.W.S`,
-and `FCVT.WU.S`. Their FPR scoreboard, operand read, E2 execution, retained
-result/flag state, commit, and retire trace paths are connected.
+`FCVT.WU.S`, `FADD.S`, and `FSUB.S`. Their FPR scoreboard, operand read, E2
+execution, retained result/flag state, commit, and retire trace paths are
+connected.
 
 Every other F encoding, every reserved encoding, and every F instruction with
 `FS=Off` remains on the precise illegal-instruction path until the required

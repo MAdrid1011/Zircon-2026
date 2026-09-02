@@ -680,6 +680,46 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("commits dynamic-RUP RV32F FADD.S through the FPR result queue") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val fmvOneToF2 = opFp(0x78, rs2 = 0, rs1 = 2, funct3 = 0, rd = 2)
+        val fmvHalfUlpToF3 = opFp(0x78, rs2 = 0, rs1 = 3, funct3 = 0, rd = 3)
+        val writeFrmRup = BigInt((0x002L << 20) | (3L << 15) | (5L << 12) | 0x73L)
+        val faddDynamic = opFp(0x00, rs2 = 3, rs1 = 2, funct3 = 7, rd = 4)
+        val fmvXW = opFp(0x70, rs2 = 0, rs1 = 4, funct3 = 0, rd = 5)
+        val readFflags = BigInt((0x001L << 20) | (2L << 12) | (6L << 7) | 0x73L)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("3f800137", 16), // x2=1.0f bits
+          ResetVector + 12 -> fmvOneToF2,
+          ResetVector + 16 -> BigInt("338001b7", 16), // x3=2^-24f bits
+          ResetVector + 20 -> fmvHalfUlpToF3,
+          ResetVector + 24 -> writeFrmRup,
+          ResetVector + 28 -> faddDynamic,
+          ResetVector + 32 -> fmvXW,
+          ResetVector + 36 -> readFflags,
+          ResetVector + 40 -> BigInt("00100073", 16)
+        ), cycles = 640))
+        assert(events.exists(event => event.instruction == writeFrmRup && event.csrWrite &&
+          event.csrAddress == 2 && event.csrData == 3),
+          s"frm=RUP did not retire before dynamic FADD.S: $events")
+        assert(events.exists(event => event.instruction == faddDynamic && event.fprWrite &&
+          event.fprAddress == 4 && event.fprData == BigInt("3f800001", 16)),
+          s"dynamic-RUP FADD.S did not commit its exact FPR result: $events")
+        assert(events.exists(event => event.instruction == fmvXW && event.gprWrite &&
+          event.gprAddress == 5 && event.gprData == BigInt("3f800001", 16)),
+          s"FMV.X.W did not observe the committed FADD.S result: $events")
+        assert(events.exists(event => event.instruction == readFflags && event.gprWrite &&
+          event.gprAddress == 6 && event.gprData == 1),
+          s"inexact FADD.S did not commit fflags.NX: $events")
+      }
+    }
+
     it("takes dynamic RV32F FCVT.W.S with reserved frm as an exact illegal instruction") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

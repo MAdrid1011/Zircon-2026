@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The initial RV32F E2 path, including five-mode/dynamic integer-to-single and single-to-integer conversion, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete arithmetic FPU, FMA source-read path, floating memory operations, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
+    "The initial RV32F E2 path, including five-mode/dynamic integer-to-single and single-to-integer conversion, FADD/FSUB, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. Multiplication, division, square root, FMA source-read path, floating memory operations, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
   ],
   "storage": [
     {
@@ -1172,6 +1172,54 @@
       "width": 1,
       "fanin": 1,
       "source": "FloatingMovePipe FCVT.W[U].S retained rounding increment and valid negative-result two's-complement formation"
+    },
+    {
+      "name": "floating_addsub_alignment_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 27,
+      "fanin": 27,
+      "source": "FloatingMovePipe FADD/FSUB exponent-difference selection for 27-bit guard/round/sticky-aligned smaller significand"
+    },
+    {
+      "name": "floating_addsub_normalization_select",
+      "metric": "priority_select_bits",
+      "units": 1,
+      "width": 5,
+      "fanin": 27,
+      "source": "FloatingMovePipe FADD/FSUB highest-significand-bit selection for finite opposite-sign normalization"
+    },
+    {
+      "name": "floating_addsub_special_round_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 180,
+      "fanin": 2,
+      "source": "FloatingMovePipe FADD/FSUB special-value classification, five-mode rounding, overflow-result, pack, and flag selections"
+    },
+    {
+      "name": "floating_addsub_compare_units",
+      "metric": "comparator32_units",
+      "units": 12,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe FADD/FSUB exponent/magnitude ordering, range, special-value, cancellation, and after-rounding tininess comparisons charged at 32-bit granularity"
+    },
+    {
+      "name": "floating_addsub_adders",
+      "metric": "adder32_units",
+      "units": 4,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe FADD/FSUB 27-bit significand add/subtract, exponent adjust, and rounding increment operations"
+    },
+    {
+      "name": "floating_addsub_shifters",
+      "metric": "shifter32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "FloatingMovePipe FADD/FSUB finite alignment and opposite-sign normalization shifts"
     }
   ]
 }

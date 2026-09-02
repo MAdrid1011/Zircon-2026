@@ -271,6 +271,64 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("adds and subtracts singles through the retained floating result path") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, lhs: BigInt, rhs: BigInt,
+            rounding: Int, expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 6, operation = operation, floatSource0 = lhs,
+            floatSource1 = rhs, floatDestination = 11, roundingMode = rounding)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatDestination.expect(11)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16), BigInt("40000000", 16),
+          rounding = 0, BigInt("40400000", 16), 0)
+        check(FloatingOperation.FsubS, BigInt("40000000", 16), BigInt("3f800000", 16),
+          rounding = 0, BigInt("3f800000", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("7f800000", 16), BigInt("ff800000", 16),
+          rounding = 0, BigInt("7fc00000", 16), BigInt(16))
+        check(FloatingOperation.FsubS, BigInt("7fc00001", 16), BigInt("3f800000", 16),
+          rounding = 0, BigInt("7fc00000", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("7f800000", 16), BigInt("3f800000", 16),
+          rounding = 0, BigInt("7f800000", 16), 0)
+        check(FloatingOperation.FsubS, BigInt("7f800000", 16), BigInt("7f800000", 16),
+          rounding = 0, BigInt("7fc00000", 16), BigInt(16))
+        check(FloatingOperation.FaddS, BigInt("7f800001", 16), BigInt("3f800000", 16),
+          rounding = 0, BigInt("7fc00000", 16), BigInt(16))
+        // Exact cancellation obeys the RDN negative-zero rule.
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16), BigInt("bf800000", 16),
+          rounding = 0, 0, 0)
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16), BigInt("bf800000", 16),
+          rounding = 2, BigInt("80000000", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("80000000", 16), BigInt("80000000", 16),
+          rounding = 0, BigInt("80000000", 16), 0)
+        // 2^-24 is exactly halfway between 1.0 and its next representable value.
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16), BigInt("33800000", 16),
+          rounding = 0, BigInt("3f800000", 16), 1)
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16), BigInt("33800000", 16),
+          rounding = 3, BigInt("3f800001", 16), 1)
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16), BigInt("33800000", 16),
+          rounding = 4, BigInt("3f800001", 16), 1)
+        check(FloatingOperation.FaddS, BigInt("bf800000", 16), BigInt("b3800000", 16),
+          rounding = 2, BigInt("bf800001", 16), 1)
+        check(FloatingOperation.FaddS, BigInt("bf800000", 16), BigInt("b3800000", 16),
+          rounding = 3, BigInt("bf800000", 16), 1)
+        // Overflow result selection follows the directed mode and always raises OF|NX.
+        check(FloatingOperation.FaddS, BigInt("7f7fffff", 16), BigInt("7f7fffff", 16),
+          rounding = 0, BigInt("7f800000", 16), BigInt(5))
+        check(FloatingOperation.FaddS, BigInt("7f7fffff", 16), BigInt("7f7fffff", 16),
+          rounding = 1, BigInt("7f7fffff", 16), BigInt(5))
+      }
+    }
+
     it("drops only younger retained work on squash and all work on flush") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

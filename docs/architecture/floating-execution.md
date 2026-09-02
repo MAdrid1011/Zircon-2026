@@ -10,8 +10,9 @@ execution endpoint.
 
 The first executable slice admits `FMV.W.X`, `FMV.X.W`, `FSGNJ.S`, `FSGNJN.S`,
 `FSGNJX.S`, `FMIN.S`, `FMAX.S`, `FEQ.S`, `FLT.S`, `FLE.S`, `FCLASS.S`,
-`FCVT.S.W`, `FCVT.S.WU`, `FCVT.W.S`, and `FCVT.WU.S`. It exercises both
-register namespaces without claiming arithmetic or load/store support.
+`FCVT.S.W`, `FCVT.S.WU`, `FCVT.W.S`, `FCVT.WU.S`, `FADD.S`, and `FSUB.S`.
+It exercises both register namespaces without claiming multiplication,
+division, square root, fused arithmetic, or load/store support.
 `FMIN.S` and `FMAX.S` implement one-NaN/both-NaN selection, canonical NaN, and
 signed-zero rules; signaling NaN raises `fflags.NV`. `FEQ.S` raises NV only for
 signaling NaN, whereas `FLT.S` and `FLE.S` raise NV for every NaN. `FCLASS.S`
@@ -31,6 +32,18 @@ its successful ROB commit. `FMV.X.W` and `FCLASS.S` do not change `FS` or
 `fflags`; a finite comparison leaves them unchanged as well.
 
 ## Dispatch and issue contract
+
+### Add/sub arithmetic contract
+
+`FADD.S` and `FSUB.S` execute through the ADR-0025 datapath and reuse the two
+FPR source reads and the existing retained-result bridge; `FSUB.S` only inverts
+the second operand sign before the shared add/sub stage. They canonicalize
+NaN results to `0x7fc00000`, raise `NV` for signaling NaNs and `+Inf + -Inf`,
+and preserve the specified infinity and signed-zero cases. Rounding is from
+the dispatch-frozen mode, uses RNE/RTZ/RDN/RUP/RMM, and reports
+`{NV,DZ,OF,UF,NX}` only through the commit-owned floating result. Overflow
+reports `OF|NX`; after-rounding tininess reports `UF|NX`; no arithmetic result
+may update an FPR or `fflags` before its matching commit fire.
 
 `RV32FMetadataDecoder` is consulted alongside the integer decoder. Dispatch
 constructs exactly one canonical decoded record, carrying the F operation,
@@ -139,6 +152,9 @@ The initial integration tests must run AXI-fed instructions through
 - static and dynamic `FCVT.S.W/U` and `FCVT.W[U].S` over exact, tie,
   signed-negative, unsigned-maximum, NaN, infinity, subnormal, and range
   boundary operands for every rounding mode, including committed NX/NV;
+- static and dynamic `FADD.S`/`FSUB.S` over alignment and cancellation,
+  signed zero, qNaN/sNaN, infinity, overflow, and all rounding modes, with
+  committed NV/OF/UF/NX and an AXI-fed FPR commit/RAW observation;
 - a preceding `frm/fcsr` write with no artificial fetch gap, plus dynamic
   reserved `frm=5/6` exact illegal-instruction traps;
 - all three `FSGNJ` forms with sign-distinct operands, min/max NaN and signed
