@@ -33,9 +33,10 @@ class LoadStoreQueues(
       Decoupled(new MemoryQueueAllocate(config))))
     val storeAddress = Flipped(Decoupled(new StoreAddressUpdate(config)))
     val storeData = Flipped(Decoupled(new StoreDataUpdate(config)))
-    val loadAddress = Flipped(Decoupled(new LoadAddressQuery(config)))
-    val loadForward = Output(Valid(new LoadStoreForward(config)))
-    val loadForwardReady = Input(Bool())
+    val loadAddress = Flipped(Vec(config.decodeWidth,
+      Decoupled(new LoadAddressQuery(config))))
+    val loadForward = Vec(config.decodeWidth,
+      Decoupled(new LoadStoreForward(config)))
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val loadResult = Decoupled(new MemoryLoadResult(config))
     val loadFault = Decoupled(new LoadAccessFault(config))
@@ -184,58 +185,66 @@ class LoadStoreQueues(
     sqValid, sqTag, io.storeData.bits.robTag, sqEntries, sqIndexWidth)
   io.storeData.ready := !recoveryBlocked && storeDataMatch
 
-  val (loadAddressMatch, loadAddressIndex) = findMatch(
-    lqValid, lqTag, io.loadAddress.bits.robTag, lqEntries, lqIndexWidth)
-  val queryWordAddress = MemoryByteLanes.wordAddress(io.loadAddress.bits.address)
-  val olderUnknownAddress = (0 until sqEntries).map(index =>
-    sqValid(index) && ROBTagOrder.isYounger(
-      io.loadAddress.bits.robTag, sqTag(index), io.robHeadTag, config) &&
-      !sqAddressValid(index)).reduce(_ || _)
-  val olderUnknownData = (0 until sqEntries).map(index =>
-    sqValid(index) && sqAddressValid(index) &&
-      ROBTagOrder.isYounger(
-        io.loadAddress.bits.robTag, sqTag(index), io.robHeadTag, config) &&
-      MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
-      (sqWriteMask(index) & io.loadAddress.bits.readMask).orR &&
-      !sqDataValid(index)).reduce(_ || _)
-  val loadMayProceed = loadAddressMatch && !olderUnknownAddress && !olderUnknownData &&
-    io.loadForwardReady
-  io.loadAddress.ready := !recoveryBlocked && loadMayProceed
-
-  val forwardMaskBits = Wire(Vec(4, Bool()))
-  val forwardBytes = Wire(Vec(4, UInt(8.W)))
-  for (lane <- 0 until 4) {
-    var chosenValid: Bool = false.B
-    var chosenTag: UInt = 0.U(config.robTagWidth.W)
-    var chosenData: UInt = 0.U(8.W)
-    for (index <- 0 until sqEntries) {
-      val candidate = sqValid(index) && sqAddressValid(index) && sqDataValid(index) &&
+  val loadAddressMatch = Wire(Vec(config.decodeWidth, Bool()))
+  val loadAddressIndex = Wire(Vec(config.decodeWidth, UInt(lqIndexWidth.W)))
+  val requestedForwardMask = Wire(Vec(config.decodeWidth, UInt(4.W)))
+  val forwardData = Wire(Vec(config.decodeWidth, UInt(32.W)))
+  for (request <- 0 until config.decodeWidth) {
+    val (addressMatch, addressIndex) = findMatch(
+      lqValid, lqTag, io.loadAddress(request).bits.robTag, lqEntries, lqIndexWidth)
+    loadAddressMatch(request) := addressMatch
+    loadAddressIndex(request) := addressIndex
+    val queryWordAddress = MemoryByteLanes.wordAddress(io.loadAddress(request).bits.address)
+    val olderUnknownAddress = (0 until sqEntries).map(index =>
+      sqValid(index) && ROBTagOrder.isYounger(
+        io.loadAddress(request).bits.robTag, sqTag(index), io.robHeadTag, config) &&
+        !sqAddressValid(index)).reduce(_ || _)
+    val olderUnknownData = (0 until sqEntries).map(index =>
+      sqValid(index) && sqAddressValid(index) &&
         ROBTagOrder.isYounger(
-          io.loadAddress.bits.robTag, sqTag(index), io.robHeadTag, config) &&
+          io.loadAddress(request).bits.robTag, sqTag(index), io.robHeadTag, config) &&
         MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
-        sqWriteMask(index)(lane)
-      val take = candidate && (!chosenValid || ROBTagOrder.isYounger(
-        sqTag(index), chosenTag, io.robHeadTag, config))
-      chosenTag = Mux(take, sqTag(index), chosenTag)
-      chosenData = Mux(take, sqWriteData(index)(8 * lane + 7, 8 * lane), chosenData)
-      chosenValid = chosenValid || candidate
-    }
-    forwardMaskBits(lane) := chosenValid
-    forwardBytes(lane) := chosenData
-  }
-  val forwardMask = forwardMaskBits.asUInt
-  val requestedForwardMask = forwardMask & io.loadAddress.bits.readMask
-  val forwardData = forwardBytes.asUInt
+        (sqWriteMask(index) & io.loadAddress(request).bits.readMask).orR &&
+        !sqDataValid(index)).reduce(_ || _)
 
-  io.loadForward.valid := io.loadAddress.valid && io.loadAddress.ready
-  io.loadForward.bits.robTag := io.loadAddress.bits.robTag
-  io.loadForward.bits.address := io.loadAddress.bits.address
-  io.loadForward.bits.readMask := io.loadAddress.bits.readMask
-  io.loadForward.bits.forwardMask := requestedForwardMask
-  io.loadForward.bits.forwardData := forwardData
-  io.loadForward.bits.requiresCache := requestedForwardMask =/= io.loadAddress.bits.readMask
-  io.loadForward.bits.cacheable := lqPmaKind(loadAddressIndex) ===
-    PMARegionKind.Memory.code.U && !lqIsAtomic(loadAddressIndex)
+    val forwardMaskBits = Wire(Vec(4, Bool()))
+    val forwardBytes = Wire(Vec(4, UInt(8.W)))
+    for (byte <- 0 until 4) {
+      var chosenValid: Bool = false.B
+      var chosenTag: UInt = 0.U(config.robTagWidth.W)
+      var chosenData: UInt = 0.U(8.W)
+      for (index <- 0 until sqEntries) {
+        val candidate = sqValid(index) && sqAddressValid(index) && sqDataValid(index) &&
+          ROBTagOrder.isYounger(
+            io.loadAddress(request).bits.robTag, sqTag(index), io.robHeadTag, config) &&
+          MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
+          sqWriteMask(index)(byte)
+        val take = candidate && (!chosenValid || ROBTagOrder.isYounger(
+          sqTag(index), chosenTag, io.robHeadTag, config))
+        chosenTag = Mux(take, sqTag(index), chosenTag)
+        chosenData = Mux(take, sqWriteData(index)(8 * byte + 7, 8 * byte), chosenData)
+        chosenValid = chosenValid || candidate
+      }
+      forwardMaskBits(byte) := chosenValid
+      forwardBytes(byte) := chosenData
+    }
+    requestedForwardMask(request) := forwardMaskBits.asUInt & io.loadAddress(request).bits.readMask
+    forwardData(request) := forwardBytes.asUInt
+    val loadMayProceed = addressMatch && !olderUnknownAddress && !olderUnknownData
+    io.loadForward(request).valid := io.loadAddress(request).valid &&
+      !recoveryBlocked && loadMayProceed
+    io.loadForward(request).bits.robTag := io.loadAddress(request).bits.robTag
+    io.loadForward(request).bits.address := io.loadAddress(request).bits.address
+    io.loadForward(request).bits.readMask := io.loadAddress(request).bits.readMask
+    io.loadForward(request).bits.forwardMask := requestedForwardMask(request)
+    io.loadForward(request).bits.forwardData := forwardData(request)
+    io.loadForward(request).bits.requiresCache := requestedForwardMask(request) =/=
+      io.loadAddress(request).bits.readMask
+    io.loadForward(request).bits.cacheable := lqPmaKind(addressIndex) ===
+      PMARegionKind.Memory.code.U && !lqIsAtomic(addressIndex)
+    io.loadAddress(request).ready := io.loadForward(request).ready &&
+      !recoveryBlocked && loadMayProceed
+  }
 
   val (loadCompleteMatch, loadCompleteIndex) = findMatch(
     lqValid, lqTag, io.loadComplete.bits.robTag, lqEntries, lqIndexWidth)
@@ -632,12 +641,14 @@ class LoadStoreQueues(
       sqDataValid(storeDataIndex) := true.B
       sqWriteData(storeDataIndex) := io.storeData.bits.writeData
     }
-    when(io.loadAddress.fire) {
-      lqAddressValid(loadAddressIndex) := true.B
-      lqAddress(loadAddressIndex) := io.loadAddress.bits.address
-      lqReadMask(loadAddressIndex) := io.loadAddress.bits.readMask
-      lqForwardMask(loadAddressIndex) := requestedForwardMask
-      lqForwardData(loadAddressIndex) := forwardData
+    for (request <- 0 until config.decodeWidth) {
+      when(io.loadAddress(request).fire) {
+        lqAddressValid(loadAddressIndex(request)) := true.B
+        lqAddress(loadAddressIndex(request)) := io.loadAddress(request).bits.address
+        lqReadMask(loadAddressIndex(request)) := io.loadAddress(request).bits.readMask
+        lqForwardMask(loadAddressIndex(request)) := requestedForwardMask(request)
+        lqForwardData(loadAddressIndex(request)) := forwardData(request)
+      }
     }
     when(io.loadComplete.fire) {
       lqCompleted(loadCompleteIndex) := true.B
@@ -790,9 +801,13 @@ class LoadStoreQueues(
     assert(io.squash.bits(config.robIndexWidth - 1, 0) < config.robEntries.U,
       "LSQ squash boundary ROB index out of range")
     assert(!io.allocate.exists(_.fire) && !io.storeAddress.fire && !io.storeData.fire &&
-      !io.loadAddress.fire && !io.commitAuthorize.fire && !io.storeEffect.fire &&
+      !io.loadAddress.exists(_.fire) && !io.commitAuthorize.fire && !io.storeEffect.fire &&
       !io.atomicEffect.fire && !io.atomicComplete.fire,
       "LSQ transferred local work during selective squash")
+  }
+  when(io.loadAddress(0).fire && io.loadAddress(1).fire) {
+    assert(io.loadAddress(0).bits.robTag =/= io.loadAddress(1).bits.robTag,
+      "two LQ load-forward ports cannot accept the same ROB tag")
   }
   assert(PopCount(lqValid) <= lqEntries.U, "LQ occupancy exceeded its depth")
   assert(PopCount(sqValid) <= sqEntries.U, "SQ occupancy exceeded its depth")

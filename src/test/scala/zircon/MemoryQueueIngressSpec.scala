@@ -51,7 +51,7 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadComplete.bits.accessFault.poke(false)
     dut.io.loadComplete.bits.faultAddress.poke(0)
     dut.io.faultReady.foreach(_.poke(true))
-    dut.io.loadForwardReady.poke(true)
+    dut.io.loadForward.foreach(_.ready.poke(true))
     dut.io.loadResult.ready.poke(true)
     dut.io.loadFault.ready.poke(true)
     dut.io.loadContextRead.valid.poke(false)
@@ -161,13 +161,13 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
         dut.io.loadCount.expect(1)
         dut.io.storeCount.expect(1)
 
-        dut.io.loadForward.valid.expect(false)
+        dut.io.loadForward(0).valid.expect(false)
         dut.clock.step()
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.robTag.expect(4)
-        dut.io.loadForward.bits.forwardMask.expect(15)
-        dut.io.loadForward.bits.forwardData.expect(BigInt("deadbeef", 16))
-        dut.io.loadForward.bits.requiresCache.expect(false)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.robTag.expect(4)
+        dut.io.loadForward(0).bits.forwardMask.expect(15)
+        dut.io.loadForward(0).bits.forwardData.expect(BigInt("deadbeef", 16))
+        dut.io.loadForward(0).bits.requiresCache.expect(false)
         dut.clock.step()
         dut.io.updateCount.expect(0)
       }
@@ -189,7 +189,28 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
         clearRequests(dut)
         dut.clock.step()
         dut.io.loadCount.expect(2)
-        dut.io.loadForward.valid.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+      }
+    }
+
+    it("publishes two pending loads by ROB age across ingress lanes") {
+      simulate(new MemoryQueueIngress) { dut =>
+        clear(dut)
+        request(dut, 0, tag = 6, load = true, store = false,
+          address = BigInt("80002000", 16))
+        request(dut, 1, tag = 5, load = true, store = false,
+          address = BigInt("80001000", 16))
+        dut.io.input.foreach(_.ready.expect(true))
+        dut.clock.step()
+        clearRequests(dut)
+        dut.clock.step()
+
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.robTag.expect(5)
+        dut.io.loadForward(0).bits.address.expect(BigInt("80001000", 16))
+        dut.io.loadForward(1).valid.expect(true)
+        dut.io.loadForward(1).bits.robTag.expect(6)
+        dut.io.loadForward(1).bits.address.expect(BigInt("80002000", 16))
       }
     }
 
@@ -203,8 +224,8 @@ class MemoryQueueIngressSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.loadCount.expect(1)
         dut.io.storeCount.expect(1)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.robTag.expect(7)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.robTag.expect(7)
         dut.clock.step()
         dut.io.storeEffect.valid.expect(false)
       }

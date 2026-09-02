@@ -26,8 +26,7 @@ class DualLSUIngress(
     val prfReadData = Input(Vec(4, UInt(32.W)))
 
     val fault = Output(Vec(2, new FaultCandidate(config)))
-    val loadForward = Output(Valid(new LoadStoreForward(config)))
-    val loadForwardReady = Input(Bool())
+    val loadForward = Vec(config.decodeWidth, Decoupled(new LoadStoreForward(config)))
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val m0Completion = Decoupled(new CompletionResult(config))
     val m1Completion = Decoupled(new CompletionResult(config))
@@ -101,8 +100,7 @@ class DualLSUIngress(
     ingress.io.faultReady(lane) := loadCompletion.io.fault(lane).ready
     io.fault(lane) := loadCompletion.io.faultAccepted(lane)
   }
-  io.loadForward := ingress.io.loadForward
-  ingress.io.loadForwardReady := io.loadForwardReady
+  io.loadForward <> ingress.io.loadForward
   ingress.io.loadComplete.valid := io.loadComplete.valid
   ingress.io.loadComplete.bits := io.loadComplete.bits
   io.loadComplete.ready := ingress.io.loadComplete.ready

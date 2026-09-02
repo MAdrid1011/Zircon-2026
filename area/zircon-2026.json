@@ -2,7 +2,7 @@
   "schema_version": 1,
   "design": "Zircon-2026",
   "revision": "working-tree",
-  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 L1D dirty/write-allocate, cache-global FENCE drain through exclusive L1D-L2 transfer and ID-5, four L2 demand-read MSHRs, ID-7 RV32A, and exact-head 1-4 beat device slices",
+  "configuration": "default RV32IMAF_Zicsr_Zifencei plan with active one-MSHR L1I shared-demand slice and dynamic clean I fills into L2, partial M3 L1D dirty/write-allocate, two-candidate ROB-age load-forward arbitration before the one-port L1D, cache-global FENCE drain through exclusive L1D-L2 transfer and ID-5, four L2 demand-read MSHRs, ID-7 RV32A, and exact-head 1-4 beat device slices",
   "completeness": "partial",
   "known_omissions": [
     "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof and external coherency remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; cache-global FENCE drains dirty L1D/L2 state through retained ID-5 writeback. Four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger",
@@ -145,6 +145,15 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "LoadStoreQueues LQ state including retained RV32A operation, PMA/effect state, and exact retire metadata"
+    },
+    {
+      "name": "dual_load_forward_arbiter_lock",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 2,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "DualLoadForwardArbiter locked-valid and selected-lane state across L1D request backpressure"
     },
     {
       "name": "sq_entries_current",
@@ -464,6 +473,30 @@
       "width": 1,
       "fanin": 1,
       "source": "LoadStoreQueues age-tagged FENCE/FENCE.I readiness: eight LQ plus eight SQ older-owner comparisons, conservatively charged as 32-bit compares"
+    },
+    {
+      "name": "dual_load_forward_age_compare_units",
+      "metric": "comparator32_units",
+      "units": 2,
+      "width": 1,
+      "fanin": 1,
+      "source": "MemoryQueueIngress and DualLoadForwardArbiter each compare two ROB ages; each six-bit modulo comparison is conservatively charged as one 32-bit compare"
+    },
+    {
+      "name": "dual_load_forward_payload_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 1,
+      "width": 80,
+      "fanin": 2,
+      "source": "DualLoadForwardArbiter selects one complete LoadStoreForward payload from two LQ candidates before the one-port L1D"
+    },
+    {
+      "name": "dual_load_forward_select_priority_bits",
+      "metric": "priority_select_bits",
+      "units": 2,
+      "width": 1,
+      "fanin": 2,
+      "source": "MemoryQueueIngress and DualLoadForwardArbiter two-candidate oldest-first selectors"
     },
     {
       "name": "mem_iq_atomic_pre_lsq_order_compare_units",

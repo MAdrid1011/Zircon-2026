@@ -1,7 +1,9 @@
 .DS_Store
 .bsp/
+.bloop/
 .idea/
 .metals/
+project/metals.sbt
 .vscode/
 __pycache__/
 *.pyc
@@ -10,6 +12,7 @@ generated/
 generated-trace/
 out/
 project/project/
+project/.bloop/
 project/target/
 target/
 test_run_dir/
@@ -24,4 +27,5 @@ test_run_dir/
 *.str
 *.xpr
 *.zip
+sail_smt_cache
 !toolchain.lock.json

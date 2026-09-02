@@ -7,7 +7,8 @@ import zircon.backend.{CompletionResult, FaultCandidate, LongIssueQueue, LongPip
   M1BackendSubsystem, MemIssueQueue, ROBTagOrder, SourceKind, UopClass}
 import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
-  AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress, ExclusiveL2TransferStore, L1DLoadCache,
+  AXIOrderedIOEngine, CacheFenceDrainController, DualLoadForwardArbiter, DualLSUIngress,
+  ExclusiveL2TransferStore, L1DLoadCache,
   HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
   OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
@@ -32,6 +33,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val longPipe = Module(new LongPipe(cfg))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
   val lsuIngress = Module(new DualLSUIngress(cfg))
+  val loadForwardArbiter = Module(new DualLoadForwardArbiter(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
@@ -139,15 +141,22 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag
   lsuIngress.io.squash := backend.io.squash
   lsuIngress.io.flush := backend.io.globalFlush
-  val cacheableLoadForward = lsuIngress.io.loadForward.bits.cacheable
-  // Device and atomic candidates retain their ordered M0 owner. Any normal
-  // Memory-PMA load, whether dispatched through M0 or M1, consumes L1D ready;
-  // its retained LQ owner bit routes the real completion back to M0 or M1.
-  lsuIngress.io.loadForwardReady := Mux(cacheableLoadForward,
-    l1dLoadCache.io.request.ready, true.B)
-  l1dLoadCache.io.request.valid := lsuIngress.io.loadForward.valid &&
-    cacheableLoadForward
-  l1dLoadCache.io.request.bits := lsuIngress.io.loadForward.bits
+  // Device and atomic candidates retain their ordered M0 owner. The two LQ
+  // cacheable candidates use a locked ROB-age arbiter before the still
+  // one-request L1D slice, so an unselected load remains backpressured rather
+  // than losing its calculated forwarding payload.
+  loadForwardArbiter.io.robHeadTag := backend.io.robHead.bits.robTag
+  loadForwardArbiter.io.squash := backend.io.squash
+  loadForwardArbiter.io.flush := backend.io.globalFlush
+  for (lane <- 0 until cfg.decodeWidth) {
+    val cacheableLoadForward = lsuIngress.io.loadForward(lane).bits.cacheable
+    loadForwardArbiter.io.in(lane).valid :=
+      lsuIngress.io.loadForward(lane).valid && cacheableLoadForward
+    loadForwardArbiter.io.in(lane).bits := lsuIngress.io.loadForward(lane).bits
+    lsuIngress.io.loadForward(lane).ready := Mux(cacheableLoadForward,
+      loadForwardArbiter.io.in(lane).ready, true.B)
+  }
+  l1dLoadCache.io.request <> loadForwardArbiter.io.out
   l2DemandArbiter.io.in(0) <> l1dLoadCache.io.dataRequest
   l2DemandArbiter.io.in(1) <> frontend.io.l2Request
   l2DemandEngine.io.request <> l2DemandArbiter.io.out
@@ -505,6 +514,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     observation.m1Fault := lsuIngress.io.fault(1).valid
     observation.m0FaultTag := lsuIngress.io.fault(0).record.robTag
     observation.m1FaultTag := lsuIngress.io.fault(1).record.robTag
+    observation.loadForwardValid := VecInit(lsuIngress.io.loadForward.map(_.valid))
+    observation.l1dRequest := l1dLoadCache.io.request.fire
+    observation.l1dRequestTag := l1dLoadCache.io.request.bits.robTag
     observation.robHeadTag := backend.io.robHead.bits.robTag
     observation.loadQueueCount := lsuIngress.io.loadCount
     observation.storeQueueCount := lsuIngress.io.storeCount

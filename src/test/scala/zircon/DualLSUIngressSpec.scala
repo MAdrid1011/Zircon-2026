@@ -43,7 +43,7 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadComplete.bits.cacheData.poke(0)
     dut.io.loadComplete.bits.accessFault.poke(false)
     dut.io.loadComplete.bits.faultAddress.poke(0)
-    dut.io.loadForwardReady.poke(true)
+    dut.io.loadForward.foreach(_.ready.poke(true))
     dut.io.m0Completion.ready.poke(true)
     dut.io.m1Completion.ready.poke(true)
     dut.io.loadContextRead.valid.poke(false)
@@ -153,8 +153,8 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         dut.io.loadCount.expect(1)
         dut.io.storeCount.expect(0)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.robTag.expect(4)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.robTag.expect(4)
         dut.io.storeEffect.valid.expect(false)
       }
     }

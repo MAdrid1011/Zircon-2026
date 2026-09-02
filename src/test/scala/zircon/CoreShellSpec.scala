@@ -1805,6 +1805,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         clearInputs(dut)
         var m0Ingress = false
         var m1Ingress = false
+        val forwardCycles = scala.collection.mutable.ArrayBuffer.empty[(Int, Boolean, Boolean)]
+        val l1dRequests = scala.collection.mutable.ArrayBuffer.empty[BigInt]
         val firstLine = BigInt("80001000", 16)
         val secondLine = BigInt("80002000", 16)
         val events = throughFirstTrap(runProgram(dut, Map(
@@ -1815,16 +1817,23 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           ResetVector + 16 -> BigInt("00100073", 16),
           firstLine -> BigInt("11223344", 16),
           secondLine -> BigInt("55667788", 16)
-        ), cycles = 384, observeCycle = (core, _) => {
+        ), cycles = 384, observeCycle = (core, cycle) => {
           val observation = core.io.m2Observation.get
           m0Ingress ||= observation.m0Ingress.peek().litToBoolean
           m1Ingress ||= observation.m1Ingress.peek().litToBoolean
+          val forward0 = observation.loadForwardValid(0).peek().litToBoolean
+          val forward1 = observation.loadForwardValid(1).peek().litToBoolean
+          if (forward0 || forward1) forwardCycles += ((cycle, forward0, forward1))
+          if (observation.l1dRequest.peek().litToBoolean) {
+            l1dRequests += observation.l1dRequestTag.peek().litValue
+          }
         }))
 
         assert(m0Ingress && m1Ingress,
           s"independent loads did not enter both LSU owners: $events")
         val firstLoad = events.find(_.pc == ResetVector + 8).getOrElse(
-          fail(s"M1-owned load did not retire: $events"))
+          fail(s"M1-owned load did not retire: forwards=$forwardCycles " +
+            s"l1dRequests=$l1dRequests events=$events"))
         val secondLoad = events.find(_.pc == ResetVector + 12).getOrElse(
           fail(s"M0-owned load did not retire: $events"))
         assert(firstLoad.gprWrite && firstLoad.gprAddress == 2 &&

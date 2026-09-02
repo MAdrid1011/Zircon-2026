@@ -30,11 +30,13 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
     dut.io.storeData.valid.poke(false)
     dut.io.storeData.bits.robTag.poke(0)
     dut.io.storeData.bits.writeData.poke(0)
-    dut.io.loadAddress.valid.poke(false)
-    dut.io.loadAddress.bits.robTag.poke(0)
-    dut.io.loadAddress.bits.address.poke(0)
-    dut.io.loadAddress.bits.readMask.poke(0)
-    dut.io.loadForwardReady.poke(true)
+    dut.io.loadAddress.foreach { port =>
+      port.valid.poke(false)
+      port.bits.robTag.poke(0)
+      port.bits.address.poke(0)
+      port.bits.readMask.poke(0)
+    }
+    dut.io.loadForward.foreach(_.ready.poke(true))
     dut.io.loadComplete.valid.poke(false)
     dut.io.loadComplete.bits.robTag.poke(0)
     dut.io.loadComplete.bits.cacheData.poke(0)
@@ -153,10 +155,10 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       address: BigInt,
       mask: Int
   ): Unit = {
-    dut.io.loadAddress.valid.poke(true)
-    dut.io.loadAddress.bits.robTag.poke(tag)
-    dut.io.loadAddress.bits.address.poke(address)
-    dut.io.loadAddress.bits.readMask.poke(mask)
+    dut.io.loadAddress(0).valid.poke(true)
+    dut.io.loadAddress(0).bits.robTag.poke(tag)
+    dut.io.loadAddress(0).bits.address.poke(address)
+    dut.io.loadAddress(0).bits.readMask.poke(mask)
   }
 
   describe("LoadStoreQueues") {
@@ -199,9 +201,9 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         noAllocations(dut)
         queryLoad(dut, 6, address, 15)
-        dut.io.loadAddress.ready.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
         dut.clock.step()
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
 
         dut.io.robHeadTag.poke(5)
         dut.io.deviceLoadEffect.valid.expect(false)
@@ -246,9 +248,9 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
           dut.clock.step()
           noAllocations(dut)
           queryLoad(dut, tag, address, 15)
-          dut.io.loadAddress.ready.expect(true)
+          dut.io.loadAddress(0).ready.expect(true)
           dut.clock.step()
-          dut.io.loadAddress.valid.poke(false)
+          dut.io.loadAddress(0).valid.poke(false)
         }
 
         dut.io.robHeadTag.poke(tags.head)
@@ -293,11 +295,11 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         noAllocations(dut)
         queryLoad(dut, 1, BigInt("80001000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.cacheable.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.cacheable.expect(true)
         dut.clock.step()
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
 
         dut.io.flush.poke(true)
         dut.clock.step()
@@ -306,12 +308,12 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         noAllocations(dut)
         queryLoad(dut, 2, BigInt("80002000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.cacheable.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.cacheable.expect(true)
 
         dut.clock.step()
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
         dut.io.flush.poke(true)
         dut.clock.step()
         dut.io.flush.poke(false)
@@ -320,9 +322,35 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.clock.step()
         noAllocations(dut)
         queryLoad(dut, 3, BigInt("a0000000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.cacheable.expect(false)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.cacheable.expect(false)
+      }
+    }
+
+    it("accepts two independent load queries in one cycle") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        allocate(dut, 0, tag = 5, load = true, store = false)
+        allocate(dut, 1, tag = 6, load = true, store = false, m1Owner = true)
+        dut.clock.step()
+        noAllocations(dut)
+
+        queryLoad(dut, 5, BigInt("80001000", 16), 15)
+        dut.io.loadAddress(1).valid.poke(true)
+        dut.io.loadAddress(1).bits.robTag.poke(6)
+        dut.io.loadAddress(1).bits.address.poke(BigInt("80002000", 16))
+        dut.io.loadAddress(1).bits.readMask.poke(15)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadAddress(1).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.robTag.expect(5)
+        dut.io.loadForward(0).bits.address.expect(BigInt("80001000", 16))
+        dut.io.loadForward(1).valid.expect(true)
+        dut.io.loadForward(1).bits.robTag.expect(6)
+        dut.io.loadForward(1).bits.address.expect(BigInt("80002000", 16))
+        dut.clock.step()
+        dut.io.loadAddress.foreach(_.valid.poke(false))
       }
     }
 
@@ -339,9 +367,9 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         updateStoreAddress(dut, 0, address, 15)
         updateStoreData(dut, 0, 5)
         queryLoad(dut, 0, address, 15)
-        dut.io.loadAddress.ready.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
         dut.clock.step()
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
 
         dut.io.atomicEffect.valid.expect(true)
         dut.io.atomicEffect.bits.robTag.expect(0)
@@ -400,20 +428,20 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         noAllocations(dut)
 
         queryLoad(dut, 2, BigInt("80001000", 16), 15)
-        dut.io.loadAddress.ready.expect(false)
+        dut.io.loadAddress(0).ready.expect(false)
 
         dut.io.storeAddress.valid.poke(true)
         dut.io.storeAddress.bits.robTag.poke(1)
         dut.io.storeAddress.bits.address.poke(BigInt("80001000", 16))
         dut.io.storeAddress.bits.writeMask.poke(15)
         dut.io.storeAddress.ready.expect(true)
-        dut.io.loadAddress.ready.expect(false)
+        dut.io.loadAddress(0).ready.expect(false)
         dut.clock.step()
         dut.io.storeAddress.valid.poke(false)
 
         updateStoreData(dut, 1, BigInt("deadbeef", 16))
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.valid.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
       }
     }
 
@@ -429,10 +457,10 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         updateStoreAddress(dut, 1, BigInt("80001000", 16), 1)
 
         queryLoad(dut, 2, BigInt("80001000", 16), 8)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.forwardMask.expect(0)
-        dut.io.loadForward.bits.requiresCache.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.forwardMask.expect(0)
+        dut.io.loadForward(0).bits.requiresCache.expect(true)
       }
     }
 
@@ -457,11 +485,11 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         dut.io.loadContextRead.valid.poke(false)
 
         queryLoad(dut, 2, BigInt("80001000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.valid.expect(true)
-        dut.io.loadForward.bits.forwardMask.expect(15)
-        dut.io.loadForward.bits.forwardData.expect(BigInt("deadbeef", 16))
-        dut.io.loadForward.bits.requiresCache.expect(false)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.forwardMask.expect(15)
+        dut.io.loadForward(0).bits.forwardData.expect(BigInt("deadbeef", 16))
+        dut.io.loadForward(0).bits.requiresCache.expect(false)
       }
     }
 
@@ -478,12 +506,12 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         updateStoreData(dut, 1, BigInt("0000bb00", 16))
 
         queryLoad(dut, 2, BigInt("80001000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.bits.forwardMask.expect(2)
-        dut.io.loadForward.bits.forwardData.expect(BigInt("0000bb00", 16))
-        dut.io.loadForward.bits.requiresCache.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).bits.forwardMask.expect(2)
+        dut.io.loadForward(0).bits.forwardData.expect(BigInt("0000bb00", 16))
+        dut.io.loadForward(0).bits.requiresCache.expect(true)
         dut.clock.step()
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
 
         dut.io.loadComplete.valid.poke(true)
         dut.io.loadComplete.bits.robTag.poke(2)
@@ -523,9 +551,9 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         updateStoreData(dut, 2, BigInt("22222222", 16))
 
         queryLoad(dut, 3, BigInt("80001000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
-        dut.io.loadForward.bits.forwardMask.expect(15)
-        dut.io.loadForward.bits.forwardData.expect(BigInt("22222222", 16))
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).bits.forwardMask.expect(15)
+        dut.io.loadForward(0).bits.forwardData.expect(BigInt("22222222", 16))
       }
     }
 
@@ -639,9 +667,9 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
         updateStoreAddress(dut, 4, BigInt("80003000", 16), 15)
         updateStoreData(dut, 4, BigInt("cafebabe", 16))
         queryLoad(dut, 4, BigInt("80003000", 16), 15)
-        dut.io.loadAddress.ready.expect(true)
+        dut.io.loadAddress(0).ready.expect(true)
         dut.clock.step()
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
         dut.io.loadComplete.valid.poke(true)
         dut.io.loadComplete.bits.robTag.poke(4)
         dut.io.loadComplete.bits.cacheData.poke(BigInt("12345678", 16))
@@ -670,7 +698,7 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.squash.valid.poke(true)
         dut.io.squash.bits.poke(23)
-        dut.io.loadAddress.valid.poke(false)
+        dut.io.loadAddress(0).valid.poke(false)
         dut.clock.step()
         dut.io.squash.valid.poke(false)
         dut.io.loadCount.expect(2)

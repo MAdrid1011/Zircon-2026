@@ -25,8 +25,7 @@ class MemoryQueueIngress(
     val fault = Output(Vec(batchWidth, new FaultCandidate(config)))
     val faultReady = Input(Vec(batchWidth, Bool()))
 
-    val loadForward = Output(Valid(new LoadStoreForward(config)))
-    val loadForwardReady = Input(Bool())
+    val loadForward = Vec(batchWidth, Decoupled(new LoadStoreForward(config)))
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val loadResult = Decoupled(new MemoryLoadResult(config))
     val loadFault = Decoupled(new LoadAccessFault(config))
@@ -77,8 +76,7 @@ class MemoryQueueIngress(
   io.loadFault.bits := queues.io.loadFault.bits
   queues.io.loadFault.ready := io.loadFault.ready
   queues.io.loadContextRead := io.loadContextRead
-  io.loadForward := queues.io.loadForward
-  queues.io.loadForwardReady := io.loadForwardReady
+  io.loadForward <> queues.io.loadForward
   io.loadContext := queues.io.loadContext
   for (lane <- 0 until config.commitWidth) {
     queues.io.retire(lane) := io.retire(lane)
@@ -173,12 +171,23 @@ class MemoryQueueIngress(
       "two-wide LSQ allocation must accept the whole ingress batch")
   }
 
-  val (loadSelectedValid, loadSelectedIndex) = selectOldest((0 until batchWidth).map(
-    lane => updateValid(lane) && loadAddressPending(lane)))
-  queues.io.loadAddress.valid := loadSelectedValid && !recoveryBlocked
-  queues.io.loadAddress.bits.robTag := updateRequest(loadSelectedIndex).address.robTag
-  queues.io.loadAddress.bits.address := updateRequest(loadSelectedIndex).address.address
-  queues.io.loadAddress.bits.readMask := updateRequest(loadSelectedIndex).address.readMask
+  val loadCandidates = (0 until batchWidth).map(lane =>
+    updateValid(lane) && loadAddressPending(lane))
+  val (firstLoadSelectedValid, firstLoadSelectedIndex) = selectOldest(loadCandidates)
+  val (secondLoadSelectedValid, secondLoadSelectedIndex) = selectOldest(
+    (0 until batchWidth).map(lane => loadCandidates(lane) &&
+      !(firstLoadSelectedValid && firstLoadSelectedIndex === lane.U)))
+  val loadSelectedValid = Seq(firstLoadSelectedValid, secondLoadSelectedValid)
+  val loadSelectedIndex = Seq(firstLoadSelectedIndex, secondLoadSelectedIndex)
+  for (port <- 0 until batchWidth) {
+    queues.io.loadAddress(port).valid := loadSelectedValid(port) && !recoveryBlocked
+    queues.io.loadAddress(port).bits.robTag :=
+      updateRequest(loadSelectedIndex(port)).address.robTag
+    queues.io.loadAddress(port).bits.address :=
+      updateRequest(loadSelectedIndex(port)).address.address
+    queues.io.loadAddress(port).bits.readMask :=
+      updateRequest(loadSelectedIndex(port)).address.readMask
+  }
 
   val (storeAddressSelectedValid, storeAddressSelectedIndex) = selectOldest(
     (0 until batchWidth).map(lane => updateValid(lane) && storeAddressPending(lane)))
@@ -197,8 +206,9 @@ class MemoryQueueIngress(
   val storeAddressPendingAfter = Wire(Vec(batchWidth, Bool()))
   val storeDataPendingAfter = Wire(Vec(batchWidth, Bool()))
   for (lane <- 0 until batchWidth) {
-    loadAddressPendingAfter(lane) := loadAddressPending(lane) &&
-      !(queues.io.loadAddress.fire && loadSelectedIndex === lane.U)
+    val selectedLoadFired = (0 until batchWidth).map(port =>
+      queues.io.loadAddress(port).fire && loadSelectedIndex(port) === lane.U).reduce(_ || _)
+    loadAddressPendingAfter(lane) := loadAddressPending(lane) && !selectedLoadFired
     storeAddressPendingAfter(lane) := storeAddressPending(lane) &&
       !(queues.io.storeAddress.fire && storeAddressSelectedIndex === lane.U)
     storeDataPendingAfter(lane) := storeDataPending(lane) &&
@@ -284,7 +294,7 @@ class MemoryQueueIngress(
     }
   }
   when(io.squash.valid) {
-    assert(!queues.io.allocate.exists(_.fire) && !queues.io.loadAddress.fire &&
+    assert(!queues.io.allocate.exists(_.fire) && !queues.io.loadAddress.exists(_.fire) &&
       !queues.io.storeAddress.fire && !queues.io.storeData.fire,
       "memory ingress transferred work during selective squash")
   }
