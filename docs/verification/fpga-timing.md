@@ -25,10 +25,12 @@ final `v1.0.0` release until the evidence above is committed.
 
 On 2026-09-03, a read-only local workspace audit found the LA32R Vivado project
 at `/home/madrid/LA32R/LA32R.xpr`, whose project metadata targets
-`xc7a200tfbg676-2L` and whose reference XDC applies a 10.000 ns clock to its
-own `clk` port. Its top-level ports, reset polarity, and peripheral wiring are
-not Zircon's, so it is reference evidence for the device and constraint form
-only. It is not a Zircon wrapper, XDC, timing report, or 100 MHz pass result.
+`xc7a200tfbg676-2L`. Its retained generated clock-IP constraint applies a
+10.000 ns clock to `clk_in1`; the project's original board-level `soc.xdc`
+path is no longer present locally. Other retained generated constraints only
+record the LA32R top-level pins. These files are reference evidence for the
+device and constraint form only. They are not a Zircon wrapper, XDC, timing
+report, or 100 MHz pass result.
 The nearby `SCARF/Zircon-SCARF/build/fpga_2025_vu13p/stage_b_bd/project/scarf_stage_b_bd.xpr`
 instead targets `xcvu13p-fhgb2104-2-i`; its VU13P/DDR4 constraints likewise
 must not enter this project.
