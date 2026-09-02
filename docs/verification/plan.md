@@ -102,6 +102,12 @@ exact load/store/FENCE retire metadata; the observed local result is 1/1 in
 50.5 seconds. Longer mixed streams and formal credit/protocol proofs remain
 open.
 
+The full `L1DLoadCacheSpec` is now 33/33 in 1 minute 46 seconds. Its added
+dirty-victim hit/miss case first accepts an older different-set hit, holds the
+younger replacement miss, then checks that its sole L1D-to-L2 transfer retains
+the dirty word. Dirty-victim dual-miss and the remaining response/recovery
+matrix remain open.
+
 Each random failure bundle contains the generator and memory seeds, ELF and
 SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
 path. No timeout increase, response filtering, or seed replacement is a valid
