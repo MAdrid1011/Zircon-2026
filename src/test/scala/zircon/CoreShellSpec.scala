@@ -3550,6 +3550,50 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("holds a top-level external-coherence response through backpressure") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val targetLine = ResetVector
+        var requestAccepted = false
+        var heldResponseCycles = 0
+        var responseCount = 0
+        val program = (0 until 64).map(index =>
+          ResetVector + index * 4 -> Nop).toMap ++ Map(
+          ResetVector + 64 * 4 -> BigInt("00100073", 16))
+        val events = runProgram(dut, program, cycles = 640,
+          driveExternalCoherence = (core, cycle) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            if (!requestAccepted && cycle >= 24) {
+              request.valid.poke(true)
+              request.bits.kind.poke(1)
+              request.bits.lineAddress.poke(targetLine)
+              if (request.ready.peek().litToBoolean) requestAccepted = true
+            } else {
+              request.valid.poke(false)
+            }
+
+            // Keep the platform acknowledgement stalled for three full
+            // cycles. The response must retain its exact payload throughout.
+            val releaseResponse = heldResponseCycles >= 3
+            response.ready.poke(releaseResponse)
+            if (response.valid.peek().litToBoolean) {
+              response.bits.kind.expect(1)
+              response.bits.lineAddress.expect(targetLine)
+              heldResponseCycles += 1
+              if (releaseResponse) responseCount += 1
+            }
+          })
+        val retired = throughFirstTrap(events)
+        withClue(s"request=$requestAccepted held=$heldResponseCycles " +
+          s"responses=$responseCount trace=$retired") {
+          assert(requestAccepted)
+          assert(heldResponseCycles >= 4 && responseCount == 1)
+          assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
     it("drains an in-flight instruction refill before external-coherence response") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

@@ -88,5 +88,9 @@ unit test demonstrates that the external modifier cannot execute before its
 response. `ExternalCoherenceControllerSpec` additionally holds a response under
 explicit backpressure while offering a second legal request, proving that the
 first kind/line payload remains stable, cacheable ingress stays blocked, and
-the replacement is accepted only after the original response fires. Integration
-still needs a concrete platform master, board wrapper, and full pressure matrix.
+the replacement is accepted only after the original response fires.
+`CoreShellSpec` applies the same rule at the production port: it holds an
+atomic-invalidate acknowledgement for three cycles, checks the exact retained
+payload every cycle, then permits one response and requires refetch through
+`EBREAK`. Integration still needs a concrete platform master, board wrapper,
+and full pressure matrix.
