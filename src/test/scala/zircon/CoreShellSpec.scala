@@ -43,6 +43,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf503L)
   private val M3AtomicErrorSeeds = Seq(0x5eedf601L, 0x5eedf602L,
     0x5eedf603L)
+  private val M3LrScInterruptSeeds = Seq(0x5eedf701L, 0x5eedf702L,
+    0x5eedf703L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2567,6 +2569,86 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "random-lr-sc-reservation", schedule, events,
                 Some(selectorSeed), Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("clears seeded LR/SC reservations across an interrupt and MRET under AXI backpressure") {
+      for (seed <- M3LrScInterruptSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val random = new Random(seed)
+          val schedule = seededAxiSchedule(seed, 1400)
+          val selectorSeed = seed ^ 0x7a0e0L
+          val selectorRandom = new Random(selectorSeed)
+          val base = BigInt("80001000", 16)
+          val initial = BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)
+          val handler = ResetVector + 64
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("80000237", 16), // lui x4,0x80000
+            ResetVector + 8 -> BigInt("04020213", 16), // addi x4,x4,64
+            ResetVector + 12 -> BigInt("30521073", 16), // csrw mtvec,x4
+            ResetVector + 16 -> BigInt("30445073", 16), // csrrwi x0,mie,8
+            ResetVector + 20 -> BigInt("30045073", 16), // csrrwi x0,mstatus,8
+            ResetVector + 24 -> BigInt("1000a12f", 16), // lr.w x2,(x1)
+            ResetVector + 28 -> BigInt("1820a1af", 16), // sc.w x3,x2,(x1)
+            ResetVector + 32 -> BigInt("00100073", 16), // ebreak
+            handler -> BigInt("30200073", 16), // mret
+            base -> initial)
+          var events = Seq.empty[TraceSample]
+          var interruptTaken = false
+          var id7Reads = 0
+          var id7Writes = 0
+          try {
+            events = throughTrap(runProgram(dut, program, cycles = 1400,
+              driveInterrupts = (core, observed) => {
+                interruptTaken ||= observed.exists(event => event.trap && event.interrupt)
+                val lrRetired = observed.exists(event => event.pc == ResetVector + 24 &&
+                  event.gprWrite && event.gprAddress == 2)
+                core.io.interrupts.msip.poke(lrRetired && !interruptTaken)
+              },
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) id7Writes += 1
+              }), count = 2)
+            val lr = events.find(event => event.pc == ResetVector + 24 &&
+              event.gprWrite && event.gprAddress == 2).getOrElse(
+              fail(s"LR did not retire before the interrupt: $events"))
+            val interrupt = events.find(event => event.trap && event.interrupt).getOrElse(
+              fail(s"MSI did not trap: $events"))
+            val sc = events.find(event => event.pc == ResetVector + 28 &&
+              event.gprWrite && event.gprAddress == 3).getOrElse(
+              fail(s"SC did not retire after MRET: $events"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$events") {
+              assert(id7Reads == 1 && id7Writes == 0,
+                s"reservation-lost SC issued unexpected ID-7 traffic: reads=$id7Reads writes=$id7Writes")
+              assert(lr.gprData == initial && lr.memoryReadData == initial)
+              assert(interrupt.pc == ResetVector + 28 &&
+                interrupt.cause == BigInt("80000003", 16))
+              assert(sc.gprData == 1 && sc.memoryWriteMask == 0 && sc.memoryWriteData == 0)
+              assert(events.last.trap && !events.last.interrupt && events.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "random-lr-sc-interrupt-reservation", schedule,
+                events, Some(selectorSeed), Some(program))
               throw failure
           }
         }

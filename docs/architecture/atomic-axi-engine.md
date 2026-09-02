@@ -80,5 +80,7 @@ covers paired AMO LQ/SQ metadata. `DualMemoryLoadCompletionSpec` covers the
 single writable M0 completion and cause-7 conversion. `L1DLoadCacheSpec`
 covers same-line MSHR exclusion and invalidation. `CoreShellSpec` covers real
 ID-7 LR/SC, local-store and trap/MRET reservation invalidation, AMO retirement,
-RRESP fault, and aq ordering. Run `make test-m3-atomic` for the focused local
-regression.
+RRESP fault, and aq ordering. `make test-m3-lrsc-interrupt` uses three explicit
+seeds with independent AR/AW/W/R/B backpressure to require that an MSI after LR
+clears the reservation: after MRET the SC retires `rd=1` with no ID-7 write.
+Run `make test-m3-atomic` for the focused local regression.
