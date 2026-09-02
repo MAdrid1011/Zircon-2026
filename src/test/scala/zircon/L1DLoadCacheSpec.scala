@@ -1343,5 +1343,49 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
         dut.io.l2Lookup.valid.expect(false)
       }
     }
+
+    it("replays a fifth independent miss until one of four MSHRs drains") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val lines = Seq.tabulate(5)(index => BigInt("80004000", 16) + index * 32)
+
+        // Keep the one-wide L2 probe backpressured while four distinct-set
+        // misses consume the frozen four-MSHR budget.
+        lines.take(4).zipWithIndex.foreach { case (line, index) =>
+          submit(dut, tag = index + 1, line)
+          dut.io.l2Lookup.valid.expect(true)
+          dut.io.dataRequest.valid.expect(false)
+        }
+        presentLoad(dut, lane = 0, tag = 5, lines(4))
+        dut.io.request(0).ready.expect(false)
+        dut.io.dataRequest.valid.expect(false)
+
+        // An L2 hit completes the oldest owner without allocating an AXI
+        // demand. Its released MSHR is the only credit that admits the fifth
+        // logical miss on the following cycle.
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(true)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(lines.head)
+        dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(1)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+      }
+    }
+
   }
 }
