@@ -53,8 +53,9 @@ class L1DLoadCache(
     val l2Insert = Decoupled(new CacheLineTransfer(config))
     val l2Lookup = Decoupled(new L2LookupRequest(config))
     val l2Response = Flipped(Decoupled(new L2LookupResponse(config)))
-    /** Trace-only exact dirty-line transfer. A matching committed host store
-      * uses this path to move its sole L1D copy into L2 before ID-5 writeback.
+    /** Exact-line cleanup. Dirty lines transfer into L2; clean or absent lines
+      * acknowledge without creating a transfer, so external coherence can
+      * retire a target only after it is definitely absent locally.
       */
     val flushLine = Flipped(Decoupled(UInt(32.W)))
     /** Cache-global FENCE drain. Existing demand owners continue to drain;
@@ -228,6 +229,7 @@ class L1DLoadCache(
   val flushHasMshr = VecInit((0 until mshrCount).map(index =>
     mshrValid(index) && mshrLineAddress(index) === flushLineAddress)).asUInt.orR
   val flushL2Insert = io.flushLine.valid && flushDirty && !flushHasMshr
+  val flushCleanOrAbsent = io.flushLine.valid && !flushDirty && !flushHasMshr
   val anyMshrValid = mshrValid.asUInt.orR
 
   val immediateSlotWidth = log2Ceil(config.decodeWidth)
@@ -442,7 +444,7 @@ class L1DLoadCache(
   for (word <- 0 until wordsPerLine) {
     io.l2Insert.bits.lineData(word) := cacheData(l2InsertWay)(l2InsertSet)(word)
   }
-  io.flushLine.ready := flushL2Insert && io.l2Insert.ready
+  io.flushLine.ready := Mux(flushL2Insert, io.l2Insert.ready, flushCleanOrAbsent)
   val missResources = anyFreeWaiter && (anyMatchingMshr ||
     (anyFreeMshr && hasVictimWay && (!newMissNeedsL2Insert || io.l2Insert.ready)))
   val sameLineDualMissResources = sameLineDualWaiterCredits &&
@@ -861,7 +863,7 @@ class L1DLoadCache(
       }
     }
   }
-  when(io.flushLine.fire || (fenceL2Insert && io.l2Insert.fire)) {
+  when((io.flushLine.fire && flushHit) || (fenceL2Insert && io.l2Insert.fire)) {
     val selectedFlushWay = Mux(fenceL2Insert, fenceDirtyWay, flushWay)
     val selectedFlushSet = Mux(fenceL2Insert, fenceDirtySet, flushSet)
     val selectedFlushAddress = Cat(cacheTag(selectedFlushWay)(selectedFlushSet),

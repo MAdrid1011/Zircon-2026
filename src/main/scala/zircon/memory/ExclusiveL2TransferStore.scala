@@ -47,8 +47,12 @@ class ExclusiveL2TransferStore(
     /** I-side probes retain the L2 copy and return a read-only line snapshot. */
     val instructionLookup = Flipped(Decoupled(UInt(32.W)))
     val instructionResponse = Decoupled(new L2InstructionLookupResponse(config))
-    /** Trace-only exact dirty-line eviction into the retained victim FIFO. */
+    /** Exact-line cleanup. Dirty lines enter the retained victim FIFO; clean
+      * or absent lines acknowledge without a writeback. */
     val flushLine = Flipped(Decoupled(UInt(32.W)))
+    /** Stable while `flushLine.valid`; tells a cleanup controller whether the
+      * accepted operation creates an ID-5 writeback obligation. */
+    val flushLineDirty = Output(Bool())
     /** Cache-global FENCE drain. Dirty resident lines enter the retained
       * victim FIFO one at a time; the top level waits for ID-5 completion. */
     val fenceDrain = Input(Bool())
@@ -168,7 +172,9 @@ class ExclusiveL2TransferStore(
   val flushHit = flushHits.asUInt.orR
   val flushWay = PriorityEncoder(flushHits.asUInt)
   val flushDirty = flushHit && lineDirty(flushWay)(flushSet)
-  io.flushLine.ready := !io.fenceDrain && !responseValid && flushDirty && victimQueue.io.enq.ready
+  io.flushLineDirty := flushDirty
+  io.flushLine.ready := !io.fenceDrain && !responseValid && !instructionResponseValid &&
+    Mux(flushDirty, victimQueue.io.enq.ready, true.B)
 
   val invalidateSet = io.invalidate.bits(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -250,17 +256,21 @@ class ExclusiveL2TransferStore(
       }
     }
   }.elsewhen(io.flushLine.fire) {
-    victimQueue.io.enq.valid := true.B
-    victimQueue.io.enq.bits.lineAddress := Cat(lineTag(flushWay)(flushSet), flushSet,
-      0.U(lineOffsetWidth.W))
-    victimQueue.io.enq.bits.dirty := true.B
-    for (word <- 0 until wordsPerLine) {
-      victimQueue.io.enq.bits.lineData(word) := lineData(flushWay)(flushSet)(word)
+    when(flushDirty) {
+      victimQueue.io.enq.valid := true.B
+      victimQueue.io.enq.bits.lineAddress := Cat(lineTag(flushWay)(flushSet), flushSet,
+        0.U(lineOffsetWidth.W))
+      victimQueue.io.enq.bits.dirty := true.B
+      for (word <- 0 until wordsPerLine) {
+        victimQueue.io.enq.bits.lineData(word) := lineData(flushWay)(flushSet)(word)
+      }
     }
-    for (way <- 0 until ways) {
-      when(flushWay === way.U) {
-        lineValid(way)(flushSet) := false.B
-        lineDirty(way)(flushSet) := false.B
+    when(flushHit) {
+      for (way <- 0 until ways) {
+        when(flushWay === way.U) {
+          lineValid(way)(flushSet) := false.B
+          lineDirty(way)(flushSet) := false.B
+        }
       }
     }
   }.elsewhen(io.invalidate.valid) {

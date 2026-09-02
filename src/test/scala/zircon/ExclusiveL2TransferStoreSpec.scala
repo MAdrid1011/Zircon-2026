@@ -317,15 +317,29 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("does not accept a targeted flush for a clean L2 line") {
+    it("acknowledges and invalidates clean or absent targeted L2 lines") {
       simulate(new ExclusiveL2TransferStore) { dut =>
         clear(dut)
         val line = BigInt("80002c00", 16)
         insert(dut, line, Seq.fill(8)(BigInt("1badb002", 16)), dirty = false)
         dut.io.flushLine.valid.poke(true)
         dut.io.flushLine.bits.poke(line)
-        dut.io.flushLine.ready.expect(false)
+        dut.io.flushLine.ready.expect(true)
+        dut.io.flushLineDirty.expect(false)
         dut.io.victim.valid.expect(false)
+        dut.clock.step()
+        dut.io.flushLine.valid.poke(false)
+        lookup(dut, line)
+        dut.io.response.valid.expect(true)
+        dut.io.response.bits.hit.expect(false)
+        dut.io.response.ready.poke(true)
+        dut.clock.step()
+        dut.io.response.ready.poke(false)
+
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(BigInt("80003000", 16))
+        dut.io.flushLine.ready.expect(true)
+        dut.io.flushLineDirty.expect(false)
       }
     }
 

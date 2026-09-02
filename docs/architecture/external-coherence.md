@@ -36,13 +36,16 @@ The component accepts only 32-byte-aligned `WriteInvalidate` and
 the retained request is active.
 
 This is not yet an externally coherent core. `ZirconCore` has not yet exposed
-the port or connected its existing L1D/L2/atomic endpoints to the controller;
-the endpoint cleanup acknowledgement must first be widened to handle clean and
-absent target lines without disturbing in-flight owners. The current local
-foundation check is:
+the port or connected its existing L1D/L2/atomic endpoints to the controller.
+The L1D and L2 cleanup endpoints now acknowledge exact dirty, clean, and
+absent targets: dirty L1D cleanup transfers to L2, dirty L2 cleanup reports
+its ID-5 obligation through `flushLineDirty`, and clean/absent targets create
+no victim. Matching in-flight L1D owners still block cleanup. The current
+local foundation checks are:
 
 ```bash
 ./scripts/sbtw 'testOnly zircon.ExternalCoherenceControllerSpec'
+./scripts/sbtw 'testOnly zircon.L1DLoadCacheSpec zircon.ExclusiveL2TransferStoreSpec'
 ```
 
 ## Required Invariants

@@ -537,7 +537,7 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("does not accept a targeted flush for a clean resident line") {
+    it("acknowledges and invalidates clean or absent targeted lines") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)
         val line = BigInt("80004c00", 16)
@@ -549,7 +549,16 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.flushLine.valid.poke(true)
         dut.io.flushLine.bits.poke(line)
-        dut.io.flushLine.ready.expect(false)
+        dut.io.flushLine.ready.expect(true)
+        dut.io.l2Insert.valid.expect(false)
+        dut.clock.step()
+        dut.io.flushLine.valid.poke(false)
+        submit(dut, tag = 2, line)
+        dut.io.l2Lookup.valid.expect(true)
+
+        dut.io.flushLine.valid.poke(true)
+        dut.io.flushLine.bits.poke(BigInt("80005000", 16))
+        dut.io.flushLine.ready.expect(true)
         dut.io.l2Insert.valid.expect(false)
       }
     }
