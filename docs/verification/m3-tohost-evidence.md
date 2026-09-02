@@ -21,6 +21,23 @@ The runner required both an ordered normal `RetireEvent` for the selected
 `tohost` store and the matching nonzero value in AXI backing memory. Each run
 returned `exit: 0`.
 
+On 2026-09-02, parent source
+`7f15ec0298982855c24b7075226639b37a0bbec5`, ZirconSim
+`b22137e40c8331608930acc6494197bc72054840`, and RV-Software
+`11d6eae150d47aab32aca3340e30ba61ddcbb2f0` repeated this gate using a locally
+built, pinned Verilator `5.050` (`848d926ebd4addacacd294dc84e35d9d4ae8078c`):
+
+```bash
+PATH="$PWD/target/tools/verilator-5.050/bin:$PATH" \\
+  make -C ZirconSim tohost
+```
+
+The runner reported all four `status:"tohost"` results below with seed `1`.
+The matching ELF, retirement-trace, and backing-memory SHA256 values were
+recomputed locally. This establishes locked-toolchain local execution evidence
+only; it does not close the remaining M3 stress, coherence, formal, or release
+requirements.
+
 | ELF | Cycle limit | Observed cycles | Retirements | ELF SHA256 | Trace SHA256 |
 | --- | ---: | ---: | ---: | --- | --- |
 | `rv32i-commit-prefix.elf` | 1024 | 241 | 19 | `d9447a5b7fc720653c3ea4fce72425863a4652351e49787f6839a94a4e6eb51a` | `00d2b73b4ccb00f360233d0396888f7e6223a12ed996b66fdebc7c240312a481` |
