@@ -73,7 +73,9 @@ git switch --track origin/feat/m1-executable-core
 1. 最终目标是完整交付 Zircon-2026，不是只完成当前 M1，也不是只搭骨架。
 2. ISA 固定为 `RV32IMAF_Zicsr_Zifencei`，单 hart、仅 M-mode。
 3. 远端 CI/门禁暂时不必等待，避免浪费交互时间；每个阶段仍必须完成本地验证并把可复现命令、seed 和结果写入 Git。可以推送后继续开发，但不能把尚未观察到的远端结果写成“通过”。
-4. 面积签收以 ADR-0009 定义的**可复现静态面积评估**为强制门槛。无需为了签收等待或安装 Vivado 2026.1；若已有 Vivado 数据，只作为可选旁证，不能取代静态 ledger。
+4. 面积签收以 ADR-0009 定义的**可复现静态面积评估**为强制门槛；最终物理签收还必须在
+   `xc7a200tfbg676-2L` 上完成 Zircon-specific Vivado post-route 实现和 100 MHz 时序检查。
+   Vivado 不取代静态 ledger，二者共同构成发布证据。
 5. 不允许通过删减冻结 ISA 行为、Cache/LSU 功能、异常精确性或验证范围来伪造面积/进度达标。
 6. GitHub 留痕顺序仍是 Issue → ADR（仅架构变化）→ 模块规格 → RTL/软件/仿真 PR → 本地/CI 证据 → 合并。远端门禁可异步，但工作记录不可省略。
 7. 不得把未实现结构在面积表中记为 0，不得把空顶层的低资源数字当成完整 Zircon-2026 面积。
@@ -94,7 +96,7 @@ git switch --track origin/feat/m1-executable-core
 
 ### 3.2 正确性与验证
 
-- 标准测试、Spike 快速差分、Sail 夜间/争议复核、ACT4、RISCV-DV、TestFloat、适用 riscv-formal 和项目定向测试全部无未解释失败。
+- 标准测试、Spike 快速差分、Sail 夜间/争议复核、ACT4、RISCV-DV、TestFloat 和项目定向测试全部无未解释失败；运行时 assertion、coverage 和 mutation 证据必须关闭。
 - 强制功能覆盖点 100%；代码覆盖目标 line ≥95%、branch ≥90%、toggle ≥85%。覆盖豁免必须有 Issue、原因/不可达证明、责任人和失效里程碑。
 - milestone 回归累计至少十亿条退休指令：10,000 seeds × 100k，所有失败都可由保存的 seed、ELF、工具 SHA、trace 和波形复现。
 - decoder、exception priority、MSHR、MMIO arbiter 的预设 mutation 必须全部被验证集杀死。
@@ -298,7 +300,7 @@ deterministic AXI slave 将该 17-retirement prefix 的 IPC 记录为 0.07234（
 - [ ] 实现 AXI 最多 4 read burst/1 write burst、8-beat refill、ID/beat/RESP accounting。
 - [ ] 实现 LR/SC、全部 RV32A AMO、reservation invalidation、aq/rl、FENCE。
 - [ ] 把 `OrderedIOCombiner` 接入 ROB/M0/AXI/commit，完成 1–4 beat ordered device groups。
-- [ ] 完成 Cache/LSQ/AXI assertion/formal、random backpressure/error injection、memory stress。
+- [ ] 完成 Cache/LSQ/AXI runtime assertion、random backpressure/error injection、memory stress。
 - [ ] 发布 `v0.4-memory`。
 
 ### M4 / `v0.5-imaf-priv`：F、完整中断、miniTAGE
@@ -326,7 +328,7 @@ deterministic AXI slave 将该 17-retirement prefix 的 IPC 记录为 0.07234（
 ### M6 / `v1.0.0`：验证闭环和发布
 
 - [ ] PR、nightly、milestone 三层回归都落地并可复现。
-- [ ] 完整 ACT4、10,000×100k differential、Spike+Sail、AXI stress、TestFloat、formal、mutation 全部关闭。
+- [ ] 完整 ACT4、10,000×100k differential、Spike+Sail、AXI stress、TestFloat、coverage、mutation 和 FPGA/Vivado release gate 全部关闭。
 - [ ] 强制功能 coverage 100%，代码覆盖达标或只有合规豁免。
 - [ ] 至少十亿条退休指令，零未解释失败。
 - [ ] 发布架构总规格、程序员手册、集成手册、验证报告、性能报告、静态面积报告、已知限制。
@@ -369,12 +371,12 @@ deterministic AXI slave 将该 17-retirement prefix 的 IPC 记录为 0.07234（
 -march=rv32im -mabi=ilp32
 ```
 
-参考模型和套件：Spike（快速退休级差分）、Sail（夜间/争议）、ACT4 + Unified DB（认证）、RISCV-DV（随机流）、riscv-tests（基础宏）、TestFloat（FP 边界）、riscv-formal/RVFI（适用性质）。性能负载包括 Embench IoT、CoreMark、Dhrystone、现有 CFFT/matmul/cholesky，以及固定数据集 pointer chasing、hash table、BFS、branch state machine。
+参考模型和套件：Spike（快速退休级差分）、Sail（夜间/争议）、ACT4 + Unified DB（认证）、RISCV-DV（随机流）、riscv-tests（基础宏）和 TestFloat（FP 边界）。riscv-formal/RVFI 可以作为诊断辅助，但不是 release blocker。性能负载包括 Embench IoT、CoreMark、Dhrystone、现有 CFFT/matmul/cholesky，以及固定数据集 pointer chasing、hash table、BFS、branch state machine。
 
 最低回归层级：
 
 - PR：全部 unit/directed、ACT4 smoke、20 seeds × 10k differential。
-- Nightly：完整 ACT4、500 × 50k、Spike+Sail、AXI random stress、bounded formal。
+- Nightly：完整 ACT4、500 × 50k、Spike+Sail、AXI random stress、coverage/mutation 汇总和 Vivado evidence 检查。
 - Milestone：10,000 × 100k，累计至少 1B retired instructions。
 
 每次失败保存并在报告中链接：generator seed、memory seed、RTL/submodule/tool SHA、ELF/hash、最小化 instruction stream、retire trace、waveform；按 root cause 聚类。禁止仅通过增加 timeout 或过滤 mismatch 让回归变绿。

@@ -1,16 +1,22 @@
 # Zircon-2026 验证计划
 
-验证以 `RetireEvent` 为统一真值边界。模块单元测试验证局部状态机；完整核心在每条退休指令后与 Spike 比较，nightly 使用 Sail 复核；ACT4、RISCV-DV、TestFloat、形式化性质和性能负载覆盖不同错误类别。
+验证以 `RetireEvent` 为统一真值边界。模块单元测试验证局部状态机；完整核心在每条退休指令后与 Spike 比较，nightly 使用 Sail 复核；ACT4、RISCV-DV、TestFloat、运行时 assertion、coverage、mutation 和性能负载覆盖不同错误类别。Vivado FPGA post-route evidence 是最终物理 release gate；formal 仅为可选诊断。
 
 ## 回归层级
 
 | 层级 | 内容 | 门槛 |
 |---|---|---|
 | PR | ChiselSim 单元、directed、ACT4 smoke、20×10k RISCV-DV | 零失败，seed 可复现 |
-| Nightly | 完整 ACT4、500×50k、Spike+Sail、AXI stress、bounded formal | 零未分类 mismatch |
+| Nightly | 完整 ACT4、500×50k、Spike+Sail、AXI stress、coverage/mutation 和 Vivado evidence 检查 | 零未分类 mismatch |
 | Milestone | 10,000×100k、覆盖闭环、mutation、静态面积/IPC | 至少十亿条退休指令 |
 
 随机源不得从墙钟取 seed。失败包包含 RTL/submodule/tool SHA、ELF hash、generator seed、memory seed、最小化程序、trace 和波形。
+
+## Formal Scope
+
+ADR-0026 将 Vivado post-route evidence on `xc7a200tfbg676-2L` 设为最终物理 release gate。
+本文件后续提到的 formal、bounded formal 或 RVFI 仅表示可选诊断工作，不是 M3/M6 release
+blocker；相应协议仍由 runtime assertion、固定 seed stress、差分、coverage 和 mutation 约束。
 
 ## 功能覆盖
 
@@ -214,6 +220,13 @@ failure.
 | Core/differential | deterministic RV32IMA ELF including `tohost`; explicit-seed stress starting at `0x5eed3004`; trace memory fields; Spike and Sail committed-memory comparison; applicable ACT4 IMA smoke |
 
 ### External Coherence Integration
+
+2026-09-03 的 `make test-m3-external-coherence` 运行 9 个 controller/adapter component
+tests 和 14 个 complete-core cases，零失败，约 274 秒。新增 seed
+`0x5eeded01`--`0x5eeded03` 将 committed dirty store 的 ID-5 eight-beat writeback、一个
+已获得 owner 的独立 data refill、五通道 backpressure 和 held sideband response 放在同一
+窗口；每例验证 B-gated acknowledgement 与精确 load/store retire metadata。失败包保留
+seed、response selector、五通道 schedule、程序和 trace。
 
 ADR-0023's one-request `ExternalCoherencePort` is now connected in
 `ZirconCore`. The local controller test covers I-side-drain gating, retained

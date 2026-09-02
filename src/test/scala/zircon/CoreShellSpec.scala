@@ -69,6 +69,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf502L, 0x5eedf503L)
   private val M3ExternalCoherenceStoreSeeds = Seq(0x5eedec01L,
     0x5eedec02L, 0x5eedec03L)
+  private val M3ExternalCoherenceMixedTrafficSeeds = Seq(0x5eeded01L,
+    0x5eeded02L, 0x5eeded03L)
 
   private case class AxiSchedule(
       arReady: IndexedSeq[Boolean],
@@ -4198,7 +4200,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
               awReadyForCycle = cycle => schedule.awReady(cycle),
               wReadyForCycle = cycle => schedule.wReady(cycle),
               bValidForCycle = cycle => schedule.bValid(cycle),
-              driveExternalCoherence = (core, _) => {
+              driveExternalCoherence = (core, cycle) => {
                 val request = core.io.externalCoherence.request
                 val response = core.io.externalCoherence.response
                 if (firstStoreRetired && !requestAccepted) {
@@ -4246,6 +4248,121 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "external-coherence-store-effect", schedule, events,
                 program = Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("preserves dirty writeback and independent refill ownership through seeded external coherence") {
+      for (seed <- M3ExternalCoherenceMixedTrafficSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val schedule = seededAxiSchedule(seed, 1152)
+          val selectorSeed = seed ^ 0x4c1eL
+          val selectorRandom = new Random(selectorSeed)
+          val dirtyLine = BigInt("80001000", 16)
+          val refillLine = BigInt("80002000", 16)
+          val storeData = BigInt((seed & 0x3ffL) + 1L)
+          var storeRetired = false
+          var refillArSeen = false
+          var requestAccepted = false
+          var requestAcceptedCycle = -1
+          var id5AwSeen = false
+          var id5BSeen = false
+          var heldResponseCycles = 0
+          var responseCount = 0
+          var responseBeforeWriteback = false
+          var events = Seq.empty[TraceSample]
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("800022b7", 16), // lui x5,0x80002
+            ResetVector + 8 -> ((storeData << 20) | (BigInt(2) << 7) | BigInt(0x13)),
+            ResetVector + 12 -> BigInt("0020a023", 16), // sw x2,0(x1)
+            ResetVector + 16 -> BigInt("0002a183", 16), // lw x3,0(x5)
+            ResetVector + 20 -> BigInt("00100073", 16),
+            dirtyLine -> BigInt("11223344", 16),
+            refillLine -> BigInt("55667788", 16)
+          )
+          try {
+            events = throughFirstTrap(runProgram(dut, program, cycles = 1152,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readValidForCycle = (cycle, _, address) =>
+                address != refillLine ||
+                  (requestAcceptedCycle >= 0 && cycle >= requestAcceptedCycle + 8),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              writeResponse = Some(0),
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              driveExternalCoherence = (core, cycle) => {
+                val request = core.io.externalCoherence.request
+                val response = core.io.externalCoherence.response
+                if (storeRetired && refillArSeen && !requestAccepted) {
+                  request.valid.poke(true)
+                  request.bits.kind.poke(0)
+                  request.bits.lineAddress.poke(dirtyLine)
+                  if (request.ready.peek().litToBoolean) {
+                    requestAccepted = true
+                    requestAcceptedCycle = cycle
+                  }
+                } else {
+                  request.valid.poke(false)
+                }
+                response.ready.poke(heldResponseCycles >= 4)
+                if (response.valid.peek().litToBoolean) {
+                  response.bits.kind.expect(0)
+                  response.bits.lineAddress.expect(dirtyLine)
+                  responseBeforeWriteback ||= !id5BSeen
+                  heldResponseCycles += 1
+                  if (response.ready.peek().litToBoolean) responseCount += 1
+                }
+              }, observeCycle = (core, _) => {
+                storeRetired ||= core.io.trace.get.exists(lane =>
+                  lane.valid.peek().litToBoolean && lane.pc.peek().litValue == ResetVector + 12 &&
+                    !lane.trap.peek().litToBoolean)
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.addr.peek().litValue == refillLine) {
+                  refillArSeen = true
+                }
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                val bFire = core.io.axi.b.valid.peek().litToBoolean &&
+                  core.io.axi.b.ready.peek().litToBoolean
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 5) {
+                  id5AwSeen = true
+                  core.io.axi.aw.bits.addr.expect(dirtyLine)
+                  core.io.axi.aw.bits.len.expect(7)
+                }
+                id5BSeen ||= bFire && core.io.axi.b.bits.id.peek().litValue == 5
+              }))
+            val store = events.find(_.pc == ResetVector + 12).getOrElse(
+              fail(s"store did not retire: seed=0x${java.lang.Long.toHexString(seed)} trace=$events"))
+            val load = events.find(_.pc == ResetVector + 16).getOrElse(
+              fail(s"refill load did not retire: seed=0x${java.lang.Long.toHexString(seed)} trace=$events"))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)} selector=0x" +
+              s"${java.lang.Long.toHexString(selectorSeed)} store=$storeRetired refillAr=$refillArSeen " +
+              s"request=$requestAccepted aw=$id5AwSeen b=$id5BSeen held=$heldResponseCycles " +
+              s"responses=$responseCount early=$responseBeforeWriteback trace=$events") {
+              assert(storeRetired && refillArSeen && requestAccepted && id5AwSeen && id5BSeen)
+              assert(heldResponseCycles >= 5 && responseCount == 1 && !responseBeforeWriteback)
+              assert(store.memoryAddress == dirtyLine && store.memoryWriteMask == 15 &&
+                store.memoryWriteData == storeData)
+              assert(load.gprWrite && load.gprAddress == 3 &&
+                load.gprData == BigInt("55667788", 16) && load.memoryAddress == refillLine &&
+                load.memoryReadData == BigInt("55667788", 16))
+              assert(events.last.trap && events.last.cause == 3)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "external-coherence-mixed-traffic", schedule, events,
+                Some(selectorSeed), Some(program))
               throw failure
           }
         }
@@ -4654,7 +4771,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("retries a failing coherence writeback before acknowledging") {
+    it("retries a failing external-coherence writeback before acknowledging") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val dirtyAddress = BigInt("80001000", 16)
@@ -4718,7 +4835,7 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
-    it("drops a dirty coherence writeback on reset and completes a fresh epoch") {
+    it("drops an external-coherence dirty writeback on reset and completes a fresh epoch") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
         val dirtyAddress = BigInt("80001000", 16)
