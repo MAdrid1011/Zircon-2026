@@ -76,7 +76,9 @@ eight-beat burst and response only after B. `ZirconSim` gitlink `3023715` explic
 port idle in its private-memory model and its RV32A `tohost` run remains 228
 cycles/12 retirements. A directed error slice retries the same target line
 after a failing ID-5 B and suppresses response until the retry succeeds.
-FPGA/SoC platform adapter, full pressure/reset/error
+The reset slice drops an accepted request before its held instruction RLAST,
+then permits only a fresh-epoch request/response for a different line.
+FPGA/SoC platform adapter, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
 
 状态只能在对应自动测试或报告进入 Git 后更新；控制文档更新本身不等价于硬件进展。

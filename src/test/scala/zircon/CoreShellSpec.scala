@@ -3608,6 +3608,82 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("drops a reset external-coherence request and accepts a fresh epoch") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val firstLine = ResetVector
+        val secondLine = ResetVector + 32
+        var firstArCycle = -1
+        var firstRequestAcceptedCycle = -1
+        var resetCycle = -1
+        var postResetArCycle = -1
+        var secondRequestAcceptedCycle = -1
+        var postResetBurstDrained = false
+        var responseBeforeDrain = false
+        var responseCount = 0
+        val program = (0 until 64).map(index =>
+          ResetVector + index * 4 -> Nop).toMap ++ Map(
+          ResetVector + 64 * 4 -> BigInt("00100073", 16))
+        val events = runProgram(dut, program, cycles = 768,
+          rValidForCycle = cycle => {
+            if (resetCycle < 0) firstArCycle >= 0 && cycle >= firstArCycle + 12
+            else postResetArCycle >= 0 && cycle >= postResetArCycle + 12
+          },
+          resetForCycle = (_, cycle) => {
+            val resetActive = firstRequestAcceptedCycle >= 0 && resetCycle < 0 &&
+              cycle == firstRequestAcceptedCycle + 1
+            if (resetActive) resetCycle = cycle
+            resetActive
+          },
+          driveExternalCoherence = (core, cycle) => {
+            val request = core.io.externalCoherence.request
+            val response = core.io.externalCoherence.response
+            response.ready.poke(true)
+            if (resetCycle < 0 && firstArCycle >= 0 && firstRequestAcceptedCycle < 0) {
+              request.valid.poke(true)
+              request.bits.kind.poke(0)
+              request.bits.lineAddress.poke(firstLine)
+              if (request.ready.peek().litToBoolean) firstRequestAcceptedCycle = cycle
+            } else if (resetCycle >= 0 && postResetArCycle >= 0 &&
+                secondRequestAcceptedCycle < 0) {
+              request.valid.poke(true)
+              request.bits.kind.poke(1)
+              request.bits.lineAddress.poke(secondLine)
+              if (request.ready.peek().litToBoolean) secondRequestAcceptedCycle = cycle
+            } else {
+              request.valid.poke(false)
+            }
+            if (response.valid.peek().litToBoolean && response.ready.peek().litToBoolean) {
+              response.bits.kind.expect(1)
+              response.bits.lineAddress.expect(secondLine)
+              responseBeforeDrain ||= !postResetBurstDrained
+              responseCount += 1
+            }
+          }, observeCycle = (core, cycle) => {
+            val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+              core.io.axi.ar.ready.peek().litToBoolean
+            if (arFire && resetCycle < 0 && firstArCycle < 0) firstArCycle = cycle
+            if (arFire && resetCycle >= 0 && postResetArCycle < 0) postResetArCycle = cycle
+            val rFire = core.io.axi.r.valid.peek().litToBoolean &&
+              core.io.axi.r.ready.peek().litToBoolean
+            if (rFire && resetCycle >= 0 && core.io.axi.r.bits.last.peek().litToBoolean) {
+              postResetBurstDrained = true
+            }
+          })
+        val retired = throughFirstTrap(events)
+        withClue(s"firstAr=$firstArCycle firstRequest=$firstRequestAcceptedCycle " +
+          s"reset=$resetCycle postAr=$postResetArCycle secondRequest=$secondRequestAcceptedCycle " +
+          s"drained=$postResetBurstDrained response=$responseCount " +
+          s"beforeDrain=$responseBeforeDrain trace=$retired") {
+          assert(firstArCycle >= 0 && firstRequestAcceptedCycle > firstArCycle)
+          assert(resetCycle == firstRequestAcceptedCycle + 1)
+          assert(postResetArCycle > resetCycle && secondRequestAcceptedCycle > postResetArCycle)
+          assert(postResetBurstDrained && !responseBeforeDrain && responseCount == 1)
+          assert(retired.last.trap && retired.last.cause == 3)
+        }
+      }
+    }
+
     it("waits for dirty external-coherence writeback before acknowledging") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
