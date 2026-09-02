@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-lrsc-random test-m3-lrsc-interrupt test-m3-atomic-errors test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-l2 test-m3-ordered-io test-m3-device-io test-m3-axi-stress test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-lrsc-random test-m3-lrsc-interrupt test-m3-lrsc-errors test-m3-atomic-errors test-m3-ordering verilog trace-verilog software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 clean status
 
 compile:
@@ -121,6 +121,11 @@ test-m3-lrsc-random:
 # no-write result even with independent five-channel AXI backpressure.
 test-m3-lrsc-interrupt:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "clears seeded LR/SC reservations across an interrupt and MRET under AXI backpressure"'
+
+# A failing LR response must trap precisely and prevent the following SC from
+# owning an ID-7 write.
+test-m3-lrsc-errors:
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "turns seeded non-line-base LR RRESP errors into one exact trap"'
 
 # AMO B-response errors after a non-line-base ID-7 write must trap exactly once.
 test-m3-atomic-errors:

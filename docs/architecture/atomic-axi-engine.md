@@ -83,4 +83,7 @@ ID-7 LR/SC, local-store and trap/MRET reservation invalidation, AMO retirement,
 RRESP fault, and aq ordering. `make test-m3-lrsc-interrupt` uses three explicit
 seeds with independent AR/AW/W/R/B backpressure to require that an MSI after LR
 clears the reservation: after MRET the SC retires `rd=1` with no ID-7 write.
+`make test-m3-lrsc-errors` uses three explicit seeds to inject a non-OKAY ID-7
+LR response at a non-line-base word address; it requires one exact cause-7/tval
+trap and proves that the following SC issues no write.
 Run `make test-m3-atomic` for the focused local regression.

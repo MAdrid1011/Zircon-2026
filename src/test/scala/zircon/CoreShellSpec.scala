@@ -45,6 +45,8 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
     0x5eedf603L)
   private val M3LrScInterruptSeeds = Seq(0x5eedf701L, 0x5eedf702L,
     0x5eedf703L)
+  private val M3LrScErrorSeeds = Seq(0x5eedf801L, 0x5eedf802L,
+    0x5eedf803L)
   private val M3FenceFifoRetrySeeds = Seq(0x5eedf001L, 0x5eedf002L,
     0x5eedf003L, 0x5eedf004L)
 
@@ -2649,6 +2651,64 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
             case failure: Throwable =>
               saveM3AxiStressFailure(seed, "random-lr-sc-interrupt-reservation", schedule,
                 events, Some(selectorSeed), Some(program))
+              throw failure
+          }
+        }
+      }
+    }
+
+    it("turns seeded non-line-base LR RRESP errors into one exact trap") {
+      for (seed <- M3LrScErrorSeeds) {
+        simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+          clearInputs(dut)
+          val random = new Random(seed)
+          val schedule = seededAxiSchedule(seed, 1200)
+          val selectorSeed = seed ^ 0x7a0f0L
+          val selectorRandom = new Random(selectorSeed)
+          val address = BigInt("80001004", 16)
+          val program = Map(
+            ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+            ResetVector + 4 -> BigInt("00408093", 16), // addi x1,x1,4
+            ResetVector + 8 -> BigInt("1000a1af", 16), // lr.w x3,(x1)
+            ResetVector + 12 -> BigInt("1820a22f", 16), // sc.w x4,x2,(x1)
+            ResetVector + 16 -> BigInt("00100073", 16),
+            address -> (BigInt(random.nextInt()) & ((BigInt(1) << 32) - 1)))
+          var events = Seq.empty[TraceSample]
+          var id7Reads = 0
+          var id7Writes = 0
+          try {
+            events = throughFirstTrap(runProgram(dut, program, cycles = 1200,
+              arReadyForCycle = cycle => schedule.arReady(cycle),
+              rValidForCycle = cycle => schedule.rValid(cycle),
+              readSelectForCycle = (_, pending) => {
+                val candidates = pending.indices.filter(index =>
+                  !pending.take(index).exists(_._1 == pending(index)._1))
+                if (candidates.isEmpty) 0 else candidates(selectorRandom.nextInt(candidates.size))
+              },
+              rResponse = (id, responseAddress) =>
+                if (id == 7 && responseAddress == address) 2 else 0,
+              awReadyForCycle = cycle => schedule.awReady(cycle),
+              wReadyForCycle = cycle => schedule.wReady(cycle),
+              bValidForCycle = cycle => schedule.bValid(cycle),
+              observeCycle = (core, _) => {
+                val arFire = core.io.axi.ar.valid.peek().litToBoolean &&
+                  core.io.axi.ar.ready.peek().litToBoolean
+                val awFire = core.io.axi.aw.valid.peek().litToBoolean &&
+                  core.io.axi.aw.ready.peek().litToBoolean
+                if (arFire && core.io.axi.ar.bits.id.peek().litValue == 7) id7Reads += 1
+                if (awFire && core.io.axi.aw.bits.id.peek().litValue == 7) id7Writes += 1
+              }))
+            withClue(s"seed=0x${java.lang.Long.toHexString(seed)}, trace=$events") {
+              assert(id7Reads == 1 && id7Writes == 0,
+                s"faulting LR issued unexpected ID-7 traffic: reads=$id7Reads writes=$id7Writes")
+              assert(events.map(_.pc) == Seq(ResetVector, ResetVector + 4, ResetVector + 8))
+              assert(events.last.trap && !events.last.gprWrite && events.last.cause == 7 &&
+                events.last.trapValue == address)
+            }
+          } catch {
+            case failure: Throwable =>
+              saveM3AxiStressFailure(seed, "random-lr-rresp-error", schedule, events,
+                Some(selectorSeed), Some(program))
               throw failure
           }
         }
