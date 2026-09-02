@@ -3453,7 +3453,9 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
         clearInputs(dut)
         var m0Ingress = false
         var m1Ingress = false
+        val dualIngressCycles = scala.collection.mutable.ArrayBuffer.empty[Int]
         val forwardCycles = scala.collection.mutable.ArrayBuffer.empty[(Int, Boolean, Boolean)]
+        val dualL1dRequestCycles = scala.collection.mutable.ArrayBuffer.empty[Int]
         val l1dRequests = scala.collection.mutable.ArrayBuffer.empty[BigInt]
         val firstLine = BigInt("80001000", 16)
         val secondLine = BigInt("80002000", 16)
@@ -3467,11 +3469,17 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
           secondLine -> BigInt("55667788", 16)
         ), cycles = 384, observeCycle = (core, cycle) => {
           val observation = core.io.m2Observation.get
-          m0Ingress ||= observation.m0Ingress.peek().litToBoolean
-          m1Ingress ||= observation.m1Ingress.peek().litToBoolean
+          val m0Fire = observation.m0Ingress.peek().litToBoolean
+          val m1Fire = observation.m1Ingress.peek().litToBoolean
+          m0Ingress ||= m0Fire
+          m1Ingress ||= m1Fire
+          if (m0Fire && m1Fire) dualIngressCycles += cycle
           val forward0 = observation.loadForwardValid(0).peek().litToBoolean
           val forward1 = observation.loadForwardValid(1).peek().litToBoolean
           if (forward0 || forward1) forwardCycles += ((cycle, forward0, forward1))
+          val l1dFire0 = observation.l1dRequest(0).peek().litToBoolean
+          val l1dFire1 = observation.l1dRequest(1).peek().litToBoolean
+          if (l1dFire0 && l1dFire1) dualL1dRequestCycles += cycle
           for (lane <- 0 until 2) {
             if (observation.l1dRequest(lane).peek().litToBoolean) {
               l1dRequests += observation.l1dRequestTag(lane).peek().litValue
@@ -3481,6 +3489,11 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
 
         assert(m0Ingress && m1Ingress,
           s"independent loads did not enter both LSU owners: $events")
+        assert(dualIngressCycles.nonEmpty,
+          s"independent loads never entered M0/M1 together: $dualIngressCycles")
+        assert(dualL1dRequestCycles.nonEmpty,
+          s"independent loads never reached both L1D ports together: " +
+            s"ingress=$dualIngressCycles forwards=$forwardCycles l1d=$l1dRequests")
         val firstLoad = events.find(_.pc == ResetVector + 8).getOrElse(
           fail(s"M1-owned load did not retire: forwards=$forwardCycles " +
             s"l1dRequests=$l1dRequests events=$events"))

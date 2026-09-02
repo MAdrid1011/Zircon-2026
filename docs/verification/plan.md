@@ -122,6 +122,14 @@ L1D owners but exactly one target-line AXI refill and both exact GPR/memory
 retirement metadata. The latest local run passes 1/1 in 33.322 seconds;
 failures persist the seed, schedule, program, and retire trace.
 
+`DualLSUIngressSpec` also drives independent cacheable M0/M1 loads with two
+live ROB contexts and requires both LQ forward ports to assert in the same
+cycle, in ROB-age order. The corresponding deterministic `CoreShellSpec`
+program requires simultaneous M0/M1 ingress and simultaneous two-port L1D
+request handshakes before checking both exact load retirements. This proves
+the uncontented top-level dual-LSU path; bank/set/victim and recovery conflict
+matrices remain separate obligations.
+
 `make test-m3-partial-store-forward` runs byte and halfword cases for each of
 three explicit seeds `0x5eedfd01`--`0x5eedfd03` through independent five-channel
 AXI backpressure. The byte program stores byte-1 of an initially uncached

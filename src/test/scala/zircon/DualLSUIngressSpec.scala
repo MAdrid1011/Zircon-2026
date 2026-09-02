@@ -159,6 +159,32 @@ class DualLSUIngressSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("forwards independent M0 and M1 cacheable loads in one LQ cycle") {
+      simulate(new DualLSUIngress) { dut =>
+        clear(dut)
+        driveIssue(dut, m1 = false, tag = 3, IntOperation.Lw, UopClass.Load,
+          EndpointMask.M0, basePhysical = 6)
+        driveIssue(dut, m1 = true, tag = 4, IntOperation.Lw, UopClass.Load,
+          EndpointMask.CacheableLoadCandidate, basePhysical = 8)
+        context(dut, lane = 0, tag = 3)
+        context(dut, lane = 1, tag = 4)
+        dut.io.prfReadData(0).poke(BigInt("80001000", 16))
+        dut.io.prfReadData(2).poke(BigInt("80002000", 16))
+
+        dut.io.m0Issue.ready.expect(true)
+        dut.io.m1Issue.ready.expect(true)
+        dut.clock.step()
+        clearIssues(dut)
+        dut.clock.step()
+
+        dut.io.loadCount.expect(2)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.robTag.expect(3)
+        dut.io.loadForward(1).valid.expect(true)
+        dut.io.loadForward(1).bits.robTag.expect(4)
+      }
+    }
+
     it("replays a device candidate to M0 behind a direct store") {
       simulate(new DualLSUIngress) { dut =>
         clear(dut)
