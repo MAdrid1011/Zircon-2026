@@ -710,6 +710,69 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("serializes a younger miss behind an older hit without losing either owner") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val hitLine = BigInt("80005c00", 16)
+        val missLine = BigInt("80005d00", 16)
+        val words = Seq.tabulate(8)(word => BigInt("66000000", 16) + word)
+
+        submit(dut, tag = 1, address = hitLine)
+        issueRefill(dut, words, lineAddress = hitLine)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // Lane 1 is older. It is a hit, while lane 0 must remain intact until
+        // the hit result is captured and the miss receives a real owner.
+        presentLoad(dut, lane = 0, tag = 7, address = missLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = hitLine + 8)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Lookup.valid.expect(false)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        issueRefill(dut, words, lineAddress = missLine)
+
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(words(2))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(words(1))
+      }
+    }
+
+    it("accepts only the older owner from a different-line dual-miss pair") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val youngerLine = BigInt("80006000", 16)
+        val olderLine = BigInt("80006100", 16)
+
+        // The simultaneous pair cannot allocate two independent miss owners
+        // yet. Port 1 wins by ROB age, and the younger port must neither fire
+        // nor create a second L2 probe before replay.
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request.foreach(_.valid.poke(false))
+
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(olderLine)
+        dut.io.dataRequest.valid.expect(false)
+        dut.io.completion.valid.expect(false)
+      }
+    }
+
     it("drains a flushed L2 miss transfer without creating a fallback AXI refill") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

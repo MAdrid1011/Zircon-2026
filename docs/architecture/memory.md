@@ -312,10 +312,11 @@ directly. It accepts two cache hits only when their four-way word banks differ
 and both exact result slots are available; a same-bank or same-address pair
 accepts only the older ROB tag. Two same-line misses allocate or reuse one MSHR
 only when two waiter credits exist, then return both exact owners from one
-refill. A hit/miss or different-line miss pair still accepts only the older
-request, so neither a second MSHR nor a second victim/L2 transfer is fabricated.
-Completing the remaining matrix requires directed hit/miss, different-line dual
-miss, MSHR/waiter/victim-full, L2-backpressure, and recovery evidence.
+refill. A hit/miss or different-line miss pair currently accepts only the older
+request; directed tests prove the younger candidate neither fires nor creates a
+second MSHR/L2 owner before replay. Completing the frozen throughput matrix
+requires resource-safe concurrent hit/miss and different-line dual-miss
+admission, then MSHR/waiter/victim/L2 pressure and recovery evidence.
 
 L2 has four ways and four MSHRs. The 4 KiB (32-set) configuration is the default;
 8 KiB is solely the M5 A/B point. L2 dynamically serves I and D demand and does

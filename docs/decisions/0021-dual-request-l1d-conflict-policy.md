@@ -63,6 +63,10 @@ combinational path.
 - Tests must cover dual hit, hit/miss, same-line secondary merge, dual miss,
   same bank/set/address, MSHR full, waiter full, dirty-victim pressure, L2
   backpressure, response order, and squash/flush for each accepted owner.
+- The current directed matrix proves that a lane-1-old hit beats a lane-0-young
+  miss, and that a lane-1-old different-line miss is the sole admitted owner.
+  These are conservative replay checks, not evidence for the eventual
+  resource-safe concurrent hit/miss or dual-miss rows.
 - The static-area ledger must include added port state, result buffering,
   conflict comparators, and any RAM port replication. A later timing report
   must identify whether a failing path is dominated by RAM routing or logic.
