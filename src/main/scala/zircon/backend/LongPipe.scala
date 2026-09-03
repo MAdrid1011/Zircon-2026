@@ -34,35 +34,38 @@ class ZirconUIntMul16 extends BlackBox with HasBlackBoxInline {
       |""".stripMargin)
 }
 
-/** The floating E2 path is mutually exclusive with LongPipe. Keep its
-  * 24x24 significand multiply in LUT fabric so the fixed FPGA DSP budget is
-  * reserved for the four shared integer 16x16 partial products. */
-class ZirconUIntMul24Lut extends BlackBox with HasBlackBoxInline {
-  override val desiredName: String = "ZirconUIntMul24Lut"
-
+/** One physical multiplier shared by integer MUL and floating multiply/FMA.
+  * Both clients present 32-bit zero-extended operands; the implementation
+  * deliberately contains only four 16x16 partial-product primitives. */
+class ZirconSharedMultiplier extends Module {
   val io = IO(new Bundle {
-    val a = Input(UInt(24.W))
-    val b = Input(UInt(24.W))
-    val y = Output(UInt(48.W))
+    val enable = Input(Bool())
+    val lhs = Input(UInt(32.W))
+    val rhs = Input(UInt(32.W))
+    val product = Output(UInt(64.W))
   })
 
-  setInline("ZirconUIntMul24Lut.sv",
-    """(* use_dsp = "no" *)
-      |module ZirconUIntMul24Lut(
-      |  input wire [23:0] a,
-      |  input wire [23:0] b,
-      |  output wire [47:0] y
-      |);
-      |  assign y = a * b;
-      |endmodule
-      |""".stripMargin)
+  private def partial(a: UInt, b: UInt): UInt = {
+    val unit = Module(new ZirconUIntMul16)
+    unit.io.a := a
+    unit.io.b := b
+    unit.io.y
+  }
+  val p00 = partial(io.lhs(15, 0), io.rhs(15, 0))
+  val p01 = partial(io.lhs(15, 0), io.rhs(31, 16))
+  val p10 = partial(io.lhs(31, 16), io.rhs(15, 0))
+  val p11 = partial(io.lhs(31, 16), io.rhs(31, 16))
+  val productWide = p00.pad(64) +& (p01.pad(64) << 16) +&
+    (p10.pad(64) << 16) +& (p11.pad(64) << 32)
+  io.product := Mux(io.enable, productWide(63, 0), 0.U)
 }
 
 /** E2 RV32M engine. The integer multiplier is composed only from four 16x16
   * partial products. Division uses one restoring step per active cycle.
   */
 class LongPipe(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    useExternalMultiplier: Boolean = false
 ) extends Module {
   val io = IO(new Bundle {
     val input = Flipped(Decoupled(new LongPipeRequest(config)))
@@ -70,6 +73,10 @@ class LongPipe(
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
+    val multiplierEnable = Output(Bool())
+    val multiplierLhs = Output(UInt(32.W))
+    val multiplierRhs = Output(UInt(32.W))
+    val multiplierProduct = Input(UInt(64.W))
   })
 
   private def negate32(value: UInt): UInt = (0.U(32.W) - value)(31, 0)
@@ -77,29 +84,22 @@ class LongPipe(
   private def magnitude(value: UInt): UInt =
     Mux(value(31), negate32(value), value)
 
-  private def unsignedProduct(lhs: UInt, rhs: UInt): UInt = {
-    def partialProduct(a: UInt, b: UInt): UInt = {
-      val multiplier = Module(new ZirconUIntMul16)
-      multiplier.io.a := a
-      multiplier.io.b := b
-      multiplier.io.y
-    }
-    val p00 = partialProduct(lhs(15, 0), rhs(15, 0))
-    val p01 = partialProduct(lhs(15, 0), rhs(31, 16))
-    val p10 = partialProduct(lhs(31, 16), rhs(15, 0))
-    val p11 = partialProduct(lhs(31, 16), rhs(31, 16))
-    val productWide = p00.pad(64) +& (p01.pad(64) << 16) +&
-      (p10.pad(64) << 16) +& (p11.pad(64) << 32)
-    val product = Wire(UInt(64.W))
-    product := productWide(63, 0)
-    product
-  }
-
   val results = Module(new CompletionBuffer(config, depth = 2))
   results.io.robHeadTag := io.robHeadTag
   results.io.squash := io.squash
   results.io.flush := io.flush
   io.completion <> results.io.dequeue
+
+  // Unit-level simulations instantiate LongPipe by itself. Keep that use
+  // self-contained while allowing ZirconCore to provide the sole production
+  // multiplier explicitly.
+  val localMultiplier = if (useExternalMultiplier) None else
+    Some(Module(new ZirconSharedMultiplier))
+  localMultiplier.foreach { multiplier =>
+    multiplier.io.enable := io.multiplierEnable
+    multiplier.io.lhs := io.multiplierLhs
+    multiplier.io.rhs := io.multiplierRhs
+  }
 
   val active = RegInit(false.B)
   val activeUop = Reg(new UopRef(config))
@@ -133,7 +133,10 @@ class LongPipe(
   // minus the high-half correction for each negative operand; signed(a)*u(b)
   // needs only the lhs correction.  This keeps the shared partial-product
   // multiplier at four 16x16 blocks instead of triplicating it.
-  val rawProduct = unsignedProduct(activeLhs, activeRhs)
+  io.multiplierEnable := active && !activeIsDivide
+  io.multiplierLhs := activeLhs
+  io.multiplierRhs := activeRhs
+  val rawProduct = localMultiplier.map(_.io.product).getOrElse(io.multiplierProduct)
   val lhsCorrection = Mux(activeLhs(31), Cat(activeRhs, 0.U(32.W)), 0.U(64.W))
   val rhsCorrection = Mux(activeRhs(31), Cat(activeLhs, 0.U(32.W)), 0.U(64.W))
   val signedProduct = rawProduct - lhsCorrection - rhsCorrection

@@ -6,6 +6,7 @@ import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, FloatingCommitState,
   FloatingIssueQueue, FloatingMovePipe, FloatingResultBridge, FloatingScoreboard,
   LongIssueQueue, LongPipe, M1BackendSubsystem, MemIssueQueue, ROBTagOrder,
+  ZirconSharedMultiplier,
   SourceKind, UopClass}
 import zircon.frontend.{IntOperation, M1Frontend}
 import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngine,
@@ -32,10 +33,11 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val frontend = Module(new M1Frontend(cfg))
   val backend = Module(new M1BackendSubsystem(cfg))
   val longQueue = Module(new LongIssueQueue(cfg))
-  val longPipe = Module(new LongPipe(cfg))
+  val longPipe = Module(new LongPipe(cfg, useExternalMultiplier = true))
+  val sharedMultiplier = Module(new ZirconSharedMultiplier)
   val floatingQueue = Module(new FloatingIssueQueue(cfg))
   val floatingScoreboard = Module(new FloatingScoreboard(cfg))
-  val floatingMovePipe = Module(new FloatingMovePipe(cfg))
+  val floatingMovePipe = Module(new FloatingMovePipe(cfg, useExternalMultiplier = true))
   val floatingResultBridge = Module(new FloatingResultBridge(cfg))
   val floatingCommitState = Module(new FloatingCommitState(cfg))
   val floatingLoadArbiter = Module(new Arbiter(new zircon.backend.FloatingResult(cfg), 2))
@@ -146,6 +148,20 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     floatingQueue.io.issue.bits.floatingDestination
   floatingMovePipe.io.input.bits.roundingMode :=
     floatingQueue.io.issue.bits.floatingRoundingMode
+
+  // Integer MUL and floating MUL/FMA share one physical four-partial-product
+  // multiplier. E2 arbitration guarantees that only the selected pipe asks
+  // for the resource in a cycle.
+  sharedMultiplier.io.enable := longPipe.io.multiplierEnable ||
+    floatingMovePipe.io.multiplierEnable
+  sharedMultiplier.io.lhs := Mux(longPipe.io.multiplierEnable,
+    longPipe.io.multiplierLhs, floatingMovePipe.io.multiplierLhs)
+  sharedMultiplier.io.rhs := Mux(longPipe.io.multiplierEnable,
+    longPipe.io.multiplierRhs, floatingMovePipe.io.multiplierRhs)
+  longPipe.io.multiplierProduct := sharedMultiplier.io.product
+  floatingMovePipe.io.multiplierProduct := sharedMultiplier.io.product
+  assert(!(longPipe.io.multiplierEnable && floatingMovePipe.io.multiplierEnable),
+    "LongPipe and FloatingMovePipe contended for the shared multiplier")
   floatingQueue.io.issue.ready := selectFloatingE2 && floatingMovePipe.io.input.ready &&
     auxiliaryRead.io.grant(0)
 

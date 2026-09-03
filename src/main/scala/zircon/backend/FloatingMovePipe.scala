@@ -39,7 +39,8 @@ class FloatingMoveResult(config: ZirconCoreConfig) extends Bundle {
   * matching commit tag.
   */
 class FloatingMovePipe(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    useExternalMultiplier: Boolean = false
 ) extends Module {
   val io = IO(new Bundle {
     val input = Flipped(Decoupled(new FloatingMoveRequest(config)))
@@ -47,6 +48,10 @@ class FloatingMovePipe(
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
+    val multiplierEnable = Output(Bool())
+    val multiplierLhs = Output(UInt(32.W))
+    val multiplierRhs = Output(UInt(32.W))
+    val multiplierProduct = Input(UInt(64.W))
   })
 
   private def supported(operation: FloatingOperation.Type): Bool =
@@ -94,6 +99,17 @@ class FloatingMovePipe(
   val sqrtSpecialResult = Reg(UInt(32.W))
   val sqrtSpecialFlags = Reg(UInt(5.W))
   val recoveryBlocked = io.flush || io.squash.valid
+
+  // Standalone unit tests use an internal instance; the production core sets
+  // useExternalMultiplier and connects this pipe to ZirconCore's one shared
+  // resource.
+  val localMultiplier = if (useExternalMultiplier) None else
+    Some(Module(new ZirconSharedMultiplier))
+  localMultiplier.foreach { multiplier =>
+    multiplier.io.enable := io.multiplierEnable
+    multiplier.io.lhs := io.multiplierLhs
+    multiplier.io.rhs := io.multiplierRhs
+  }
 
   val sign = MuxLookup(request.operation.asUInt, 0.U(1.W))(Seq(
     FloatingOperation.FsgnjS.asUInt -> request.floatSource(1)(31),
@@ -261,10 +277,11 @@ class FloatingMovePipe(
     ((Cat(0.U(1.W), lhsArithmeticExponent) +& 256.U)(9, 0) - multiplicationLhsShift)
   val multiplicationRhsExponent =
     ((Cat(0.U(1.W), rhsArithmeticExponent) +& 256.U)(9, 0) - multiplicationRhsShift)
-  val multiplicationUnit = Module(new ZirconUIntMul24Lut)
-  multiplicationUnit.io.a := multiplicationLhsSignificand
-  multiplicationUnit.io.b := multiplicationRhsSignificand
-  val multiplicationProduct = multiplicationUnit.io.y
+  io.multiplierEnable := active && (multiplication || fma)
+  io.multiplierLhs := Cat(0.U(8.W), multiplicationLhsSignificand)
+  io.multiplierRhs := Cat(0.U(8.W), multiplicationRhsSignificand)
+  val multiplicationProduct = localMultiplier.map(_.io.product(47, 0)).getOrElse(
+    io.multiplierProduct(47, 0))
   val multiplicationProductHigh = multiplicationProduct(47)
   val multiplicationProductShift = Mux(multiplicationProductHigh, 21.U, 20.U)
   val multiplicationNormalized = rightJam(multiplicationProduct,

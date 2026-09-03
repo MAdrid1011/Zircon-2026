@@ -12,6 +12,7 @@ memory，不产生 control redirect，也不修改 CSR/FPR。
 | issue | 2 enqueue / 1 E2 start | `LongIssueQueue` |
 | operand read | 与 E1 共享 2 source read | M2 operand admission |
 | active operation | 1 | `LongPipe` |
+| multiply resource | 4 x 16x16 partial products | `ZirconSharedMultiplier` (top-level, shared with FPU) |
 | result buffer | 2 entries | `LongPipe` |
 | global start | E0 + E1 + E2 at most 3 | top-level issue arbitration |
 | global completion | at most 2 | existing completion router |
@@ -47,6 +48,12 @@ replicating the partial-product array.
 Each partial product is emitted through `ZirconUIntMul16` with explicit 16-bit
 operands. This preserves the four-DSP inference boundary in Vivado instead of
 allowing zero-extension in generated Verilog to widen each multiply.
+
+`ZirconCore` instantiates exactly one `ZirconSharedMultiplier`; `LongPipe` and
+`FloatingMovePipe` expose operand/request ports and are mutually exclusive at
+the E2 arbiter. Standalone pipe simulations use a local fallback instance so
+unit tests retain the same functional contract without adding a second
+production multiplier.
 
 ## State, recovery, and completion
 
