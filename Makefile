@@ -36,7 +36,7 @@ test-m3-store:
 # path, and remains bounded below the five-minute component-simulation gate.
 test-m3-load-boundary:
 	./scripts/sbtw "testOnly zircon.DualLSUIngressSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "without L1D"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z inaccessible'
 
 # Fast M3 two-candidate load-forward tier. It checks the retained-LQ boundary
 # plus direct two-lane L1D different-bank hits, same-bank/address replay,
