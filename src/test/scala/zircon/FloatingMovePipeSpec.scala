@@ -255,6 +255,18 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
         check(FloatingOperation.FmsubS, BigInt("3f800001", 16),
           BigInt("3f800001", 16), BigInt("3f800002", 16),
           BigInt("28800000", 16), flags = 0)
+        check(FloatingOperation.FmaddS, BigInt("00000000", 16),
+          BigInt("7f800000", 16), BigInt("3f800000", 16),
+          BigInt("7fc00000", 16), flags = 16)
+        check(FloatingOperation.FmaddS, BigInt("7f800000", 16),
+          BigInt("40000000", 16), BigInt("ff800000", 16),
+          BigInt("7fc00000", 16), flags = 16)
+        check(FloatingOperation.FmaddS, BigInt("7fc00001", 16),
+          BigInt("3f800000", 16), BigInt("3f800000", 16),
+          BigInt("7fc00000", 16), flags = 0)
+        check(FloatingOperation.FmsubS, BigInt("00000000", 16),
+          BigInt("3f800000", 16), BigInt("7f800000", 16),
+          BigInt("ff800000", 16), flags = 0)
       }
     }
 
