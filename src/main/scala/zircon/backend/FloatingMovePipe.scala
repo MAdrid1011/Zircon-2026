@@ -345,23 +345,20 @@ class FloatingMovePipe(
 
   val fmaLhsZero = lhs(30, 0) === 0.U
   val fmaRhsZero = rhs(30, 0) === 0.U
-  val fmaLhsRawSignificand = Mux(lhsExponent === 0.U,
-    Cat(0.U(1.W), lhsFraction), Cat(1.U(1.W), lhsFraction))
-  val fmaRhsRawSignificand = Mux(rhsExponent === 0.U,
-    Cat(0.U(1.W), rhsFraction), Cat(1.U(1.W), rhsFraction))
-  val fmaLhsLeadingShift = Mux(fmaLhsZero, 0.U(5.W),
-    PriorityEncoder(Reverse(fmaLhsRawSignificand)))
-  val fmaRhsLeadingShift = Mux(fmaRhsZero, 0.U(5.W),
-    PriorityEncoder(Reverse(fmaRhsRawSignificand)))
-  val fmaLhsSignificand = (fmaLhsRawSignificand << fmaLhsLeadingShift)(23, 0)
-  val fmaRhsSignificand = (fmaRhsRawSignificand << fmaRhsLeadingShift)(23, 0)
+  // FMUL and FMA are mutually exclusive in this single-entry E2 pipe. Reuse
+  // the normalized operands and product node so the FPU does not infer a
+  // second multiplier/DSP for the fused path.
+  val fmaLhsLeadingShift = multiplicationLhsShift
+  val fmaRhsLeadingShift = multiplicationRhsShift
+  val fmaLhsSignificand = multiplicationLhsSignificand
+  val fmaRhsSignificand = multiplicationRhsSignificand
   val fmaLhsTopCoord = Mux(fmaLhsZero, 0.U(11.W),
     Mux(lhsExponent === 0.U, 513.U(11.W) - fmaLhsLeadingShift,
       512.U(11.W) + lhsExponent))
   val fmaRhsTopCoord = Mux(fmaRhsZero, 0.U(11.W),
     Mux(rhsExponent === 0.U, 513.U(11.W) - fmaRhsLeadingShift,
       512.U(11.W) + rhsExponent))
-  val fmaProductRaw = fmaLhsSignificand * fmaRhsSignificand
+  val fmaProductRaw = multiplicationProduct
   val fmaProductRawZero = fmaLhsZero || fmaRhsZero
   val fmaProductRawTopCoord = (Cat(0.U(1.W), fmaLhsTopCoord) +&
     Cat(0.U(1.W), fmaRhsTopCoord) -
