@@ -29,6 +29,12 @@ DSP/LUT 或 100 MHz 时序达标。
 XPM/RAMB，DSP 表显示四个 `16x16` 乘法 primitive。该运行在约 30 分钟时仍停在
 timing optimization，按约定终止，未生成 utilization/WNS/checkpoint，不能作为
 面积或 100 MHz 通过证据。
+随后以 `AreaOptimized_medium` 完成同一固定器件的 synthesis-only 实验并保存
+checkpoint：synthesis LUT 71,457/134,600（53.09%）、FF 35,185、BRAM tile
+133/365（36.44%）、DSP 4/740（0.54%）。层级热点为 M1Frontend 20,888 LUT、
+M1BackendSubsystem 20,612、ExclusiveL2TransferStore 9,958 和 DualLSUIngress
+6,133；这些数字仍是 synthesis 初步值，正式门禁必须继续执行 place/route、WNS
+和最终 utilization。
 
 同日新增顶层 `MEI > MSI > MTI` 优先级回归，`make test-m4-interrupt-priority`
 以三线同时 pending 验证 `mcause=0x8000000b`、精确 EPC、MRET 和被中断指令单次
