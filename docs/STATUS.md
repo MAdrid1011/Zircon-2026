@@ -2,7 +2,12 @@
 
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
-最新完整 `L1DLoadCacheSpec`（2026-09-03）为 55/55 tests、166 秒，仍低于五分钟组件门槛。除既有 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、反向 refill response order 和饱和 owner recovery 外，新增用例明确覆盖 dirty victim 已 transfer 到 L2、但本地 demand 尚未发 L2 probe 时的 global flush：flush 只能释放本地 MSHR，不能产生 stale probe、AXI refill 或 completion；后续 fresh miss 建立独立 owner。新压力交叉让一个 dirty-victim transfer 已交给 L2、但其本地 probe 尚未发出，并以三条独立 miss 填满其余 MSHR；global flush 必须释放四项本地 owner、不产生 stale L2/AXI/completion，并允许 fresh miss 获得新 credit。另一个新增 cell 令 lane 1 的 dirty-victim transfer 已被 L2 接收、lane 0 仍是未接受 replay；global flush 必须移除两个 local demand、不产生 stale probe/refill/completion，并允许 fresh miss 获得新 MSHR credit。另一个新增 case 使两个 lane 在同一 cold word 上同时进入 one-MSHR merge，要求仅一次 refill、两个 exact waiter 和按 ROB age 的相同 word completion。最新 waiter recovery cases 则让一条 MSHR 用满八个 waiter 后仅保留最老 tag：在 probe 前，选择性 squash 必须释放其余 credit、允许新同 line waiter 合并；在 probe 已接受后，必须保留 L2/AXI ownership并只完成该 survivor。
+2026-09-03 新增同 set 单 invalid-way 双 miss 矩阵：`make test-m3-dual-resource`
+为 1/1（约 5 秒）。该用例验证一条 resident line 占用一个 way 时，较老 miss
+独占唯一 invalid way/MSHR，年轻 miss 保持 replay，不产生第二笔 L2 transfer；
+older refill 完成后年轻请求才重新取得 ingress。该证据补齐了“两路都 invalid”和
+“两路都需替换”之间的资源边界，未改变当前 M3 仍为 partially completed 的结论。
+最新完整 `L1DLoadCacheSpec`（2026-09-03）为 56/56 tests、56 秒，仍低于五分钟组件门槛。除既有 MSHR、waiter、dirty-victim L2 backpressure、dirty-victim hit/miss/dual-miss replay、反向 refill response order 和饱和 owner recovery 外，新增用例明确覆盖 dirty victim 已 transfer 到 L2、但本地 demand 尚未发 L2 probe 时的 global flush：flush 只能释放本地 MSHR，不能产生 stale probe、AXI refill 或 completion；后续 fresh miss 建立独立 owner。新压力交叉让一个 dirty-victim transfer 已交给 L2、但其本地 probe 尚未发出，并以三条独立 miss 填满其余 MSHR；global flush 必须释放四项本地 owner、不产生 stale L2/AXI/completion，并允许 fresh miss 获得新 credit。另一个新增 cell 令 lane 1 的 dirty-victim transfer 已被 L2 接收、lane 0 仍是未接受 replay；global flush 必须移除两个 local demand、不产生 stale probe/refill/completion，并允许 fresh miss 获得新 MSHR credit。另一个新增 case 使两个 lane 在同一 cold word 上同时进入 one-MSHR merge，要求仅一次 refill、两个 exact waiter 和按 ROB age 的相同 word completion。最新 waiter recovery cases 则让一条 MSHR 用满八个 waiter 后仅保留最老 tag：在 probe 前，选择性 squash 必须释放其余 credit、允许新同 line waiter 合并；在 probe 已接受后，必须保留 L2/AXI ownership并只完成该 survivor。
 最新完整 `ExclusiveL2TransferStoreSpec`（2026-09-03）为 12/12 tests、75 秒。新增 exact dirty-line cleanup 在两项 victim FIFO 已满时的回压与 dequeue/enqueue 时序验证：原 FIFO 头先 drain，下一周期 cleanup target 才进入 tail，三项 dirty line 的地址与 payload 顺序保持精确。
 同 set hit/miss 在存在另一个 invalid way 时现已同拍受理；两路 resident/dirty-victim replacement 仍保持 oldest-only。
 不同 set pair 中若年轻 miss 需要 resident victim，`L1DLoadCacheSpec` 证明较老 hit 单独握手，年轻 miss 只在下一周期得到唯一 L1D-to-L2 transfer owner。
@@ -76,7 +81,7 @@ with reserved `frm=5`.
 `ExclusiveL2TransferStore` now stores each way in an explicit `L2LineMemory`
 bank. Its simulation branch follows the Zircon-2024 registered-address RAM
 pattern, while Vivado selects XPM block RAM with one-cycle read latency.
-`ExclusiveL2TransferStoreSpec` (12/12), `L1DLoadCacheSpec` (55/55), and
+`ExclusiveL2TransferStoreSpec` (12/12), `L1DLoadCacheSpec` (56/56), and
 `L1InstructionCacheSpec` (11/11) pass after the change. Vivado preliminary
 mapping on `xc7a200tfbg676-2L` reports four `32 x 256` banks using 16
 `RAMB36` total, with the L2 line store absent from the distributed-RAM table.
@@ -89,7 +94,7 @@ post-route WNS, and bitstream evidence remain open.
 large distributed `Reg(Vec(...))` data array. The behavioral branch keeps the
 existing zero-latency unit-test model; the Vivado branch uses read-first XPM
 true-dual-port block RAM with retained hit/store metadata. The focused cache
-and top-level checks pass: 55/55 L1D tests, 85/85 combined L1I/L1D/L2/dual-LSU
+and top-level checks pass: 56/56 L1D tests, 85/85 combined L1I/L1D/L2/dual-LSU
 tests, and four selected CoreShell ownership cases. Vivado preliminary mapping
 on `xc7a200tfbg676-2L` reports eight `16 x 256` L1D RAM objects in block RAM.
 The synthesis run was intentionally stopped during timing optimization after

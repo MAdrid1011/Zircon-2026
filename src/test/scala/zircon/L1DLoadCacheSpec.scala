@@ -1409,6 +1409,53 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("serializes same-set dual misses when only one way is invalid") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val residentLine = BigInt("8000e000", 16)
+        val youngerLine = BigInt("8000e200", 16)
+        val olderLine = BigInt("8000e400", 16)
+        val residentWords = Seq.tabulate(8)(word => BigInt("61000000", 16) + word)
+        val olderWords = Seq.tabulate(8)(word => BigInt("62000000", 16) + word)
+
+        // One line occupies a way in this set, leaving exactly one invalid
+        // way. The two candidates map to the same set but different tags.
+        // There is therefore no legal two-owner admission: only the older
+        // ROB request may cross the ingress boundary.
+        submit(dut, tag = 1, address = residentLine)
+        issueRefill(dut, residentWords, lineAddress = residentLine)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        presentLoad(dut, lane = 0, tag = 7, address = youngerLine + 4)
+        presentLoad(dut, lane = 1, tag = 3, address = olderLine + 12)
+        dut.io.request(0).ready.expect(false)
+        dut.io.request(1).ready.expect(true)
+        dut.io.l2Insert.valid.expect(false)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(olderLine)
+
+        issueRefill(dut, olderWords, lineAddress = olderLine, mshrIndex = 0)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(olderWords(3))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        // The younger request stayed at the boundary and can now replay
+        // using the released invalid-way/MSHR credit.
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(youngerLine)
+      }
+    }
+
     it("admits only the older same-set miss when both ways need replacement") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

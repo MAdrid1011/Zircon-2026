@@ -1,4 +1,4 @@
-.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-dual-load-merge test-m3-partial-store-forward test-m3-mshr-pressure test-m3-l2 test-m3-ordered-io test-m3-ordered-io-top test-m3-device-io test-m3-axi-stress test-m3-axi-wrong-path-drain test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-lrsc-random test-m3-lrsc-interrupt test-m3-lrsc-errors test-m3-sc-errors test-m3-lrsc-granularity test-m3-lrsc-replacement test-m3-atomic-errors test-m3-external-coherence test-m3-ordering test-m4-fp-move verilog platform-verilog trace-verilog fpga-impl test-fpga-bram software sim-unit sim-smoke static-area \
+.PHONY: compile test test-m3-store test-m3-load-boundary test-m3-dual-load-forward test-m3-dual-load-merge test-m3-dual-resource test-m3-partial-store-forward test-m3-mshr-pressure test-m3-l2 test-m3-ordered-io test-m3-ordered-io-top test-m3-device-io test-m3-axi-stress test-m3-axi-wrong-path-drain test-m3-axi-reset test-m3-axi-long test-m3-axi-faults test-m3-fence-pressure test-m3-axi-mixed test-m3-atomic test-m3-atomic-axi test-m3-atomic-random test-m3-lrsc-random test-m3-lrsc-interrupt test-m3-lrsc-errors test-m3-sc-errors test-m3-lrsc-granularity test-m3-lrsc-replacement test-m3-atomic-errors test-m3-external-coherence test-m3-ordering test-m4-fp-move verilog platform-verilog trace-verilog fpga-impl test-fpga-bram software sim-unit sim-smoke static-area \
 	static-area-check verify-m0 test-fpga-timing-evidence verify-fpga-timing clean status
 
 compile:
@@ -55,6 +55,11 @@ test-m3-dual-load-forward:
 test-m3-dual-load-merge:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-address resident hits"'
+
+# Focused same-set resource matrix: one invalid way must serialize the pair
+# instead of fabricating a second MSHR or L2 transfer owner.
+test-m3-dual-resource:
+	./scripts/sbtw 'testOnly zircon.L1DLoadCacheSpec -- -z "serializes same-set dual misses when only one way is invalid"'
 
 # Nine explicit-seed complete-core partial-store forwarding runs. They require
 # older SB and both aligned SH lane pairs to merge with a cacheable refill read
