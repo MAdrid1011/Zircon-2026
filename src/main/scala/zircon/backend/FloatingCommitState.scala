@@ -30,8 +30,8 @@ class FloatingCommitState(
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
 
-    val readAddress = Input(Vec(2, UInt(5.W)))
-    val readData = Output(Vec(2, UInt(32.W)))
+    val readAddress = Input(Vec(3, UInt(5.W)))
+    val readData = Output(Vec(3, UInt(32.W)))
     val fprWrite = Output(Valid(new FloatingRegisterWrite(config)))
     val scoreboardComplete = Output(Valid(new FloatingScoreboardCompletion(config)))
     val fpCommit = Output(Valid(new FloatingStateCommit))

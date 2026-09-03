@@ -17,8 +17,10 @@ class FloatingRegisterFileSpec extends AnyFunSpec with ChiselSim {
         clearWrite(dut)
         dut.io.readAddress(0).poke(0)
         dut.io.readAddress(1).poke(31)
+        dut.io.readAddress(2).poke(0)
         dut.io.readData(0).expect(0)
         dut.io.readData(1).expect(0)
+        dut.io.readData(2).expect(0)
 
         dut.io.write.valid.poke(true)
         dut.io.write.bits.address.poke(0)

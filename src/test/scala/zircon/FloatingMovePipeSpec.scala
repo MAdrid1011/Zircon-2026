@@ -25,7 +25,8 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
   private def drive(dut: FloatingMovePipe, tag: Int,
       operation: FloatingOperation.Type, integerDestination: Int = 0,
       integerSource: BigInt = 0, floatSource0: BigInt = 0,
-      floatSource1: BigInt = 0, floatDestination: Int = 0,
+      floatSource1: BigInt = 0, floatSource2: BigInt = 0,
+      floatDestination: Int = 0,
       roundingMode: Int = 0): Unit = {
     dut.io.input.valid.poke(true)
     dut.io.input.bits.robTag.poke(tag)
@@ -35,6 +36,7 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
     dut.io.input.bits.integerSource.poke(integerSource)
     dut.io.input.bits.floatSource(0).poke(floatSource0)
     dut.io.input.bits.floatSource(1).poke(floatSource1)
+    dut.io.input.bits.floatSource(2).poke(floatSource2)
     dut.io.input.bits.floatDestination.poke(floatDestination)
   }
 
@@ -213,6 +215,46 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
           BigInt("7f800000", 16), 5)
         check(BigInt("7f7fffff", 16), BigInt("40000000", 16), 1,
           BigInt("7f7fffff", 16), 5)
+      }
+    }
+
+    it("executes all four fused multiply-add signs with one final rounding") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, lhs: BigInt, rhs: BigInt,
+            addend: BigInt, expected: BigInt, flags: BigInt = 0): Unit = {
+          drive(dut, tag = 19, operation = operation, floatSource0 = lhs,
+            floatSource1 = rhs, floatSource2 = addend, floatDestination = 6)
+          accept(dut)
+          dut.io.output.valid.expect(false)
+          dut.clock.step()
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(FloatingOperation.FmaddS, BigInt("3fc00000", 16),
+          BigInt("40000000", 16), BigInt("3f000000", 16),
+          BigInt("40600000", 16))
+        check(FloatingOperation.FmsubS, BigInt("3fc00000", 16),
+          BigInt("40000000", 16), BigInt("3f000000", 16),
+          BigInt("40200000", 16))
+        check(FloatingOperation.FnmsubS, BigInt("3fc00000", 16),
+          BigInt("40000000", 16), BigInt("3f000000", 16),
+          BigInt("c0600000", 16))
+        check(FloatingOperation.FnmaddS, BigInt("3fc00000", 16),
+          BigInt("40000000", 16), BigInt("3f000000", 16),
+          BigInt("c0200000", 16))
+
+        // (1 + 2^-23)^2 - (1 + 2^-22) is 2^-46. Rounding the product
+        // before the subtraction would incorrectly produce zero.
+        check(FloatingOperation.FmsubS, BigInt("3f800001", 16),
+          BigInt("3f800001", 16), BigInt("3f800002", 16),
+          BigInt("28800000", 16), flags = 0)
       }
     }
 

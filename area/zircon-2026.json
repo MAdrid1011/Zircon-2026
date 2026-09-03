@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The RV32F E2 path, including five-mode/dynamic conversions, FADD.S/FSUB.S/FMUL.S/FDIV.S/FSQRT.S, FPR/fflags commit state, FS admission barrier, and trace integration is implemented but not yet fully inventoried below. FMA source-read path, floating memory operations, complete differential coverage, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
+    "The RV32F E2 path, including five-mode/dynamic conversions, FADD.S/FSUB.S/FMUL.S/FDIV.S/FSQRT.S/FMA, FPR/fflags commit state, FS admission barrier, and trace integration is implemented but not yet fully inventoried below. Floating memory operations, complete differential coverage, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
   ],
   "storage": [
     {
@@ -79,10 +79,10 @@
       "name": "floating_move_pipe_retained_request",
       "class": "register_payload",
       "entries": 1,
-      "bits_per_entry": 121,
+      "bits_per_entry": 153,
       "instances": 1,
       "replication_factor": 1,
-      "source": "FloatingMovePipe retained FloatingMoveRequest: six-bit ROB tag, five-bit operation, three-bit effective rounding mode, six-bit integer destination, 32-bit integer source, two 32-bit FPR sources, and five-bit FPR destination"
+      "source": "FloatingMovePipe retained FloatingMoveRequest: six-bit ROB tag, five-bit operation, three-bit effective rounding mode, six-bit integer destination, 32-bit integer source, three 32-bit FPR sources, and five-bit FPR destination"
     },
     {
       "name": "floating_move_pipe_control",

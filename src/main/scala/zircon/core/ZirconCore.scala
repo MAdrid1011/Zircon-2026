@@ -150,6 +150,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   floatingCommitState.io.readAddress(0) := floatingQueue.io.issue.bits.floatingSource(0)
   floatingCommitState.io.readAddress(1) := floatingQueue.io.issue.bits.floatingSource(1)
+  floatingCommitState.io.readAddress(2) := floatingQueue.io.issue.bits.floatingSource(2)
   floatingScoreboard.io.readRelease.valid := floatingMovePipe.io.input.fire
   floatingScoreboard.io.readRelease.bits.robTag := floatingQueue.io.issue.bits.robTag
   for (source <- 0 until 3) {

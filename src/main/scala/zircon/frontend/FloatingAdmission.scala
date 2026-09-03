@@ -30,6 +30,10 @@ class FloatingAdmission extends Module {
     opcode === "b1010011".U
   val executableE2 = decoder.io.decoded.operation === FloatingOperation.FmvWX ||
     decoder.io.decoded.operation === FloatingOperation.FmvXW ||
+    decoder.io.decoded.operation === FloatingOperation.FmaddS ||
+    decoder.io.decoded.operation === FloatingOperation.FmsubS ||
+    decoder.io.decoded.operation === FloatingOperation.FnmsubS ||
+    decoder.io.decoded.operation === FloatingOperation.FnmaddS ||
     decoder.io.decoded.operation === FloatingOperation.FaddS ||
     decoder.io.decoded.operation === FloatingOperation.FsubS ||
     decoder.io.decoded.operation === FloatingOperation.FmulS ||

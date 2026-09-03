@@ -9,6 +9,11 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
     BigInt((funct7.toLong << 25) | (rs2.toLong << 20) | (rs1.toLong << 15) |
       (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
 
+  private def opFma(opcode: Int, rs3: Int, rs2: Int, rs1: Int,
+      funct3: Int, rd: Int): BigInt =
+    BigInt((rs3.toLong << 27) | (rs2.toLong << 20) | (rs1.toLong << 15) |
+      (funct3.toLong << 12) | (rd.toLong << 7) | opcode.toLong)
+
   describe("FloatingAdmission") {
     it("admits the executable RV32F E2 subset when FS is enabled") {
       simulate(new FloatingAdmission) { dut =>
@@ -48,6 +53,17 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
         dut.io.instruction.poke(opFp(0x08, rs2 = 2, rs1 = 1, funct3 = 0, rd = 3))
         dut.io.live.expect(true)
         dut.io.decoded.operation.expect(FloatingOperation.FmulS)
+
+        Seq(
+          0x43 -> FloatingOperation.FmaddS,
+          0x47 -> FloatingOperation.FmsubS,
+          0x4b -> FloatingOperation.FnmsubS,
+          0x4f -> FloatingOperation.FnmaddS).foreach { case (opcode, operation) =>
+          dut.io.instruction.poke(opFma(opcode, rs3 = 3, rs2 = 2, rs1 = 1,
+            funct3 = 0, rd = 4))
+          dut.io.live.expect(true)
+          dut.io.decoded.operation.expect(operation)
+        }
 
         dut.io.instruction.poke(opFp(0x0c, rs2 = 2, rs1 = 1, funct3 = 0, rd = 3))
         dut.io.live.expect(true)

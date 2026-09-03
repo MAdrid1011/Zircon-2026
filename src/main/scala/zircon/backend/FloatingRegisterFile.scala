@@ -11,8 +11,8 @@ import chisel3.util._
   */
 class FloatingRegisterFile extends Module {
   val io = IO(new Bundle {
-    val readAddress = Input(Vec(2, UInt(5.W)))
-    val readData = Output(Vec(2, UInt(32.W)))
+    val readAddress = Input(Vec(3, UInt(5.W)))
+    val readData = Output(Vec(3, UInt(32.W)))
     val write = Input(Valid(new Bundle {
       val address = UInt(5.W)
       val data = UInt(32.W)

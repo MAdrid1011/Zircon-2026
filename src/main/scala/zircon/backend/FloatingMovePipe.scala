@@ -12,7 +12,7 @@ class FloatingMoveRequest(config: ZirconCoreConfig) extends Bundle {
   val roundingMode = UInt(3.W)
   val integerDestinationPhysical = UInt(log2Ceil(config.intPhysicalRegisters).W)
   val integerSource = UInt(32.W)
-  val floatSource = Vec(2, UInt(32.W))
+  val floatSource = Vec(3, UInt(32.W))
   val floatDestination = UInt(5.W)
 }
 
@@ -51,6 +51,8 @@ class FloatingMovePipe(
 
   private def supported(operation: FloatingOperation.Type): Bool =
     operation === FloatingOperation.FmvWX || operation === FloatingOperation.FmvXW ||
+    operation === FloatingOperation.FmaddS || operation === FloatingOperation.FmsubS ||
+    operation === FloatingOperation.FnmsubS || operation === FloatingOperation.FnmaddS ||
     operation === FloatingOperation.FsgnjS || operation === FloatingOperation.FsgnjnS ||
       operation === FloatingOperation.FsgnjxS || operation === FloatingOperation.FminS ||
       operation === FloatingOperation.FmaxS || operation === FloatingOperation.FleS ||
@@ -75,6 +77,12 @@ class FloatingMovePipe(
   val divSpecial = RegInit(false.B)
   val divSpecialResult = Reg(UInt(32.W))
   val divSpecialFlags = Reg(UInt(5.W))
+  val fmaInitialized = RegInit(false.B)
+  val fmaProduct = RegInit(0.U(48.W))
+  val fmaProductSign = RegInit(false.B)
+  val fmaProductTopCoord = RegInit(0.U(11.W))
+  val fmaProductZero = RegInit(false.B)
+  val fmaProductInfinity = RegInit(false.B)
   val sqrtInitialized = RegInit(false.B)
   val sqrtRadicand = Reg(UInt(54.W))
   val sqrtRemainder = Reg(UInt(56.W))
@@ -101,6 +109,14 @@ class FloatingMovePipe(
   val arithmeticSubtraction = request.operation === FloatingOperation.FsubS
   val multiplication = request.operation === FloatingOperation.FmulS
   val division = request.operation === FloatingOperation.FdivS
+  val fma = request.operation === FloatingOperation.FmaddS ||
+    request.operation === FloatingOperation.FmsubS ||
+    request.operation === FloatingOperation.FnmsubS ||
+    request.operation === FloatingOperation.FnmaddS
+  val fmaProductNegated = request.operation === FloatingOperation.FnmsubS ||
+    request.operation === FloatingOperation.FnmaddS
+  val fmaAddendSubtracted = request.operation === FloatingOperation.FmsubS ||
+    request.operation === FloatingOperation.FnmsubS
   val lhsExponent = lhs(30, 23)
   val rhsExponent = rhs(30, 23)
   val lhsFraction = lhs(22, 0)
@@ -297,6 +313,141 @@ class FloatingMovePipe(
       Mux(multiplicationOverflow, "b00101".U,
         Cat(0.U(3.W), Mux(multiplicationTiny && multiplicationInexact,
           1.U(1.W), 0.U(1.W)), multiplicationInexact))))
+
+  // FMA keeps the complete product until the addend has been aligned.  The
+  // common representation places each operand's most significant bit at bit
+  // 52, leaving enough room for the 48-bit product, cancellation, and GRS
+  // bits before the single architectural rounding step.
+  val fmaAddend = request.floatSource(2)
+  val fmaAddendExponent = fmaAddend(30, 23)
+  val fmaAddendFraction = fmaAddend(22, 0)
+  val fmaAddendNaN = fmaAddendExponent === "hff".U && fmaAddendFraction.orR
+  val fmaAddendSignalingNaN = fmaAddendNaN && !fmaAddendFraction(22)
+  val fmaAddendInfinity = fmaAddendExponent === "hff".U && !fmaAddendFraction.orR
+  val fmaAddendZero = fmaAddend(30, 0) === 0.U
+  val fmaAddendRawSignificand = Mux(fmaAddendExponent === 0.U,
+    Cat(0.U(1.W), fmaAddendFraction), Cat(1.U(1.W), fmaAddendFraction))
+  val fmaAddendLeadingShift = Mux(fmaAddendZero, 0.U(5.W),
+    PriorityEncoder(Reverse(fmaAddendRawSignificand)))
+  val fmaAddendSignificand = (fmaAddendRawSignificand << fmaAddendLeadingShift)(23, 0)
+  val fmaAddendTopCoord = Mux(fmaAddendZero, 0.U(11.W),
+    Mux(fmaAddendExponent === 0.U,
+      513.U(11.W) - fmaAddendLeadingShift,
+      512.U(11.W) + fmaAddendExponent))
+
+  val fmaLhsZero = lhs(30, 0) === 0.U
+  val fmaRhsZero = rhs(30, 0) === 0.U
+  val fmaLhsRawSignificand = Mux(lhsExponent === 0.U,
+    Cat(0.U(1.W), lhsFraction), Cat(1.U(1.W), lhsFraction))
+  val fmaRhsRawSignificand = Mux(rhsExponent === 0.U,
+    Cat(0.U(1.W), rhsFraction), Cat(1.U(1.W), rhsFraction))
+  val fmaLhsLeadingShift = Mux(fmaLhsZero, 0.U(5.W),
+    PriorityEncoder(Reverse(fmaLhsRawSignificand)))
+  val fmaRhsLeadingShift = Mux(fmaRhsZero, 0.U(5.W),
+    PriorityEncoder(Reverse(fmaRhsRawSignificand)))
+  val fmaLhsSignificand = (fmaLhsRawSignificand << fmaLhsLeadingShift)(23, 0)
+  val fmaRhsSignificand = (fmaRhsRawSignificand << fmaRhsLeadingShift)(23, 0)
+  val fmaLhsTopCoord = Mux(fmaLhsZero, 0.U(11.W),
+    Mux(lhsExponent === 0.U, 513.U(11.W) - fmaLhsLeadingShift,
+      512.U(11.W) + lhsExponent))
+  val fmaRhsTopCoord = Mux(fmaRhsZero, 0.U(11.W),
+    Mux(rhsExponent === 0.U, 513.U(11.W) - fmaRhsLeadingShift,
+      512.U(11.W) + rhsExponent))
+  val fmaProductRaw = fmaLhsSignificand * fmaRhsSignificand
+  val fmaProductRawZero = fmaLhsZero || fmaRhsZero
+  val fmaProductRawTopCoord = (Cat(0.U(1.W), fmaLhsTopCoord) +&
+    Cat(0.U(1.W), fmaRhsTopCoord) -
+    Mux(fmaProductRaw(47), 638.U(12.W), 639.U(12.W)))(10, 0)
+  val fmaProductRawSign = lhs(31) ^ rhs(31) ^ fmaProductNegated
+  val fmaProductTopForAlign = Mux(fmaProductZero,
+    fmaAddendTopCoord, fmaProductTopCoord)
+  val fmaAddendTopForAlign = Mux(fmaAddendZero,
+    fmaProductTopForAlign, fmaAddendTopCoord)
+  val fmaCommonTopCoord = Mux(fmaProductTopForAlign >= fmaAddendTopForAlign,
+    fmaProductTopForAlign, fmaAddendTopForAlign)
+  val fmaProductAligned = (Cat(0.U(8.W), fmaProduct) <<
+    Mux(fmaProduct(47), 5.U(6.W), 6.U(6.W)))(55, 0)
+  val fmaAddendAligned = Cat(0.U(3.W), fmaAddendSignificand, 0.U(29.W))
+  val fmaProductAtCommonTop = rightJam(fmaProductAligned,
+    fmaCommonTopCoord - fmaProductTopForAlign, 56)
+  val fmaAddendAtCommonTop = rightJam(fmaAddendAligned,
+    fmaCommonTopCoord - fmaAddendTopForAlign, 56)
+  val fmaProductEffectiveSign = fmaProductSign
+  val fmaAddendEffectiveSign = fmaAddend(31) ^ fmaAddendSubtracted
+  val fmaSameSign = fmaProductEffectiveSign === fmaAddendEffectiveSign
+  val fmaMagnitudeSum = (Cat(0.U(1.W), fmaProductAtCommonTop) +&
+    Cat(0.U(1.W), fmaAddendAtCommonTop))(56, 0)
+  val fmaMagnitudeDifference = Mux(fmaProductAtCommonTop >= fmaAddendAtCommonTop,
+    Cat(0.U(1.W), fmaProductAtCommonTop) - Cat(0.U(1.W), fmaAddendAtCommonTop),
+    Cat(0.U(1.W), fmaAddendAtCommonTop) - Cat(0.U(1.W), fmaProductAtCommonTop))
+  val fmaMagnitude = Mux(fmaSameSign, fmaMagnitudeSum, fmaMagnitudeDifference)
+  val fmaInitialSign = Mux(fmaSameSign, fmaProductEffectiveSign,
+    Mux(fmaProductAtCommonTop >= fmaAddendAtCommonTop,
+      fmaProductEffectiveSign, fmaAddendEffectiveSign))
+  val fmaLeadingZeros = PriorityEncoder(Reverse(fmaMagnitude))
+  val fmaLeadingBit = 56.U(6.W) - fmaLeadingZeros
+  val fmaNormalized = Mux(fmaLeadingBit >= 26.U,
+    rightJam(fmaMagnitude, fmaLeadingBit - 26.U, 57),
+    (fmaMagnitude << (26.U - fmaLeadingBit))(56, 0))
+  val fmaTopCoordWide = Cat(0.U(1.W), fmaCommonTopCoord) +
+    Cat(0.U(6.W), fmaLeadingBit) - 52.U(12.W)
+  val fmaTopCoord = fmaTopCoordWide(10, 0)
+  val fmaSubnormalShift = Mux(fmaTopCoord < 513.U,
+    513.U(11.W) - fmaTopCoord, 0.U(11.W))
+  val fmaRoundedInput = rightJam(fmaNormalized, fmaSubnormalShift, 57)(26, 0)
+  val fmaRoundedBaseExponent = Mux(fmaTopCoord < 513.U, 0.U(10.W),
+    fmaTopCoord - 512.U)
+  val fmaInexact = fmaRoundedInput(2, 0).orR
+  val fmaRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (fmaRoundedInput(2) &&
+      (fmaRoundedInput(1, 0).orR || fmaRoundedInput(3))),
+    1.U -> false.B,
+    2.U -> (fmaInitialSign && fmaInexact),
+    3.U -> (!fmaInitialSign && fmaInexact),
+    4.U -> fmaRoundedInput(2)
+  ))
+  val fmaRoundedSignificand = Cat(0.U(1.W), fmaRoundedInput(26, 3)) +
+    fmaRoundUp.asUInt
+  val fmaRoundedCarry = fmaRoundedSignificand(24)
+  val fmaTiny = fmaRoundedBaseExponent === 0.U && !fmaRoundedInput(26)
+  val fmaOverflow = fmaRoundedBaseExponent >= 255.U ||
+    (fmaRoundedBaseExponent === 254.U && fmaRoundedCarry)
+  val fmaOverflowToInfinity = request.roundingMode === 0.U ||
+    request.roundingMode === 4.U ||
+    (request.roundingMode === 3.U && !fmaInitialSign) ||
+    (request.roundingMode === 2.U && fmaInitialSign)
+  val fmaOutputExponent = Mux(fmaOverflow,
+    Mux(fmaOverflowToInfinity, 255.U(10.W), 254.U(10.W)),
+    Mux(fmaRoundedCarry, fmaRoundedBaseExponent + 1.U, fmaRoundedBaseExponent))
+  val fmaOutputFraction = Mux(fmaOverflow && fmaOverflowToInfinity,
+    0.U(23.W), Mux(fmaOverflow, "h7fffff".U(23.W),
+      Mux(fmaRoundedCarry, 0.U(23.W), fmaRoundedSignificand(22, 0))))
+  val fmaFiniteData = Cat(fmaInitialSign, fmaOutputExponent(7, 0),
+    fmaOutputFraction)
+  val fmaProductNaN = lhsNaN || rhsNaN
+  val fmaProductInvalid = (lhsInfinity && fmaRhsZero) ||
+    (rhsInfinity && fmaLhsZero)
+  val fmaProductInf = fmaProductInfinity && !fmaProductZero
+  val fmaInvalid = lhsSignalingNaN || rhsSignalingNaN || fmaAddendSignalingNaN ||
+    fmaProductInvalid || (fmaProductInf && fmaAddendInfinity &&
+      fmaProductEffectiveSign =/= fmaAddendEffectiveSign)
+  val fmaSpecial = fmaInvalid || fmaProductNaN || fmaAddendNaN ||
+    fmaProductInf || fmaAddendInfinity
+  val fmaSpecialData = Mux(fmaInvalid, canonicalNaN,
+    Mux(fmaProductNaN || fmaAddendNaN, canonicalNaN,
+      Mux(fmaProductInf || fmaAddendInfinity,
+        Cat(Mux(fmaProductInf, fmaProductEffectiveSign,
+          fmaAddendEffectiveSign), "hff".U(8.W), 0.U(23.W)),
+        fmaFiniteData)))
+  val fmaResultData = Mux(fmaSpecial, fmaSpecialData,
+    Mux(fmaMagnitude.orR, fmaFiniteData,
+      Cat(Mux(fmaSameSign, fmaProductEffectiveSign,
+        request.roundingMode === 2.U), 0.U(31.W))))
+  val fmaFlags = Mux(fmaInvalid, "b10000".U,
+    Mux(fmaProductNaN || fmaAddendNaN || fmaProductInf || fmaAddendInfinity,
+      0.U(5.W), Mux(fmaOverflow, "b00101".U,
+        Cat(0.U(3.W), Mux(fmaTiny && fmaInexact, 1.U(1.W), 0.U(1.W)),
+          fmaInexact))))
 
   val divisionLhsFinite = !lhsNaN && !lhsInfinity
   val divisionRhsFinite = !rhsNaN && !rhsInfinity
@@ -587,7 +738,11 @@ class FloatingMovePipe(
   result.integerDestinationPhysical := request.integerDestinationPhysical
   result.floatDestination := request.floatDestination
   result.flags := 0.U
-  when(multiplication) {
+  when(fma) {
+    result.writesFloat := true.B
+    result.floatData := fmaResultData
+    result.flags := fmaFlags
+  }.elsewhen(multiplication) {
     result.writesFloat := true.B
     result.floatData := multiplicationResultData
     result.flags := multiplicationFlags
@@ -641,7 +796,8 @@ class FloatingMovePipe(
   val divisionDone = divInitialized && (divSpecial || divIteration === 51.U)
   val sqrtDone = sqrtInitialized && (sqrtSpecial || sqrtIteration === 27.U)
   io.output.valid := active && !recoveryBlocked &&
-    (!division || divisionDone) && (!squareRoot || sqrtDone)
+    (!fma || fmaInitialized) && (!division || divisionDone) &&
+    (!squareRoot || sqrtDone)
   io.output.bits := result
 
   val activeYounger = active && ROBTagOrder.isYounger(
@@ -649,11 +805,13 @@ class FloatingMovePipe(
   when(io.flush) {
     active := false.B
     divInitialized := false.B
+    fmaInitialized := false.B
     sqrtInitialized := false.B
   }.elsewhen(io.squash.valid) {
     when(activeYounger) {
       active := false.B
       divInitialized := false.B
+      fmaInitialized := false.B
       sqrtInitialized := false.B
     }
   }.otherwise {
@@ -671,6 +829,10 @@ class FloatingMovePipe(
         divInitialized := true.B
         sqrtInitialized := true.B
       }
+      fmaInitialized := !(io.input.bits.operation === FloatingOperation.FmaddS ||
+        io.input.bits.operation === FloatingOperation.FmsubS ||
+        io.input.bits.operation === FloatingOperation.FnmsubS ||
+        io.input.bits.operation === FloatingOperation.FnmaddS)
     }
     when(active && division && !divInitialized) {
       divInitialized := true.B
@@ -690,6 +852,14 @@ class FloatingMovePipe(
       divRemainder := divisionNextRemainder
       divQuotient := divisionNextQuotient
       divIteration := divIteration + 1.U
+    }
+    when(active && fma && !fmaInitialized) {
+      fmaInitialized := true.B
+      fmaProduct := fmaProductRaw
+      fmaProductSign := fmaProductRawSign
+      fmaProductTopCoord := fmaProductRawTopCoord
+      fmaProductZero := fmaProductRawZero
+      fmaProductInfinity := lhsInfinity || rhsInfinity
     }
     when(active && squareRoot && !sqrtInitialized) {
       sqrtInitialized := true.B
@@ -741,6 +911,13 @@ class FloatingMovePipe(
     when(io.input.bits.operation === FloatingOperation.FsqrtS) {
       assert(io.input.bits.roundingMode <= 4.U,
         "FSQRT received a reserved effective rounding mode")
+    }
+    when(io.input.bits.operation === FloatingOperation.FmaddS ||
+        io.input.bits.operation === FloatingOperation.FmsubS ||
+        io.input.bits.operation === FloatingOperation.FnmsubS ||
+        io.input.bits.operation === FloatingOperation.FnmaddS) {
+      assert(io.input.bits.roundingMode <= 4.U,
+        "FMA received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
