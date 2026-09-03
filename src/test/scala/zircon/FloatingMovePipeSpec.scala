@@ -216,6 +216,46 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("divides single values with an iterative result and precise specials") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(lhs: BigInt, rhs: BigInt, rounding: Int,
+            expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 15, operation = FloatingOperation.FdivS,
+            floatSource0 = lhs, floatSource1 = rhs, floatDestination = 10,
+            roundingMode = rounding)
+          accept(dut)
+          var cycles = 0
+          while (!dut.io.output.valid.peek().litToBoolean && cycles < 60) {
+            dut.clock.step()
+            cycles += 1
+          }
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(BigInt("40c00000", 16), BigInt("40000000", 16), 0,
+          BigInt("40400000", 16), 0)
+        check(BigInt("3f800000", 16), BigInt("40000000", 16), 0,
+          BigInt("3f000000", 16), 0)
+        check(BigInt("bf800000", 16), BigInt("40000000", 16), 0,
+          BigInt("bf000000", 16), 0)
+        check(BigInt("3f800000", 16), BigInt("40400000", 16), 0,
+          BigInt("3eaaaaab", 16), 1)
+        check(BigInt("3f800000", 16), BigInt("00000000", 16), 0,
+          BigInt("7f800000", 16), 8)
+        check(BigInt("00000000", 16), BigInt("00000000", 16), 0,
+          BigInt("7fc00000", 16), 16)
+        check(BigInt("7f800000", 16), BigInt("7f800000", 16), 0,
+          BigInt("7fc00000", 16), 16)
+      }
+    }
+
     it("classifies every floating category without modifying fflags") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

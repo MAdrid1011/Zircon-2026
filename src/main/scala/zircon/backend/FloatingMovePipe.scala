@@ -56,13 +56,24 @@ class FloatingMovePipe(
       operation === FloatingOperation.FmaxS || operation === FloatingOperation.FleS ||
       operation === FloatingOperation.FltS || operation === FloatingOperation.FeqS ||
       operation === FloatingOperation.FaddS || operation === FloatingOperation.FsubS ||
-      operation === FloatingOperation.FmulS ||
+      operation === FloatingOperation.FmulS || operation === FloatingOperation.FdivS ||
       operation === FloatingOperation.FclassS || operation === FloatingOperation.FcvtSW ||
       operation === FloatingOperation.FcvtSWu || operation === FloatingOperation.FcvtWS ||
       operation === FloatingOperation.FcvtWuS
 
   val active = RegInit(false.B)
   val request = Reg(new FloatingMoveRequest(config))
+  val divInitialized = RegInit(false.B)
+  val divDividend = Reg(UInt(24.W))
+  val divDivisor = Reg(UInt(25.W))
+  val divQuotient = Reg(UInt(28.W))
+  val divRemainder = Reg(UInt(25.W))
+  val divIteration = RegInit(0.U(6.W))
+  val divExponentBiased = Reg(UInt(10.W))
+  val divSign = RegInit(false.B)
+  val divSpecial = RegInit(false.B)
+  val divSpecialResult = Reg(UInt(32.W))
+  val divSpecialFlags = Reg(UInt(5.W))
   val recoveryBlocked = io.flush || io.squash.valid
 
   val sign = MuxLookup(request.operation.asUInt, 0.U(1.W))(Seq(
@@ -78,6 +89,7 @@ class FloatingMovePipe(
     request.operation === FloatingOperation.FsubS
   val arithmeticSubtraction = request.operation === FloatingOperation.FsubS
   val multiplication = request.operation === FloatingOperation.FmulS
+  val division = request.operation === FloatingOperation.FdivS
   val lhsExponent = lhs(30, 23)
   val rhsExponent = rhs(30, 23)
   val lhsFraction = lhs(22, 0)
@@ -274,6 +286,80 @@ class FloatingMovePipe(
       Mux(multiplicationOverflow, "b00101".U,
         Cat(0.U(3.W), Mux(multiplicationTiny && multiplicationInexact,
           1.U(1.W), 0.U(1.W)), multiplicationInexact))))
+
+  val divisionLhsFinite = !lhsNaN && !lhsInfinity
+  val divisionRhsFinite = !rhsNaN && !rhsInfinity
+  val divisionInvalid = lhsSignalingNaN || rhsSignalingNaN ||
+    (lhsInfinity && rhsInfinity) || (lhsZero && rhsZero)
+  val divisionByZero = rhsZero && !lhsZero && divisionLhsFinite && divisionRhsFinite
+  val divisionSpecial = divisionInvalid || lhsNaN || rhsNaN || lhsInfinity || rhsInfinity ||
+    lhsZero || rhsZero
+  val divisionSign = lhs(31) ^ rhs(31)
+  val divisionSpecialData = Mux(divisionInvalid, canonicalNaN,
+    Mux(lhsNaN || rhsNaN, canonicalNaN,
+      Mux(lhsInfinity || divisionByZero,
+        Cat(divisionSign, "hff".U(8.W), 0.U(23.W)),
+        Mux(rhsInfinity || lhsZero, Cat(divisionSign, 0.U(31.W)),
+          Cat(divisionSign, 0.U(31.W))))))
+  val divisionSpecialFlags = Mux(divisionInvalid, "b10000".U,
+    Mux(divisionByZero, "b01000".U, 0.U(5.W)))
+
+  // The divider generates floor((normalized lhs / normalized rhs) * 2^27)
+  // over 51 restoring steps. The final remainder is folded into sticky.
+  val divisionQuotientHigh = divQuotient(27)
+  val divisionQuotientJammed = Mux(divisionQuotientHigh,
+    rightJam(divQuotient, 1.U, 28), divQuotient)
+  val divisionQuotientWithRemainder = Mux(divRemainder.orR,
+    divisionQuotientJammed | 1.U, divisionQuotientJammed)
+  val divisionExtended = divisionQuotientWithRemainder(26, 0)
+  val divisionEffectiveExponentBiased = divExponentBiased -
+    Mux(divisionQuotientHigh, 0.U(10.W), 1.U(10.W))
+  val divisionSubnormalShift = Mux(divisionEffectiveExponentBiased < 257.U,
+    257.U(10.W) - divisionEffectiveExponentBiased, 0.U(10.W))
+  val divisionRoundedBaseExponent = Mux(divisionEffectiveExponentBiased < 257.U,
+    1.U(10.W), divisionEffectiveExponentBiased - 256.U)
+  val divisionRoundedInput = rightJam(divisionExtended, divisionSubnormalShift, 27)
+  val divisionInexact = divisionRoundedInput(2, 0).orR
+  val divisionRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (divisionRoundedInput(2) &&
+      (divisionRoundedInput(1, 0).orR || divisionRoundedInput(3))),
+    1.U -> false.B,
+    2.U -> (divisionSign && divisionInexact),
+    3.U -> (!divisionSign && divisionInexact),
+    4.U -> divisionRoundedInput(2)
+  ))
+  val divisionRoundedSignificand = Cat(0.U(1.W), divisionRoundedInput(26, 3)) +
+    divisionRoundUp.asUInt
+  val divisionRoundedCarry = divisionRoundedSignificand(24)
+  val divisionTiny = divisionEffectiveExponentBiased <= 257.U &&
+    !divisionRoundedInput(26)
+  val divisionOverflow = divisionEffectiveExponentBiased >= 511.U ||
+    (divisionEffectiveExponentBiased === 510.U && divisionRoundedCarry)
+  val divisionOverflowToInfinity = request.roundingMode === 0.U ||
+    request.roundingMode === 4.U ||
+    (request.roundingMode === 3.U && !divisionSign) ||
+    (request.roundingMode === 2.U && divisionSign)
+  val divisionOutputExponent = Mux(divisionOverflow,
+    Mux(divisionOverflowToInfinity, 255.U(10.W), 254.U(10.W)),
+    Mux(divisionRoundedCarry, divisionRoundedBaseExponent + 1.U,
+      Mux(divisionTiny, 0.U(10.W), divisionRoundedBaseExponent)))
+  val divisionOutputFraction = Mux(divisionOverflow && divisionOverflowToInfinity,
+    0.U(23.W), Mux(divisionOverflow, "h7fffff".U(23.W),
+      Mux(divisionRoundedCarry, 0.U(23.W), divisionRoundedSignificand(22, 0))))
+  val divisionFiniteData = Cat(divisionSign, divisionOutputExponent(7, 0),
+    divisionOutputFraction)
+  val divisionFlags = Mux(divisionOverflow, "b00101".U,
+    Cat(0.U(3.W), Mux(divisionTiny && divisionInexact, 1.U(1.W), 0.U(1.W)),
+      divisionInexact))
+  val divisionExponentBase =
+    ((Cat(0.U(1.W), multiplicationLhsExponent) + 383.U)(10, 0) -
+      Cat(0.U(1.W), multiplicationRhsExponent))(9, 0)
+  val divisionInputBit = Mux(divIteration < 24.U, divDividend(23), false.B)
+  val divisionShiftedRemainder = Cat(divRemainder(23, 0), divisionInputBit)
+  val divisionQuotientBit = divisionShiftedRemainder >= divDivisor
+  val divisionNextRemainder = Mux(divisionQuotientBit,
+    divisionShiftedRemainder - divDivisor, divisionShiftedRemainder)
+  val divisionNextQuotient = Cat(divQuotient(26, 0), divisionQuotientBit)
   val numericEqual = lhs === rhs || (lhsZero && rhsZero)
   val lhsOrderKey = Mux(lhs(31), ~lhs, lhs ^ "h80000000".U(32.W))
   val rhsOrderKey = Mux(rhs(31), ~rhs, rhs ^ "h80000000".U(32.W))
@@ -437,6 +523,10 @@ class FloatingMovePipe(
     result.writesFloat := true.B
     result.floatData := multiplicationResultData
     result.flags := multiplicationFlags
+  }.elsewhen(division) {
+    result.writesFloat := true.B
+    result.floatData := Mux(divSpecial, divSpecialResult, divisionFiniteData)
+    result.flags := Mux(divSpecial, divSpecialFlags, divisionFlags)
   }.elsewhen(arithmetic) {
     result.writesFloat := true.B
     result.floatData := arithmeticResultData
@@ -476,20 +566,50 @@ class FloatingMovePipe(
   }
 
   io.input.ready := !active && !recoveryBlocked
-  io.output.valid := active && !recoveryBlocked
+  val divisionDone = divInitialized && (divSpecial || divIteration === 51.U)
+  io.output.valid := active && !recoveryBlocked && (!division || divisionDone)
   io.output.bits := result
 
   val activeYounger = active && ROBTagOrder.isYounger(
     request.robTag, io.squash.bits, io.robHeadTag, config)
   when(io.flush) {
     active := false.B
+    divInitialized := false.B
   }.elsewhen(io.squash.valid) {
-    when(activeYounger) { active := false.B }
+    when(activeYounger) {
+      active := false.B
+      divInitialized := false.B
+    }
   }.otherwise {
     when(io.output.fire) { active := false.B }
     when(io.input.fire) {
       request := io.input.bits
       active := true.B
+      when(io.input.bits.operation === FloatingOperation.FdivS) {
+        divInitialized := false.B
+        divIteration := 0.U
+      }.otherwise {
+        divInitialized := true.B
+      }
+    }
+    when(active && division && !divInitialized) {
+      divInitialized := true.B
+      divSign := divisionSign
+      divSpecial := divisionSpecial
+      divSpecialResult := divisionSpecialData
+      divSpecialFlags := divisionSpecialFlags
+      divIteration := 0.U
+      divDividend := multiplicationLhsSignificand
+      divDivisor := Cat(0.U(1.W), multiplicationRhsSignificand)
+      divQuotient := 0.U
+      divRemainder := 0.U
+      divExponentBiased := divisionExponentBase
+    }.elsewhen(active && division && divInitialized && !divSpecial &&
+        divIteration =/= 51.U) {
+      divDividend := Cat(divDividend(22, 0), 0.U(1.W))
+      divRemainder := divisionNextRemainder
+      divQuotient := divisionNextQuotient
+      divIteration := divIteration + 1.U
     }
   }
 
@@ -515,6 +635,10 @@ class FloatingMovePipe(
     when(io.input.bits.operation === FloatingOperation.FmulS) {
       assert(io.input.bits.roundingMode <= 4.U,
         "FMUL received a reserved effective rounding mode")
+    }
+    when(io.input.bits.operation === FloatingOperation.FdivS) {
+      assert(io.input.bits.roundingMode <= 4.U,
+        "FDIV received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
