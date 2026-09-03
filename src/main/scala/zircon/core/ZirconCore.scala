@@ -117,12 +117,23 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   auxiliaryRead.io.robHeadTag := backend.io.robHead.bits.robTag
   auxiliaryRead.io.readData := backend.io.auxReadData
 
+  // The architectural FPR file has three read ports.  A floating E2 uop can
+  // consume all three ports, while two LSU lanes may independently carry an
+  // FPR store operand.  Keep those uses disjoint for the cycle and map the
+  // LSU lanes to distinct ports below.  This lookahead uses the MemIQ entries
+  // before auxiliary-read grants, avoiding a combinational grant/issue loop.
+  val pendingFloatingStore =
+    (memQueue.io.m0Issue.valid &&
+      memQueue.io.m0Issue.bits.sourceKind(1) === SourceKind.FloatingRegister) ||
+    (memQueue.io.m1Issue.valid &&
+      memQueue.io.m1Issue.bits.sourceKind(1) === SourceKind.FloatingRegister)
+
   val floatingOlderThanLong = floatingQueue.io.issue.valid &&
     (!longQueue.io.issue.valid || ROBTagOrder.ageFromHead(
       floatingQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg) <
       ROBTagOrder.ageFromHead(longQueue.io.issue.bits.robTag,
         backend.io.robHead.bits.robTag, cfg))
-  val selectFloatingE2 = floatingOlderThanLong
+  val selectFloatingE2 = floatingOlderThanLong && !pendingFloatingStore
   val selectLongE2 = longQueue.io.issue.valid && !selectFloatingE2
   val selectedE2Uop = Mux(selectFloatingE2, floatingQueue.io.issue.bits,
     longQueue.io.issue.bits)
@@ -177,13 +188,14 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     auxiliaryRead.io.grant(0)
 
   floatingCommitState.io.readAddress(0) := floatingQueue.io.issue.bits.floatingSource(0)
-  val lsuFloatingRead = lsuIngress.io.floatingReadValid(0) ||
-    lsuIngress.io.floatingReadValid(1)
-  val lsuFloatingAddress = Mux(lsuIngress.io.floatingReadValid(0),
-    lsuIngress.io.floatingReadAddress(0), lsuIngress.io.floatingReadAddress(1))
-  floatingCommitState.io.readAddress(1) := Mux(lsuFloatingRead,
-    lsuFloatingAddress, floatingQueue.io.issue.bits.floatingSource(1))
-  floatingCommitState.io.readAddress(2) := floatingQueue.io.issue.bits.floatingSource(2)
+  floatingCommitState.io.readAddress(1) := Mux(
+    lsuIngress.io.floatingReadValid(0),
+    lsuIngress.io.floatingReadAddress(0),
+    floatingQueue.io.issue.bits.floatingSource(1))
+  floatingCommitState.io.readAddress(2) := Mux(
+    lsuIngress.io.floatingReadValid(1),
+    lsuIngress.io.floatingReadAddress(1),
+    floatingQueue.io.issue.bits.floatingSource(2))
   // Only instructions that actually read FPR operands consume a scoreboard
   // reservation. Source-less moves (for example FMV.W.X) are already marked
   // consumed at allocation and must not generate a second release event.
@@ -265,7 +277,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       auxiliaryRead.io.candidateData(2)(source)
   }
   lsuIngress.io.floatingReadData(0) := floatingCommitState.io.readData(1)
-  lsuIngress.io.floatingReadData(1) := floatingCommitState.io.readData(1)
+  lsuIngress.io.floatingReadData(1) := floatingCommitState.io.readData(2)
   backend.io.memoryExecutionRead := lsuIngress.io.robRead
   lsuIngress.io.robContext := backend.io.memoryExecutionContext
   lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag

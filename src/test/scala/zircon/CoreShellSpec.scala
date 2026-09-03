@@ -675,6 +675,50 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("preserves distinct FPR data for two floating stores in the dual LSU") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def sType(immediate: Int, rs2: Int, rs1: Int, funct3: Int,
+            opcode: Int): BigInt = {
+          val value = immediate & 0xfff
+          BigInt(((value >> 5).toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) |
+            ((value & 0x1f).toLong << 7) | opcode.toLong)
+        }
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) |
+            (rd.toLong << 7) | 0x53L)
+        val fmvF1X2 = opFp(0x78, rs2 = 0, rs1 = 2, funct3 = 0, rd = 1)
+        val fmvF2X3 = opFp(0x78, rs2 = 0, rs1 = 3, funct3 = 0, rd = 2)
+        val fswF1 = sType(0, rs2 = 1, rs1 = 1, funct3 = 2, opcode = 0x27)
+        val fswF2 = sType(4, rs2 = 2, rs1 = 1, funct3 = 2, opcode = 0x27)
+        val dataAddress = BigInt("80001000", 16)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // x1=0x2000, mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("3f800137", 16), // x2=1.0f
+          ResetVector + 12 -> BigInt("400001b7", 16), // x3=2.0f
+          ResetVector + 16 -> fmvF1X2,
+          ResetVector + 20 -> fmvF2X3,
+          ResetVector + 24 -> BigInt("800010b7", 16), // x1=0x80001000
+          ResetVector + 28 -> fswF1,
+          ResetVector + 32 -> fswF2,
+          ResetVector + 36 -> BigInt("00100073", 16)
+        ), cycles = 768))
+        val first = events.find(_.instruction == fswF1).getOrElse(
+          fail(s"first FSW did not retire: $events"))
+        val second = events.find(_.instruction == fswF2).getOrElse(
+          fail(s"second FSW did not retire: $events"))
+        assert(first.memoryAddress == dataAddress && first.memoryWriteMask == 15 &&
+          first.memoryWriteData == BigInt("3f800000", 16),
+          s"first FSW lost f1 data: $first")
+        assert(second.memoryAddress == dataAddress + 4 && second.memoryWriteMask == 15 &&
+          second.memoryWriteData == BigInt("40000000", 16),
+          s"second FSW lost f2 data: $second")
+      }
+    }
+
     it("waits for a committed mstatus.FS update before admitting adjacent RV32F") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

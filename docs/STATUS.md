@@ -12,6 +12,12 @@ L2 victim”曾可在未改动的 `af0904f` 基线复现；本轮修复了显式
 就消费旧 line payload 的问题，该场景及相关 L2/L1I 回归现已通过。后续采用聚焦门禁
 加完整夜间回归，保留所有非重复 corner-case 覆盖。
 
+2026-09-04 修复双 LSU 浮点 store 的 FPR 读端口复用：两个同时保留的 `FSW`
+现在分别使用 FPR 读端口 1/2；存在 LSU 浮点 store 时，E2 浮点运算暂缓一个发射
+窗口，避免三端口 FPR 文件被五个读请求争用。新增 CoreShell 确定性场景验证两个
+不同 FPR 值的 store metadata（1/1，约 20 秒），并与既有 FLW/FSW 场景合并复跑为
+2/2（约 23 秒）。
+
 同日 `LongPipe` 将 MUL/MULH/MULHSU/MULHU 的 signedness 变换统一到一个 raw
 unsigned product 和符号修正网络，保持四个 16x16 partial-product 单元边界；
 `LongPipeSpec` 5/5、顶层 RV32M 2/2 通过。固定器件综合正在后台运行，尚未据此宣称
