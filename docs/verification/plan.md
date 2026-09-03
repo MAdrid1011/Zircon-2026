@@ -74,6 +74,12 @@ response-error cases. The standalone `AXIOrderedIOEngineSpec` and
 rerun by `test-m3-device-io`. The complete `./scripts/sbtw test` run remains unchanged
 and is still required for the PR/nightly release evidence.
 
+Within each focused Make target, multiple `CoreShellSpec` scenarios are passed
+as one `testOnly` invocation with repeated `-z` filters. This preserves the
+scenario and explicit-seed set while avoiding repeated SBT/JVM project startup;
+targets that split component suites remain split when needed for the five-minute
+simulation budget.
+
 The top-level M-mode interrupt slice also includes
 `make test-m4-interrupt-priority`: with MEI, MSI, and MTI asserted together,
 the AXI-fed core must retire one precise MEI trap (`mcause=0x8000000b`, exact

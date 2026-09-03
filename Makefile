@@ -27,9 +27,7 @@ verify-fpga-timing:
 # bounded well below the five-minute component-simulation target.
 test-m3-store:
 	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.AXIL2WritebackEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.ExclusiveL2TransferStoreSpec zircon.HostStoreFlushSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "write-allocates a cacheable store"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps a cacheable store local"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "delays a trace-selected cacheable store retirement"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "write-allocates a cacheable store" -z "keeps a cacheable store local" -z "delays a trace-selected cacheable store retirement"'
 
 # Fast, focused M3 M0/M1 load-admission regression. It verifies that the
 # unfinished M0 device/atomic owner cannot leak through the executable L1D
@@ -46,15 +44,13 @@ test-m3-load-boundary:
 # result-slot ordering before broader concurrent miss-resource work.
 test-m3-dual-load-forward:
 	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.L1DLoadCacheSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "accepts seeded different-set M0 and M1 cold misses"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1" -z "accepts seeded different-set M0 and M1 cold misses"'
 
 # Six explicit-seed complete-core same-bank merge and same-address resident-hit
 # replay runs. Kept separate from the broad component target so each M3
 # component simulation remains bounded.
 test-m3-dual-load-merge:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-address resident hits"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads" -z "replays seeded same-address resident hits"'
 
 # Focused mixed-resource matrix: a live-MSHR merge is accepted while an
 # independent younger miss remains replayable instead of fabricating an owner.
@@ -66,9 +62,7 @@ test-m3-dual-resource:
 # by a younger LW.
 test-m3-partial-store-forward:
 	./scripts/sbtw 'testOnly zircon.LoadStoreQueuesSpec -- -z "combines disjoint partial stores byte-by-byte"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older partial store forward with a cacheable refill"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older halfword store forward with a cacheable refill"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older low-halfword store forward with a cacheable refill"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older partial store forward with a cacheable refill" -z "merges an older halfword store forward with a cacheable refill" -z "merges an older low-halfword store forward with a cacheable refill"'
 
 # Four explicit-seed complete-core MSHR pressure runs. Four data lines hold all
 # retained owners; a fifth cannot send AR before one exact data R handshake.
@@ -114,22 +108,14 @@ test-m3-device-io:
 	# Keep this slice to the basic M0/ID-6 ownership cases.  The broad
 	# "Device" selector also reran the dedicated mixed-AXI, grouped-MMIO,
 	# fetch-pressure, and interrupt cases below.
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceStrong load"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceBurstable load"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "turns a DeviceStrong RRESP error"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceStrong store"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "turns a DeviceBurstable store BRESP error"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceStrong load" -z "executes a DeviceBurstable load" -z "turns a DeviceStrong RRESP error" -z "executes a DeviceStrong store" -z "turns a DeviceBurstable store BRESP error"'
 
 # Fast full-channel AXI stress tier. It keeps the explicit-seed read/write
 # backpressure, bounded two/four-owner data beat interleaving, and RRESP/BRESP
 # fault cases below the five-minute component budget.
 test-m3-axi-stress:
 	./scripts/sbtw 'testOnly zircon.AXIDataReadEngineSpec'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves cross-ID AXI read ownership under seeded response interleaving"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retains four data owners before seeded cross-ID AXI drain"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "starts clean AXI read and write owner epochs across reset"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves ordered device writes through explicitly seeded all-channel AXI backpressure"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves exact data RRESP and device BRESP faults under seeded AXI backpressure"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves cross-ID AXI read ownership under seeded response interleaving" -z "retains four data owners before seeded cross-ID AXI drain" -z "starts clean AXI read and write owner epochs across reset" -z "preserves ordered device writes through explicitly seeded all-channel AXI backpressure" -z "preserves exact data RRESP and device BRESP faults under seeded AXI backpressure"'
 
 # One explicit-seed core regression: an accepted wrong-path data refill must
 # drain every R beat after recovery, but may not generate a load completion.
@@ -139,8 +125,7 @@ test-m3-axi-wrong-path-drain:
 # Separate reset-owner tier so the broad AXI stress target remains within its
 # five-minute component-simulation budget.
 test-m3-axi-reset:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "resets an accepted ID-5 writeback before its response"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "resets an accepted ID-7 atomic write before its response"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "resets an accepted ID-5 writeback before its response" -z "resets an accepted ID-7 atomic write before its response"'
 
 # Long-read ownership tier. It remains separate from the short pressure and
 # reset tiers while exercising physical demand-owner reuse across eight lines.
@@ -150,24 +135,17 @@ test-m3-axi-long:
 # Precise-fault tier. It reverses two- and four-owner legal cross-ID RRESP
 # order, then exercises an older ID-6 BRESP against a younger RRESP fault.
 test-m3-axi-faults:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps the older load fault when a younger RRESP fault drains first"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps the oldest of four RRESP faults after reverse cross-ID drain"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps an older device BRESP fault when a younger RRESP fault drains first"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "keeps the older load fault when a younger RRESP fault drains first" -z "keeps the oldest of four RRESP faults after reverse cross-ID drain" -z "keeps an older device BRESP fault when a younger RRESP fault drains first"'
 
 # Cache-global FENCE must drain every dirty L1D/L2 line through the retained
 # ID-5 owner before it or younger instructions may retire.
 test-m3-fence-pressure:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains every dirty line before a cache-global FENCE retires"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retries an errored dirty FENCE writeback before retirement"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "fills the dirty L2 victim FIFO before a cache-global FENCE can retire"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retries the oldest dirty FENCE writeback before draining the next victim"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains every dirty line before a cache-global FENCE retires" -z "retries an errored dirty FENCE writeback before retirement" -z "fills the dirty L2 victim FIFO before a cache-global FENCE can retire" -z "retries the oldest dirty FENCE writeback before draining the next victim"'
 
 # Mixed cache refill/writeback and ordered-device traffic runs in a separate
 # four-seed tier, keeping the more focused AXI slices quick to reproduce.
 test-m3-axi-mixed:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves mixed cache and device AXI traffic"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains two dirty cache lines and device AXI traffic through seeded backpressure"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retries a dirty writeback with mixed device AXI traffic through seeded backpressure"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves mixed cache and device AXI traffic" -z "drains two dirty cache lines and device AXI traffic through seeded backpressure" -z "retries a dirty writeback with mixed device AXI traffic through seeded backpressure"'
 
 # Fast RV32A ownership regression. It remains below the five-minute component
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and
@@ -176,9 +154,7 @@ test-m3-atomic:
 	./scripts/sbtw "testOnly zircon.AtomicMemoryEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec zircon.MemIssueQueueSpec"
 	# Use exact scenario selectors: the former broad selectors overlapped
 	# heavily and also pulled in the dedicated AXI/error/ordering cases.
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes response-gated LR/SC through the ID-7 atomic owner"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "invalidates LR/SC reservation on a conflicting local store"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "returns the old AMO value only after its ID-7 read-modify-write response"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes response-gated LR/SC through the ID-7 atomic owner" -z "invalidates LR/SC reservation on a conflicting local store" -z "returns the old AMO value only after its ID-7 read-modify-write response"'
 
 # Three deterministic full-channel RV32A streams. Each mixes cache refill,
 # ID-7 AMO read/modify/write, ID-6 device traffic, and FENCE ID-5 writeback
@@ -230,10 +206,7 @@ test-m3-atomic-errors:
 test-m3-ordering:
 	./scripts/sbtw "testOnly zircon.CacheFenceDrainControllerSpec zircon.MemIssueQueueSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.ExclusiveL2TransferStoreSpec"
 	./scripts/sbtw "testOnly zircon.L1DLoadCacheSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "allows FENCE to retire while a younger cacheable load owns LQ state"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "does not retire a dirty cache-global FENCE before the ID-5 B response"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "writes back dirty code before FENCE.I invalidates the I-side and refetches it"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "holds a younger cacheable load behind an aq atomic until its read response"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "allows FENCE to retire while a younger cacheable load owns LQ state" -z "does not retire a dirty cache-global FENCE before the ID-5 B response" -z "writes back dirty code before FENCE.I invalidates the I-side and refetches it" -z "holds a younger cacheable load behind an aq atomic until its read response"'
 
 # Focused M4 E2 bit-move/sign-injection tier. The AXI-fed CoreShell portion
 # exercises the executable commit path without claiming the full RV32F ISA.

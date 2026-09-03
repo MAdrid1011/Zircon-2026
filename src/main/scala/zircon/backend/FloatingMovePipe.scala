@@ -261,7 +261,10 @@ class FloatingMovePipe(
     ((Cat(0.U(1.W), lhsArithmeticExponent) +& 256.U)(9, 0) - multiplicationLhsShift)
   val multiplicationRhsExponent =
     ((Cat(0.U(1.W), rhsArithmeticExponent) +& 256.U)(9, 0) - multiplicationRhsShift)
-  val multiplicationProduct = multiplicationLhsSignificand * multiplicationRhsSignificand
+  val multiplicationUnit = Module(new ZirconUIntMul24Lut)
+  multiplicationUnit.io.a := multiplicationLhsSignificand
+  multiplicationUnit.io.b := multiplicationRhsSignificand
+  val multiplicationProduct = multiplicationUnit.io.y
   val multiplicationProductHigh = multiplicationProduct(47)
   val multiplicationProductShift = Mux(multiplicationProductHigh, 21.U, 20.U)
   val multiplicationNormalized = rightJam(multiplicationProduct,

@@ -34,6 +34,30 @@ class ZirconUIntMul16 extends BlackBox with HasBlackBoxInline {
       |""".stripMargin)
 }
 
+/** The floating E2 path is mutually exclusive with LongPipe. Keep its
+  * 24x24 significand multiply in LUT fabric so the fixed FPGA DSP budget is
+  * reserved for the four shared integer 16x16 partial products. */
+class ZirconUIntMul24Lut extends BlackBox with HasBlackBoxInline {
+  override val desiredName: String = "ZirconUIntMul24Lut"
+
+  val io = IO(new Bundle {
+    val a = Input(UInt(24.W))
+    val b = Input(UInt(24.W))
+    val y = Output(UInt(48.W))
+  })
+
+  setInline("ZirconUIntMul24Lut.sv",
+    """(* use_dsp = "no" *)
+      |module ZirconUIntMul24Lut(
+      |  input wire [23:0] a,
+      |  input wire [23:0] b,
+      |  output wire [47:0] y
+      |);
+      |  assign y = a * b;
+      |endmodule
+      |""".stripMargin)
+}
+
 /** E2 RV32M engine. The integer multiplier is composed only from four 16x16
   * partial products. Division uses one restoring step per active cycle.
   */
