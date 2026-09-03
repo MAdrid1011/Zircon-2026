@@ -26,6 +26,11 @@ foreach source [glob -nocomplain [file join $generated_dir *.sv]] {
 read_verilog -sv $wrapper
 read_xdc $constraints
 
+if {[info exists ::env(FPGA_PARSE_ONLY)] && $::env(FPGA_PARSE_ONLY) eq "1"} {
+  puts "Zircon FPGA RTL parse-only run completed: $target_part"
+  exit 0
+}
+
 synth_design -top ZirconBoard -part $target_part -directive AreaOptimized_high
 write_checkpoint -force [file join $run_dir zircon_board_synth.dcp]
 report_utilization -file [file join $run_dir utilization_synth.rpt]

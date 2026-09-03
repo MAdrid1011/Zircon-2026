@@ -32,8 +32,12 @@ retains it until a successful AXI B response, including across B-error retries.
 
 ## State and arbitration
 
-Tags, valid bits, dirty bits, data words, and per-set round-robin replacement
-are stored locally. The single port prioritizes D-side `insert`, clean
+Tags, valid bits, dirty bits, and per-set round-robin replacement are stored
+locally. Each way's 32-set line array is an `L2LineMemory` bank. Its
+registered-address, one-cycle read boundary follows the Zircon-2024 Xilinx
+inline RAM helper and its Vivado branch instantiates an XPM block RAM; the
+controller keeps response metadata aligned with the returned line data. The
+single port prioritizes D-side `insert`, clean
 `instructionInsert`, exclusive D `lookup`, then read-only instruction probe.
 This preserves D ownership while allowing I/D ways to allocate dynamically. A
 lookup is accepted only when the response transfer buffer is empty. The component permits

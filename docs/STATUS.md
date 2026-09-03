@@ -71,6 +71,18 @@ write, exact GPR/FPR retirement, committed `NX`, qNaN `FCVT.WU.S` invalid
 result plus accumulated `NV`, and an exact illegal trap for dynamic `FCVT.W.S`
 with reserved `frm=5`.
 
+### M3 L2 BRAM Update
+
+`ExclusiveL2TransferStore` now stores each way in an explicit `L2LineMemory`
+bank. Its simulation branch follows the Zircon-2024 registered-address RAM
+pattern, while Vivado selects XPM block RAM with one-cycle read latency.
+`ExclusiveL2TransferStoreSpec` (12/12), `L1DLoadCacheSpec` (55/55), and
+`L1InstructionCacheSpec` (11/11) pass after the change. Vivado preliminary
+mapping on `xc7a200tfbg676-2L` reports four `32 x 256` banks using 16
+`RAMB36` total, with the L2 line store absent from the distributed-RAM table.
+The synthesis-only run was stopped during timing optimization, so final LUT,
+post-route WNS, and bitstream evidence remain open.
+
 ### M3 External Coherence Update
 
 ### M3 ZirconSim AXI-owner Update

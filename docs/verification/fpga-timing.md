@@ -40,6 +40,16 @@ post-route WNS exists for this worktree experiment. The hierarchy report
 identifies `ExclusiveL2TransferStore` (about 62k LUTs), `M1Frontend` (about
 26k), and `L1DLoadCache` (about 24k) as the dominant structural hotspots.
 
+The next local experiment in the worktree based on `4718aa0` replaces the L2 line array with
+four `L2LineMemory` way banks based on the Zircon-2024 inline block-RAM pattern.
+Vivado on `xc7a200tfbg676-2L` accepted `READ_LATENCY_B=1` and its preliminary
+mapping reports four `32 x 256` XPM memories, each using four `RAMB36`, for 16
+L2 `RAMB36` total. The L2 line store no longer appears in the distributed-RAM
+table; only the existing two-entry victim FIFO remains there. This run was
+stopped during synthesis timing optimization before final utilization, place,
+route, WNS, or bitstream generation, so it is structural mapping evidence and
+not FPGA release evidence.
+
 On 2026-09-03, a read-only local workspace audit found the LA32R Vivado project
 at `/home/madrid/LA32R/LA32R.xpr`, whose project metadata targets
 `xc7a200tfbg676-2L`. Its retained generated clock-IP constraint applies a

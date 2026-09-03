@@ -74,21 +74,30 @@ class ExclusiveL2TransferStore(
   // Store one complete line per memory word.  Keeping the line packed avoids
   // elaborating one wide mux per word over every way/set entry, while the
   // `Mem` interface preserves the existing one-cycle transfer contract.
-  val lineMem = Mem(lineCount, UInt((wordsPerLine * 32).W))
-  def lineIndex(way: UInt, set: UInt): UInt =
-    (way * sets.U + set)(log2Ceil(lineCount) - 1, 0)
   def lineWord(line: UInt, word: Int): UInt =
     line(word * 32 + 31, word * 32)
   def packedLine(words: Vec[UInt]): UInt = Cat(words.reverse)
-  // All clients are mutually excluded by the ready equations below.  A
-  // single shared read address therefore represents the sole active line
-  // operation and prevents Chisel from creating one memory port per word or
-  // per consumer.
-  val readAddress = WireDefault(0.U(log2Ceil(lineCount).W))
-  val lineRead = lineMem(readAddress)
+  // One explicit block-RAM instance per way gives the four-way cache a
+  // banked line store. All banks share the selected set address; the active
+  // way is muxed only after the memory boundary.
+  val lineMemories = Seq.fill(ways)(Module(new L2LineMemory(
+    sets, wordsPerLine * 32)))
+  val readSet = WireDefault(0.U(setWidth.W))
+  val readWay = WireDefault(0.U(wayWidth.W))
+  val lineRead = MuxLookup(readWay, 0.U((wordsPerLine * 32).W))(
+    (0 until ways).map(way => way.U -> lineMemories(way).io.readData))
   val lineWriteEnable = WireDefault(false.B)
-  val lineWriteAddress = WireDefault(0.U(log2Ceil(lineCount).W))
+  val lineWriteSet = WireDefault(0.U(setWidth.W))
+  val lineWriteWay = WireDefault(0.U(wayWidth.W))
   val lineWriteData = WireDefault(0.U((wordsPerLine * 32).W))
+  for (way <- 0 until ways) {
+    lineMemories(way).io.clk := clock
+    lineMemories(way).io.readEnable := true.B
+    lineMemories(way).io.readAddress := readSet
+    lineMemories(way).io.writeEnable := lineWriteEnable && lineWriteWay === way.U
+    lineMemories(way).io.writeAddress := lineWriteSet
+    lineMemories(way).io.writeData := lineWriteData
+  }
   val replacementWay = RegInit(VecInit.fill(sets)(0.U(wayWidth.W)))
 
   val responseValid = RegInit(false.B)
@@ -232,32 +241,40 @@ class ExclusiveL2TransferStore(
   // valid instruction insertion this also supplies the resident collision
   // line to `instructionInsertData` without adding another read port.
   when(fenceEvict) {
-    readAddress := lineIndex(fenceDirtyWay, fenceDirtySet)
+    readWay := fenceDirtyWay
+    readSet := fenceDirtySet
   }.elsewhen(io.flushLine.valid && io.flushLine.ready) {
-    readAddress := lineIndex(flushWay, flushSet)
+    readWay := flushWay
+    readSet := flushSet
   }.elsewhen(io.insert.valid && io.insert.ready) {
-    readAddress := lineIndex(insertWay, insertSet)
+    readWay := insertWay
+    readSet := insertSet
   }.elsewhen(io.instructionInsert.valid && io.instructionInsert.ready) {
-    readAddress := lineIndex(instructionInsertHitWay, instructionInsertSet)
+    readWay := instructionInsertHitWay
+    readSet := instructionInsertSet
   }.elsewhen(io.lookup.valid && io.lookup.ready) {
-    readAddress := lineIndex(lookupWay, lookupSet)
+    readWay := lookupWay
+    readSet := lookupSet
   }.elsewhen(io.instructionLookup.valid && io.instructionLookup.ready) {
-    readAddress := lineIndex(instructionLookupWay, instructionLookupSet)
+    readWay := instructionLookupWay
+    readSet := instructionLookupSet
   }.elsewhen(io.instructionInsert.valid) {
-    readAddress := lineIndex(instructionInsertHitWay, instructionInsertSet)
+    readWay := instructionInsertHitWay
+    readSet := instructionInsertSet
   }
 
   when(io.insert.fire) {
     lineWriteEnable := true.B
-    lineWriteAddress := lineIndex(insertWay, insertSet)
+    lineWriteWay := insertWay
+    lineWriteSet := insertSet
     lineWriteData := packedLine(io.insert.bits.lineData)
   }.elsewhen(io.instructionInsert.fire && !instructionInsertHit) {
     lineWriteEnable := true.B
-    lineWriteAddress := lineIndex(instructionInsertWay, instructionInsertSet)
+    lineWriteWay := instructionInsertWay
+    lineWriteSet := instructionInsertSet
     lineWriteData := packedLine(io.instructionInsert.bits.lineData)
   }
   when(lineWriteEnable) {
-    lineMem(lineWriteAddress) := lineWriteData
   }
 
   when(io.insert.valid) {
