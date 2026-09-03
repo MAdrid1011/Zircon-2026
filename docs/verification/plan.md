@@ -78,7 +78,14 @@ Within each focused Make target, multiple `CoreShellSpec` scenarios are passed
 as one `testOnly` invocation with repeated `-z` filters. This preserves the
 scenario and explicit-seed set while avoiding repeated SBT/JVM project startup;
 targets that split component suites remain split when needed for the five-minute
-simulation budget.
+simulation budget. Component suites also have a single canonical focused owner:
+`test-m3-store` owns cache/store suites, `test-m3-device-io` owns LSQ/device
+ingress suites, `test-m3-atomic` owns the RV32A/MemIQ suites, and
+`test-m3-ordering` owns `CacheFenceDrainControllerSpec`. The remaining M3
+targets intentionally run only their unique component suite (when one exists)
+and their precise top-level scenarios. This removes whole-suite reruns without
+removing any scenario or changing the complete `./scripts/sbtw test` release
+gate.
 
 The top-level M-mode interrupt slice also includes
 `make test-m4-interrupt-priority`: with MEI, MSI, and MTI asserted together,

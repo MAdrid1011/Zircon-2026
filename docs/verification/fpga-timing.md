@@ -90,8 +90,10 @@ Each component regression should finish within five minutes on the reference
 development host. `make test-m3-store` is the focused cacheable-store tier: it
 runs independent AXI/SQ/cache suites followed by the normal and BRESP-error
 top-level tests. `make test-m3-load-boundary` is the equivalent M0/M1 load tier:
-it runs LSU/LQ/L1D ownership suites and the three DeviceStrong, DeviceBurstable,
-and LR.W no-L1D/no-data-AXI/no-false-retirement checks. New feature work should
+it runs the focused inaccessible-load top-level check. The canonical
+LSU/LQ/L1D ownership suites live in `make test-m3-device-io` and
+`make test-m3-store`; the dual-load component suite lives in
+`make test-m3-dual-load-forward`. New feature work should
 add an equivalent focused target instead of requiring the complete test corpus
 for every edit.
 
@@ -105,9 +107,10 @@ device `BRESP` fault paths while independently backpressuring AR, R, AW, W,
 and B. The test harness saves the seed, all five channel schedules, and retire
 trace under `target/zircon-failures` when a case fails.
 
-`make test-m3-ordering` keeps its component suites in two invocations: the
-queue/L2/FENCE group and `L1DLoadCacheSpec` are separate so each remains below
-five minutes, followed by the four short complete-core FENCE/aq/rl cases.
+`make test-m3-ordering` runs the unique `CacheFenceDrainControllerSpec`,
+followed by the four short complete-core FENCE/aq/rl cases. Queue, L2, and
+L1D component suites are owned by the canonical store/device/atomic targets
+and are not rerun here.
 
 `make test-m3-external-coherence` is the focused sideband tier. It runs the
 retained core controller and platform gate, then clean/dirty/retry, in-flight

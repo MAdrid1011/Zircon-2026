@@ -109,16 +109,20 @@ class MiniTagePredictor(
   val queryIndex = Seq.tabulate(tableCount, config.fetchWidth) { (table, slot) =>
     tableIndex(queryPc(slot), io.historyBefore(slot), historyLengths(table))
   }
+  // Each fetch group maps exactly one slot to each bank. Read every bank once
+  // per table, then route the bank result to its slot. The previous nested
+  // slot/bank construction inferred four reads per slot and replicated the
+  // tagged-table mux cone even though each bank has only one useful row.
+  val taggedBankReads = Seq.tabulate(tableCount, banks) { (table, bank) =>
+    val matches = (0 until config.fetchWidth).map(slot =>
+      queryBank(slot) === bank.U)
+    val row = Mux1H((0 until config.fetchWidth).map(slot =>
+      matches(slot) -> queryIndex(table)(slot)(6, 2)))
+    tagged(table)(bank).read(row)
+  }
   val queryEntries = Seq.tabulate(tableCount, config.fetchWidth) { (table, slot) =>
-    val bankReads = (0 until banks).map { bank =>
-      val matches = (0 until config.fetchWidth).map(other =>
-        tableBank(queryPc(other)) === bank.U)
-      val row = Mux1H((0 until config.fetchWidth).map(other =>
-        matches(other) -> queryIndex(table)(other)(6, 2)))
-      tagged(table)(bank).read(row)
-    }
     Mux1H((0 until banks).map(bank =>
-      (tableBank(queryPc(slot)) === bank.U) -> bankReads(bank)))
+      (queryBank(slot) === bank.U) -> taggedBankReads(table)(bank)))
   }
 
   for (slot <- 0 until config.fetchWidth) {

@@ -29,11 +29,14 @@ test-m3-store:
 	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.AXIL2WritebackEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.ExclusiveL2TransferStoreSpec zircon.HostStoreFlushSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "write-allocates a cacheable store" -z "keeps a cacheable store local" -z "delays a trace-selected cacheable store retirement"'
 
+# Focused M3 component suites have one canonical Make target each. Other M3
+# targets below retain only unique component suites plus their top-level
+# CoreShell scenarios, so running several slices does not rerun whole suites.
+
 # Fast, focused M3 M0/M1 load-admission regression. It verifies that the
 # unfinished M0 device/atomic owner cannot leak through the executable L1D
 # path, and remains bounded below the five-minute component-simulation gate.
 test-m3-load-boundary:
-	./scripts/sbtw "testOnly zircon.DualLSUIngressSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z inaccessible'
 
 # Fast M3 two-candidate load-forward tier. It checks the retained-LQ boundary
@@ -43,7 +46,7 @@ test-m3-load-boundary:
 # victim backpressure, conservative same-set/victim replay, and exact
 # result-slot ordering before broader concurrent miss-resource work.
 test-m3-dual-load-forward:
-	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.L1DLoadCacheSpec"
+	./scripts/sbtw "testOnly zircon.DualLoadForwardArbiterSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "independent cacheable loads through both M0 and M1" -z "accepts seeded different-set M0 and M1 cold misses"'
 
 # Six explicit-seed complete-core same-bank merge and same-address resident-hit
@@ -81,7 +84,6 @@ test-m3-external-coherence:
 # handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery
 # drain, and one complete-core no-refill path within the component budget.
 test-m3-l2:
-	./scripts/sbtw "testOnly zircon.ExclusiveL2TransferStoreSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "serves an evicted L1D line"'
 
 # Fast, focused device-group AXI transport regression. LSQ/ROB integration is
@@ -151,7 +153,7 @@ test-m3-axi-mixed:
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and
 # L1D same-line exclusion/invalidation.
 test-m3-atomic:
-	./scripts/sbtw "testOnly zircon.AtomicMemoryEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec zircon.MemIssueQueueSpec"
+	./scripts/sbtw "testOnly zircon.AtomicMemoryEngineSpec zircon.MemIssueQueueSpec"
 	# Use exact scenario selectors: the former broad selectors overlapped
 	# heavily and also pulled in the dedicated AXI/error/ordering cases.
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes response-gated LR/SC through the ID-7 atomic owner" -z "invalidates LR/SC reservation on a conflicting local store" -z "returns the old AMO value only after its ID-7 read-modify-write response"'
@@ -204,8 +206,7 @@ test-m3-atomic-errors:
 # Fast FENCE/aq/rl ordering tier. It covers pre-LSQ atomic gating, age-tagged
 # LQ/SQ FENCE drain, and the executable FENCE/aq pressure cases below five minutes.
 test-m3-ordering:
-	./scripts/sbtw "testOnly zircon.CacheFenceDrainControllerSpec zircon.MemIssueQueueSpec zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.ExclusiveL2TransferStoreSpec"
-	./scripts/sbtw "testOnly zircon.L1DLoadCacheSpec"
+	./scripts/sbtw "testOnly zircon.CacheFenceDrainControllerSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "allows FENCE to retire while a younger cacheable load owns LQ state" -z "does not retire a dirty cache-global FENCE before the ID-5 B response" -z "writes back dirty code before FENCE.I invalidates the I-side and refetches it" -z "holds a younger cacheable load behind an aq atomic until its read response"'
 
 # Focused M4 E2 bit-move/sign-injection tier. The AXI-fed CoreShell portion

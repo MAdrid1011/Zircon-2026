@@ -91,7 +91,8 @@ alias/替换矩阵和性能收敛仍未完成。
 19/34/19/12 条指令，均返回 `status=tohost`、退出码 0（seed 1）。
 
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
-`make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
+`make test-m3-dual-load-forward` 在回归去重后由 1 个独有组件 suite（4 tests）和 2 条顶层 CoreShell 场景组成，均已通过；此前重复的 LSQ/L1D/ingress 整套 suite 仍由 canonical store/device target 覆盖。
+上述 5-suite/81-test 记录保留为去重前证据；当前 focused target 的组件计数已按新入口更新，完整 `./scripts/sbtw test` release gate 不变。
 2026-09-03 新增同 set 单 invalid-way 双 miss 矩阵：`make test-m3-dual-resource`
 为 1/1（约 5 秒）。该用例验证一条 resident line 占用一个 way 时，较老 miss
 独占唯一 invalid way/MSHR，年轻 miss 保持 replay，不产生第二笔 L2 transfer；
