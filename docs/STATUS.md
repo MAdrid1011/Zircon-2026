@@ -106,6 +106,9 @@ on `xc7a200tfbg676-2L` reports eight `16 x 256` L1D RAM objects in block RAM.
 The synthesis run was intentionally stopped during timing optimization after
 the mapping report because it consumed excessive host swap; final utilization,
 timing, and post-route evidence remain open.
+The fixed-target wrapper regression `make test-fpga-bram` also passes locally on
+Vivado/XSim 2023.1 (`ZirconAxiBramTb PASS`, 2856 ns); this validates only the
+AXI BRAM wrapper protocol and does not close the full-core FPGA gate.
 
 ### M3 External Coherence Update
 
