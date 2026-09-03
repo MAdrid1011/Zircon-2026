@@ -82,7 +82,11 @@ alias/替换矩阵和性能收敛仍未完成。
 
 同日将固定深度 2 的 L2 dirty-victim FIFO 从通用 `Queue` 改为显式寄存器环形队列，
 `ExclusiveL2TransferStoreSpec` 为 12/12、顶层 FIFO 压力场景为 1/1；目标是消除综合
-层级中约 30k LUT 的小深度宽 payload 异步读 mux，待新提交的 Vivado 结果确认收益。
+层级中约 30k LUT 的小深度宽 payload 异步读 mux。随后在提交 `29237b4`（含
+miniTAGE 读端口复用和该 FIFO）上完成固定器件综合：`fpga/runs/synth-29237b4`
+报告 LUT 65,951/134,600（49.00%）、FF 31,480、BRAM tile 133/365（36.44%）、
+DSP 4/740（0.54%），综合 0 errors/0 critical warnings；该结果仍未包含 place/route
+和 100 MHz WNS，不能替代 FPGA release gate。
 
 `ZirconCoreConfig` 的 4 KiB 默认点和 8 KiB 对照点现在都可通过显式入口
 复现：`make platform-verilog` 生成默认 `generated-platform/`，

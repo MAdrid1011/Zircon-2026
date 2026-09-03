@@ -70,6 +70,15 @@ unbounded host-resource wait. The latest parent revision `4210e5b` also passes
 the fixed-part Vivado parse-only flow against the same XDC; this is an RTL/XDC
 parse result only and does not change the failed/unverified physical gate.
 
+On 2026-09-04, revision `29237b4` completed the fixed-part Vivado 2023.1
+synthesis-only flow with `AreaOptimized_medium` in
+`fpga/runs/synth-29237b4/`. Final synthesis utilization is 65,951 Slice LUTs
+of 134,600 (49.00%), 31,480 Slice Registers, 133 BRAM tiles of 365 (36.44%),
+and 4 DSPs of 740 (0.54%); synthesis reported zero errors and zero critical
+warnings. This is the first current-structure result below the 50% LUT target,
+but it has no place/route, WNS/TNS, or bitstream result and therefore remains
+structural evidence rather than a 100 MHz release pass.
+
 ## Timing triage
 
 Timing fixes must preserve the frozen ISA, exact exception/interrupt behavior,
