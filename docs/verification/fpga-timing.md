@@ -17,11 +17,16 @@ and the command line. Setup WNS must be non-negative at this 100 MHz point;
 any negative slack fails the gate. A higher achieved frequency is welcome, but
 never substitutes for the 100 MHz timing check.
 
-The current repository has `ZirconPlatformCore`, a synthesizable generic
-integration boundary, but no board-specific clock/reset wrapper, XDC, or
-post-route timing report. Consequently FPGA timing support is **unverified**,
-not failed or passed. This does not block current RTL work, but it blocks the
-final `v1.0.0` release until the evidence above is committed.
+The repository now has `ZirconBoard`, its board-specific XDC, and a fixed-part
+Vivado flow. FPGA timing support remains **failed/unverified** because no
+post-route report exists yet. A local run at revision `ddaa7f99f91ee8c57f0aa36571bc39f0759f497c`
+successfully elaborated and synthesized the complete production core, but the
+pre-placement DRC rejected the synthesized resource map: 318,188 Slice LUTs
+(236.40% of 134,600), 131,264 distributed-RAM LUTs, 110,378 F7 muxes, and zero
+Block RAM tiles. The run therefore produced synthesis checkpoints only and did
+not produce a timing pass or bitstream. This is a measured failure baseline,
+not release evidence; it blocks the final `v1.0.0` release until BRAM/resource
+mapping is corrected and post-route timing is committed.
 
 On 2026-09-03, a read-only local workspace audit found the LA32R Vivado project
 at `/home/madrid/LA32R/LA32R.xpr`, whose project metadata targets
