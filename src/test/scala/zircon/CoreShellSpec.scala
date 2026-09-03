@@ -581,6 +581,44 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("executes an AXI-fed R4 fused multiply-add through the third FPR read") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        def opFma(opcode: Int, rs3: Int, rs2: Int, rs1: Int,
+            funct3: Int, rd: Int): BigInt =
+          BigInt((rs3.toLong << 27) | (rs2.toLong << 20) | (rs1.toLong << 15) |
+            (funct3.toLong << 12) | (rd.toLong << 7) | opcode.toLong)
+        val fmvF1X2 = opFp(0x78, rs2 = 0, rs1 = 2, funct3 = 0, rd = 1)
+        val fmvF2X3 = opFp(0x78, rs2 = 0, rs1 = 3, funct3 = 0, rd = 2)
+        val fmvF3X4 = opFp(0x78, rs2 = 0, rs1 = 4, funct3 = 0, rd = 3)
+        val fmaddF4 = opFma(0x43, rs3 = 3, rs2 = 2, rs1 = 1,
+          funct3 = 0, rd = 4)
+        val fmvXW5 = opFp(0x70, rs2 = 0, rs1 = 4, funct3 = 0, rd = 5)
+        val events = throughFirstTrap(runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16),
+          ResetVector + 8 -> BigInt("3fc00137", 16), // x2=1.5f
+          ResetVector + 12 -> BigInt("400001b7", 16), // x3=2.0f
+          ResetVector + 16 -> BigInt("3f000237", 16), // x4=0.5f
+          ResetVector + 20 -> fmvF1X2,
+          ResetVector + 24 -> fmvF2X3,
+          ResetVector + 28 -> fmvF3X4,
+          ResetVector + 32 -> fmaddF4,
+          ResetVector + 36 -> fmvXW5,
+          ResetVector + 40 -> BigInt("00100073", 16)
+        ), cycles = 512))
+        assert(events.exists(event => event.instruction == fmaddF4 && event.fprWrite &&
+          event.fprAddress == 4 && event.fprData == BigInt("40600000", 16)),
+          s"FMADD.S did not commit 1.5*2.0+0.5=3.5 through FPR source 3: $events")
+        assert(events.exists(event => event.instruction == fmvXW5 && event.gprWrite &&
+          event.gprAddress == 5 && event.gprData == BigInt("40600000", 16)),
+          s"FMV.X.W did not observe the committed FMADD.S result: $events")
+      }
+    }
+
     it("waits for a committed mstatus.FS update before admitting adjacent RV32F") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
