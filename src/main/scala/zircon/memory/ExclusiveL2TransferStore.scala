@@ -4,6 +4,42 @@ import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
 
+/** Fixed two-entry victim FIFO.  The depth is architectural, so registers
+  * avoid the large asynchronous-read mux inferred by a generic Queue for a
+  * packed cache-line payload. */
+class TwoEntryCacheLineFifo(config: ZirconCoreConfig) extends Module {
+  val io = IO(new Bundle {
+    val enq = Flipped(Decoupled(new CacheLineTransfer(config)))
+    val deq = Decoupled(new CacheLineTransfer(config))
+    val count = Output(UInt(2.W))
+  })
+
+  val storage = Reg(Vec(2, new CacheLineTransfer(config)))
+  val readPointer = RegInit(false.B)
+  val writePointer = RegInit(false.B)
+  val count = RegInit(0.U(2.W))
+
+  io.enq.ready := count =/= 2.U
+  io.deq.valid := count =/= 0.U
+  io.deq.bits := storage(readPointer)
+  io.count := count
+
+  when(io.enq.fire) {
+    storage(writePointer) := io.enq.bits
+    writePointer := !writePointer
+  }
+  when(io.deq.fire) {
+    readPointer := !readPointer
+  }
+  when(io.enq.fire && !io.deq.fire) {
+    count := count + 1.U
+  }.elsewhen(io.deq.fire && !io.enq.fire) {
+    count := count - 1.U
+  }
+
+  assert(count <= 2.U, "two-entry cache-line FIFO occupancy exceeded capacity")
+}
+
 /** Owns stable D-side L2 lines and the first exclusive transfer boundary.
   *
   * An L1D eviction transfers one complete line into this store. A lookup hit
@@ -118,7 +154,7 @@ class ExclusiveL2TransferStore(
   io.instructionResponse.valid := instructionResponseValid
   io.instructionResponse.bits := instructionResponseBits
 
-  val victimQueue = Module(new Queue(new CacheLineTransfer(config), entries = 2))
+  val victimQueue = Module(new TwoEntryCacheLineFifo(config))
   io.victim <> victimQueue.io.deq
   io.victimCount := victimQueue.io.count
   victimQueue.io.enq.valid := false.B

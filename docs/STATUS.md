@@ -15,6 +15,10 @@ miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-on
 误预测分配、useful 饱和更新和 scrub；逐 slot folded-history 查询、完整 alias/替换
 矩阵和性能收敛仍未完成。
 
+同日将固定深度 2 的 L2 dirty-victim FIFO 从通用 `Queue` 改为显式寄存器环形队列，
+`ExclusiveL2TransferStoreSpec` 为 12/12、顶层 FIFO 压力场景为 1/1；目标是消除综合
+层级中约 30k LUT 的小深度宽 payload 异步读 mux，待新提交的 Vivado 结果确认收益。
+
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
 2026-09-03 新增同 set 单 invalid-way 双 miss 矩阵：`make test-m3-dual-resource`
