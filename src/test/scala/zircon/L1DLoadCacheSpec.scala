@@ -755,6 +755,87 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("merges a live MSHR waiter while accepting an independent miss") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val liveLine = BigInt("80005f00", 16)
+        val independentLine = BigInt("80006000", 16)
+        val liveWords = Seq.tabulate(8)(word => BigInt("79000000", 16) + word)
+        val independentWords = Seq.tabulate(8)(word => BigInt("7a000000", 16) + word)
+
+        // Establish a live miss owner without returning its refill. The next
+        // cycle attaches the older lane to that MSHR; the younger independent
+        // miss remains valid for replay because the transfer path is one-wide.
+        submit(dut, tag = 1, address = liveLine + 4)
+        dut.io.l2Lookup.valid.expect(true)
+
+        presentLoad(dut, lane = 0, tag = 3, address = liveLine + 12)
+        presentLoad(dut, lane = 1, tag = 7, address = independentLine + 20)
+        dut.io.request(0).ready.expect(true)
+        dut.io.request(1).ready.expect(false)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+
+        // The already-live line owns one MSHR and now has two exact waiters;
+        // the independent request is still held at ingress and must not
+        // fabricate a second owner while the older merge is being accepted.
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(liveLine)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(false)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(liveLine)
+        dut.io.l2Response.bits.transfer.lineData.foreach(_.poke(0))
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        dut.io.l2Response.ready.expect(true)
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.io.dataRequest.valid.expect(true)
+        dut.io.dataRequest.bits.clientMshr.expect(0)
+        dut.io.dataRequest.bits.lineAddress.expect(liveLine)
+        dut.io.dataRequest.ready.poke(true)
+        dut.clock.step()
+        dut.io.dataRequest.ready.poke(false)
+        dut.io.dataResponse.valid.poke(true)
+        dut.io.dataResponse.bits.client.poke(L2DemandClient.Data)
+        dut.io.dataResponse.bits.clientMshr.poke(0)
+        dut.io.dataResponse.bits.accessFault.poke(false)
+        liveWords.zipWithIndex.foreach { case (word, index) =>
+          dut.io.dataResponse.bits.lineData(index).poke(word)
+        }
+        dut.io.dataResponse.ready.expect(true)
+        dut.clock.step()
+        dut.io.dataResponse.valid.poke(false)
+
+        // The original owner retires first; the merged waiter follows by ROB
+        // age, then the held independent miss is accepted and refilled.
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(1)
+        dut.io.completion.bits.cacheData.expect(liveWords(1))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(3)
+        dut.io.completion.bits.cacheData.expect(liveWords(3))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        dut.io.request(1).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(1).valid.poke(false)
+        dut.io.l2Lookup.valid.expect(true)
+        dut.io.l2Lookup.bits.lineAddress.expect(independentLine)
+        issueRefill(dut, independentWords, lineAddress = independentLine, mshrIndex = 1)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.robTag.expect(7)
+        dut.io.completion.bits.cacheData.expect(independentWords(5))
+      }
+    }
+
     it("accepts a same-set hit and miss when an invalid way is available") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

@@ -99,6 +99,11 @@ When exactly one way is invalid, `L1DLoadCacheSpec` and
 `make test-m3-dual-resource` prove the same conservative policy: the older miss
 alone reserves the invalid way/MSHR, the younger request remains replayable, and
 it is admitted only after the older refill releases its owner.
+The same focused target now also covers a live-MSHR merge beside an independent
+younger miss. The older request attaches an exact second waiter to the existing
+MSHR; the independent request remains valid without fabricating a second owner,
+then replays after the first refill and receives a distinct MSHR. This test
+passes 1/1 locally, while the full `L1DLoadCacheSpec` is 57/57.
 For a different-set pair whose younger miss requires a resident victim,
 `L1DLoadCacheSpec` proves that only the older hit handshakes in the contention
 cycle; the retained miss may claim the one-wide L1D-to-L2 transfer only later.

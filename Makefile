@@ -56,10 +56,10 @@ test-m3-dual-load-merge:
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-bank M0 and M1 loads"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "replays seeded same-address resident hits"'
 
-# Focused same-set resource matrix: one invalid way must serialize the pair
-# instead of fabricating a second MSHR or L2 transfer owner.
+# Focused mixed-resource matrix: a live-MSHR merge is accepted while an
+# independent younger miss remains replayable instead of fabricating an owner.
 test-m3-dual-resource:
-	./scripts/sbtw 'testOnly zircon.L1DLoadCacheSpec -- -z "serializes same-set dual misses when only one way is invalid"'
+	./scripts/sbtw 'testOnly zircon.L1DLoadCacheSpec -- -z "merges a live MSHR waiter while accepting an independent miss"'
 
 # Nine explicit-seed complete-core partial-store forwarding runs. They require
 # older SB and both aligned SH lane pairs to merge with a cacheable refill read
