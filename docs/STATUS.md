@@ -165,6 +165,18 @@ write, exact GPR/FPR retirement, committed `NX`, qNaN `FCVT.WU.S` invalid
 result plus accumulated `NV`, and an exact illegal trap for dynamic `FCVT.W.S`
 with reserved `frm=5`.
 
+### M1 BTB Distributed-RAM Update
+
+`BankedBranchTargetBuffer` now stores its eight 8-entry way banks through an
+asynchronous-read `BranchTargetMemory` wrapper. Simulation keeps the existing
+zero-latency read/write contract while Vivado maps the 64-bit storage to
+distributed RAM. On `xc7a200tfbg676-2L` with `AreaOptimized_medium`, the
+synthesis-only report (`fpga/runs/btb-lutram-synth/utilization_synth.rpt`)
+measured LUT 65,546/134,600 (48.70%), LUT-as-memory 352, FF 31,491, BRAM
+133/365, and DSP 4/740. This is structural evidence only; no place/route,
+WNS, or bitstream release claim is made. `BranchTargetBufferSpec` and
+`M1FrontendSpec` pass 9/9 after regenerating platform RTL.
+
 ### M3 L2 BRAM Update
 
 `ExclusiveL2TransferStore` now stores each way in an explicit `L2LineMemory`

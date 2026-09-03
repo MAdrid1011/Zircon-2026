@@ -48,8 +48,10 @@ class BankedBranchTargetBuffer(
 
   require(config.fetchWidth == 4, "the BTB bank mapping is frozen for four-wide fetch")
 
+  private val entryWidth = 1 + 25 + 32 + 1 + 1 + 1
+  private val storageWidth = 64
   val arrays = Seq.tabulate(banksCount, waysCount)((_, _) =>
-    Mem(rowsPerBank, new BranchTargetEntry))
+    Module(new BranchTargetMemory(rowsPerBank, storageWidth)))
   val replacement = RegInit(VecInit.fill(banksCount)(
     VecInit.fill(rowsPerBank)(false.B)))
   val scrubbing = RegInit(true.B)
@@ -77,7 +79,10 @@ class BankedBranchTargetBuffer(
     val readRow = Mux(trainingThisBank, trainRow, queryRowForBank)
 
     for (way <- 0 until waysCount) {
-      bankReads(bank)(way) := arrays(bank)(way).read(readRow)
+      arrays(bank)(way).io.clk := clock
+      arrays(bank)(way).io.readAddress := readRow
+      bankReads(bank)(way) := arrays(bank)(way).io.readData(entryWidth - 1, 0).asTypeOf(
+        new BranchTargetEntry)
     }
 
     assert(PopCount(slotMatches) === 1.U,
@@ -105,11 +110,15 @@ class BankedBranchTargetBuffer(
 
   for (bank <- 0 until banksCount) {
     for (way <- 0 until waysCount) {
+      arrays(bank)(way).io.writeEnable := training && trainBank === bank.U &&
+        trainWay === way.U
+      arrays(bank)(way).io.writeAddress := trainRow
+      arrays(bank)(way).io.writeData := Cat(0.U((storageWidth - entryWidth).W),
+        trainedEntry.asUInt)
       when(scrubbing && !io.invalidate) {
-        arrays(bank)(way).write(scrubRow,
-          0.U.asTypeOf(new BranchTargetEntry))
-      }.elsewhen(training && trainBank === bank.U && trainWay === way.U) {
-        arrays(bank)(way).write(trainRow, trainedEntry)
+        arrays(bank)(way).io.writeEnable := true.B
+        arrays(bank)(way).io.writeAddress := scrubRow
+        arrays(bank)(way).io.writeData := 0.U(storageWidth.W)
       }
     }
 
