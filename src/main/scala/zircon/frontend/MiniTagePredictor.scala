@@ -198,6 +198,10 @@ class MiniTagePredictor(
   })
 
   val allocationTable = PriorityEncoder(VecInit((0 until tableCount).map(!trainHits(_))).asUInt)
+  // PriorityEncoder(0) returns table 0.  That value is not a valid
+  // allocation choice when every tagged table already matches: a committed
+  // misprediction must not silently overwrite an existing entry.
+  val allocationValid = (0 until tableCount).map(table => !trainHits(table)).reduce(_ || _)
   val trainingMispredict = io.train.bits.providerPrediction =/= io.train.bits.actualTaken
 
   for (bank <- 0 until banks) {
@@ -233,7 +237,7 @@ class MiniTagePredictor(
         when(index(1, 0) === bank.U) {
           tagged(table)(bank).write(index(6, 2), updateEntry)
         }
-      }.elsewhen(training && trainingMispredict && allocationTable === table.U) {
+      }.elsewhen(training && trainingMispredict && allocationValid && allocationTable === table.U) {
         val allocated = Wire(new MiniTageEntry(tagWidths(table)))
         allocated.valid := true.B
         allocated.tag := tableTag(io.train.bits.pc, io.train.bits.historyBefore,

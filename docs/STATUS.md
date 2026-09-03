@@ -63,8 +63,10 @@ MSI pending 后恢复取指，在下一条 live ROB 指令处产生精确 EPC，
 单元回归也通过。
 
 miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-only training、
-误预测分配、useful 饱和更新和 scrub；逐 slot folded-history 查询、完整 alias/替换
-矩阵和性能收敛仍未完成。
+误预测分配、useful 饱和更新和 scrub；当三张 tagged 表均命中时，误预测不会再因
+`PriorityEncoder(0)` 静默覆盖表 0，新增全命中保护回归。`MiniTagePredictorSpec`
+与 `M1FrontendSpec` 聚焦回归共 7/7 通过。逐 slot folded-history 查询、完整
+alias/替换矩阵和性能收敛仍未完成。
 
 同日将固定深度 2 的 L2 dirty-victim FIFO 从通用 `Queue` 改为显式寄存器环形队列，
 `ExclusiveL2TransferStoreSpec` 为 12/12、顶层 FIFO 压力场景为 1/1；目标是消除综合

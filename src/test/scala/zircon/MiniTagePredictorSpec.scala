@@ -68,5 +68,26 @@ class MiniTagePredictorSpec extends AnyFunSpec with ChiselSim {
         dut.io.predictions(0).provider.expect(BranchProvider.Base)
       }
     }
+
+    it("does not overwrite table zero after all tagged tables already hit") {
+      simulate(new MiniTagePredictor) { dut =>
+        clear(dut)
+        finishScrub(dut)
+
+        // Allocate T0, raise its counter to 5, then allocate T1 and T2.
+        train(dut, Pc, 0, taken = true, BranchProvider.Base, prediction = false)
+        train(dut, Pc, 0, taken = true, BranchProvider.Tagged0, prediction = true)
+        train(dut, Pc, 0, taken = true, BranchProvider.Base, prediction = false)
+        train(dut, Pc, 0, taken = true, BranchProvider.Base, prediction = false)
+
+        // All three tables hit.  This is a misprediction from T2, but there
+        // is no legal unhit allocation target; T0 must retain its strong-taken
+        // counter instead of being reinitialized to weak-taken.
+        train(dut, Pc, 0, taken = true, BranchProvider.Tagged2, prediction = false)
+        train(dut, Pc, 0, taken = false, BranchProvider.Tagged0, prediction = false)
+        dut.io.predictions(0).provider.expect(BranchProvider.Tagged2)
+        dut.io.predictions(0).taken.expect(true)
+      }
+    }
   }
 }
