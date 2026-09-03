@@ -181,6 +181,41 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("multiplies single values with special-value handling and rounding flags") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(lhs: BigInt, rhs: BigInt, rounding: Int,
+            expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 13, operation = FloatingOperation.FmulS,
+            floatSource0 = lhs, floatSource1 = rhs, floatDestination = 8,
+            roundingMode = rounding)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(BigInt("3fc00000", 16), BigInt("40000000", 16), 0,
+          BigInt("40400000", 16), 0)
+        check(BigInt("bfc00000", 16), BigInt("40000000", 16), 0,
+          BigInt("c0400000", 16), 0)
+        check(BigInt("00000001", 16), BigInt("40000000", 16), 0,
+          BigInt("00000002", 16), 0)
+        check(BigInt("00000000", 16), BigInt("7f800000", 16), 0,
+          BigInt("7fc00000", 16), 16)
+        check(BigInt("7fc00001", 16), BigInt("3f800000", 16), 0,
+          BigInt("7fc00000", 16), 0)
+        check(BigInt("7f7fffff", 16), BigInt("40000000", 16), 0,
+          BigInt("7f800000", 16), 5)
+        check(BigInt("7f7fffff", 16), BigInt("40000000", 16), 1,
+          BigInt("7f7fffff", 16), 5)
+      }
+    }
+
     it("classifies every floating category without modifying fflags") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

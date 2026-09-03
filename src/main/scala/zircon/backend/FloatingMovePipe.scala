@@ -56,6 +56,7 @@ class FloatingMovePipe(
       operation === FloatingOperation.FmaxS || operation === FloatingOperation.FleS ||
       operation === FloatingOperation.FltS || operation === FloatingOperation.FeqS ||
       operation === FloatingOperation.FaddS || operation === FloatingOperation.FsubS ||
+      operation === FloatingOperation.FmulS ||
       operation === FloatingOperation.FclassS || operation === FloatingOperation.FcvtSW ||
       operation === FloatingOperation.FcvtSWu || operation === FloatingOperation.FcvtWS ||
       operation === FloatingOperation.FcvtWuS
@@ -76,6 +77,7 @@ class FloatingMovePipe(
   val arithmetic = request.operation === FloatingOperation.FaddS ||
     request.operation === FloatingOperation.FsubS
   val arithmeticSubtraction = request.operation === FloatingOperation.FsubS
+  val multiplication = request.operation === FloatingOperation.FmulS
   val lhsExponent = lhs(30, 23)
   val rhsExponent = rhs(30, 23)
   val lhsFraction = lhs(22, 0)
@@ -194,6 +196,84 @@ class FloatingMovePipe(
       Mux(arithmeticOverflow, "b00101".U,
         Cat(0.U(3.W), Mux(arithmeticTiny && arithmeticInexact, 1.U(1.W), 0.U(1.W)),
           arithmeticInexact))))
+
+  val multiplicationSign = lhs(31) ^ rhs(31)
+  val multiplicationInvalid = (lhsInfinity && rhsZero) ||
+    (rhsInfinity && lhsZero) || lhsSignalingNaN || rhsSignalingNaN
+  val multiplicationLhsLeading = PriorityEncoder(Reverse(lhsArithmeticSignificand))
+  val multiplicationRhsLeading = PriorityEncoder(Reverse(rhsArithmeticSignificand))
+  val multiplicationLhsShift = Mux(lhsZero, 0.U(5.W),
+    multiplicationLhsLeading)
+  val multiplicationRhsShift = Mux(rhsZero, 0.U(5.W),
+    multiplicationRhsLeading)
+  val multiplicationLhsSignificand = (lhsArithmeticSignificand << multiplicationLhsShift)(23, 0)
+  val multiplicationRhsSignificand = (rhsArithmeticSignificand << multiplicationRhsShift)(23, 0)
+  // Bias the normalized exponents by 256 so subnormal products never wrap
+  // around an unsigned Chisel subtraction.
+  val multiplicationLhsExponent =
+    ((Cat(0.U(1.W), lhsArithmeticExponent) +& 256.U)(9, 0) - multiplicationLhsShift)
+  val multiplicationRhsExponent =
+    ((Cat(0.U(1.W), rhsArithmeticExponent) +& 256.U)(9, 0) - multiplicationRhsShift)
+  val multiplicationProduct = multiplicationLhsSignificand * multiplicationRhsSignificand
+  val multiplicationProductHigh = multiplicationProduct(47)
+  val multiplicationProductShift = Mux(multiplicationProductHigh, 21.U, 20.U)
+  val multiplicationNormalized = rightJam(multiplicationProduct,
+    multiplicationProductShift, 48)(26, 0)
+  val multiplicationExponentSum = Cat(0.U(1.W), multiplicationLhsExponent) +&
+    Cat(0.U(1.W), multiplicationRhsExponent)
+  val multiplicationExponentBiased = multiplicationExponentSum - 383.U(11.W)
+  val multiplicationSubnormalShift = Mux(multiplicationExponentBiased < 257.U,
+    257.U(11.W) - multiplicationExponentBiased, 0.U(11.W))
+  val multiplicationRoundedBaseExponent = Mux(multiplicationExponentBiased < 257.U,
+    1.U(11.W), multiplicationExponentBiased - 256.U)
+  val multiplicationRoundedInput = rightJam(multiplicationNormalized,
+    multiplicationSubnormalShift, 27)
+  val multiplicationInexact = multiplicationRoundedInput(2, 0).orR
+  val multiplicationRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (multiplicationRoundedInput(2) &&
+      (multiplicationRoundedInput(1, 0).orR || multiplicationRoundedInput(3))),
+    1.U -> false.B,
+    2.U -> (multiplicationSign && multiplicationInexact),
+    3.U -> (!multiplicationSign && multiplicationInexact),
+    4.U -> multiplicationRoundedInput(2)
+  ))
+  val multiplicationRoundedSignificand = Cat(0.U(1.W), multiplicationRoundedInput(26, 3)) +
+    multiplicationRoundUp.asUInt
+  val multiplicationRoundedCarry = multiplicationRoundedSignificand(24)
+  val multiplicationTiny = multiplicationRoundedBaseExponent <= 1.U &&
+    !multiplicationRoundedInput(26)
+  val multiplicationOverflow = multiplicationRoundedBaseExponent >= 255.U ||
+    (multiplicationRoundedBaseExponent === 254.U && multiplicationRoundedCarry)
+  val multiplicationOverflowToInfinity = request.roundingMode === 0.U ||
+    request.roundingMode === 4.U ||
+    (request.roundingMode === 3.U && !multiplicationSign) ||
+    (request.roundingMode === 2.U && multiplicationSign)
+  val multiplicationOutputExponent = Mux(multiplicationOverflow,
+    Mux(multiplicationOverflowToInfinity, 255.U(10.W), 254.U(10.W)),
+    Mux(multiplicationRoundedCarry, multiplicationRoundedBaseExponent + 1.U,
+      Mux(multiplicationTiny, 0.U(10.W), multiplicationRoundedBaseExponent)))
+  val multiplicationOutputFraction = Mux(multiplicationOverflow &&
+    multiplicationOverflowToInfinity, 0.U(23.W),
+    Mux(multiplicationOverflow, "h7fffff".U(23.W),
+      Mux(multiplicationRoundedCarry, 0.U(23.W),
+        multiplicationRoundedSignificand(22, 0))))
+  val multiplicationFiniteData = Cat(multiplicationSign,
+    multiplicationOutputExponent(7, 0), multiplicationOutputFraction)
+  val multiplicationSpecial = multiplicationInvalid || lhsNaN || rhsNaN ||
+    lhsInfinity || rhsInfinity
+  val multiplicationSpecialData = Mux(multiplicationInvalid, canonicalNaN,
+    Mux(lhsNaN || rhsNaN, canonicalNaN,
+      Mux(lhsInfinity, Cat(multiplicationSign, "hff".U(8.W), 0.U(23.W)),
+        Mux(rhsInfinity, Cat(multiplicationSign, "hff".U(8.W), 0.U(23.W)),
+          multiplicationFiniteData))))
+  val multiplicationResultData = Mux(multiplicationSpecial, multiplicationSpecialData,
+    Mux(multiplicationProduct.orR, multiplicationFiniteData,
+      Cat(multiplicationSign, 0.U(31.W))))
+  val multiplicationFlags = Mux(multiplicationInvalid, "b10000".U,
+    Mux(lhsNaN || rhsNaN || lhsInfinity || rhsInfinity, 0.U(5.W),
+      Mux(multiplicationOverflow, "b00101".U,
+        Cat(0.U(3.W), Mux(multiplicationTiny && multiplicationInexact,
+          1.U(1.W), 0.U(1.W)), multiplicationInexact))))
   val numericEqual = lhs === rhs || (lhsZero && rhsZero)
   val lhsOrderKey = Mux(lhs(31), ~lhs, lhs ^ "h80000000".U(32.W))
   val rhsOrderKey = Mux(rhs(31), ~rhs, rhs ^ "h80000000".U(32.W))
@@ -353,7 +433,11 @@ class FloatingMovePipe(
   result.integerDestinationPhysical := request.integerDestinationPhysical
   result.floatDestination := request.floatDestination
   result.flags := 0.U
-  when(arithmetic) {
+  when(multiplication) {
+    result.writesFloat := true.B
+    result.floatData := multiplicationResultData
+    result.flags := multiplicationFlags
+  }.elsewhen(arithmetic) {
     result.writesFloat := true.B
     result.floatData := arithmeticResultData
     result.flags := arithmeticFlags
@@ -427,6 +511,10 @@ class FloatingMovePipe(
         io.input.bits.operation === FloatingOperation.FsubS) {
       assert(io.input.bits.roundingMode <= 4.U,
         "FADD/FSUB received a reserved effective rounding mode")
+    }
+    when(io.input.bits.operation === FloatingOperation.FmulS) {
+      assert(io.input.bits.roundingMode <= 4.U,
+        "FMUL received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
