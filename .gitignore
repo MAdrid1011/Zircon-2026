@@ -35,6 +35,7 @@ test_run_dir/
 fpga/.Xil/
 fpga/vivado/
 fpga/runs/
+tight_setup_hold_pins.txt
 *.zip
 sail_smt_cache
 !toolchain.lock.json

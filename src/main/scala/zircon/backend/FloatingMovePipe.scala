@@ -88,6 +88,12 @@ class FloatingMovePipe(
   val fmaProductTopCoord = RegInit(0.U(11.W))
   val fmaProductZero = RegInit(false.B)
   val fmaProductInfinity = RegInit(false.B)
+  // Keep the wide FMA align/normalize cone behind a result register.  This
+  // adds one E2 cycle for FMA, but prevents its 57-bit carry/priority network
+  // from extending into the shared completion and memory-control paths.
+  val fmaResultDataReg = RegInit(0.U(32.W))
+  val fmaResultFlagsReg = RegInit(0.U(5.W))
+  val fmaResultCaptured = RegInit(false.B)
   val sqrtInitialized = RegInit(false.B)
   val sqrtRadicand = Reg(UInt(54.W))
   val sqrtRemainder = Reg(UInt(56.W))
@@ -765,8 +771,8 @@ class FloatingMovePipe(
   result.flags := 0.U
   when(fma) {
     result.writesFloat := true.B
-    result.floatData := fmaResultData
-    result.flags := fmaFlags
+    result.floatData := Mux(fmaResultCaptured, fmaResultDataReg, fmaResultData)
+    result.flags := Mux(fmaResultCaptured, fmaResultFlagsReg, fmaFlags)
   }.elsewhen(multiplication) {
     result.writesFloat := true.B
     result.floatData := multiplicationResultData
@@ -821,7 +827,7 @@ class FloatingMovePipe(
   val divisionDone = divInitialized && (divSpecial || divIteration === 51.U)
   val sqrtDone = sqrtInitialized && (sqrtSpecial || sqrtIteration === 27.U)
   io.output.valid := active && !recoveryBlocked &&
-    (!fma || fmaInitialized) && (!division || divisionDone) &&
+    (!fma || fmaResultCaptured) && (!division || divisionDone) &&
     (!squareRoot || sqrtDone)
   io.output.bits := result
 
@@ -831,6 +837,7 @@ class FloatingMovePipe(
     active := false.B
     divInitialized := false.B
     fmaInitialized := false.B
+    fmaResultCaptured := false.B
     sqrtInitialized := false.B
   }.elsewhen(io.squash.valid) {
     when(activeYounger) {
@@ -858,6 +865,7 @@ class FloatingMovePipe(
         io.input.bits.operation === FloatingOperation.FmsubS ||
         io.input.bits.operation === FloatingOperation.FnmsubS ||
         io.input.bits.operation === FloatingOperation.FnmaddS)
+      fmaResultCaptured := false.B
     }
     when(active && division && !divInitialized) {
       divInitialized := true.B
@@ -885,6 +893,11 @@ class FloatingMovePipe(
       fmaProductTopCoord := fmaProductRawTopCoord
       fmaProductZero := fmaProductRawZero
       fmaProductInfinity := lhsInfinity || rhsInfinity
+    }
+    when(active && fma && fmaInitialized && !fmaResultCaptured) {
+      fmaResultDataReg := fmaResultData
+      fmaResultFlagsReg := fmaFlags
+      fmaResultCaptured := true.B
     }
     when(active && squareRoot && !sqrtInitialized) {
       sqrtInitialized := true.B

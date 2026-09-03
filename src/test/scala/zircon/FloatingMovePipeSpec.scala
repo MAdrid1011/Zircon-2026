@@ -230,6 +230,11 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
           accept(dut)
           dut.io.output.valid.expect(false)
           dut.clock.step()
+          // FMA keeps the wide align/normalize cone behind a result
+          // register; completion is therefore visible one cycle after the
+          // product capture.
+          dut.io.output.valid.expect(false)
+          dut.clock.step()
           dut.io.output.valid.expect(true)
           dut.io.output.bits.writesFloat.expect(true)
           dut.io.output.bits.floatData.expect(expected)
