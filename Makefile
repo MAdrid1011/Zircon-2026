@@ -107,8 +107,10 @@ test-m3-ordered-io-fetch-pressure:
 
 # Fast, focused device ownership regression. It covers the exact-head LQ/SQ
 # bridge through ID 6 and stays below the five-minute component-simulation gate.
+# OrderedIOCombinerSpec and AXIOrderedIOEngineSpec belong to the standalone
+# transport target above; rerunning them here added no device-ownership coverage.
 test-m3-device-io:
-	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.AXIOrderedIOEngineSpec zircon.OrderedIOCombinerSpec"
+	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec"
 	# Keep this slice to the basic M0/ID-6 ownership cases.  The broad
 	# "Device" selector also reran the dedicated mixed-AXI, grouped-MMIO,
 	# fetch-pressure, and interrupt cases below.

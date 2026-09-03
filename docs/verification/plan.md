@@ -69,7 +69,9 @@ substring filters are prohibited because they rerun cases owned by the
 dedicated AXI, MMIO-group, interrupt, and error slices. In particular,
 `test-m3-atomic` selects one basic LR/SC, reservation-loss, and AMO completion
 case each, while `test-m3-device-io` selects only the basic ID-6 ownership and
-response-error cases. The complete `./scripts/sbtw test` run remains unchanged
+response-error cases. The standalone `AXIOrderedIOEngineSpec` and
+`OrderedIOCombinerSpec` suites are owned by `test-m3-ordered-io` and are not
+rerun by `test-m3-device-io`. The complete `./scripts/sbtw test` run remains unchanged
 and is still required for the PR/nightly release evidence.
 
 The top-level M-mode interrupt slice also includes
