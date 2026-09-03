@@ -43,6 +43,14 @@ post-place 报告为 LUT 72,090（53.56%），setup WNS `-209.860 ns`、TNS
 选择网络和 floatingMovePipe、memQueue 是主要时序热点，后续必须进行结构流水化
 或减少逻辑扇出。
 
+随后在同一固定器件和 `AreaOptimized_medium` 指令下复跑了 FMA 结果寄存器版本
+（`FPGA_REVISION=fma-reg-synth`）。综合在 11 分钟内完成并生成 checkpoint：LUT
+71,513/134,600（53.13%）、FF 35,221、BRAM tile 133/365（36.44%）、DSP 4/740
+（0.54%）。相对 `medium-synth` 的 LUT 71,457、FF 35,185，寄存器边界没有带来
+面积下降；该运行没有 place/route/WNS 证据，不能作为 100 MHz 通过结果。后续应优先
+优化 FloatingMovePipe、backend/frontend 选择网络和高扇出控制，而不是继续复制此类
+面积近似不变的综合实验。
+
 同日新增顶层 `MEI > MSI > MTI` 优先级回归，`make test-m4-interrupt-priority`
 以三线同时 pending 验证 `mcause=0x8000000b`、精确 EPC、MRET 和被中断指令单次
 重执行，结果 1/1。ZirconSim `make -C ZirconSim tohost` 在同一 RTL 上完成 RV32I
