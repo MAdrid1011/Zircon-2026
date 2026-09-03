@@ -2,6 +2,8 @@
 
 Zircon-2026 的目标配置为 `RV32IMAF_Zicsr_Zifencei`、单 hart、M-mode。处理器由 4-wide frontend、2-wide rename/dispatch/commit backend、整数和长延迟执行端点、M0/M1 两条访存流水线、L1I/L1D、共享 L2、PMA、AXI4 master 和提交级验证接口组成。当前 partial 代码已将 [M1Frontend](m1-frontend.md)、active [L1I shared-demand slice](l1-instruction-cache.md)、dispatch/rename/整数执行/BDB recovery/FirstFault、commit/CSR/BDB retirement、E2 [LongPipe](long-pipe.md) 与 M3 的 MemIQ/LQ/SQ、L1D dirty/write-allocate load/store、clean/dirty exclusive L1D-L2 transfer、动态 L2 I-fill、四项 L2 demand MSHR/ID 1--4、ID-5 dirty-victim writeback、ID-6 MMIO 和 ID-7 RV32A 接到 `ZirconCore`，可执行 directed RV32IMA 指令流；完整 I/D coherence、FPU 和完整数据通路仍未实现。
 
+固定 FPGA 物理顶层及已验证的板级边界见 [FPGA board integration](fpga-board-integration.md)。
+
 双路资源接纳与路由见 [dispatch](dispatch.md)，execute-time 分支恢复见
 [branch recovery](branch-recovery.md)，当前组合边界见
 [Integer Dispatch/Recovery Backend](integer-dispatch-recovery-backend.md)。

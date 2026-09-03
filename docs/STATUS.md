@@ -73,6 +73,16 @@ with reserved `frm=5`.
 
 ### M3 External Coherence Update
 
+### M3 ZirconSim AXI-owner Update
+
+`ZirconSim` 的 deterministic AXI slave 已从单一 read owner 扩展为四个独立
+owner，可同时接受 4 个 outstanding burst，并在不同 ID 间交错 R beat；当
+`r_ready` 回压时会保持同一 owner 的完整 payload。`make -C ZirconSim unit`
+新增四 ID/双 beat 单元覆盖；更新后的四个 `tohost` ELF、Spike 和 Sail
+committed-memory differential 均在 2026-09-03 本地通过。该项关闭仿真器的
+单 owner 限制，但不等于完整 M3 随机 AXI、Cache conflict 或平台 master
+矩阵已完成。
+
 The earlier M3 row's statement that ADR-0023 had no controller or integration
 is superseded. `ZirconCoreIO.externalCoherence` now implements the retained
 single-request port through `ExternalCoherenceController`: new cacheable

@@ -38,6 +38,25 @@ recomputed locally. This establishes locked-toolchain local execution evidence
 only; it does not close the remaining M3 stress, coherence, formal, or release
 requirements.
 
+## Four-owner deterministic AXI model
+
+The ZirconSim AXI slave now retains four independent read owners, accepts up to
+four outstanding bursts, and selects ready R beats across owners while keeping
+an offered payload stable under `r_ready` backpressure. A local unit test issues
+four two-beat bursts on IDs 1--4 and verifies both beats and `RLAST` data for
+each ID. The same test also checks the explicit seed contract.
+
+On 2026-09-03, the updated model rebuilt and passed `make -C ZirconSim unit`,
+then completed all four deterministic `tohost` runs and both Spike and Sail
+committed-memory differential targets. A repeated RV32M run with seed
+`0x12345` produced identical trace SHA256
+`a58356c0448f0dc58505c1870ab6591bdb025cb337a3b380556f063d291c91aa` and
+backing-memory SHA256
+`f59164e11cf286b691649dad57479455d701ef3483c0ccb827bc10424cf00a91`.
+This closes the simulator's single-read-owner limitation; it does not close the
+remaining complete-core random AXI, cache conflict, or external-platform
+pressure matrix.
+
 | ELF | Cycle limit | Observed cycles | Retirements | ELF SHA256 | Trace SHA256 |
 | --- | ---: | ---: | ---: | --- | --- |
 | `rv32i-commit-prefix.elf` | 1024 | 241 | 19 | `d9447a5b7fc720653c3ea4fce72425863a4652351e49787f6839a94a4e6eb51a` | `00d2b73b4ccb00f360233d0396888f7e6223a12ed996b66fdebc7c240312a481` |
