@@ -31,7 +31,13 @@ if {[info exists ::env(FPGA_PARSE_ONLY)] && $::env(FPGA_PARSE_ONLY) eq "1"} {
   exit 0
 }
 
-synth_design -top ZirconBoard -part $target_part -directive AreaOptimized_high
+set synth_directive AreaOptimized_high
+if {[info exists ::env(FPGA_SYNTH_DIRECTIVE)] &&
+    $::env(FPGA_SYNTH_DIRECTIVE) ne ""} {
+  set synth_directive $::env(FPGA_SYNTH_DIRECTIVE)
+}
+puts "Zircon synthesis directive: $synth_directive"
+synth_design -top ZirconBoard -part $target_part -directive $synth_directive
 write_checkpoint -force [file join $run_dir zircon_board_synth.dcp]
 report_utilization -file [file join $run_dir utilization_synth.rpt]
 

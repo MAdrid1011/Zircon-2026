@@ -33,6 +33,11 @@ the production no-observation platform RTL, then writes implementation outputs
 under `fpga/runs/<git-revision>/`, which is intentionally ignored. Copy only
 measured reports selected for release evidence beneath `fpga/reports/`.
 
+For bounded synthesis experiments, `FPGA_SYNTH_ONLY=1` exits after synthesis
+and `FPGA_SYNTH_DIRECTIVE=AreaOptimized_medium` selects an alternate Vivado
+directive. The default remains `AreaOptimized_high`; changing the directive
+does not create release timing or utilization evidence.
+
 The recovered LA32R source tree contains no board-level DDR wiring or physical
 external coherence initiator. Consequently this wrapper keeps the production
 coherence adapter instantiated but idle. It is valid physical timing evidence
