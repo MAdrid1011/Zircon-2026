@@ -1,7 +1,7 @@
 # M1 BTB、RAS 与目标选择
 
-该模块组为四路取指提供目标预测。方向在 M1 来自 Base bimodal，M4 换成
-miniTAGE；目标和调用栈契约不随方向预测器变化。
+该模块组为四路取指提供目标预测。方向由冻结的 Base + miniTAGE provider
+提供；目标和调用栈契约不随方向预测器变化。
 
 ## 参数与组织
 
@@ -20,6 +20,18 @@ BTB 每项保存 valid、tag、target、conditional、call 和 return 属性。c
 counter，也不根据 opcode 自行重新译码。
 
 ## 接口
+
+### `MiniTagePredictor`
+
+方向表固定为 512 项、2-bit Base 表，以及三张各 128 项的 tagged 表。三张表的
+历史长度为 4/16/64 bit，tag 宽度为 7/8/9 bit，tagged counter 为 3 bit，useful
+为 2 bit。训练只在 BDB commit training 上发生；Base 饱和计数器和命中的 tagged
+provider 同周期更新，提交误预测时分配最短历史的未命中表。`useful` 在 provider
+正确且 alternate 错误时递增，否则递减并饱和。
+
+同一四指令组的并行查询使用 group-start history checkpoint，避免预测结果与
+`SpeculativeGlobalHistory` 的组内推进形成组合环；现有 history 模块仍按 accepted
+prefix 生成每个 slot 的 checkpoint，供 BDB 和恢复使用。
 
 ### `BankedBranchTargetBuffer`
 

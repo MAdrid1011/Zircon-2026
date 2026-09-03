@@ -219,7 +219,7 @@ class M1FrontendSpec extends AnyFunSpec with ChiselSim {
         dut.io.decode(0).bits.prediction.predictedTaken.expect(true)
         dut.io.decode(0).bits.prediction.predictedTarget.expect(ResetVector + 16)
         dut.io.decode(0).bits.prediction.conditional.expect(true)
-        dut.io.decode(0).bits.prediction.provider.expect(BranchProvider.Base)
+        dut.io.decode(0).bits.prediction.provider.expect(BranchProvider.Tagged0)
         dut.clock.step(2)
         dut.io.l2Request.valid.expect(false)
       }

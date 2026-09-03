@@ -46,7 +46,7 @@ class M1Frontend(
     "M1Frontend is frozen for four-wide fetch and two-wide decode")
 
   val fetch = Module(new L1InstructionCache(config))
-  val bimodal = Module(new BankedBimodalPredictor(config))
+  val direction = Module(new MiniTagePredictor(config))
   val btb = Module(new BankedBranchTargetBuffer(config))
   val ras = Module(new ReturnAddressStack)
   val control = Module(new FetchControlPrediction(config))
@@ -64,11 +64,23 @@ class M1Frontend(
 
   fetch.io.invalidate := fenceICommit || io.coherenceInvalidate
 
-  bimodal.io.fetchBase := fetch.io.response.bits.base
-  bimodal.io.train.valid := io.branchTraining.valid &&
+  direction.io.fetchBase := fetch.io.response.bits.base
+  // The predictor query must not depend combinationally on the direction
+  // result that advances the same group's speculative history.  Use the
+  // group's starting checkpoint for all four parallel queries; the history
+  // module still records the exact per-slot checkpoints for BDB/recovery.
+  direction.io.historyBefore := VecInit.fill(config.fetchWidth)(control.io.currentHistory)
+  direction.io.train.valid := io.branchTraining.valid &&
     io.branchTraining.bits.metadata.conditional
-  bimodal.io.train.bits.pc := io.branchTraining.bits.metadata.pc
-  bimodal.io.train.bits.taken := io.branchTraining.bits.actualTaken
+  direction.io.train.bits.pc := io.branchTraining.bits.metadata.pc
+  direction.io.train.bits.historyBefore := io.branchTraining.bits.metadata.historyBefore
+  direction.io.train.bits.actualTaken := io.branchTraining.bits.actualTaken
+  direction.io.train.bits.provider := io.branchTraining.bits.metadata.provider
+  direction.io.train.bits.alternateProvider := io.branchTraining.bits.metadata.alternateProvider
+  direction.io.train.bits.providerPrediction :=
+    io.branchTraining.bits.metadata.providerPrediction
+  direction.io.train.bits.alternatePrediction :=
+    io.branchTraining.bits.metadata.alternatePrediction
 
   btb.io.fetchBase := fetch.io.response.bits.base
   btb.io.train.valid := io.branchTraining.valid
@@ -79,12 +91,12 @@ class M1Frontend(
   btb.io.train.bits.ret := io.branchTraining.bits.metadata.ret
   btb.io.invalidate := fenceICommit || io.coherenceInvalidate
 
-  val predictorsReady = bimodal.io.ready && btb.io.ready
+  val predictorsReady = direction.io.ready && btb.io.ready
   control.io.fetchBase := fetch.io.response.bits.base
   for (slot <- 0 until config.fetchWidth) {
     control.io.instructions(slot) := fetch.io.response.bits.words(slot).instruction
     control.io.slotValid(slot) := slot.U < fetch.io.response.bits.count
-    control.io.directionTaken(slot) := bimodal.io.predictions(slot).taken
+    control.io.directionTaken(slot) := direction.io.predictions(slot).taken
     control.io.btb(slot) := btb.io.predictions(slot)
   }
   control.io.predictorsReady := predictorsReady
@@ -114,7 +126,7 @@ class M1Frontend(
     val predictedControl = control.io.redirect.valid &&
       control.io.redirect.bits.slot === slot.U
     val predictedTaken = Mux(control.io.predecode(slot).conditional,
-      bimodal.io.predictions(slot).taken, predictedControl)
+      direction.io.predictions(slot).taken, predictedControl)
     val predictedTarget = Mux(predictedTaken,
       Mux(control.io.predecode(slot).direct,
         control.io.predecode(slot).directTarget,
@@ -128,10 +140,10 @@ class M1Frontend(
     entry.prediction.conditional := control.io.predecode(slot).conditional
     entry.prediction.call := control.io.predecode(slot).call
     entry.prediction.ret := control.io.predecode(slot).ret
-    entry.prediction.provider := BranchProvider.Base
-    entry.prediction.alternateProvider := BranchProvider.Base
-    entry.prediction.providerPrediction := bimodal.io.predictions(slot).taken
-    entry.prediction.alternatePrediction := false.B
+    entry.prediction.provider := direction.io.predictions(slot).provider
+    entry.prediction.alternateProvider := direction.io.predictions(slot).alternateProvider
+    entry.prediction.providerPrediction := direction.io.predictions(slot).providerPrediction
+    entry.prediction.alternatePrediction := direction.io.predictions(slot).alternatePrediction
     entry.prediction.btbWay := btb.io.predictions(slot).way
     entry.prediction.rasPointerBefore := ras.io.pointer
     entry.prediction.rasCountBefore := ras.io.count
