@@ -79,6 +79,13 @@ alias/替换矩阵和性能收敛仍未完成。
 `ExclusiveL2TransferStoreSpec` 为 12/12、顶层 FIFO 压力场景为 1/1；目标是消除综合
 层级中约 30k LUT 的小深度宽 payload 异步读 mux，待新提交的 Vivado 结果确认收益。
 
+`ZirconCoreConfig` 的 4 KiB 默认点和 8 KiB 对照点现在都可通过显式入口
+复现：`make platform-verilog` 生成默认 `generated-platform/`，
+`make platform-verilog-8k` 使用 `--l2-8k` 生成隔离的
+`generated-platform-8k/`。两种配置均通过 elaboration；`CoreConfigSpec` 和
+`ExclusiveL2TransferStoreSpec` 的 8 KiB 几何测试通过。完整 IPC/工作负载 A/B
+测量仍是 M5 未完成项。
+
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
 2026-09-03 新增同 set 单 invalid-way 双 miss 矩阵：`make test-m3-dual-resource`
