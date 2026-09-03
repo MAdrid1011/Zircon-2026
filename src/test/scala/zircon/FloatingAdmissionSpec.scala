@@ -10,7 +10,7 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
       (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
 
   describe("FloatingAdmission") {
-    it("admits only the documented bit-move/sign subset when FS is enabled") {
+    it("admits the executable RV32F E2 subset when FS is enabled") {
       simulate(new FloatingAdmission) { dut =>
         val fmvwx = opFp(0x78, rs2 = 0, rs1 = 4, funct3 = 0, rd = 7)
         dut.io.instruction.poke(fmvwx)
