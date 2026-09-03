@@ -2744,6 +2744,82 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("seals a DeviceBurstable group early when fetch crosses a backpressured packet") {
+      // The first device load is the last instruction in its eight-word fetch
+      // packet. The remaining three loads cannot be dispatched until the next
+      // packet is accepted, so the collection window must seal a legal
+      // one-beat group rather than waiting indefinitely for a larger group.
+      val seed = 0x5eed0401L
+      val address = BigInt("b0000000", 16)
+      val values = Seq(BigInt("51000011", 16), BigInt("51000022", 16),
+        BigInt("51000033", 16), BigInt("51000044", 16))
+      val program = scala.collection.mutable.Map[BigInt, BigInt](
+        ResetVector -> BigInt("b00000b7", 16),
+        ResetVector + 4 -> Nop,
+        ResetVector + 8 -> Nop,
+        ResetVector + 12 -> Nop,
+        ResetVector + 16 -> Nop,
+        ResetVector + 20 -> Nop,
+        ResetVector + 24 -> BigInt("0000a103", 16),
+        ResetVector + 28 -> BigInt("0040a183", 16),
+        ResetVector + 32 -> BigInt("0080a203", 16),
+        ResetVector + 36 -> BigInt("00c0a283", 16),
+        ResetVector + 40 -> BigInt("00100073", 16),
+        address -> values(0), address + 4 -> values(1),
+        address + 8 -> values(2), address + 12 -> values(3)
+      )
+      val cycles = 384
+      val schedule = AxiSchedule(
+        // The first fetch burst must enter at cycle zero. Hold the next burst
+        // for 24 cycles, which is longer than the six-cycle group window.
+        arReady = Vector.tabulate(cycles)(cycle => cycle == 0 || cycle >= 24),
+        rValid = Vector.fill(cycles)(true),
+        awReady = Vector.fill(cycles)(true),
+        wReady = Vector.fill(cycles)(true),
+        bValid = Vector.fill(cycles)(true)
+      )
+
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val groups = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
+        var fetchBlocked = false
+        var events = Seq.empty[TraceSample]
+        try {
+          events = runProgram(dut, program.toMap, cycles = cycles,
+            arReadyForCycle = cycle => schedule.arReady(cycle),
+            rValidForCycle = cycle => schedule.rValid(cycle),
+            observeCycle = (core, _) => {
+              val arValid = core.io.axi.ar.valid.peek().litToBoolean
+              val arReady = core.io.axi.ar.ready.peek().litToBoolean
+              val arId = core.io.axi.ar.bits.id.peek().litValue
+              fetchBlocked ||= arValid && !arReady && arId == 1
+              if (arValid && arReady && arId == 6) {
+                groups += ((core.io.axi.ar.bits.addr.peek().litValue,
+                  core.io.axi.ar.bits.len.peek().litValue))
+              }
+            })
+          val retired = throughFirstTrap(events)
+          val loads = retired.filter(event =>
+            event.pc >= ResetVector + 24 && event.pc <= ResetVector + 36)
+          withClue(s"seed=0x${java.lang.Long.toHexString(seed)} " +
+            s"fetchBlocked=$fetchBlocked groups=$groups events=$retired") {
+            assert(fetchBlocked, "instruction AR was never held by the fetch-pressure schedule")
+            assert(groups.nonEmpty && groups.head._2 < 3,
+              "fetch pressure did not seal the first device group early")
+            assert(loads.size == 4, "not all four device loads retired")
+            loads.zip(values).foreach { case (event, value) =>
+              assert(event.memoryReadMask == 15 && event.memoryReadData == value)
+            }
+          }
+        } catch {
+          case failure: Throwable =>
+            saveM3AxiStressFailure(seed, "ordered-io-fetch-pressure", schedule,
+              events, program = Some(program.toMap))
+            throw failure
+        }
+      }
+    }
+
     it("takes an interrupt before an unaccepted device load, then reexecutes it") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
