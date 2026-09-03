@@ -83,6 +83,19 @@ mapping on `xc7a200tfbg676-2L` reports four `32 x 256` banks using 16
 The synthesis-only run was stopped during timing optimization, so final LUT,
 post-route WNS, and bitstream evidence remain open.
 
+### M3 L1D BRAM Update
+
+`L1DLoadCache` now uses replicated `L1DDataMemory` line views instead of the
+large distributed `Reg(Vec(...))` data array. The behavioral branch keeps the
+existing zero-latency unit-test model; the Vivado branch uses read-first XPM
+true-dual-port block RAM with retained hit/store metadata. The focused cache
+and top-level checks pass: 55/55 L1D tests, 85/85 combined L1I/L1D/L2/dual-LSU
+tests, and four selected CoreShell ownership cases. Vivado preliminary mapping
+on `xc7a200tfbg676-2L` reports eight `16 x 256` L1D RAM objects in block RAM.
+The synthesis run was intentionally stopped during timing optimization after
+the mapping report because it consumed excessive host swap; final utilization,
+timing, and post-route evidence remain open.
+
 ### M3 External Coherence Update
 
 ### M3 ZirconSim AXI-owner Update
