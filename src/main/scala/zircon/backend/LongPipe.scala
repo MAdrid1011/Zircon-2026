@@ -11,6 +11,29 @@ class LongPipeRequest(config: ZirconCoreConfig) extends Bundle {
   val rhs = UInt(32.W)
 }
 
+/** Explicitly sized partial-product primitive. Keeping the operands at 16 bits
+  * prevents Verilog emission from widening the multiply into a 32x32 DSP. */
+class ZirconUIntMul16 extends BlackBox with HasBlackBoxInline {
+  override val desiredName: String = "ZirconUIntMul16"
+
+  val io = IO(new Bundle {
+    val a = Input(UInt(16.W))
+    val b = Input(UInt(16.W))
+    val y = Output(UInt(32.W))
+  })
+
+  setInline("ZirconUIntMul16.sv",
+    """(* use_dsp = "yes" *)
+      |module ZirconUIntMul16(
+      |  input wire [15:0] a,
+      |  input wire [15:0] b,
+      |  output wire [31:0] y
+      |);
+      |  assign y = a * b;
+      |endmodule
+      |""".stripMargin)
+}
+
 /** E2 RV32M engine. The integer multiplier is composed only from four 16x16
   * partial products. Division uses one restoring step per active cycle.
   */
@@ -31,10 +54,16 @@ class LongPipe(
     Mux(value(31), negate32(value), value)
 
   private def unsignedProduct(lhs: UInt, rhs: UInt): UInt = {
-    val p00 = lhs(15, 0) * rhs(15, 0)
-    val p01 = lhs(15, 0) * rhs(31, 16)
-    val p10 = lhs(31, 16) * rhs(15, 0)
-    val p11 = lhs(31, 16) * rhs(31, 16)
+    def partialProduct(a: UInt, b: UInt): UInt = {
+      val multiplier = Module(new ZirconUIntMul16)
+      multiplier.io.a := a
+      multiplier.io.b := b
+      multiplier.io.y
+    }
+    val p00 = partialProduct(lhs(15, 0), rhs(15, 0))
+    val p01 = partialProduct(lhs(15, 0), rhs(31, 16))
+    val p10 = partialProduct(lhs(31, 16), rhs(15, 0))
+    val p11 = partialProduct(lhs(31, 16), rhs(31, 16))
     val productWide = p00.pad(64) +& (p01.pad(64) << 16) +&
       (p10.pad(64) << 16) +& (p11.pad(64) << 32)
     val product = Wire(UInt(64.W))

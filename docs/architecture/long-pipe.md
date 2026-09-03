@@ -44,6 +44,10 @@ All four multiply signedness variants derive from one unsigned 32x32 raw product
 two's-complement high-half corrections select `MULH`, `MULHSU`, and `MULHU` without
 replicating the partial-product array.
 
+Each partial product is emitted through `ZirconUIntMul16` with explicit 16-bit
+operands. This preserves the four-DSP inference boundary in Vivado instead of
+allowing zero-extension in generated Verilog to widen each multiply.
+
 ## State, recovery, and completion
 
 LongIQ may dequeue only on a request fire. LongPipe owns one active tag and two result
