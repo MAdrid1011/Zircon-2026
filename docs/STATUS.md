@@ -43,6 +43,13 @@ post-place 报告为 LUT 72,090（53.56%），setup WNS `-209.860 ns`、TNS
 选择网络和 floatingMovePipe、memQueue 是主要时序热点，后续必须进行结构流水化
 或减少逻辑扇出。
 
+在提交 `83f9345` 后重新生成平台 RTL，并以固定器件 `xc7a200tfbg676-2L`、
+`AreaOptimized_medium` 完成 synthesis-only 复核（`fpga/runs/mini-tage-synth`，
+10 分 39 秒）：LUT `71,401/134,600 = 53.05%`、FF `35,202`、BRAM
+`133/365 = 36.44%`、DSP `4/740 = 0.54%`。该结果比此前 medium synthesis
+的 53.13% 略低，但仍高于 50% 目标，且没有 place/route、WNS 或 bitstream
+证据，不能视为 FPGA release gate 通过。
+
 随后在同一固定器件和 `AreaOptimized_medium` 指令下复跑了 FMA 结果寄存器版本
 （`FPGA_REVISION=fma-reg-synth`）。综合在 11 分钟内完成并生成 checkpoint：LUT
 71,513/134,600（53.13%）、FF 35,221、BRAM tile 133/365（36.44%）、DSP 4/740
