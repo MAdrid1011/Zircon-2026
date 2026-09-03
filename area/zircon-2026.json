@@ -94,6 +94,15 @@
       "source": "FloatingMovePipe active request bit"
     },
     {
+      "name": "floating_fma_product_state",
+      "class": "register_payload",
+      "entries": 1,
+      "bits_per_entry": 62,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "FloatingMovePipe FMA stage-one state: 48-bit exact product, product sign, 11-bit exponent coordinate, zero/infinity markers"
+    },
+    {
       "name": "floating_result_bridge_completion_hold",
       "class": "register_payload",
       "entries": 1,
@@ -1172,6 +1181,38 @@
       "width": 1,
       "fanin": 1,
       "source": "FloatingMovePipe FCVT.W[U].S retained rounding increment and valid negative-result two's-complement formation"
+    },
+    {
+      "name": "floating_fma_alignment_mux_inputs",
+      "metric": "mux_input_bits",
+      "units": 3,
+      "width": 56,
+      "fanin": 2,
+      "source": "FloatingMovePipe FMA product/addend common-exponent alignment and effective-sign selection"
+    },
+    {
+      "name": "floating_fma_alignment_shifters",
+      "metric": "shifter32_units",
+      "units": 4,
+      "width": 56,
+      "fanin": 1,
+      "source": "FloatingMovePipe FMA dynamic product/addend alignment, normalization, and subnormal shifts"
+    },
+    {
+      "name": "floating_fma_adders",
+      "metric": "adder32_units",
+      "units": 4,
+      "width": 57,
+      "fanin": 1,
+      "source": "FloatingMovePipe FMA magnitude add/subtract, exponent coordinate, and final significand increment"
+    },
+    {
+      "name": "floating_fma_compare_units",
+      "metric": "comparator32_units",
+      "units": 3,
+      "width": 57,
+      "fanin": 1,
+      "source": "FloatingMovePipe FMA sign/magnitude ordering and exponent-range decisions"
     }
   ]
 }
