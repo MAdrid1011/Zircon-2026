@@ -542,6 +542,69 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "BankedBranchTargetBuffer: one replacement bit per bank and row"
+    },
+    {
+      "name": "minitage_base_counters",
+      "class": "tag_metadata",
+      "entries": 512,
+      "bits_per_entry": 2,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "MiniTagePredictor: four banks x 128 rows x two-bit base counter"
+    },
+    {
+      "name": "minitage_tagged0_entries",
+      "class": "tag_metadata",
+      "entries": 128,
+      "bits_per_entry": 13,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "MiniTagePredictor tagged table 0: four banks x 32 rows, valid/7-bit tag/three-bit counter/two-bit useful"
+    },
+    {
+      "name": "minitage_tagged1_entries",
+      "class": "tag_metadata",
+      "entries": 128,
+      "bits_per_entry": 14,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "MiniTagePredictor tagged table 1: four banks x 32 rows, valid/8-bit tag/three-bit counter/two-bit useful"
+    },
+    {
+      "name": "minitage_tagged2_entries",
+      "class": "tag_metadata",
+      "entries": 128,
+      "bits_per_entry": 15,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "MiniTagePredictor tagged table 2: four banks x 32 rows, valid/9-bit tag/three-bit counter/two-bit useful"
+    },
+    {
+      "name": "minitage_scrub_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 8,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "MiniTagePredictor scrub state and seven-bit row counter"
+    },
+    {
+      "name": "return_address_stack_entries",
+      "class": "register_payload",
+      "entries": 8,
+      "bits_per_entry": 32,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ReturnAddressStack: eight speculative return addresses"
+    },
+    {
+      "name": "return_address_stack_control",
+      "class": "register_control",
+      "entries": 1,
+      "bits_per_entry": 7,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "ReturnAddressStack three-bit pointer and four-bit occupancy count"
     }
   ],
   "logic": [
@@ -1256,6 +1319,22 @@
       "width": 1,
       "fanin": 2,
       "source": "BankedBranchTargetBuffer two-way hit selection for four fetch slots"
+    },
+    {
+      "name": "minitage_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 12,
+      "width": 1,
+      "fanin": 1,
+      "source": "MiniTagePredictor three tagged tables compared for each of four fetch slots"
+    },
+    {
+      "name": "minitage_provider_priority_bits",
+      "metric": "priority_select_bits",
+      "units": 4,
+      "width": 2,
+      "fanin": 3,
+      "source": "MiniTagePredictor newest matching tagged provider selection for four fetch slots"
     }
   ]
 }
