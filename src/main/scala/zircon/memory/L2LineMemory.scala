@@ -14,6 +14,8 @@ class L2LineMemory(depth: Int, width: Int) extends BlackBox
   require(depth > 0 && (depth & (depth - 1)) == 0)
   require(width > 0 && width % 8 == 0)
   private val addressWidth = log2Ceil(depth)
+  private val moduleName = s"L2LineMemory_${depth}x${width}"
+  override def desiredName: String = moduleName
 
   val io = IO(new Bundle {
     val clk = Input(Clock())
@@ -25,8 +27,8 @@ class L2LineMemory(depth: Int, width: Int) extends BlackBox
     val writeData = Input(UInt(width.W))
   })
 
-  setInline("L2LineMemory.sv",
-    s"""module L2LineMemory #(
+  setInline(s"$moduleName.sv",
+    s"""module $moduleName #(
        |  parameter integer DEPTH = $depth,
        |  parameter integer WIDTH = $width,
        |  parameter integer ADDR_WIDTH = $addressWidth

@@ -77,7 +77,26 @@ class L1InstructionCache(
 
   val cacheValid = RegInit(VecInit(Seq.fill(ways)(VecInit(Seq.fill(sets)(false.B)))))
   val cacheTag = Reg(Vec(ways, Vec(sets, UInt(tagWidth.W))))
-  val cacheData = Reg(Vec(ways, Vec(sets, Vec(wordsPerLine, UInt(32.W)))))
+  val cacheDataMemories = Seq.fill(ways)(Module(new L2LineMemory(
+    sets, wordsPerLine * 32)))
+  val dataReadSet = WireDefault(0.U(setWidth.W))
+  val dataReadWay = WireDefault(0.U(log2Ceil(ways).W))
+  val dataRead = MuxLookup(dataReadWay, 0.U((wordsPerLine * 32).W))(
+    (0 until ways).map(way => way.U -> cacheDataMemories(way).io.readData))
+  val dataReadWords = dataRead.asTypeOf(Vec(wordsPerLine, UInt(32.W)))
+  val dataWriteEnable = WireDefault(false.B)
+  val dataWriteWay = WireDefault(0.U(log2Ceil(ways).W))
+  val dataWriteSet = WireDefault(0.U(setWidth.W))
+  val dataWriteData = WireDefault(0.U((wordsPerLine * 32).W))
+  for (way <- 0 until ways) {
+    cacheDataMemories(way).io.clk := clock
+    cacheDataMemories(way).io.readEnable := true.B
+    cacheDataMemories(way).io.readAddress := dataReadSet
+    cacheDataMemories(way).io.writeEnable :=
+      dataWriteEnable && dataWriteWay === way.U
+    cacheDataMemories(way).io.writeAddress := dataWriteSet
+    cacheDataMemories(way).io.writeData := dataWriteData
+  }
   val replacement = RegInit(VecInit.fill(sets)(false.B))
 
   val requestSet = requestBase(lineOffsetWidth + setWidth - 1, lineOffsetWidth)
@@ -87,6 +106,27 @@ class L1InstructionCache(
     cacheValid(way)(requestSet) && cacheTag(way)(requestSet) === requestTag))
   val cacheHit = hitWays.asUInt.orR
   val hitWay = PriorityEncoder(hitWays.asUInt)
+  // The line store has a registered read address. Prepare the address during
+  // the cycle that captures a request (and during a no-idle continuation) so
+  // Lookup can consume the returned line without exposing a HitRead bubble.
+  val pcSet = pc(lineOffsetWidth + setWidth - 1, lineOffsetWidth)
+  val pcTag = pc(31, lineOffsetWidth + setWidth)
+  val pcHitWays = VecInit((0 until ways).map(way =>
+    cacheValid(way)(pcSet) && cacheTag(way)(pcSet) === pcTag))
+  val pcHitWay = PriorityEncoder(pcHitWays.asUInt)
+  val continuationSet = io.responseNextPc(
+    lineOffsetWidth + setWidth - 1, lineOffsetWidth)
+  val continuationTag = io.responseNextPc(31, lineOffsetWidth + setWidth)
+  val continuationHitWays = VecInit((0 until ways).map(way =>
+    cacheValid(way)(continuationSet) &&
+      cacheTag(way)(continuationSet) === continuationTag))
+  val continuationHitWay = PriorityEncoder(continuationHitWays.asUInt)
+  dataReadSet := Mux(state === L1InstructionCacheState.Idle, pcSet,
+    Mux(state === L1InstructionCacheState.Present && io.response.fire &&
+      io.continueAfterResponse, continuationSet, requestSet))
+  dataReadWay := Mux(state === L1InstructionCacheState.Idle, pcHitWay,
+    Mux(state === L1InstructionCacheState.Present && io.response.fire &&
+      io.continueAfterResponse, continuationHitWay, hitWay))
   val invalidWays = VecInit((0 until ways).map(way => !cacheValid(way)(requestSet)))
   val victimWay = Mux(invalidWays.asUInt.orR, PriorityEncoder(invalidWays.asUInt),
     replacement(requestSet).asUInt)
@@ -199,9 +239,10 @@ class L1InstructionCache(
     when(!io.l2Response.bits.accessFault) {
       cacheValid(lookaheadWay)(lookaheadSet) := true.B
       cacheTag(lookaheadWay)(lookaheadSet) := lookaheadTag
-      for (word <- 0 until wordsPerLine) {
-        cacheData(lookaheadWay)(lookaheadSet)(word) := refillLineData(word)
-      }
+      dataWriteEnable := true.B
+      dataWriteWay := lookaheadWay
+      dataWriteSet := lookaheadSet
+      dataWriteData := Cat(refillLineData.reverse)
       replacement(lookaheadSet) := !lookaheadWay.asBool
     }
     lookaheadInFlight := false.B
@@ -255,7 +296,7 @@ class L1InstructionCache(
           for (slot <- 0 until config.fetchWidth) {
             val wordIndex = requestWord + slot.U
             packetWords(slot).instruction := Mux(slot.U < requestCount,
-              cacheData(hitWay)(requestSet)(wordIndex), 0.U)
+              dataReadWords(wordIndex), 0.U)
             packetWords(slot).fault.valid := false.B
             packetWords(slot).fault.cause := 0.U
             packetWords(slot).fault.tval := 0.U
@@ -289,10 +330,10 @@ class L1InstructionCache(
             when(!io.invalidate) {
               cacheValid(missWay)(requestSet) := true.B
               cacheTag(missWay)(requestSet) := requestTag
-              for (word <- 0 until wordsPerLine) {
-                cacheData(missWay)(requestSet)(word) :=
-                  io.l2LookupResponse.bits.lineData(word)
-              }
+              dataWriteEnable := true.B
+              dataWriteWay := missWay
+              dataWriteSet := requestSet
+              dataWriteData := Cat(io.l2LookupResponse.bits.lineData.reverse)
               replacement(requestSet) := !missWay.asBool
             }
             state := L1InstructionCacheState.Present
@@ -321,9 +362,10 @@ class L1InstructionCache(
           when(!io.l2Response.bits.accessFault && !io.invalidate) {
             cacheValid(missWay)(requestSet) := true.B
             cacheTag(missWay)(requestSet) := requestTag
-            for (word <- 0 until wordsPerLine) {
-              cacheData(missWay)(requestSet)(word) := refillLineData(word)
-            }
+            dataWriteEnable := true.B
+            dataWriteWay := missWay
+            dataWriteSet := requestSet
+            dataWriteData := Cat(refillLineData.reverse)
             replacement(requestSet) := !missWay.asBool
           }
           state := L1InstructionCacheState.Present
