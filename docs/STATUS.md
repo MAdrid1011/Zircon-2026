@@ -24,6 +24,12 @@ DSP/LUT 或 100 MHz 时序达标。
 `mul24-lut` synthesis-only 运行超过 28 分钟未产生 utilization report，已终止，
 不能作为当前结构或 FPGA 门槛证据。
 
+2026-09-04 对当前共享乘法器/L2 修复运行固定器件 `xc7a200tfbg676-2L` 的
+`FPGA_SYNTH_ONLY=1` 实验；Vivado 初步映射显示 L1D/L2 与 BRAM wrapper 采用
+XPM/RAMB，DSP 表显示四个 `16x16` 乘法 primitive。该运行在约 30 分钟时仍停在
+timing optimization，按约定终止，未生成 utilization/WNS/checkpoint，不能作为
+面积或 100 MHz 通过证据。
+
 同日新增顶层 `MEI > MSI > MTI` 优先级回归，`make test-m4-interrupt-priority`
 以三线同时 pending 验证 `mcause=0x8000000b`、精确 EPC、MRET 和被中断指令单次
 重执行，结果 1/1。ZirconSim `make -C ZirconSim tohost` 在同一 RTL 上完成 RV32I
