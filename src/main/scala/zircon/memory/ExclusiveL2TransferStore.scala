@@ -291,7 +291,7 @@ class ExclusiveL2TransferStore(
   // The operation priority mirrors the state-update chain below.  For a
   // valid instruction insertion this also supplies the resident collision
   // line to `instructionInsertData` without adding another read port.
-  when(fenceEvict) {
+  when(io.fenceDrain && fenceDirtyFound) {
     readWay := fenceDirtyWay
     readSet := fenceDirtySet
   }.elsewhen(io.flushLine.valid) {
