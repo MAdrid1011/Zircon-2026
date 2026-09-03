@@ -75,6 +75,10 @@ device `BRESP` fault paths while independently backpressuring AR, R, AW, W,
 and B. The test harness saves the seed, all five channel schedules, and retire
 trace under `target/zircon-failures` when a case fails.
 
+`make test-m3-ordering` keeps its component suites in two invocations: the
+queue/L2/FENCE group and `L1DLoadCacheSpec` are separate so each remains below
+five minutes, followed by the four short complete-core FENCE/aq/rl cases.
+
 `make test-m3-external-coherence` is the focused sideband tier. It runs the
 retained core controller and platform gate, then clean/dirty/retry, in-flight
 I/D refill, and reset-epoch complete-core cases. On 2026-09-03 it completed
