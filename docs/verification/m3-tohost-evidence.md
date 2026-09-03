@@ -44,7 +44,9 @@ The ZirconSim AXI slave now retains four independent read owners, accepts up to
 four outstanding bursts, and selects ready R beats across owners while keeping
 an offered payload stable under `r_ready` backpressure. A local unit test issues
 four two-beat bursts on IDs 1--4 and verifies both beats and `RLAST` data for
-each ID. The same test also checks the explicit seed contract.
+each ID; a second case issues two same-ID bursts and verifies that the older
+owner drains before the younger response. The same test also checks the
+explicit seed contract.
 
 On 2026-09-03, the updated model rebuilt and passed `make -C ZirconSim unit`,
 then completed all four deterministic `tohost` runs and both Spike and Sail
