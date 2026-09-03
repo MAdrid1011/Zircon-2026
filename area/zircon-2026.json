@@ -6,7 +6,7 @@
   "completeness": "partial",
   "known_omissions": [
     "DeviceStrong and 1-4 beat DeviceBurstable accesses are connected through the LSQ/ROB and AXI ID 6; ID-7 RV32A is executable. L1I is an active one-MSHR shared-demand client: it probes resident L2 lines and cleanly allocates each successful AXI refill into the same dynamic L2 ways. Formal proof and concrete board integration remain unfinished. L1D has dirty/write-allocate and transfers clean/dirty victims to the exclusive L2 store; cache-global FENCE drains dirty L1D/L2 state through retained ID-5 writeback. Four retained L2 demand-read owners map client tokens to IDs 1-4 and ID-5 dirty-victim writeback is executable. Trace-only host flush is excluded from this production ledger",
-    "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
+    "ROB, BDB, rename-map, free-list, ready-table, speculative-history, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
     "The RV32F E2 path, including five-mode/dynamic conversions, FADD.S/FSUB.S/FMUL.S/FDIV.S/FSQRT.S/FMA, FPR/fflags commit state, FS admission barrier, and trace integration is implemented but not yet fully inventoried below. Floating memory operations, complete differential coverage, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
