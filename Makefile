@@ -155,7 +155,9 @@ test-m3-fence-pressure:
 # Mixed cache refill/writeback and ordered-device traffic runs in a separate
 # four-seed tier, keeping the more focused AXI slices quick to reproduce.
 test-m3-axi-mixed:
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "device AXI traffic through seeded backpressure"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "preserves mixed cache and device AXI traffic"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "drains two dirty cache lines and device AXI traffic through seeded backpressure"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "retries a dirty writeback with mixed device AXI traffic through seeded backpressure"'
 
 # Fast RV32A ownership regression. It remains below the five-minute component
 # budget and covers the ID-7 owner, exact M0 completion, reservation loss, and
