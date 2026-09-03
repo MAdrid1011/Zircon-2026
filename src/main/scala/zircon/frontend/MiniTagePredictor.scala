@@ -79,8 +79,13 @@ class MiniTagePredictor(
     chunks.reduce(_ ^ _)
   }
 
+  private def tableBank(pc: UInt): UInt = pc(3, 2)
+
+  private def tableRow(pc: UInt, history: UInt, length: Int): UInt =
+    pc(8, 4) ^ fold(history, length, 5)
+
   private def tableIndex(pc: UInt, history: UInt, length: Int): UInt =
-    pc(8, 2) ^ fold(history, length, 7)
+    Cat(tableRow(pc, history, length), tableBank(pc))
 
   private def tableTag(pc: UInt, history: UInt, length: Int, width: Int): UInt = {
     val mixed = pc ^ Cat(0.U((32 - width).W), fold(history, length, width))
@@ -105,12 +110,15 @@ class MiniTagePredictor(
     tableIndex(queryPc(slot), io.historyBefore(slot), historyLengths(table))
   }
   val queryEntries = Seq.tabulate(tableCount, config.fetchWidth) { (table, slot) =>
-    val bankEntries = (0 until banks).map { bank =>
-      val row = queryIndex(table)(slot)(6, 2)
+    val bankReads = (0 until banks).map { bank =>
+      val matches = (0 until config.fetchWidth).map(other =>
+        tableBank(queryPc(other)) === bank.U)
+      val row = Mux1H((0 until config.fetchWidth).map(other =>
+        matches(other) -> queryIndex(table)(other)(6, 2)))
       tagged(table)(bank).read(row)
     }
     Mux1H((0 until banks).map(bank =>
-      (queryIndex(table)(slot)(1, 0) === bank.U) -> bankEntries(bank)))
+      (tableBank(queryPc(slot)) === bank.U) -> bankReads(bank)))
   }
 
   for (slot <- 0 until config.fetchWidth) {
@@ -179,7 +187,7 @@ class MiniTagePredictor(
     val index = tableIndex(io.train.bits.pc, io.train.bits.historyBefore,
       historyLengths(table))
     val entry = Mux1H((0 until banks).map(bank =>
-      (index(1, 0) === bank.U) -> tagged(table)(bank).read(index(6, 2))))
+      (tableBank(io.train.bits.pc) === bank.U) -> tagged(table)(bank).read(index(6, 2))))
     val widened = Wire(new MiniTageEntry(tagWidths(table)))
     widened := entry
     widened

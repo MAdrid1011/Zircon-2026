@@ -29,6 +29,9 @@ counter，也不根据 opcode 自行重新译码。
 provider 同周期更新，提交误预测时分配最短历史的未命中表。`useful` 在 provider
 正确且 alternate 错误时递增，否则递减并饱和。
 
+每张 tagged 表按 `pc[3:2]` 分成四个 bank，并以 history-folded row 查询；四条
+连续 PC 因而每周期各占一个物理读口，避免把表复制成四读口 LUTRAM。
+
 同一四指令组的并行查询使用 group-start history checkpoint，避免预测结果与
 `SpeculativeGlobalHistory` 的组内推进形成组合环；现有 history 模块仍按 accepted
 prefix 生成每个 slot 的 checkpoint，供 BDB 和恢复使用。
