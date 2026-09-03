@@ -222,9 +222,11 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)
         def check(operation: FloatingOperation.Type, lhs: BigInt, rhs: BigInt,
-            addend: BigInt, expected: BigInt, flags: BigInt = 0): Unit = {
+            addend: BigInt, expected: BigInt, flags: BigInt = 0,
+            rounding: Int = 0): Unit = {
           drive(dut, tag = 19, operation = operation, floatSource0 = lhs,
-            floatSource1 = rhs, floatSource2 = addend, floatDestination = 6)
+            floatSource1 = rhs, floatSource2 = addend, floatDestination = 6,
+            roundingMode = rounding)
           accept(dut)
           dut.io.output.valid.expect(false)
           dut.clock.step()
@@ -264,6 +266,12 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
         check(FloatingOperation.FmaddS, BigInt("7fc00001", 16),
           BigInt("3f800000", 16), BigInt("3f800000", 16),
           BigInt("7fc00000", 16), flags = 0)
+        check(FloatingOperation.FmaddS, BigInt("3f800000", 16),
+          BigInt("3f800000", 16), BigInt("33800000", 16),
+          BigInt("3f800000", 16), flags = 1, rounding = 0)
+        check(FloatingOperation.FmaddS, BigInt("3f800000", 16),
+          BigInt("3f800000", 16), BigInt("33800000", 16),
+          BigInt("3f800001", 16), flags = 1, rounding = 3)
         check(FloatingOperation.FmsubS, BigInt("00000000", 16),
           BigInt("3f800000", 16), BigInt("7f800000", 16),
           BigInt("ff800000", 16), flags = 0)
