@@ -71,7 +71,24 @@ class ExclusiveL2TransferStore(
   val lineValid = RegInit(VecInit(Seq.fill(ways)(VecInit(Seq.fill(sets)(false.B)))))
   val lineDirty = RegInit(VecInit(Seq.fill(ways)(VecInit(Seq.fill(sets)(false.B)))))
   val lineTag = Reg(Vec(ways, Vec(sets, UInt(tagWidth.W))))
-  val lineData = Reg(Vec(ways, Vec(sets, Vec(wordsPerLine, UInt(32.W)))))
+  // Store one complete line per memory word.  Keeping the line packed avoids
+  // elaborating one wide mux per word over every way/set entry, while the
+  // `Mem` interface preserves the existing one-cycle transfer contract.
+  val lineMem = Mem(lineCount, UInt((wordsPerLine * 32).W))
+  def lineIndex(way: UInt, set: UInt): UInt =
+    (way * sets.U + set)(log2Ceil(lineCount) - 1, 0)
+  def lineWord(line: UInt, word: Int): UInt =
+    line(word * 32 + 31, word * 32)
+  def packedLine(words: Vec[UInt]): UInt = Cat(words.reverse)
+  // All clients are mutually excluded by the ready equations below.  A
+  // single shared read address therefore represents the sole active line
+  // operation and prevents Chisel from creating one memory port per word or
+  // per consumer.
+  val readAddress = WireDefault(0.U(log2Ceil(lineCount).W))
+  val lineRead = lineMem(readAddress)
+  val lineWriteEnable = WireDefault(false.B)
+  val lineWriteAddress = WireDefault(0.U(log2Ceil(lineCount).W))
+  val lineWriteData = WireDefault(0.U((wordsPerLine * 32).W))
   val replacementWay = RegInit(VecInit.fill(sets)(0.U(wayWidth.W)))
 
   val responseValid = RegInit(false.B)
@@ -103,6 +120,7 @@ class ExclusiveL2TransferStore(
     replacementWay(insertSet))
   val replacingValid = lineValid(insertWay)(insertSet)
   val replacingDirty = replacingValid && lineDirty(insertWay)(insertSet)
+  val insertLine = lineRead
   val canInsert = !insertHit && (!replacingDirty || victimQueue.io.enq.ready)
   // First version is a single array port: an insertion owns the cycle over a
   // lookup, including while a dirty victim is waiting for FIFO credit.
@@ -126,6 +144,7 @@ class ExclusiveL2TransferStore(
   val instructionReplacingValid = lineValid(instructionInsertWay)(instructionInsertSet)
   val instructionReplacingDirty = instructionReplacingValid &&
     lineDirty(instructionInsertWay)(instructionInsertSet)
+  val instructionInsertLine = lineRead
   val canInstructionInsert = instructionInsertHit || !instructionReplacingDirty ||
     victimQueue.io.enq.ready
   io.instructionInsert.ready := !io.fenceDrain && !io.insert.valid && !responseValid &&
@@ -134,7 +153,7 @@ class ExclusiveL2TransferStore(
   io.instructionInsertHit := instructionInsertHit
   for (word <- 0 until wordsPerLine) {
     io.instructionInsertData(word) := Mux(instructionInsertHit,
-      lineData(instructionInsertHitWay)(instructionInsertSet)(word),
+      lineWord(instructionInsertLine, word),
       io.instructionInsert.bits.lineData(word))
   }
 
@@ -145,6 +164,7 @@ class ExclusiveL2TransferStore(
     lineValid(way)(lookupSet) && lineTag(way)(lookupSet) === lookupTag))
   val lookupHit = lookupHits.asUInt.orR
   val lookupWay = PriorityEncoder(lookupHits.asUInt)
+  val lookupLine = lineRead
   io.lookup.ready := !io.fenceDrain && !io.invalidate.valid && !io.insert.valid &&
     !io.instructionInsert.valid && !io.flushLine.valid && !responseValid &&
     !instructionResponseValid
@@ -158,6 +178,7 @@ class ExclusiveL2TransferStore(
       lineTag(way)(instructionLookupSet) === instructionLookupTag))
   val instructionLookupHit = instructionLookupHits.asUInt.orR
   val instructionLookupWay = PriorityEncoder(instructionLookupHits.asUInt)
+  val instructionLookupLine = lineRead
   // One Reg-backed L2 array port is shared deterministically: D insertion
   // wins, then clean I fill, then exclusive D transfer, then I probe.
   io.instructionLookup.ready := !io.fenceDrain && !io.invalidate.valid && !io.insert.valid &&
@@ -172,6 +193,7 @@ class ExclusiveL2TransferStore(
   val flushHit = flushHits.asUInt.orR
   val flushWay = PriorityEncoder(flushHits.asUInt)
   val flushDirty = flushHit && lineDirty(flushWay)(flushSet)
+  val flushLineData = lineRead
   io.flushLineDirty := flushDirty
   io.flushLine.ready := !io.fenceDrain && !responseValid && !instructionResponseValid &&
     Mux(flushDirty, victimQueue.io.enq.ready, true.B)
@@ -202,8 +224,41 @@ class ExclusiveL2TransferStore(
   }
   val fenceEvict = io.fenceDrain && !responseValid && !instructionResponseValid &&
     fenceDirtyFound && victimQueue.io.enq.ready
+  val fenceLineData = lineRead
   io.fenceDrained := !responseValid && !instructionResponseValid &&
     !fenceDirtyFound && victimQueue.io.count === 0.U
+
+  // The operation priority mirrors the state-update chain below.  For a
+  // valid instruction insertion this also supplies the resident collision
+  // line to `instructionInsertData` without adding another read port.
+  when(fenceEvict) {
+    readAddress := lineIndex(fenceDirtyWay, fenceDirtySet)
+  }.elsewhen(io.flushLine.valid && io.flushLine.ready) {
+    readAddress := lineIndex(flushWay, flushSet)
+  }.elsewhen(io.insert.valid && io.insert.ready) {
+    readAddress := lineIndex(insertWay, insertSet)
+  }.elsewhen(io.instructionInsert.valid && io.instructionInsert.ready) {
+    readAddress := lineIndex(instructionInsertHitWay, instructionInsertSet)
+  }.elsewhen(io.lookup.valid && io.lookup.ready) {
+    readAddress := lineIndex(lookupWay, lookupSet)
+  }.elsewhen(io.instructionLookup.valid && io.instructionLookup.ready) {
+    readAddress := lineIndex(instructionLookupWay, instructionLookupSet)
+  }.elsewhen(io.instructionInsert.valid) {
+    readAddress := lineIndex(instructionInsertHitWay, instructionInsertSet)
+  }
+
+  when(io.insert.fire) {
+    lineWriteEnable := true.B
+    lineWriteAddress := lineIndex(insertWay, insertSet)
+    lineWriteData := packedLine(io.insert.bits.lineData)
+  }.elsewhen(io.instructionInsert.fire && !instructionInsertHit) {
+    lineWriteEnable := true.B
+    lineWriteAddress := lineIndex(instructionInsertWay, instructionInsertSet)
+    lineWriteData := packedLine(io.instructionInsert.bits.lineData)
+  }
+  when(lineWriteEnable) {
+    lineMem(lineWriteAddress) := lineWriteData
+  }
 
   when(io.insert.valid) {
     assert(io.insert.bits.lineAddress(lineOffsetWidth - 1, 0) === 0.U,
@@ -247,7 +302,8 @@ class ExclusiveL2TransferStore(
       fenceDirtySet, 0.U(lineOffsetWidth.W))
     victimQueue.io.enq.bits.dirty := true.B
     for (word <- 0 until wordsPerLine) {
-      victimQueue.io.enq.bits.lineData(word) := lineData(fenceDirtyWay)(fenceDirtySet)(word)
+      victimQueue.io.enq.bits.lineData(word) :=
+        lineWord(fenceLineData, word)
     }
     for (way <- 0 until ways) {
       when(fenceDirtyWay === way.U) {
@@ -262,7 +318,7 @@ class ExclusiveL2TransferStore(
         0.U(lineOffsetWidth.W))
       victimQueue.io.enq.bits.dirty := true.B
       for (word <- 0 until wordsPerLine) {
-        victimQueue.io.enq.bits.lineData(word) := lineData(flushWay)(flushSet)(word)
+        victimQueue.io.enq.bits.lineData(word) := lineWord(flushLineData, word)
       }
     }
     when(flushHit) {
@@ -289,7 +345,7 @@ class ExclusiveL2TransferStore(
         insertSet, 0.U(lineOffsetWidth.W))
       victimQueue.io.enq.bits.dirty := true.B
       for (word <- 0 until wordsPerLine) {
-        victimQueue.io.enq.bits.lineData(word) := lineData(insertWay)(insertSet)(word)
+        victimQueue.io.enq.bits.lineData(word) := lineWord(insertLine, word)
       }
     }
     for (way <- 0 until ways) {
@@ -297,9 +353,6 @@ class ExclusiveL2TransferStore(
         lineValid(way)(insertSet) := true.B
         lineDirty(way)(insertSet) := io.insert.bits.dirty
         lineTag(way)(insertSet) := insertTag
-        for (word <- 0 until wordsPerLine) {
-          lineData(way)(insertSet)(word) := io.insert.bits.lineData(word)
-        }
       }
     }
     replacementWay(insertSet) := Mux(insertWay === (ways - 1).U,
@@ -314,7 +367,7 @@ class ExclusiveL2TransferStore(
         victimQueue.io.enq.bits.dirty := true.B
         for (word <- 0 until wordsPerLine) {
           victimQueue.io.enq.bits.lineData(word) :=
-            lineData(instructionInsertWay)(instructionInsertSet)(word)
+            lineWord(instructionInsertLine, word)
         }
       }
       for (way <- 0 until ways) {
@@ -322,10 +375,6 @@ class ExclusiveL2TransferStore(
           lineValid(way)(instructionInsertSet) := true.B
           lineDirty(way)(instructionInsertSet) := false.B
           lineTag(way)(instructionInsertSet) := instructionInsertTag
-          for (word <- 0 until wordsPerLine) {
-            lineData(way)(instructionInsertSet)(word) :=
-              io.instructionInsert.bits.lineData(word)
-          }
         }
       }
       replacementWay(instructionInsertSet) := Mux(instructionInsertWay ===
@@ -347,7 +396,7 @@ class ExclusiveL2TransferStore(
           responseBits.transfer.lineAddress := Cat(lineTag(way)(lookupSet),
             lookupSet, 0.U(lineOffsetWidth.W))
           for (word <- 0 until wordsPerLine) {
-            responseBits.transfer.lineData(word) := lineData(way)(lookupSet)(word)
+            responseBits.transfer.lineData(word) := lineWord(lookupLine, word)
           }
         }
       }
@@ -366,7 +415,7 @@ class ExclusiveL2TransferStore(
             instructionLookupSet, 0.U(lineOffsetWidth.W))
           for (word <- 0 until wordsPerLine) {
             instructionResponseBits.lineData(word) :=
-              lineData(way)(instructionLookupSet)(word)
+              lineWord(instructionLookupLine, word)
           }
         }
       }

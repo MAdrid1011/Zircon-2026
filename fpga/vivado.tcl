@@ -29,6 +29,15 @@ read_xdc $constraints
 synth_design -top ZirconBoard -part $target_part -directive AreaOptimized_high
 write_checkpoint -force [file join $run_dir zircon_board_synth.dcp]
 report_utilization -file [file join $run_dir utilization_synth.rpt]
+
+# Keep a fast, reproducible synthesis checkpoint for structural area work.
+# Full implementation remains the release path below; this mode never emits
+# timing or bitstream evidence.
+if {[info exists ::env(FPGA_SYNTH_ONLY)] && $::env(FPGA_SYNTH_ONLY) eq "1"} {
+  puts "Zircon FPGA synthesis-only run completed: $run_dir"
+  exit 0
+}
+
 opt_design
 write_checkpoint -force [file join $run_dir zircon_board_opt.dcp]
 place_design
