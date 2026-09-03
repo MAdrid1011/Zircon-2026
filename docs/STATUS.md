@@ -177,6 +177,13 @@ measured LUT 65,546/134,600 (48.70%), LUT-as-memory 352, FF 31,491, BRAM
 WNS, or bitstream release claim is made. `BranchTargetBufferSpec` and
 `M1FrontendSpec` pass 9/9 after regenerating platform RTL.
 
+Using the regenerated platform RTL, a full-top synthesis-only run
+(`fpga/runs/btb-full-synth`, Vivado 2023.1, `AreaOptimized_medium`) completed
+on `xc7a200tfbg676-2L` in 10m44s. The final report is LUT 65,546/134,600
+(48.70%), FF 31,491, BRAM tile 133/365 (36.44%), and DSP 4/740 (0.54%).
+This confirms the current structural LUT result is below 50%; place/route,
+WNS, DRC, and bitstream evidence remain open.
+
 ### M3 L2 BRAM Update
 
 `ExclusiveL2TransferStore` now stores each way in an explicit `L2LineMemory`
