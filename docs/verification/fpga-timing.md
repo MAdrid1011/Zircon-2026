@@ -62,6 +62,14 @@ The nearby `SCARF/Zircon-SCARF/build/fpga_2025_vu13p/stage_b_bd/project/scarf_st
 instead targets `xcvu13p-fhgb2104-2-i`; its VU13P/DDR4 constraints likewise
 must not enter this project.
 
+On 2026-09-03, the Vivado 2023.1 synthesis-only run at parent revision
+`2d188b4` reached `Start Timing Optimization` after RTL elaboration and
+preliminary DSP/RAM mapping, but produced no checkpoint or utilization report
+before it was intentionally terminated at about 24 minutes to avoid an
+unbounded host-resource wait. The latest parent revision `4210e5b` also passes
+the fixed-part Vivado parse-only flow against the same XDC; this is an RTL/XDC
+parse result only and does not change the failed/unverified physical gate.
+
 ## Timing triage
 
 Timing fixes must preserve the frozen ISA, exact exception/interrupt behavior,
