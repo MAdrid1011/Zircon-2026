@@ -109,6 +109,15 @@ timing, and post-route evidence remain open.
 
 ### M3 External Coherence Update
 
+`ExternalCoherenceController`、`ExternalCoherenceAdapter` 和
+`ZirconPlatformCore` 的一请求 sideband 已完成可综合连接；controller/adapter
+组件测试与 `CoreShellSpec` 的 clean、dirty、retry、I-side/D-side drain、reset、
+LR reservation 和 response backpressure 场景均有本地证据。`ZirconBoard` 在固定
+`xc7a200tfbg676-2L` wrapper 中保留该接口但将 modifier 置 idle，因为恢复的 LA32R
+工程只提供 clk/reset/LED 和本地 AXI BRAM，没有可验证的外部 master/DDR pinout。
+因此 core boundary 已闭环，真实 platform-master wiring 仍是 M3 发布前的明确缺口，
+不能用 idle 输入或 local BRAM 代替该证据。
+
 ### M3 ZirconSim AXI-owner Update
 
 `ZirconSim` 的 deterministic AXI slave 已从单一 read owner 扩展为四个独立
