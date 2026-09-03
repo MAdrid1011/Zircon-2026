@@ -35,6 +35,13 @@ checkpoint：synthesis LUT 71,457/134,600（53.09%）、FF 35,185、BRAM tile
 M1BackendSubsystem 20,612、ExclusiveL2TransferStore 9,958 和 DualLSUIngress
 6,133；这些数字仍是 synthesis 初步值，正式门禁必须继续执行 place/route、WNS
 和最终 utilization。
+同一配置的 medium 完整 implementation 已完成 synth/opt/place 并保存三个
+checkpoint，但在 route 的 30 分钟预算内因拥塞未完成（overlap 最后降至 2,990）。
+post-place 报告为 LUT 72,090（53.56%），setup WNS `-209.860 ns`、TNS
+`-6,066,633.854 ns`，共有 56,094 个 failing endpoints；该结果明确不满足
+100 MHz，也不能生成 bitstream。层级报告显示 backend/frontend 的大规模组合
+选择网络和 floatingMovePipe、memQueue 是主要时序热点，后续必须进行结构流水化
+或减少逻辑扇出。
 
 同日新增顶层 `MEI > MSI > MTI` 优先级回归，`make test-m4-interrupt-priority`
 以三线同时 pending 验证 `mcause=0x8000000b`、精确 EPC、MRET 和被中断指令单次

@@ -17,5 +17,7 @@ open_checkpoint $checkpoint
 report_utilization -hierarchical -file $report
 report_utilization -hierarchical -hierarchical_depth 5 \
   -file "${report}.depth5.rpt"
+report_timing_summary -delay_type min_max -report_unconstrained \
+  -file "${report}.timing.rpt"
 puts "Hierarchical FPGA utilization report written: $report"
 exit 0
