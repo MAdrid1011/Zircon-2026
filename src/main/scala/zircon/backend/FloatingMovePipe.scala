@@ -146,6 +146,14 @@ class FloatingMovePipe(
     }
     (value >> shift) | sticky.asUInt
   }
+  private def rightJamMasked(value: UInt, shift: UInt, width: Int): UInt = {
+    // A dynamic shift plus one generated low-bit mask keeps the wide FMA
+    // alignment cone out of the per-bit equality muxes used by the narrow
+    // legacy paths above.
+    val mask = Mux(shift >= width.U, Fill(width, 1.U(1.W)),
+      ((1.U(width.W) << shift)(width - 1, 0) - 1.U(width.W)))
+    (value >> shift) | (value & mask).orR.asUInt
+  }
   val lhsArithmeticSignificand = Mux(lhsExponent === 0.U,
     Cat(0.U(1.W), lhsFraction), Cat(1.U(1.W), lhsFraction))
   val rhsArithmeticSignificand = Mux(rhsExponent === 0.U,
@@ -368,9 +376,9 @@ class FloatingMovePipe(
   val fmaProductAligned = (Cat(0.U(8.W), fmaProduct) <<
     Mux(fmaProduct(47), 5.U(6.W), 6.U(6.W)))(55, 0)
   val fmaAddendAligned = Cat(0.U(3.W), fmaAddendSignificand, 0.U(29.W))
-  val fmaProductAtCommonTop = rightJam(fmaProductAligned,
+  val fmaProductAtCommonTop = rightJamMasked(fmaProductAligned,
     fmaCommonTopCoord - fmaProductTopForAlign, 56)
-  val fmaAddendAtCommonTop = rightJam(fmaAddendAligned,
+  val fmaAddendAtCommonTop = rightJamMasked(fmaAddendAligned,
     fmaCommonTopCoord - fmaAddendTopForAlign, 56)
   val fmaProductEffectiveSign = fmaProductSign
   val fmaAddendEffectiveSign = fmaAddend(31) ^ fmaAddendSubtracted
@@ -387,14 +395,14 @@ class FloatingMovePipe(
   val fmaLeadingZeros = PriorityEncoder(Reverse(fmaMagnitude))
   val fmaLeadingBit = 56.U(6.W) - fmaLeadingZeros
   val fmaNormalized = Mux(fmaLeadingBit >= 26.U,
-    rightJam(fmaMagnitude, fmaLeadingBit - 26.U, 57),
+    rightJamMasked(fmaMagnitude, fmaLeadingBit - 26.U, 57),
     (fmaMagnitude << (26.U - fmaLeadingBit))(56, 0))
   val fmaTopCoordWide = Cat(0.U(1.W), fmaCommonTopCoord) +
     Cat(0.U(6.W), fmaLeadingBit) - 52.U(12.W)
   val fmaTopCoord = fmaTopCoordWide(10, 0)
   val fmaSubnormalShift = Mux(fmaTopCoord < 513.U,
     513.U(11.W) - fmaTopCoord, 0.U(11.W))
-  val fmaRoundedInput = rightJam(fmaNormalized, fmaSubnormalShift, 57)(26, 0)
+  val fmaRoundedInput = rightJamMasked(fmaNormalized, fmaSubnormalShift, 57)(26, 0)
   val fmaRoundedBaseExponent = Mux(fmaTopCoord < 513.U, 0.U(10.W),
     fmaTopCoord - 512.U)
   val fmaInexact = fmaRoundedInput(2, 0).orR
