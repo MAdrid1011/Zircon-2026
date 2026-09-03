@@ -138,6 +138,49 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("adds and subtracts single values with IEEE rounding and exception flags") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(operation: FloatingOperation.Type, lhs: BigInt, rhs: BigInt,
+            rounding: Int, expected: BigInt, flags: BigInt): Unit = {
+          drive(dut, tag = 11, operation = operation, floatSource0 = lhs,
+            floatSource1 = rhs, floatDestination = 7, roundingMode = rounding)
+          accept(dut)
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16),
+          BigInt("40000000", 16), 0, BigInt("40400000", 16), 0)
+        check(FloatingOperation.FsubS, BigInt("40b00000", 16),
+          BigInt("40100000", 16), 0, BigInt("40500000", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("3fc00000", 16),
+          BigInt("c0100000", 16), 0, BigInt("bf400000", 16), 0)
+        // Half an ulp is inexact: RNE ties to even, RUP advances one ulp.
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16),
+          BigInt("33800000", 16), 0, BigInt("3f800000", 16), 1)
+        check(FloatingOperation.FaddS, BigInt("3f800000", 16),
+          BigInt("33800000", 16), 3, BigInt("3f800001", 16), 1)
+        check(FloatingOperation.FsubS, BigInt("00000000", 16),
+          BigInt("00000000", 16), 2, BigInt("80000000", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("00000001", 16),
+          BigInt("00000001", 16), 0, BigInt("00000002", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("7f800000", 16),
+          BigInt("ff800000", 16), 0, BigInt("7fc00000", 16), 16)
+        check(FloatingOperation.FaddS, BigInt("7fc00001", 16),
+          BigInt("3f800000", 16), 0, BigInt("7fc00000", 16), 0)
+        check(FloatingOperation.FaddS, BigInt("7f7fffff", 16),
+          BigInt("7f7fffff", 16), 0, BigInt("7f800000", 16), 5)
+        check(FloatingOperation.FaddS, BigInt("7f7fffff", 16),
+          BigInt("7f7fffff", 16), 1, BigInt("7f7fffff", 16), 5)
+      }
+    }
+
     it("classifies every floating category without modifying fflags") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

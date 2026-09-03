@@ -55,6 +55,7 @@ class FloatingMovePipe(
       operation === FloatingOperation.FsgnjxS || operation === FloatingOperation.FminS ||
       operation === FloatingOperation.FmaxS || operation === FloatingOperation.FleS ||
       operation === FloatingOperation.FltS || operation === FloatingOperation.FeqS ||
+      operation === FloatingOperation.FaddS || operation === FloatingOperation.FsubS ||
       operation === FloatingOperation.FclassS || operation === FloatingOperation.FcvtSW ||
       operation === FloatingOperation.FcvtSWu || operation === FloatingOperation.FcvtWS ||
       operation === FloatingOperation.FcvtWuS
@@ -72,21 +73,131 @@ class FloatingMovePipe(
   val signInjected = Cat(sign, request.floatSource(0)(30, 0))
   val lhs = request.floatSource(0)
   val rhs = request.floatSource(1)
+  val arithmetic = request.operation === FloatingOperation.FaddS ||
+    request.operation === FloatingOperation.FsubS
+  val arithmeticSubtraction = request.operation === FloatingOperation.FsubS
   val lhsExponent = lhs(30, 23)
   val rhsExponent = rhs(30, 23)
   val lhsFraction = lhs(22, 0)
   val rhsFraction = rhs(22, 0)
   val lhsNaN = lhsExponent === "hff".U && lhsFraction.orR
   val rhsNaN = rhsExponent === "hff".U && rhsFraction.orR
+  val canonicalNaN = "h7fc00000".U(32.W)
   val lhsSignalingNaN = lhsNaN && !lhsFraction(22)
   val rhsSignalingNaN = rhsNaN && !rhsFraction(22)
+  val rhsArithmeticSign = rhs(31) ^ arithmeticSubtraction
+  val lhsInfinity = lhsExponent === "hff".U && !lhsFraction.orR
+  val rhsInfinity = rhsExponent === "hff".U && !rhsFraction.orR
   val lhsZero = lhs(30, 0) === 0.U
   val rhsZero = rhs(30, 0) === 0.U
+
+  // Add/subtract uses three low guard bits. Bit zero is sticky (jammed), so
+  // a single integer adder can implement all five architectural modes.
+  private def rightJam(value: UInt, shift: UInt, width: Int): UInt = {
+    val out = WireDefault(value)
+    when(shift >= width.U) {
+      out := value.orR.asUInt
+    }
+    for (amount <- 1 until width) {
+      when(shift === amount.U) {
+        out := (value >> amount) | value(amount - 1, 0).orR.asUInt
+      }
+    }
+    out
+  }
+  val lhsArithmeticSignificand = Mux(lhsExponent === 0.U,
+    Cat(0.U(1.W), lhsFraction), Cat(1.U(1.W), lhsFraction))
+  val rhsArithmeticSignificand = Mux(rhsExponent === 0.U,
+    Cat(0.U(1.W), rhsFraction), Cat(1.U(1.W), rhsFraction))
+  val lhsArithmeticExponent = Mux(lhsExponent === 0.U, 1.U(9.W), lhsExponent)
+  val rhsArithmeticExponent = Mux(rhsExponent === 0.U, 1.U(9.W), rhsExponent)
+  val arithmeticBaseExponent = Mux(lhsArithmeticExponent >= rhsArithmeticExponent,
+    lhsArithmeticExponent, rhsArithmeticExponent)
+  val lhsArithmeticShift = arithmeticBaseExponent - lhsArithmeticExponent
+  val rhsArithmeticShift = arithmeticBaseExponent - rhsArithmeticExponent
+  val lhsArithmeticExtended = rightJam(Cat(lhsArithmeticSignificand, 0.U(3.W)),
+    lhsArithmeticShift, 27)
+  val rhsArithmeticExtended = rightJam(Cat(rhsArithmeticSignificand, 0.U(3.W)),
+    rhsArithmeticShift, 27)
+  val sameArithmeticSign = lhs(31) === rhsArithmeticSign
+  val lhsMagnitudeAtBase = lhsArithmeticExtended
+  val rhsMagnitudeAtBase = rhsArithmeticExtended
+  val lhsAtLeastMagnitude = lhsMagnitudeAtBase >= rhsMagnitudeAtBase
+  val arithmeticRawSum = (Cat(0.U(1.W), lhsMagnitudeAtBase) +&
+    Cat(0.U(1.W), rhsMagnitudeAtBase))(27, 0)
+  val arithmeticRawDifference = Mux(lhsAtLeastMagnitude,
+    Cat(0.U(1.W), lhsMagnitudeAtBase) - Cat(0.U(1.W), rhsMagnitudeAtBase),
+    Cat(0.U(1.W), rhsMagnitudeAtBase) - Cat(0.U(1.W), lhsMagnitudeAtBase))
+  val arithmeticRaw = Mux(sameArithmeticSign, arithmeticRawSum, arithmeticRawDifference)
+  val arithmeticInitialSign = Mux(sameArithmeticSign, lhs(31),
+    Mux(lhsAtLeastMagnitude, lhs(31), rhsArithmeticSign))
+  val arithmeticCarry = sameArithmeticSign && arithmeticRaw(27)
+  val arithmeticPreRound = Mux(arithmeticCarry,
+    rightJam(arithmeticRaw, 1.U, 28), arithmeticRaw)
+  val arithmeticPreExponent = Mux(arithmeticCarry,
+    arithmeticBaseExponent + 1.U, arithmeticBaseExponent)
+  val arithmeticLeadingShift = PriorityEncoder(Reverse(arithmeticPreRound(26, 0)))
+  val arithmeticSubtractionShift = Mux(arithmeticPreExponent > 1.U &&
+    arithmeticLeadingShift > (arithmeticPreExponent - 1.U),
+    arithmeticPreExponent - 1.U, arithmeticLeadingShift)
+  val arithmeticNormalizeShift = Mux(arithmeticPreRound.orR &&
+    !arithmeticCarry && arithmeticPreExponent > 1.U,
+    arithmeticSubtractionShift, 0.U)
+  val arithmeticNormalized = (arithmeticPreRound << arithmeticNormalizeShift)(26, 0)
+  val arithmeticNormalizedExponent = arithmeticPreExponent - arithmeticNormalizeShift
+  val arithmeticInexact = arithmeticNormalized(2, 0).orR
+  val arithmeticRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (arithmeticNormalized(2) &&
+      (arithmeticNormalized(1, 0).orR || arithmeticNormalized(3))),
+    1.U -> false.B,
+    2.U -> (arithmeticInitialSign && arithmeticInexact),
+    3.U -> (!arithmeticInitialSign && arithmeticInexact),
+    4.U -> arithmeticNormalized(2)
+  ))
+  val arithmeticRoundedSignificand = Cat(0.U(1.W), arithmeticNormalized(26, 3)) +
+    arithmeticRoundUp.asUInt
+  val arithmeticRoundedCarry = arithmeticRoundedSignificand(24)
+  val arithmeticTiny = arithmeticNormalizedExponent === 1.U && !arithmeticNormalized(26)
+  // The unbiased exponent represented by an IEEE exponent field of 255 is
+  // already outside the finite range; rounding can raise a 254 result into it.
+  val arithmeticOverflow = arithmeticNormalizedExponent >= 255.U ||
+    (arithmeticNormalizedExponent === 254.U && arithmeticRoundedCarry)
+  val arithmeticOverflowToInfinity = request.roundingMode === 0.U ||
+    request.roundingMode === 4.U ||
+    (request.roundingMode === 3.U && !arithmeticInitialSign) ||
+    (request.roundingMode === 2.U && arithmeticInitialSign)
+  val arithmeticOutputExponent = Mux(arithmeticOverflow,
+    Mux(arithmeticOverflowToInfinity, 255.U(9.W), 254.U(9.W)),
+    Mux(arithmeticRoundedCarry, arithmeticNormalizedExponent + 1.U,
+      Mux(arithmeticTiny, 0.U(9.W), arithmeticNormalizedExponent)))
+  val arithmeticOutputFraction = Mux(arithmeticOverflow && arithmeticOverflowToInfinity,
+    0.U(23.W),
+    Mux(arithmeticOverflow, "h7fffff".U(23.W),
+      Mux(arithmeticRoundedCarry, 0.U(23.W), arithmeticRoundedSignificand(22, 0))))
+  val arithmeticFiniteData = Cat(arithmeticInitialSign, arithmeticOutputExponent(7, 0),
+    arithmeticOutputFraction)
+  val arithmeticInvalid = (lhsInfinity && rhsInfinity &&
+    lhs(31) =/= rhsArithmeticSign) || lhsSignalingNaN || rhsSignalingNaN
+  val arithmeticSpecialData = Mux(arithmeticInvalid, canonicalNaN,
+    Mux(lhsNaN || rhsNaN, canonicalNaN,
+      Mux(lhsInfinity, Cat(lhs(31), "hff".U(8.W), 0.U(23.W)),
+        Mux(rhsInfinity, Cat(rhsArithmeticSign, "hff".U(8.W), 0.U(23.W)),
+          arithmeticFiniteData))))
+  val arithmeticSpecial = arithmeticInvalid || lhsNaN || rhsNaN || lhsInfinity || rhsInfinity
+  val arithmeticZeroSign = Mux(sameArithmeticSign, lhs(31), request.roundingMode === 2.U)
+  val arithmeticResultData = Mux(arithmeticSpecial, arithmeticSpecialData,
+    Mux(arithmeticRaw.orR, arithmeticFiniteData,
+      Cat(arithmeticZeroSign,
+        0.U(31.W))))
+  val arithmeticFlags = Mux(arithmeticInvalid, "b10000".U,
+    Mux(lhsNaN || rhsNaN || lhsInfinity || rhsInfinity, 0.U(5.W),
+      Mux(arithmeticOverflow, "b00101".U,
+        Cat(0.U(3.W), Mux(arithmeticTiny && arithmeticInexact, 1.U(1.W), 0.U(1.W)),
+          arithmeticInexact))))
   val numericEqual = lhs === rhs || (lhsZero && rhsZero)
   val lhsOrderKey = Mux(lhs(31), ~lhs, lhs ^ "h80000000".U(32.W))
   val rhsOrderKey = Mux(rhs(31), ~rhs, rhs ^ "h80000000".U(32.W))
   val lhsLessThanRhs = lhsOrderKey < rhsOrderKey
-  val canonicalNaN = "h7fc00000".U(32.W)
   val minOperation = request.operation === FloatingOperation.FminS
   val maxOperation = request.operation === FloatingOperation.FmaxS
   val minMaxSelectLhs = Mux(numericEqual,
@@ -242,7 +353,11 @@ class FloatingMovePipe(
   result.integerDestinationPhysical := request.integerDestinationPhysical
   result.floatDestination := request.floatDestination
   result.flags := 0.U
-  when(request.operation === FloatingOperation.FmvWX) {
+  when(arithmetic) {
+    result.writesFloat := true.B
+    result.floatData := arithmeticResultData
+    result.flags := arithmeticFlags
+  }.elsewhen(request.operation === FloatingOperation.FmvWX) {
     result.writesFloat := true.B
     result.floatData := request.integerSource
   }.elsewhen(request.operation === FloatingOperation.FmvXW) {
@@ -307,6 +422,11 @@ class FloatingMovePipe(
         io.input.bits.operation === FloatingOperation.FcvtWuS) {
       assert(io.input.bits.roundingMode <= 4.U,
         "FCVT received a reserved effective rounding mode")
+    }
+    when(io.input.bits.operation === FloatingOperation.FaddS ||
+        io.input.bits.operation === FloatingOperation.FsubS) {
+      assert(io.input.bits.roundingMode <= 4.U,
+        "FADD/FSUB received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
