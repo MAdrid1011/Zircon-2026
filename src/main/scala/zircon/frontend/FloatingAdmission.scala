@@ -51,7 +51,9 @@ class FloatingAdmission extends Module {
     decoder.io.decoded.operation === FloatingOperation.FcvtSW ||
     decoder.io.decoded.operation === FloatingOperation.FcvtSWu ||
     decoder.io.decoded.operation === FloatingOperation.FcvtWS ||
-    decoder.io.decoded.operation === FloatingOperation.FcvtWuS
+    decoder.io.decoded.operation === FloatingOperation.FcvtWuS ||
+    decoder.io.decoded.operation === FloatingOperation.Flw ||
+    decoder.io.decoded.operation === FloatingOperation.Fsw
   val effectiveRoundingMode = Mux(decoder.io.decoded.dynamicRounding,
     io.currentFrm, decoder.io.decoded.roundingMode)
   val roundingLegal = !decoder.io.decoded.usesRoundingMode ||

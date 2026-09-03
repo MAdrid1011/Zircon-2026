@@ -80,6 +80,8 @@ class BackendDispatch(
       floatingAdmissions(lane).io.floatingOpcode))
   val liveFloating = VecInit((0 until config.decodeWidth).map(lane =>
     io.input(lane).valid && !fetchFault(lane) && floatingAdmissions(lane).io.live))
+  val floatingMemory = VecInit((0 until config.decodeWidth).map(lane =>
+    liveFloating(lane) && floatingAdmissions(lane).io.decoded.isMemory))
   val executes = VecInit((0 until config.decodeWidth).map(lane =>
     io.input(lane).valid && !fetchFault(lane) &&
       (decoded(lane).legal || floatingAdmissions(lane).io.live)))
@@ -95,8 +97,11 @@ class BackendDispatch(
   val needsLong = VecInit((0 until config.decodeWidth).map(lane =>
     executes(lane) && decoded(lane).allowedEndpoints(2)))
   val needsMem = VecInit((0 until config.decodeWidth).map(lane =>
-    executes(lane) && !liveFloating(lane) && decoded(lane).allowedEndpoints(4, 3).orR))
+    executes(lane) && (floatingMemory(lane) ||
+      (!liveFloating(lane) && decoded(lane).allowedEndpoints(4, 3).orR))))
   val needsFloating = VecInit((0 until config.decodeWidth).map(lane =>
+    executes(lane) && liveFloating(lane) && !floatingMemory(lane)))
+  val needsFloatingState = VecInit((0 until config.decodeWidth).map(lane =>
     executes(lane) && liveFloating(lane)))
   val floatingControlWrite = VecInit((0 until config.decodeWidth).map(lane =>
     executes(lane) && !liveFloating(lane) &&
@@ -115,6 +120,7 @@ class BackendDispatch(
     val longCount = countFor(mask, needsLong)
     val memCount = countFor(mask, needsMem)
     val floatingCount = countFor(mask, needsFloating)
+    val floatingStateCount = countFor(mask, needsFloatingState)
     val floatingOpcodeCount = countFor(mask, floatingOpcode)
     val floatingControlWriteCount = countFor(mask, floatingControlWrite)
     val noFloatingStateDependency = floatingOpcodeCount === 0.U &&
@@ -123,7 +129,7 @@ class BackendDispatch(
       floatingOpcodeCount === 0.U && floatingControlWriteCount <= 1.U
     val floatingOpcodeAllowed = !io.floatingAdmissionBlocked &&
       floatingControlWriteCount === 0.U &&
-      (floatingCount === 0.U || io.floatingScoreboardEmpty)
+      (floatingStateCount === 0.U || io.floatingScoreboardEmpty)
     io.robCapacity >= instructionCount.U &&
       io.renameFreeCount >= physicalCount &&
       io.intCapacity >= intCount &&
@@ -131,6 +137,7 @@ class BackendDispatch(
       io.memCapacity >= memCount &&
       io.floatingCapacity >= floatingCount &&
       bdbCount <= 1.U && floatingCount <= 1.U &&
+      floatingStateCount <= 1.U &&
       (bdbCount === 0.U || io.bdbAllocate.ready) &&
       // F instructions observe only committed FS/frm state. A control write
       // is isolated from F dispatch and only one may remain in flight.
@@ -197,10 +204,16 @@ class BackendDispatch(
     else false.B
 
     laneUop(lane).robTag := io.robTags(lane).bits
-    laneUop(lane).allowedEndpoints := Mux(liveFloating(lane),
-      EndpointMask.E2.U(EndpointMask.Width.W), decoded(lane).allowedEndpoints)
-    laneUop(lane).uopClass := Mux(liveFloating(lane), UopClass.Floating,
-      decoded(lane).uopClass)
+    laneUop(lane).allowedEndpoints := Mux(floatingMemory(lane),
+      Mux(floatingAdmissions(lane).io.decoded.memoryWrite,
+        EndpointMask.M0.U(EndpointMask.Width.W),
+        EndpointMask.CacheableLoadCandidate.U(EndpointMask.Width.W)),
+      Mux(liveFloating(lane),
+        EndpointMask.E2.U(EndpointMask.Width.W), decoded(lane).allowedEndpoints))
+    laneUop(lane).uopClass := Mux(floatingMemory(lane),
+      Mux(floatingAdmissions(lane).io.decoded.memoryWrite,
+        UopClass.Store, UopClass.Load),
+      Mux(liveFloating(lane), UopClass.Floating, decoded(lane).uopClass))
     laneUop(lane).operation := Mux(liveFloating(lane), 0.U,
       decoded(lane).operation.asUInt)
     laneUop(lane).sourceKind(0) := Mux(liveFloating(lane),
@@ -244,7 +257,8 @@ class BackendDispatch(
       floatingAdmissions(lane).io.decoded.rd, 0.U)
     laneUop(lane).floatingRoundingMode :=
       floatingAdmissions(lane).io.effectiveRoundingMode
-    laneUop(lane).immediate := decoded(lane).immediate
+    laneUop(lane).immediate := Mux(floatingMemory(lane),
+      floatingAdmissions(lane).io.decoded.immediate, decoded(lane).immediate)
 
     val entry = io.robEnqueue(lane).bits.entry
     io.robEnqueue(lane).valid := dispatchFire && selected(lane)
@@ -255,6 +269,12 @@ class BackendDispatch(
     entry.instruction := io.input(lane).bits.instruction
     entry.privilege := io.input(lane).bits.privilege
     entry.decoded := decoded(lane)
+    when(floatingMemory(lane)) {
+      entry.decoded.uopClass := Mux(
+        floatingAdmissions(lane).io.decoded.memoryWrite,
+        UopClass.Store, UopClass.Load)
+      entry.decoded.isMemory := true.B
+    }
     entry.floating := Mux(floatingAdmissions(lane).io.floatingOpcode,
       floatingAdmissions(lane).io.decoded,
       0.U.asTypeOf(new zircon.frontend.FloatingDecodedInstruction))
@@ -302,18 +322,23 @@ class BackendDispatch(
 
   val selectedFloating = VecInit((0 until config.decodeWidth).map(lane =>
     selected(lane) && needsFloating(lane)))
+  val selectedFloatingState = VecInit((0 until config.decodeWidth).map(lane =>
+    selected(lane) && needsFloatingState(lane)))
   val selectedFloatingControlWrite = VecInit((0 until config.decodeWidth).map(lane =>
     selected(lane) && floatingControlWrite(lane)))
   val floatingControlLane = Mux(selectedFloatingControlWrite(0), 0.U, 1.U)
   io.floatingControlWriteAccepted.valid := dispatchFire &&
     selectedFloatingControlWrite.asUInt.orR
   io.floatingControlWriteAccepted.bits := io.robTags(floatingControlLane).bits
-  val floatingLane = Mux(selectedFloating(0), 0.U, 1.U)
-  val floatingDecoded = Mux(selectedFloating(0),
+  val floatingLane = Mux(selectedFloatingState(0), 0.U, 1.U)
+  val floatingDecoded = Mux(selectedFloatingState(0),
     floatingAdmissions(0).io.decoded, floatingAdmissions(1).io.decoded)
   for (lane <- 0 until config.decodeWidth) {
     io.floatingAllocate(lane).valid := lane.U === 0.U && dispatchFire &&
-      selectedFloating.asUInt.orR
+      (selectedFloating.asUInt.orR ||
+        (selected.asUInt & floatingMemory.asUInt &
+          VecInit((0 until config.decodeWidth).map(index =>
+            floatingAdmissions(index).io.decoded.writesFloatRd)).asUInt).orR)
     io.floatingAllocate(lane).bits.robTag := io.robTags(floatingLane).bits
     io.floatingAllocate(lane).bits.sourceValid(0) := floatingDecoded.readsFloatRs1
     io.floatingAllocate(lane).bits.sourceValid(1) := floatingDecoded.readsFloatRs2

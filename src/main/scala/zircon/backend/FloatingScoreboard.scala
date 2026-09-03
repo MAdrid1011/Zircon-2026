@@ -118,7 +118,10 @@ class FloatingScoreboard(
       "floating scoreboard released a non-live ROB-tagged reservation")
     assert(PopCount(releaseMatch) === 1.U,
       "floating scoreboard found duplicate reservations for one ROB tag")
-    assert(!sourceConsumed(releaseIndex),
+    // Source-less operations are marked consumed at allocation, but older
+    // callers may still present an empty release event. Keep that event
+    // idempotent while retaining the duplicate-release check for real reads.
+    assert(!sourceConsumed(releaseIndex) || !io.readRelease.bits.sourceValid.asUInt.orR,
       "floating scoreboard released FPR operands more than once")
     assert(io.readRelease.bits.asUInt === reservation(releaseIndex).asUInt,
       "floating scoreboard release payload did not match its reservation")
@@ -163,12 +166,14 @@ class FloatingScoreboard(
     when(lane0Fire) {
       valid(freeIndex) := true.B
       reservation(freeIndex) := io.allocate(0).bits
-      sourceConsumed(freeIndex) := false.B
+      // Loads such as FLW have no FPR source-read event; their destination
+      // may complete as soon as the memory response reaches commit state.
+      sourceConsumed(freeIndex) := !io.allocate(0).bits.sourceValid.asUInt.orR
     }
     when(lane1Fire) {
       valid(lane1Index) := true.B
       reservation(lane1Index) := io.allocate(1).bits
-      sourceConsumed(lane1Index) := false.B
+      sourceConsumed(lane1Index) := !io.allocate(1).bits.sourceValid.asUInt.orR
     }
   }
 

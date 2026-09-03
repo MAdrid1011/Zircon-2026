@@ -14,6 +14,7 @@ class MemoryAddressRequest(config: ZirconCoreConfig = ZirconCoreConfig.default) 
   val uop = new UopRef(config)
   val base = UInt(32.W)
   val storeData = UInt(32.W)
+  val floatingStoreData = UInt(32.W)
   val atomicAq = Bool()
   val atomicRl = Bool()
 }
@@ -66,6 +67,8 @@ class MemoryAddressUnit(
   val request = io.request
   val address = request.base + request.uop.immediate
   val (operation, operationValid) = IntOperation.safe(request.uop.operation(5, 0))
+  val isFloatingLoad = request.uop.floatingOperation === zircon.frontend.FloatingOperation.Flw
+  val isFloatingStore = request.uop.floatingOperation === zircon.frontend.FloatingOperation.Fsw
 
   val isIntegerLoad = operation === IntOperation.Lb || operation === IntOperation.Lh ||
     operation === IntOperation.Lw || operation === IntOperation.Lbu ||
@@ -80,9 +83,10 @@ class MemoryAddressUnit(
     operation === IntOperation.AmoMaxW || operation === IntOperation.AmoMinuW ||
     operation === IntOperation.AmoMaxuW
   val isAtomic = isLr || isSc || isAmo
-  val isLoad = isIntegerLoad || isLr || isAmo
-  val isStore = isIntegerStore || isSc || isAmo
-  val legalMemoryOperation = operationValid && (isLoad || isStore)
+  val isLoad = isIntegerLoad || isLr || isAmo || isFloatingLoad
+  val isStore = isIntegerStore || isSc || isAmo || isFloatingStore
+  val legalMemoryOperation = (operationValid && (isLoad || isStore)) ||
+    (isFloatingLoad || isFloatingStore)
 
   val accessSize = MuxLookup(operation.asUInt, 2.U(2.W))(Seq(
     IntOperation.Lb.asUInt -> 0.U,
@@ -100,14 +104,16 @@ class MemoryAddressUnit(
     1.U -> halfMask,
     2.U -> "b1111".U(4.W)
   ))
-  val byteData = (request.storeData(7, 0) << (address(1, 0) << 3))(31, 0)
+  val effectiveStoreData = Mux(isFloatingStore,
+    request.floatingStoreData, request.storeData)
+  val byteData = (effectiveStoreData(7, 0) << (address(1, 0) << 3))(31, 0)
   val halfData = Mux(address(1),
-    Cat(request.storeData(15, 0), 0.U(16.W)),
-    Cat(0.U(16.W), request.storeData(15, 0)))
-  val writeData = MuxLookup(accessSize, request.storeData)(Seq(
+    Cat(effectiveStoreData(15, 0), 0.U(16.W)),
+    Cat(0.U(16.W), effectiveStoreData(15, 0)))
+  val writeData = MuxLookup(accessSize, effectiveStoreData)(Seq(
     0.U -> byteData,
     1.U -> halfData,
-    2.U -> request.storeData
+    2.U -> effectiveStoreData
   ))
   val naturallyAligned = MuxLookup(accessSize, false.B)(Seq(
     0.U -> true.B,
@@ -154,9 +160,9 @@ class MemoryAddressUnit(
 
   when(io.valid && legalMemoryOperation) {
     assert((request.uop.uopClass === UopClass.Load) ===
-      (isIntegerLoad && !isAtomic),
+      (isIntegerLoad && !isAtomic || isFloatingLoad),
       "integer load operations must carry the Load uop class")
-    assert((request.uop.uopClass === UopClass.Store) === isIntegerStore,
+    assert((request.uop.uopClass === UopClass.Store) === (isIntegerStore || isFloatingStore),
       "integer store operations must carry the Store uop class")
     assert((request.uop.uopClass === UopClass.Atomic) === isAtomic,
       "RV32A operations must carry the Atomic uop class")

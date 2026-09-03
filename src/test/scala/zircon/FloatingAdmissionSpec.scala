@@ -11,8 +11,21 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
 
   private def opFma(opcode: Int, rs3: Int, rs2: Int, rs1: Int,
       funct3: Int, rd: Int): BigInt =
-    BigInt((rs3.toLong << 27) | (rs2.toLong << 20) | (rs1.toLong << 15) |
+      BigInt((rs3.toLong << 27) | (rs2.toLong << 20) | (rs1.toLong << 15) |
       (funct3.toLong << 12) | (rd.toLong << 7) | opcode.toLong)
+
+  private def iType(immediate: Int, rs1: Int, funct3: Int, rd: Int,
+      opcode: Int): BigInt =
+    BigInt(((immediate & 0xfff).toLong << 20) | (rs1.toLong << 15) |
+      (funct3.toLong << 12) | (rd.toLong << 7) | opcode.toLong)
+
+  private def sType(immediate: Int, rs2: Int, rs1: Int, funct3: Int,
+      opcode: Int): BigInt = {
+    val value = immediate & 0xfff
+    BigInt(((value >> 5).toLong << 25) | (rs2.toLong << 20) |
+      (rs1.toLong << 15) | (funct3.toLong << 12) |
+      ((value & 0x1f).toLong << 7) | opcode.toLong)
+  }
 
   describe("FloatingAdmission") {
     it("admits the executable RV32F E2 subset when FS is enabled") {
@@ -112,6 +125,26 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
         dut.io.roundingLegal.expect(false)
         dut.io.live.expect(false)
         dut.io.illegal.expect(true)
+      }
+    }
+
+    it("admits FLW and FSW to the LSU-owned floating memory path") {
+      simulate(new FloatingAdmission) { dut =>
+        dut.io.mstatusFs.poke(1)
+        dut.io.currentFrm.poke(0)
+        dut.io.instruction.poke(iType(12, rs1 = 2, funct3 = 2, rd = 5, opcode = 0x07))
+        dut.io.floatingOpcode.expect(true)
+        dut.io.live.expect(true)
+        dut.io.decoded.operation.expect(FloatingOperation.Flw)
+        dut.io.decoded.isMemory.expect(true)
+        dut.io.decoded.writesFloatRd.expect(true)
+
+        dut.io.instruction.poke(sType(-8, rs2 = 5, rs1 = 2, funct3 = 2, opcode = 0x27))
+        dut.io.floatingOpcode.expect(true)
+        dut.io.live.expect(true)
+        dut.io.decoded.operation.expect(FloatingOperation.Fsw)
+        dut.io.decoded.memoryWrite.expect(true)
+        dut.io.decoded.readsFloatRs2.expect(true)
       }
     }
   }

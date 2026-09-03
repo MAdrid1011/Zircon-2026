@@ -10,6 +10,8 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadResult.bits.robTag.poke(0)
     dut.io.loadResult.bits.destinationPhysical.poke(32)
     dut.io.loadResult.bits.writesInteger.poke(true)
+    dut.io.loadResult.bits.floatingDestination.poke(0)
+    dut.io.loadResult.bits.writesFloat.poke(false)
     dut.io.loadResult.bits.m1Owner.poke(false)
     dut.io.loadResult.bits.accessSize.poke(2)
     dut.io.loadResult.bits.unsignedLoad.poke(false)
@@ -43,6 +45,7 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     }
     dut.io.m0Completion.ready.poke(false)
     dut.io.m1Completion.ready.poke(false)
+    dut.io.floatingResult.ready.poke(false)
     dut.io.robHeadTag.poke(0)
     dut.io.squash.valid.poke(false)
     dut.io.squash.bits.poke(0)
@@ -203,6 +206,36 @@ class DualMemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
         dut.io.m0Completion.bits.robTag.expect(4)
         dut.io.m0Completion.bits.writesInteger.expect(false)
         dut.io.m0Completion.bits.data.expect(0)
+      }
+    }
+
+    it("pairs an FLW ROB completion with one commit-qualified FPR result") {
+      simulate(new DualMemoryLoadCompletion) { dut =>
+        clear(dut)
+        dut.io.floatingResult.ready.poke(true)
+        dut.io.m0Completion.ready.poke(true)
+        dut.io.loadResult.valid.poke(true)
+        dut.io.loadResult.bits.robTag.poke(9)
+        dut.io.loadResult.bits.destinationPhysical.poke(0)
+        dut.io.loadResult.bits.writesInteger.poke(false)
+        dut.io.loadResult.bits.floatingDestination.poke(6)
+        dut.io.loadResult.bits.writesFloat.poke(true)
+        dut.io.loadResult.bits.m1Owner.poke(false)
+        dut.io.loadResult.bits.accessSize.poke(2)
+        dut.io.loadResult.bits.unsignedLoad.poke(false)
+        dut.io.loadResult.bits.data.poke(BigInt("40490fdb", 16))
+        dut.io.loadResult.ready.expect(true)
+        dut.io.floatingResult.valid.expect(true)
+        dut.io.floatingResult.bits.robTag.expect(9)
+        dut.io.floatingResult.bits.fprAddress.expect(6)
+        dut.io.floatingResult.bits.fprData.expect(BigInt("40490fdb", 16))
+        dut.io.floatingResult.bits.writesFloat.expect(true)
+        dut.clock.step()
+        dut.io.loadResult.valid.poke(false)
+        dut.io.floatingResult.valid.expect(false)
+        dut.io.m0Completion.valid.expect(true)
+        dut.io.m0Completion.bits.robTag.expect(9)
+        dut.io.m0Completion.bits.writesInteger.expect(false)
       }
     }
   }

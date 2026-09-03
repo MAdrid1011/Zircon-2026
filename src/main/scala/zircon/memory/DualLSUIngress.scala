@@ -24,12 +24,16 @@ class DualLSUIngress(
     val robContext = Input(Vec(2, Valid(new ROBExecutionContext(config))))
     val prfReadPhysical = Output(Vec(4, UInt(physicalWidth.W)))
     val prfReadData = Input(Vec(4, UInt(32.W)))
+    val floatingReadData = Input(Vec(2, UInt(32.W)))
+    val floatingReadAddress = Output(Vec(2, UInt(5.W)))
+    val floatingReadValid = Output(Vec(2, Bool()))
 
     val fault = Output(Vec(2, new FaultCandidate(config)))
     val loadForward = Vec(config.decodeWidth, Decoupled(new LoadStoreForward(config)))
     val loadComplete = Flipped(Decoupled(new LoadCompletion(config)))
     val m0Completion = Decoupled(new CompletionResult(config))
     val m1Completion = Decoupled(new CompletionResult(config))
+    val floatingResult = Decoupled(new zircon.backend.FloatingResult(config))
     val loadContextRead = Input(Valid(UInt(config.robTagWidth.W)))
     val loadContext = Output(Valid(new LoadQueueContext(config)))
     val commitAuthorize = Flipped(Decoupled(UInt(config.robTagWidth.W)))
@@ -75,6 +79,9 @@ class DualLSUIngress(
   io.robRead := operandRead.io.robRead
   io.prfReadPhysical := operandRead.io.prfReadPhysical
   operandRead.io.prfReadData := io.prfReadData
+  operandRead.io.floatingReadData := io.floatingReadData
+  io.floatingReadAddress := operandRead.io.floatingReadAddress
+  io.floatingReadValid := operandRead.io.floatingReadValid
   operandRead.io.flush := io.flush
 
   admission.io.m0Input <> operandRead.io.request(0)
@@ -113,6 +120,7 @@ class DualLSUIngress(
   loadCompletion.io.flush := io.flush
   io.m0Completion <> loadCompletion.io.m0Completion
   io.m1Completion <> loadCompletion.io.m1Completion
+  io.floatingResult <> loadCompletion.io.floatingResult
   ingress.io.loadContextRead := io.loadContextRead
   io.loadContext := ingress.io.loadContext
   ingress.io.commitAuthorize.valid := io.commitAuthorize.valid

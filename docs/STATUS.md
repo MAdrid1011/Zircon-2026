@@ -1,5 +1,14 @@
 # Zircon-2026 实施状态
 
+2026-09-04 本地增量证据：FLW/FSW 接入双 LSU、L1D/L2、精确 FPR completion 和
+retire metadata；`FloatingAdmissionSpec`、`MemoryAddressUnitSpec`、
+`DualMemoryLoadCompletionSpec`、`FloatingScoreboardSpec` 聚焦回归为 17/17，
+`make test-m4-fp-move` 为 20/20（组件）加 11/11（顶层 RV32F），`make verilog`
+成功。修复了 source-less floating operation 的 scoreboard release 幂等性。完整
+`CoreShellSpec` 当前 108 个场景，不能作为每次改动的快速门禁；其中“selected dirty
+L2 victim”失败可在未改动的 `af0904f` 基线复现，属于既有问题，不能计为本次浮点回归
+失败或通过。后续采用聚焦门禁加完整夜间回归，保留所有非重复 corner-case 覆盖。
+
 最新本地全回归（2026-09-02）为 63 suites、410 tests，全部通过，耗时 36 分 17 秒；
 `make test-m3-dual-load-forward` 最新本地结果为 5 suites、81 tests 加 1 条顶层 core 用例，全部通过，耗时约 4 分 23 秒。
 2026-09-03 新增同 set 单 invalid-way 双 miss 矩阵：`make test-m3-dual-resource`

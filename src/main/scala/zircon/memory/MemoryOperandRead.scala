@@ -21,6 +21,9 @@ class MemoryOperandRead(
     val robContext = Input(Vec(2, Valid(new ROBExecutionContext(config))))
     val prfReadPhysical = Output(Vec(4, UInt(physicalWidth.W)))
     val prfReadData = Input(Vec(4, UInt(32.W)))
+    val floatingReadData = Input(Vec(2, UInt(32.W)))
+    val floatingReadAddress = Output(Vec(2, UInt(5.W)))
+    val floatingReadValid = Output(Vec(2, Bool()))
     val request = Vec(2, Decoupled(new MemoryAddressRequest(config)))
     val flush = Input(Bool())
   })
@@ -45,6 +48,13 @@ class MemoryOperandRead(
       io.prfReadData(basePort), 0.U)
     request.bits.storeData := Mux(issue.bits.sourceKind(1) === SourceKind.IntegerRegister,
       io.prfReadData(storePort), 0.U)
+    request.bits.floatingStoreData := Mux(issue.bits.sourceKind(1) === SourceKind.FloatingRegister,
+      io.floatingReadData(lane), 0.U)
+    io.floatingReadAddress(lane) := Mux(
+      issue.bits.sourceKind(1) === SourceKind.FloatingRegister,
+      issue.bits.floatingSource(1), 0.U)
+    io.floatingReadValid(lane) := issue.valid &&
+      issue.bits.sourceKind(1) === SourceKind.FloatingRegister
     request.bits.atomicAq := context.bits.atomicAq
     request.bits.atomicRl := context.bits.atomicRl
     issue.ready := request.ready && context.valid && !io.flush

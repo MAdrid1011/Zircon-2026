@@ -38,6 +38,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val floatingMovePipe = Module(new FloatingMovePipe(cfg))
   val floatingResultBridge = Module(new FloatingResultBridge(cfg))
   val floatingCommitState = Module(new FloatingCommitState(cfg))
+  val floatingLoadArbiter = Module(new Arbiter(new zircon.backend.FloatingResult(cfg), 2))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
   val lsuIngress = Module(new DualLSUIngress(cfg))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
@@ -149,9 +150,18 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     auxiliaryRead.io.grant(0)
 
   floatingCommitState.io.readAddress(0) := floatingQueue.io.issue.bits.floatingSource(0)
-  floatingCommitState.io.readAddress(1) := floatingQueue.io.issue.bits.floatingSource(1)
+  val lsuFloatingRead = lsuIngress.io.floatingReadValid(0) ||
+    lsuIngress.io.floatingReadValid(1)
+  val lsuFloatingAddress = Mux(lsuIngress.io.floatingReadValid(0),
+    lsuIngress.io.floatingReadAddress(0), lsuIngress.io.floatingReadAddress(1))
+  floatingCommitState.io.readAddress(1) := Mux(lsuFloatingRead,
+    lsuFloatingAddress, floatingQueue.io.issue.bits.floatingSource(1))
   floatingCommitState.io.readAddress(2) := floatingQueue.io.issue.bits.floatingSource(2)
-  floatingScoreboard.io.readRelease.valid := floatingMovePipe.io.input.fire
+  // Only instructions that actually read FPR operands consume a scoreboard
+  // reservation. Source-less moves (for example FMV.W.X) are already marked
+  // consumed at allocation and must not generate a second release event.
+  floatingScoreboard.io.readRelease.valid := floatingMovePipe.io.input.fire &&
+    floatingQueue.io.issue.bits.sourceKind.map(_ === SourceKind.FloatingRegister).reduce(_ || _)
   floatingScoreboard.io.readRelease.bits.robTag := floatingQueue.io.issue.bits.robTag
   for (source <- 0 until 3) {
     floatingScoreboard.io.readRelease.bits.sourceValid(source) :=
@@ -168,7 +178,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   floatingResultBridge.io.robHeadTag := backend.io.robHead.bits.robTag
   floatingResultBridge.io.squash := backend.io.squash
   floatingResultBridge.io.flush := backend.io.globalFlush
-  floatingCommitState.io.enqueue <> floatingResultBridge.io.floatingResult
+  floatingLoadArbiter.io.in(0) <> floatingResultBridge.io.floatingResult
+  floatingLoadArbiter.io.in(1) <> lsuIngress.io.floatingResult
+  floatingCommitState.io.enqueue <> floatingLoadArbiter.io.out
   floatingCommitState.io.robHeadTag := backend.io.robHead.bits.robTag
   floatingCommitState.io.squash := backend.io.squash
   floatingCommitState.io.flush := backend.io.globalFlush
@@ -225,6 +237,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     lsuIngress.io.prfReadData(source + 2) :=
       auxiliaryRead.io.candidateData(2)(source)
   }
+  lsuIngress.io.floatingReadData(0) := floatingCommitState.io.readData(1)
+  lsuIngress.io.floatingReadData(1) := floatingCommitState.io.readData(1)
   backend.io.memoryExecutionRead := lsuIngress.io.robRead
   lsuIngress.io.robContext := backend.io.memoryExecutionContext
   lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag

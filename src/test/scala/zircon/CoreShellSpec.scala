@@ -619,6 +619,62 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("executes FLW and FSW through the cacheable dual-LSU path") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        def iType(immediate: Int, rs1: Int, funct3: Int, rd: Int,
+            opcode: Int): BigInt =
+          BigInt(((immediate & 0xfff).toLong << 20) | (rs1.toLong << 15) |
+            (funct3.toLong << 12) | (rd.toLong << 7) | opcode.toLong)
+        def sType(immediate: Int, rs2: Int, rs1: Int, funct3: Int,
+            opcode: Int): BigInt = {
+          val value = immediate & 0xfff
+          BigInt(((value >> 5).toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) |
+            ((value & 0x1f).toLong << 7) | opcode.toLong)
+        }
+        def opFp(funct7: Int, rs2: Int, rs1: Int, funct3: Int, rd: Int): BigInt =
+          BigInt((funct7.toLong << 25) | (rs2.toLong << 20) |
+            (rs1.toLong << 15) | (funct3.toLong << 12) | (rd.toLong << 7) | 0x53L)
+        val flw = iType(0, rs1 = 1, funct3 = 2, rd = 3, opcode = 0x07)
+        val fsw = sType(4, rs2 = 3, rs1 = 1, funct3 = 2, opcode = 0x27)
+        val fmvXW = opFp(0x70, rs2 = 0, rs1 = 3, funct3 = 0, rd = 4)
+        val dataAddress = BigInt("80001000", 16)
+        val allEvents = runProgram(dut, Map(
+          ResetVector -> BigInt("000020b7", 16), // x1=0x2000, mstatus.FS=Initial
+          ResetVector + 4 -> BigInt("30009073", 16), // csrrw x0,mstatus,x1
+          ResetVector + 8 -> Nop,
+          ResetVector + 12 -> Nop,
+          ResetVector + 16 -> Nop,
+          ResetVector + 20 -> BigInt("800010b7", 16), // x1=0x80001000
+          ResetVector + 24 -> Nop,
+          ResetVector + 28 -> flw,
+          ResetVector + 32 -> fsw,
+          ResetVector + 36 -> fmvXW,
+          ResetVector + 40 -> BigInt("00100073", 16),
+          dataAddress -> BigInt("3f800000", 16)
+        ), cycles = 768)
+        val events = throughFirstTrap(allEvents)
+        val load = events.find(_.instruction == flw).getOrElse(
+          fail(s"FLW did not retire: $events"))
+        assert(load.fprWrite && load.fprAddress == 3 &&
+          load.fprData == BigInt("3f800000", 16) &&
+          load.memoryAddress == dataAddress && load.memoryReadMask == 15,
+          s"FLW did not produce exact FPR/load metadata: $load")
+        val store = events.find(_.instruction == fsw).getOrElse(
+          fail(s"FSW did not retire: $events"))
+        assert(store.memoryAddress == dataAddress + 4 && store.memoryWriteMask == 15 &&
+          store.memoryWriteData == BigInt("3f800000", 16),
+          s"FSW did not produce exact store metadata: $store")
+        val move = events.find(_.instruction == fmvXW).getOrElse(
+          fail(s"FMV.X.W after FLW did not retire: $events"))
+        assert(move.gprWrite && move.gprAddress == 4 &&
+          move.gprData == BigInt("3f800000", 16),
+          s"FMV.X.W did not observe FLW value: $move")
+        assert(events.last.trap && events.last.cause == 3)
+      }
+    }
+
     it("waits for a committed mstatus.FS update before admitting adjacent RV32F") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

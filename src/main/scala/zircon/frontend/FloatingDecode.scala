@@ -28,6 +28,7 @@ class FloatingDecodedInstruction extends Bundle {
   val rs2 = UInt(5.W)
   val rs3 = UInt(5.W)
   val rd = UInt(5.W)
+  val immediate = UInt(32.W)
   val readsIntegerRs1 = Bool()
   val readsIntegerRs2 = Bool()
   val readsFloatRs1 = Bool()
@@ -54,6 +55,9 @@ class RV32FMetadataDecoder extends Module {
   val funct3 = instruction(14, 12)
   val funct7 = instruction(31, 25)
   val rmLegal = funct3 <= 4.U || funct3 === 7.U
+  val iImmediate = Cat(Fill(20, instruction(31)), instruction(31, 20))
+  val sImmediate = Cat(Fill(20, instruction(31)), instruction(31, 25),
+    instruction(11, 7))
 
   val decoded = WireDefault(0.U.asTypeOf(new FloatingDecodedInstruction))
   decoded.operation := FloatingOperation.Invalid
@@ -61,6 +65,7 @@ class RV32FMetadataDecoder extends Module {
   decoded.rs2 := instruction(24, 20)
   decoded.rs3 := instruction(31, 27)
   decoded.rd := instruction(11, 7)
+  decoded.immediate := iImmediate
   decoded.roundingMode := funct3
   decoded.dynamicRounding := funct3 === 7.U
 
@@ -88,6 +93,7 @@ class RV32FMetadataDecoder extends Module {
     decoded.writesFloatRd := writesFloatRd.B
     decoded.isMemory := isMemory.B
     decoded.memoryWrite := memoryWrite.B
+    decoded.immediate := Mux(memoryWrite.B, sImmediate, iImmediate)
     decoded.usesRoundingMode := usesRoundingMode.B
   }
 

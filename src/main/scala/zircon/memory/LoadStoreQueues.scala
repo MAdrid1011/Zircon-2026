@@ -90,6 +90,8 @@ class LoadStoreQueues(
   val lqDestinationPhysical = Reg(Vec(lqEntries,
     UInt(log2Ceil(config.intPhysicalRegisters).W)))
   val lqWritesInteger = Reg(Vec(lqEntries, Bool()))
+  val lqFloatingDestination = Reg(Vec(lqEntries, UInt(5.W)))
+  val lqWritesFloat = Reg(Vec(lqEntries, Bool()))
   val lqM1Owner = Reg(Vec(lqEntries, Bool()))
   val lqIsAtomic = Reg(Vec(lqEntries, Bool()))
   val lqAtomicOperation = Reg(Vec(lqEntries, UInt(7.W)))
@@ -119,6 +121,7 @@ class LoadStoreQueues(
   val sqDestinationPhysical = Reg(Vec(sqEntries,
     UInt(log2Ceil(config.intPhysicalRegisters).W)))
   val sqWritesInteger = Reg(Vec(sqEntries, Bool()))
+  val sqWritesFloat = Reg(Vec(sqEntries, Bool()))
   val sqPmaKind = Reg(Vec(sqEntries, UInt(2.W)))
   val sqAq = Reg(Vec(sqEntries, Bool()))
   val sqRl = Reg(Vec(sqEntries, Bool()))
@@ -259,6 +262,8 @@ class LoadStoreQueues(
   io.loadResult.bits.robTag := lqTag(loadCompleteIndex)
   io.loadResult.bits.destinationPhysical := lqDestinationPhysical(loadCompleteIndex)
   io.loadResult.bits.writesInteger := lqWritesInteger(loadCompleteIndex)
+  io.loadResult.bits.floatingDestination := lqFloatingDestination(loadCompleteIndex)
+  io.loadResult.bits.writesFloat := lqWritesFloat(loadCompleteIndex)
   io.loadResult.bits.m1Owner := lqM1Owner(loadCompleteIndex)
   io.loadResult.bits.accessSize := lqAccessSize(loadCompleteIndex)
   io.loadResult.bits.unsignedLoad := lqUnsignedLoad(loadCompleteIndex)
@@ -278,6 +283,8 @@ class LoadStoreQueues(
   io.loadContext.bits.unsignedLoad := lqUnsignedLoad(loadContextIndex)
   io.loadContext.bits.destinationPhysical := lqDestinationPhysical(loadContextIndex)
   io.loadContext.bits.writesInteger := lqWritesInteger(loadContextIndex)
+  io.loadContext.bits.floatingDestination := lqFloatingDestination(loadContextIndex)
+  io.loadContext.bits.writesFloat := lqWritesFloat(loadContextIndex)
   io.loadContext.bits.m1Owner := lqM1Owner(loadContextIndex)
   io.loadContext.bits.isAtomic := lqIsAtomic(loadContextIndex)
   io.loadContext.bits.atomicOperation := lqAtomicOperation(loadContextIndex)
@@ -598,6 +605,8 @@ class LoadStoreQueues(
           lqUnsignedLoad(index) := io.allocate(lane).bits.unsignedLoad
           lqDestinationPhysical(index) := io.allocate(lane).bits.destinationPhysical
           lqWritesInteger(index) := io.allocate(lane).bits.writesInteger
+          lqFloatingDestination(index) := io.allocate(lane).bits.floatingDestination
+          lqWritesFloat(index) := io.allocate(lane).bits.writesFloat
           lqM1Owner(index) := io.allocate(lane).bits.m1Owner
           lqIsAtomic(index) := io.allocate(lane).bits.isAtomic
           lqAtomicOperation(index) := io.allocate(lane).bits.atomicOperation
@@ -620,6 +629,7 @@ class LoadStoreQueues(
           sqAtomicOperation(index) := io.allocate(lane).bits.atomicOperation
           sqDestinationPhysical(index) := io.allocate(lane).bits.destinationPhysical
           sqWritesInteger(index) := io.allocate(lane).bits.writesInteger
+          sqWritesFloat(index) := io.allocate(lane).bits.writesFloat
           sqPmaKind(index) := io.allocate(lane).bits.pmaKind
           sqAq(index) := io.allocate(lane).bits.aq
           sqRl(index) := io.allocate(lane).bits.rl

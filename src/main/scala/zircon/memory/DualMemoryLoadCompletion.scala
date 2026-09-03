@@ -18,6 +18,7 @@ class DualMemoryLoadCompletion(
     val faultAccepted = Output(Vec(2, new FaultCandidate(config)))
     val m0Completion = Decoupled(new CompletionResult(config))
     val m1Completion = Decoupled(new CompletionResult(config))
+    val floatingResult = Decoupled(new zircon.backend.FloatingResult(config))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
@@ -46,6 +47,8 @@ class DualMemoryLoadCompletion(
   atomicAsLoadResult.robTag := io.atomicResult.bits.robTag
   atomicAsLoadResult.destinationPhysical := io.atomicResult.bits.destinationPhysical
   atomicAsLoadResult.writesInteger := io.atomicResult.bits.writesInteger
+  atomicAsLoadResult.floatingDestination := 0.U
+  atomicAsLoadResult.writesFloat := false.B
   atomicAsLoadResult.m1Owner := false.B
   atomicAsLoadResult.accessSize := 2.U
   atomicAsLoadResult.unsignedLoad := false.B
@@ -56,9 +59,18 @@ class DualMemoryLoadCompletion(
   m1Buffer.io.loadResult.valid := io.loadResult.valid &&
     io.loadResult.bits.m1Owner
   m1Buffer.io.loadResult.bits := io.loadResult.bits
-  io.loadResult.ready := Mux(io.loadResult.valid && io.loadResult.bits.m1Owner,
+  val selectedLoadReady = Mux(io.loadResult.valid && io.loadResult.bits.m1Owner,
     m1Buffer.io.loadResult.ready,
     selectRegularM0Load && m0Buffer.io.loadResult.ready)
+  val floatingLoad = io.loadResult.valid && io.loadResult.bits.writesFloat
+  io.floatingResult.valid := floatingLoad && selectedLoadReady
+  io.floatingResult.bits.robTag := io.loadResult.bits.robTag
+  io.floatingResult.bits.writesFloat := true.B
+  io.floatingResult.bits.fprAddress := io.loadResult.bits.floatingDestination
+  io.floatingResult.bits.fprData := io.loadResult.bits.data
+  io.floatingResult.bits.flags := 0.U
+  io.loadResult.ready := selectedLoadReady &&
+    (!floatingLoad || io.floatingResult.ready)
 
   m0Buffer.io.effectCompletion.valid := io.storeResult.valid &&
     !io.storeResult.bits.accessFault

@@ -158,6 +158,10 @@ class MemoryQueueIngress(
       intakeRequest(lane).request.uop.destinationPhysical
     queues.io.allocate(lane).bits.writesInteger :=
       intakeRequest(lane).request.uop.writesInteger
+    queues.io.allocate(lane).bits.floatingDestination :=
+      intakeRequest(lane).request.uop.floatingDestination
+    queues.io.allocate(lane).bits.writesFloat :=
+      intakeRequest(lane).request.uop.writesFloat
     queues.io.allocate(lane).bits.m1Owner := intakeRequest(lane).m1Owner
     queues.io.allocate(lane).bits.isAtomic := intakeRequest(lane).address.isAtomic
     queues.io.allocate(lane).bits.atomicOperation := intakeRequest(lane).request.uop.operation
