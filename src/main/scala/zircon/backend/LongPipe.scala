@@ -75,18 +75,21 @@ class LongPipe(
     activeOperation === IntOperation.Divu || activeOperation === IntOperation.Rem ||
     activeOperation === IntOperation.Remu
 
-  val multiplyMagnitude = unsignedProduct(magnitude(activeLhs), magnitude(activeRhs))
-  val multiplySigned = negate64(multiplyMagnitude)
-  val signedProduct = Mux(activeLhs(31) ^ activeRhs(31), multiplySigned,
-    multiplyMagnitude)
-  val signedUnsignedMagnitude = unsignedProduct(magnitude(activeLhs), activeRhs)
-  val signedUnsignedProduct = Mux(activeLhs(31), negate64(signedUnsignedMagnitude),
-    signedUnsignedMagnitude)
+  // Derive all RV32M signedness variants from one raw product.  For two's
+  // complement operands, signed(a)*signed(b) is the raw unsigned product
+  // minus the high-half correction for each negative operand; signed(a)*u(b)
+  // needs only the lhs correction.  This keeps the shared partial-product
+  // multiplier at four 16x16 blocks instead of triplicating it.
+  val rawProduct = unsignedProduct(activeLhs, activeRhs)
+  val lhsCorrection = Mux(activeLhs(31), Cat(activeRhs, 0.U(32.W)), 0.U(64.W))
+  val rhsCorrection = Mux(activeRhs(31), Cat(activeLhs, 0.U(32.W)), 0.U(64.W))
+  val signedProduct = rawProduct - lhsCorrection - rhsCorrection
+  val signedUnsignedProduct = rawProduct - lhsCorrection
   val multiplyResult = MuxLookup(activeOperation.asUInt, 0.U(32.W))(Seq(
     IntOperation.Mul.asUInt -> signedProduct(31, 0),
     IntOperation.Mulh.asUInt -> signedProduct(63, 32),
     IntOperation.Mulhsu.asUInt -> signedUnsignedProduct(63, 32),
-    IntOperation.Mulhu.asUInt -> unsignedProduct(activeLhs, activeRhs)(63, 32)
+    IntOperation.Mulhu.asUInt -> rawProduct(63, 32)
   ))
 
   val shiftedRemainder = Cat(divRemainder(31, 0), divDividend(31))

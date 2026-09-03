@@ -11,6 +11,11 @@ retire metadata；`FloatingAdmissionSpec`、`MemoryAddressUnitSpec`、
 L2 victim”失败可在未改动的 `af0904f` 基线复现，属于既有问题，不能计为本次浮点回归
 失败或通过。后续采用聚焦门禁加完整夜间回归，保留所有非重复 corner-case 覆盖。
 
+同日 `LongPipe` 将 MUL/MULH/MULHSU/MULHU 的 signedness 变换统一到一个 raw
+unsigned product 和符号修正网络，保持四个 16x16 partial-product 单元边界；
+`LongPipeSpec` 5/5、顶层 RV32M 2/2 通过。固定器件综合正在后台运行，尚未据此宣称
+DSP/LUT 或 100 MHz 时序达标。
+
 miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-only training、
 误预测分配、useful 饱和更新和 scrub；逐 slot folded-history 查询、完整 alias/替换
 矩阵和性能收敛仍未完成。

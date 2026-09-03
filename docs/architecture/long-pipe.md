@@ -40,6 +40,10 @@ low/high half. Divide/remainder must implement the zero-divisor and signed overf
 rules in ADR-0011 before starting the iterative engine. Callers rely only on
 ready/valid and cannot infer a latency from operation class.
 
+All four multiply signedness variants derive from one unsigned 32x32 raw product;
+two's-complement high-half corrections select `MULH`, `MULHSU`, and `MULHU` without
+replicating the partial-product array.
+
 ## State, recovery, and completion
 
 LongIQ may dequeue only on a request fire. LongPipe owns one active tag and two result
