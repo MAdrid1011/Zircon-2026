@@ -90,6 +90,13 @@ class ExclusiveL2TransferStore(
   val lineWriteSet = WireDefault(0.U(setWidth.W))
   val lineWriteWay = WireDefault(0.U(wayWidth.W))
   val lineWriteData = WireDefault(0.U((wordsPerLine * 32).W))
+  // Reads from the explicit BRAM line store are one cycle. Keep the address
+  // corresponding to the currently visible lineRead so consumers can retain
+  // immediate handshakes when the same set/way is already resident.
+  val lastReadSet = RegInit(0.U(setWidth.W))
+  val lastReadWay = RegInit(0.U(wayWidth.W))
+  def lineReadMatches(way: UInt, set: UInt): Bool =
+    lastReadWay === way && lastReadSet === set
   for (way <- 0 until ways) {
     lineMemories(way).io.clk := clock
     lineMemories(way).io.readEnable := true.B
@@ -150,6 +157,8 @@ class ExclusiveL2TransferStore(
   val instructionInsertWay = Mux(instructionInsertInvalidWays.asUInt.orR,
     PriorityEncoder(instructionInsertInvalidWays.asUInt),
     replacementWay(instructionInsertSet))
+  val instructionInsertReadWay = Mux(instructionInsertHit,
+    instructionInsertHitWay, instructionInsertWay)
   val instructionReplacingValid = lineValid(instructionInsertWay)(instructionInsertSet)
   val instructionReplacingDirty = instructionReplacingValid &&
     lineDirty(instructionInsertWay)(instructionInsertSet)
@@ -192,7 +201,8 @@ class ExclusiveL2TransferStore(
   // wins, then clean I fill, then exclusive D transfer, then I probe.
   io.instructionLookup.ready := !io.fenceDrain && !io.invalidate.valid && !io.insert.valid &&
     !io.instructionInsert.valid && !io.lookup.valid && !io.flushLine.valid && !responseValid &&
-    !instructionResponseValid
+    !instructionResponseValid && (!instructionLookupHit ||
+      lineReadMatches(instructionLookupWay, instructionLookupSet))
 
   val flushSet = io.flushLine.bits(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -243,25 +253,26 @@ class ExclusiveL2TransferStore(
   when(fenceEvict) {
     readWay := fenceDirtyWay
     readSet := fenceDirtySet
-  }.elsewhen(io.flushLine.valid && io.flushLine.ready) {
+  }.elsewhen(io.flushLine.valid) {
     readWay := flushWay
     readSet := flushSet
-  }.elsewhen(io.insert.valid && io.insert.ready) {
+  }.elsewhen(io.insert.valid) {
     readWay := insertWay
     readSet := insertSet
-  }.elsewhen(io.instructionInsert.valid && io.instructionInsert.ready) {
-    readWay := instructionInsertHitWay
+  }.elsewhen(io.instructionInsert.valid) {
+    readWay := instructionInsertReadWay
     readSet := instructionInsertSet
-  }.elsewhen(io.lookup.valid && io.lookup.ready) {
+  }.elsewhen(io.lookup.valid) {
     readWay := lookupWay
     readSet := lookupSet
-  }.elsewhen(io.instructionLookup.valid && io.instructionLookup.ready) {
+  }.elsewhen(io.instructionLookup.valid) {
     readWay := instructionLookupWay
     readSet := instructionLookupSet
-  }.elsewhen(io.instructionInsert.valid) {
-    readWay := instructionInsertHitWay
-    readSet := instructionInsertSet
   }
+
+  // Model the registered address stage explicitly alongside the black box.
+  lastReadSet := readSet
+  lastReadWay := readWay
 
   when(io.insert.fire) {
     lineWriteEnable := true.B

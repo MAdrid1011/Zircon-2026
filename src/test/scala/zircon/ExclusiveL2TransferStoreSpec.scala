@@ -1,10 +1,20 @@
 package zircon
 
+import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.funspec.AnyFunSpec
 import zircon.memory.ExclusiveL2TransferStore
 
 class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
+  private def waitReady(dut: ExclusiveL2TransferStore, ready: Bool): Unit = {
+    var cycles = 0
+    while (!ready.peek().litToBoolean && cycles < 8) {
+      dut.clock.step()
+      cycles += 1
+    }
+    ready.expect(true)
+  }
+
   private def clear(dut: ExclusiveL2TransferStore): Unit = {
     dut.io.insert.valid.poke(false)
     dut.io.insert.bits.lineAddress.poke(0)
@@ -40,7 +50,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     words.zipWithIndex.foreach { case (word, index) =>
       dut.io.insert.bits.lineData(index).poke(word)
     }
-    dut.io.insert.ready.expect(true)
+    waitReady(dut, dut.io.insert.ready)
     dut.clock.step()
     dut.io.insert.valid.poke(false)
   }
@@ -48,7 +58,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
   private def lookup(dut: ExclusiveL2TransferStore, address: BigInt): Unit = {
     dut.io.lookup.valid.poke(true)
     dut.io.lookup.bits.lineAddress.poke(address)
-    dut.io.lookup.ready.expect(true)
+    waitReady(dut, dut.io.lookup.ready)
     dut.clock.step()
     dut.io.lookup.valid.poke(false)
   }
@@ -64,7 +74,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
     words.zipWithIndex.foreach { case (word, index) =>
       dut.io.instructionInsert.bits.lineData(index).poke(word)
     }
-    dut.io.instructionInsert.ready.expect(true)
+    waitReady(dut, dut.io.instructionInsert.ready)
     dut.clock.step()
     dut.io.instructionInsert.valid.poke(false)
   }
@@ -80,7 +90,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.instructionLookup.valid.poke(true)
         dut.io.instructionLookup.bits.poke(instructionLine)
-        dut.io.instructionLookup.ready.expect(true)
+        waitReady(dut, dut.io.instructionLookup.ready)
         dut.clock.step()
         dut.io.instructionLookup.valid.poke(false)
         dut.io.instructionResponse.valid.expect(true)
@@ -103,7 +113,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         residentWords.zipWithIndex.foreach { case (word, index) =>
           dut.io.instructionInsertData(index).expect(word)
         }
-        dut.io.instructionInsert.ready.expect(true)
+        waitReady(dut, dut.io.instructionInsert.ready)
         dut.clock.step()
         dut.io.instructionInsert.valid.poke(false)
         dut.io.residentLineCount.expect(2)
@@ -127,7 +137,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         dut.io.instructionInsert.ready.expect(false)
         dut.clock.step()
         dut.io.insert.valid.poke(false)
-        dut.io.instructionInsert.ready.expect(true)
+        waitReady(dut, dut.io.instructionInsert.ready)
         dut.clock.step()
         dut.io.instructionInsert.valid.poke(false)
         dut.io.residentLineCount.expect(2)
@@ -155,7 +165,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         dut.io.victim.ready.poke(true)
         dut.clock.step()
         dut.io.victim.ready.poke(false)
-        dut.io.instructionInsert.ready.expect(true)
+        waitReady(dut, dut.io.instructionInsert.ready)
         dut.clock.step()
         dut.io.instructionInsert.valid.poke(false)
       }
@@ -170,7 +180,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.instructionLookup.valid.poke(true)
         dut.io.instructionLookup.bits.poke(line)
-        dut.io.instructionLookup.ready.expect(true)
+        waitReady(dut, dut.io.instructionLookup.ready)
         dut.clock.step()
         dut.io.instructionLookup.valid.poke(false)
         dut.io.instructionResponse.valid.expect(true)
@@ -248,7 +258,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         dut.io.victim.bits.lineAddress.expect(lines(0))
         dut.clock.step()
         dut.io.victim.ready.poke(false)
-        dut.io.insert.ready.expect(true)
+        waitReady(dut, dut.io.insert.ready)
         dut.clock.step()
         dut.io.insert.valid.poke(false)
         dut.io.victim.valid.expect(true)
@@ -281,7 +291,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.flushLine.valid.poke(true)
         dut.io.flushLine.bits.poke(line)
-        dut.io.flushLine.ready.expect(true)
+        waitReady(dut, dut.io.flushLine.ready)
         dut.clock.step()
         dut.io.flushLine.valid.poke(false)
         dut.io.residentLineCount.expect(0)
@@ -327,7 +337,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         dut.io.victim.bits.lineAddress.expect(lines(0))
         dut.clock.step()
         dut.io.victim.ready.poke(false)
-        dut.io.flushLine.ready.expect(true)
+        waitReady(dut, dut.io.flushLine.ready)
         dut.clock.step()
         dut.io.flushLine.valid.poke(false)
         dut.io.victimCount.expect(2)
@@ -374,7 +384,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
         insert(dut, line, Seq.fill(8)(BigInt("1badb002", 16)), dirty = false)
         dut.io.flushLine.valid.poke(true)
         dut.io.flushLine.bits.poke(line)
-        dut.io.flushLine.ready.expect(true)
+        waitReady(dut, dut.io.flushLine.ready)
         dut.io.flushLineDirty.expect(false)
         dut.io.victim.valid.expect(false)
         dut.clock.step()
@@ -388,7 +398,7 @@ class ExclusiveL2TransferStoreSpec extends AnyFunSpec with ChiselSim {
 
         dut.io.flushLine.valid.poke(true)
         dut.io.flushLine.bits.poke(BigInt("80003000", 16))
-        dut.io.flushLine.ready.expect(true)
+        waitReady(dut, dut.io.flushLine.ready)
         dut.io.flushLineDirty.expect(false)
       }
     }

@@ -502,6 +502,8 @@ class L1DLoadCache(
   val dataResponseMshr = io.dataResponse.bits.clientMshr
   val dataResponseStore = mshrStoreEffect(dataResponseMshr)
   val dataResponseHasStore = mshrStorePending(dataResponseMshr)
+  val lookupResponseStore = mshrStoreEffect(l2ProbeMshr)
+  val lookupResponseHasStore = mshrStorePending(l2ProbeMshr)
   val dataResponseWriteWords = Wire(Vec(wordsPerLine, UInt(32.W)))
   for (word <- 0 until wordsPerLine) {
     dataResponseWriteWords(word) := Mux(dataResponseHasStore &&
@@ -512,7 +514,11 @@ class L1DLoadCache(
   }
   val lookupResponseWriteWords = Wire(Vec(wordsPerLine, UInt(32.W)))
   for (word <- 0 until wordsPerLine) {
-    lookupResponseWriteWords(word) := io.l2Response.bits.transfer.lineData(word)
+    lookupResponseWriteWords(word) := Mux(lookupResponseHasStore &&
+      lookupResponseStore.address(lineOffsetWidth - 1, 2) === word.U,
+      MemoryByteLanes.merge(io.l2Response.bits.transfer.lineData(word),
+        lookupResponseStore.writeData, lookupResponseStore.writeMask),
+      io.l2Response.bits.transfer.lineData(word))
   }
   val storeHitReadWords = sideReadLineB(storeHitPendingWay).asTypeOf(
     Vec(wordsPerLine, UInt(32.W)))
