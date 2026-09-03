@@ -52,6 +52,10 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
         dut.io.instruction.poke(opFp(0x0c, rs2 = 2, rs1 = 1, funct3 = 0, rd = 3))
         dut.io.live.expect(true)
         dut.io.decoded.operation.expect(FloatingOperation.FdivS)
+
+        dut.io.instruction.poke(opFp(0x2c, rs2 = 0, rs1 = 1, funct3 = 0, rd = 3))
+        dut.io.live.expect(true)
+        dut.io.decoded.operation.expect(FloatingOperation.FsqrtS)
       }
     }
 
@@ -59,8 +63,8 @@ class FloatingAdmissionSpec extends AnyFunSpec with ChiselSim {
       simulate(new FloatingAdmission) { dut =>
         dut.io.mstatusFs.poke(3)
         dut.io.currentFrm.poke(0)
-        // FSQRT.S remains outside the executable E2 slice.
-        dut.io.instruction.poke(opFp(0x2c, rs2 = 0, rs1 = 1, funct3 = 0, rd = 3))
+        // An illegal FSQRT.S rs2 field remains outside the executable slice.
+        dut.io.instruction.poke(opFp(0x2c, rs2 = 1, rs1 = 1, funct3 = 0, rd = 3))
         dut.io.floatingOpcode.expect(true)
         dut.io.live.expect(false)
         dut.io.illegal.expect(true)

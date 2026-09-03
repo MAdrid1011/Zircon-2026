@@ -256,6 +256,37 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("computes single square roots with an iterative restoring root") {
+      simulate(new FloatingMovePipe) { dut =>
+        clear(dut)
+        def check(source: BigInt, rounding: Int, expected: BigInt,
+            flags: BigInt): Unit = {
+          drive(dut, tag = 17, operation = FloatingOperation.FsqrtS,
+            floatSource0 = source, floatDestination = 11, roundingMode = rounding)
+          accept(dut)
+          var cycles = 0
+          while (!dut.io.output.valid.peek().litToBoolean && cycles < 35) {
+            dut.clock.step()
+            cycles += 1
+          }
+          dut.io.output.valid.expect(true)
+          dut.io.output.bits.writesFloat.expect(true)
+          dut.io.output.bits.floatData.expect(expected)
+          dut.io.output.bits.flags.expect(flags)
+          dut.io.output.ready.poke(true)
+          dut.clock.step()
+          dut.io.output.ready.poke(false)
+        }
+
+        check(BigInt("3f800000", 16), 0, BigInt("3f800000", 16), 0)
+        check(BigInt("40000000", 16), 0, BigInt("3fb504f3", 16), 1)
+        check(BigInt("40800000", 16), 0, BigInt("40000000", 16), 0)
+        check(BigInt("bf800000", 16), 0, BigInt("7fc00000", 16), 16)
+        check(BigInt("80000000", 16), 0, BigInt("80000000", 16), 0)
+        check(BigInt("7f800000", 16), 0, BigInt("7f800000", 16), 0)
+      }
+    }
+
     it("classifies every floating category without modifying fflags") {
       simulate(new FloatingMovePipe) { dut =>
         clear(dut)

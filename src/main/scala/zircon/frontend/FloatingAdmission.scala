@@ -34,6 +34,7 @@ class FloatingAdmission extends Module {
     decoder.io.decoded.operation === FloatingOperation.FsubS ||
     decoder.io.decoded.operation === FloatingOperation.FmulS ||
     decoder.io.decoded.operation === FloatingOperation.FdivS ||
+    decoder.io.decoded.operation === FloatingOperation.FsqrtS ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjS ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjnS ||
     decoder.io.decoded.operation === FloatingOperation.FsgnjxS ||

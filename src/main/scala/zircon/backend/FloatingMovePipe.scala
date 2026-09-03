@@ -57,6 +57,7 @@ class FloatingMovePipe(
       operation === FloatingOperation.FltS || operation === FloatingOperation.FeqS ||
       operation === FloatingOperation.FaddS || operation === FloatingOperation.FsubS ||
       operation === FloatingOperation.FmulS || operation === FloatingOperation.FdivS ||
+      operation === FloatingOperation.FsqrtS ||
       operation === FloatingOperation.FclassS || operation === FloatingOperation.FcvtSW ||
       operation === FloatingOperation.FcvtSWu || operation === FloatingOperation.FcvtWS ||
       operation === FloatingOperation.FcvtWuS
@@ -74,6 +75,16 @@ class FloatingMovePipe(
   val divSpecial = RegInit(false.B)
   val divSpecialResult = Reg(UInt(32.W))
   val divSpecialFlags = Reg(UInt(5.W))
+  val sqrtInitialized = RegInit(false.B)
+  val sqrtRadicand = Reg(UInt(54.W))
+  val sqrtRemainder = Reg(UInt(56.W))
+  val sqrtRoot = Reg(UInt(27.W))
+  val sqrtIteration = RegInit(0.U(5.W))
+  val sqrtExponentBiased = Reg(UInt(10.W))
+  val sqrtSign = RegInit(false.B)
+  val sqrtSpecial = RegInit(false.B)
+  val sqrtSpecialResult = Reg(UInt(32.W))
+  val sqrtSpecialFlags = Reg(UInt(5.W))
   val recoveryBlocked = io.flush || io.squash.valid
 
   val sign = MuxLookup(request.operation.asUInt, 0.U(1.W))(Seq(
@@ -351,6 +362,63 @@ class FloatingMovePipe(
   val divisionFlags = Mux(divisionOverflow, "b00101".U,
     Cat(0.U(3.W), Mux(divisionTiny && divisionInexact, 1.U(1.W), 0.U(1.W)),
       divisionInexact))
+
+  val squareRoot = request.operation === FloatingOperation.FsqrtS
+  val sqrtInvalid = lhsSignalingNaN || (lhs(31) && !lhsZero)
+  val sqrtSpecialInput = sqrtInvalid || lhsNaN || lhsInfinity || lhsZero
+  val sqrtSignificandLeading = PriorityEncoder(Reverse(lhsArithmeticSignificand))
+  val sqrtSignificandShift = Mux(lhsZero, 0.U(5.W), sqrtSignificandLeading)
+  val sqrtNormalizedSignificand = (lhsArithmeticSignificand <<
+    sqrtSignificandShift)(23, 0)
+  val sqrtInputExponentBiased =
+    ((Cat(0.U(1.W), lhsArithmeticExponent) +& 256.U)(9, 0) -
+      sqrtSignificandShift)
+  val sqrtExponentOdd = !sqrtInputExponentBiased(0)
+  val sqrtAdjustedSignificand = Wire(UInt(25.W))
+  sqrtAdjustedSignificand := Mux(sqrtExponentOdd,
+    (Cat(0.U(1.W), sqrtNormalizedSignificand) << 1)(24, 0),
+    Cat(0.U(1.W), sqrtNormalizedSignificand))
+  val sqrtExponentBase =
+    ((Cat(0.U(1.W), sqrtInputExponentBiased) + 383.U)(10, 0) -
+      Mux(sqrtExponentOdd, 1.U, 0.U)) >> 1
+  val sqrtPair = sqrtRadicand(53, 52)
+  val sqrtShiftedRemainder = Cat(sqrtRemainder(53, 0), sqrtPair)
+  val sqrtTrial = (Cat(0.U(27.W), sqrtRoot, 0.U(2.W)) + 1.U)(55, 0)
+  val sqrtRootBit = sqrtShiftedRemainder >= sqrtTrial
+  val sqrtNextRemainder = Mux(sqrtRootBit,
+    sqrtShiftedRemainder - sqrtTrial, sqrtShiftedRemainder)
+  val sqrtNextRoot = Cat(sqrtRoot(25, 0), sqrtRootBit)
+  val sqrtRootJammed = Mux(sqrtRemainder.orR, sqrtRoot | 1.U, sqrtRoot)
+  val sqrtInexact = sqrtRootJammed(2, 0).orR
+  val sqrtRoundUp = MuxLookup(request.roundingMode, false.B)(Seq(
+    0.U -> (sqrtRootJammed(2) &&
+      (sqrtRootJammed(1, 0).orR || sqrtRootJammed(3))),
+    1.U -> false.B,
+    2.U -> (sqrtSign && sqrtInexact),
+    3.U -> (!sqrtSign && sqrtInexact),
+    4.U -> sqrtRootJammed(2)
+  ))
+  val sqrtRoundedSignificand = Cat(0.U(1.W), sqrtRootJammed(26, 3)) +
+    sqrtRoundUp.asUInt
+  val sqrtRoundedCarry = sqrtRoundedSignificand(24)
+  val sqrtTiny = sqrtExponentBiased <= 257.U && !sqrtRootJammed(26)
+  val sqrtOverflow = sqrtExponentBiased >= 511.U ||
+    (sqrtExponentBiased === 510.U && sqrtRoundedCarry)
+  val sqrtOutputExponent = Mux(sqrtOverflow, 255.U(10.W),
+    Mux(sqrtRoundedCarry, sqrtExponentBiased + 1.U,
+      Mux(sqrtTiny, 0.U(10.W), sqrtExponentBiased)))
+  val sqrtOutputFraction = Mux(sqrtOverflow, "h7fffff".U(23.W),
+    Mux(sqrtRoundedCarry, 0.U(23.W), sqrtRoundedSignificand(22, 0)))
+  val sqrtFiniteData = Cat(0.U(1.W), sqrtOutputExponent(7, 0), sqrtOutputFraction)
+  val sqrtSpecialData = Mux(sqrtInvalid, canonicalNaN,
+    Mux(lhsNaN, canonicalNaN,
+      Mux(lhsInfinity, Cat(0.U(1.W), "hff".U(8.W), 0.U(23.W)),
+        Cat(lhs(31), 0.U(31.W)))))
+  val sqrtResultData = Mux(sqrtSpecial, sqrtSpecialResult,
+    Mux(sqrtRoot.orR, sqrtFiniteData, Cat(0.U(1.W), 0.U(31.W))))
+  val sqrtFlags = Mux(sqrtOverflow, "b00101".U,
+    Cat(0.U(3.W), Mux(sqrtTiny && sqrtInexact, 1.U(1.W), 0.U(1.W)),
+      sqrtInexact))
   val divisionExponentBase =
     ((Cat(0.U(1.W), multiplicationLhsExponent) + 383.U)(10, 0) -
       Cat(0.U(1.W), multiplicationRhsExponent))(9, 0)
@@ -523,6 +591,10 @@ class FloatingMovePipe(
     result.writesFloat := true.B
     result.floatData := multiplicationResultData
     result.flags := multiplicationFlags
+  }.elsewhen(squareRoot) {
+    result.writesFloat := true.B
+    result.floatData := Mux(sqrtSpecial, sqrtSpecialResult, sqrtFiniteData)
+    result.flags := Mux(sqrtSpecial, sqrtSpecialFlags, sqrtFlags)
   }.elsewhen(division) {
     result.writesFloat := true.B
     result.floatData := Mux(divSpecial, divSpecialResult, divisionFiniteData)
@@ -567,7 +639,9 @@ class FloatingMovePipe(
 
   io.input.ready := !active && !recoveryBlocked
   val divisionDone = divInitialized && (divSpecial || divIteration === 51.U)
-  io.output.valid := active && !recoveryBlocked && (!division || divisionDone)
+  val sqrtDone = sqrtInitialized && (sqrtSpecial || sqrtIteration === 27.U)
+  io.output.valid := active && !recoveryBlocked &&
+    (!division || divisionDone) && (!squareRoot || sqrtDone)
   io.output.bits := result
 
   val activeYounger = active && ROBTagOrder.isYounger(
@@ -575,10 +649,12 @@ class FloatingMovePipe(
   when(io.flush) {
     active := false.B
     divInitialized := false.B
+    sqrtInitialized := false.B
   }.elsewhen(io.squash.valid) {
     when(activeYounger) {
       active := false.B
       divInitialized := false.B
+      sqrtInitialized := false.B
     }
   }.otherwise {
     when(io.output.fire) { active := false.B }
@@ -588,8 +664,12 @@ class FloatingMovePipe(
       when(io.input.bits.operation === FloatingOperation.FdivS) {
         divInitialized := false.B
         divIteration := 0.U
+      }.elsewhen(io.input.bits.operation === FloatingOperation.FsqrtS) {
+        sqrtInitialized := false.B
+        sqrtIteration := 0.U
       }.otherwise {
         divInitialized := true.B
+        sqrtInitialized := true.B
       }
     }
     when(active && division && !divInitialized) {
@@ -610,6 +690,24 @@ class FloatingMovePipe(
       divRemainder := divisionNextRemainder
       divQuotient := divisionNextQuotient
       divIteration := divIteration + 1.U
+    }
+    when(active && squareRoot && !sqrtInitialized) {
+      sqrtInitialized := true.B
+      sqrtSign := lhs(31)
+      sqrtSpecial := sqrtSpecialInput
+      sqrtSpecialResult := sqrtSpecialData
+      sqrtSpecialFlags := Mux(sqrtInvalid, "b10000".U, 0.U(5.W))
+      sqrtIteration := 0.U
+      sqrtRadicand := Cat(sqrtAdjustedSignificand, 0.U(29.W))
+      sqrtRemainder := 0.U
+      sqrtRoot := 0.U
+      sqrtExponentBiased := sqrtExponentBase(9, 0)
+    }.elsewhen(active && squareRoot && sqrtInitialized && !sqrtSpecial &&
+        sqrtIteration =/= 27.U) {
+      sqrtRadicand := Cat(sqrtRadicand(51, 0), 0.U(2.W))
+      sqrtRemainder := sqrtNextRemainder
+      sqrtRoot := sqrtNextRoot
+      sqrtIteration := sqrtIteration + 1.U
     }
   }
 
@@ -639,6 +737,10 @@ class FloatingMovePipe(
     when(io.input.bits.operation === FloatingOperation.FdivS) {
       assert(io.input.bits.roundingMode <= 4.U,
         "FDIV received a reserved effective rounding mode")
+    }
+    when(io.input.bits.operation === FloatingOperation.FsqrtS) {
+      assert(io.input.bits.roundingMode <= 4.U,
+        "FSQRT received a reserved effective rounding mode")
     }
   }
   when(io.output.valid) {
