@@ -108,16 +108,16 @@ class FloatingMovePipe(
   // Add/subtract uses three low guard bits. Bit zero is sticky (jammed), so
   // a single integer adder can implement all five architectural modes.
   private def rightJam(value: UInt, shift: UInt, width: Int): UInt = {
-    val out = WireDefault(value)
+    val sticky = WireDefault(false.B)
     when(shift >= width.U) {
-      out := value.orR.asUInt
+      sticky := value.orR
     }
     for (amount <- 1 until width) {
       when(shift === amount.U) {
-        out := (value >> amount) | value(amount - 1, 0).orR.asUInt
+        sticky := value(amount - 1, 0).orR
       }
     }
-    out
+    (value >> shift) | sticky.asUInt
   }
   val lhsArithmeticSignificand = Mux(lhsExponent === 0.U,
     Cat(0.U(1.W), lhsFraction), Cat(1.U(1.W), lhsFraction))
