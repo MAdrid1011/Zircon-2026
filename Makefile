@@ -213,7 +213,7 @@ test-m3-ordering:
 # exercises the executable commit path without claiming the full RV32F ISA.
 test-m4-fp-move:
 	./scripts/sbtw 'testOnly zircon.FloatingAdmissionSpec zircon.FloatingMovePipeSpec zircon.FloatingResultBridgeSpec'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "RV32F"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "RV32F" -z "preserves distinct FPR data for two floating stores in the dual LSU"'
 
 # One AXI-fed top-level M-mode interrupt priority run. It exercises the
 # architectural MEI > MSI > MTI ordering and MRET resume without rerunning

@@ -3,7 +3,8 @@
 2026-09-04 本地增量证据：FLW/FSW 接入双 LSU、L1D/L2、精确 FPR completion 和
 retire metadata；`FloatingAdmissionSpec`、`MemoryAddressUnitSpec`、
 `DualMemoryLoadCompletionSpec`、`FloatingScoreboardSpec` 聚焦回归为 17/17，
-`make test-m4-fp-move` 为 20/20（组件）加 11/11（顶层 RV32F），`make verilog`
+`make test-m4-fp-move` 为 20/20（组件）加 11/11 原有顶层 RV32F 场景和 1 个双 FSW
+场景，`make verilog`
 成功。修复了 source-less floating operation 的 scoreboard release 幂等性；新增
 `MiniTagePredictor` 并接入 `M1Frontend`，其最小回归为 2/2、前端回归为 4/4，
 顶层 AXI-fed RV32I/FMA 子集为 2/2。完整
