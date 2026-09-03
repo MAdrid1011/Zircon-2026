@@ -57,6 +57,11 @@ post-place 报告为 LUT 72,090（53.56%），setup WNS `-209.860 ns`、TNS
 prefix 19 条、ALU/branch 34 条、RV32M 19 条和 RV32A 12 条退休的 backing-memory
 gate，四项均 `status=tohost`、退出码 0。
 
+同日补齐 WFI 顶层 quiescent/wakeup：WFI 提交会 flush 年轻推测状态并停止前端，启用的
+MSI pending 后恢复取指，在下一条 live ROB 指令处产生精确 EPC，再经 MRET 恢复一次。
+`CoreShellSpec` 新增确定性场景 1/1（约 18 秒），`CommitControllerSpec` 的 6/6
+单元回归也通过。
+
 miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-only training、
 误预测分配、useful 饱和更新和 scrub；逐 slot folded-history 查询、完整 alias/替换
 矩阵和性能收敛仍未完成。

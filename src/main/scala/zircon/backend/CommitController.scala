@@ -13,7 +13,7 @@ class CommitSideEffect extends Bundle {
 }
 
 object CommitRedirectReason extends ChiselEnum {
-  val Exception, Interrupt, Mret, FenceI = Value
+  val Exception, Interrupt, Mret, FenceI, Wfi = Value
 }
 
 class CommitRedirect extends Bundle {
@@ -146,7 +146,11 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
   io.firstFaultClear := exceptionValid
 
-  val controlRedirect = io.trapCommit.valid || io.mretCommit || io.fenceICommit
+  // WFI retires as a serializing system instruction.  Treat its next PC as
+  // a redirect so younger speculative state is discarded before the
+  // integration-level quiescent state blocks fetch.
+  val controlRedirect = io.trapCommit.valid || io.mretCommit ||
+    io.fenceICommit || io.wfiCommit
   io.flush := controlRedirect
   io.redirect.valid := controlRedirect
   io.redirect.bits.target := Mux(io.trapCommit.valid, io.trapVector,
@@ -155,7 +159,8 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
     Mux(interruptAccepted, CommitRedirectReason.Interrupt,
       CommitRedirectReason.Exception),
     Mux(io.mretCommit, CommitRedirectReason.Mret,
-      CommitRedirectReason.FenceI))
+      Mux(io.fenceICommit, CommitRedirectReason.FenceI,
+        CommitRedirectReason.Wfi)))
 
   assert(!io.rob(1).valid || io.rob(0).valid,
     "ROB commit lane 1 cannot be valid when lane 0 is a bubble")

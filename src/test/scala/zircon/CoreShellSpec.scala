@@ -2144,6 +2144,50 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("sleeps after WFI, wakes for an interrupt, and resumes at its exact EPC") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val handler = ResetVector + 64
+        var wfiRetired = false
+        var interruptTaken = false
+        val events = throughTrap(runProgram(
+          dut,
+          Map(
+            ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+            ResetVector + 4 -> BigInt("04008093", 16), // x1=mtvec handler
+            ResetVector + 8 -> BigInt("30509073", 16), // csrw mtvec,x1
+            ResetVector + 12 -> BigInt("30445073", 16), // csrrwi x0,mie,8
+            ResetVector + 16 -> BigInt("30045073", 16), // csrrwi x0,mstatus,8
+            ResetVector + 20 -> BigInt("10500073", 16), // wfi
+            ResetVector + 24 -> BigInt("00700193", 16), // addi x3,x0,7
+            ResetVector + 28 -> BigInt("00100073", 16), // ebreak
+            handler -> BigInt("30200073", 16) // mret
+          ),
+          cycles = 256,
+          driveInterrupts = (core, observed) => {
+            wfiRetired ||= observed.exists(_.instruction == BigInt("10500073", 16))
+            interruptTaken ||= observed.exists(event => event.trap && event.interrupt)
+            core.io.interrupts.msip.poke(wfiRetired && !interruptTaken)
+          }
+        ), count = 2)
+
+        val wfiIndex = events.indexWhere(_.instruction == BigInt("10500073", 16))
+        val interruptIndex = events.indexWhere(event => event.trap && event.interrupt)
+        assert(wfiIndex >= 0 && interruptIndex > wfiIndex,
+          s"WFI did not retire before its wakeup interrupt: $events")
+        assert(!events.take(interruptIndex).exists(event =>
+          event.pc == ResetVector + 24 && event.gprWrite),
+          s"instruction after WFI executed before wakeup: $events")
+        assert(events(interruptIndex).pc == ResetVector + 24 &&
+          events(interruptIndex).cause == BigInt("80000003", 16),
+          s"WFI wakeup did not preserve exact next-instruction EPC: $events")
+        assert(events.count(event => event.pc == ResetVector + 24 &&
+          event.gprWrite && event.gprAddress == 3 && event.gprData == 7) == 1,
+          s"woken instruction did not resume exactly once: $events")
+        assert(events.last.trap && !events.last.interrupt && events.last.cause == 3)
+      }
+    }
+
     it("prioritizes MEI over simultaneous MSI and MTI at the live head") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)

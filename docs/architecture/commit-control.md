@@ -1,6 +1,6 @@
 # 提交控制器
 
-`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)，并通过 [M1 Backend Subsystem](m1-backend-subsystem.md) 接入 E0 CSR/System side effect 与整数后端。精确 `RetireEvent` 格式化已经在 trace-enabled 顶层接入；WFI 唤醒状态机和 memory drain 实现仍待接入。
+`CommitController` 是 ROB、`FirstFaultTracker`、`MachineCSRFile`、rename committed map 和前端 redirect 的唯一架构提交仲裁点。本规格冻结 M1 的决定逻辑；它已与 CSR state 和单端口 BDB 提交调度组成 [Commit/CSR Subsystem](commit-csr-subsystem.md)，并通过 [M1 Backend Subsystem](m1-backend-subsystem.md) 接入 E0 CSR/System side effect 与整数后端。精确 `RetireEvent` 格式化和 WFI 集成状态机已经接入 trace-enabled 顶层；memory drain 仍由 M3 LSU/Cache 路径提供。
 
 ## 参数与接口
 
@@ -35,7 +35,7 @@ CSR/system 指令只在 lane 0 独占退休；若它出现在 lane 1，本周期
 - CSR write 只由已经正常退休的 lane 0 CSR 指令产生；非法 CSR 必须此前转换为 FirstFaultRecord。
 - MRET 正常退休后更新 CSR 状态，flush 年轻指令并 redirect 到 `mepc`。
 - FENCE.I 只有 `serializingReady` 表示旧 store/MMIO 排空且 I-Cache/BTB 失效完成后才退休，随后 flush 并从 `pc+4` 重取。
-- WFI 正常退休时产生 `wfiCommit`。进入/退出 quiescent 的状态机在集成层实现；控制器不会允许 WFI 与第二条指令同周期退休。
+- WFI 正常退休时产生 `wfiCommit`，同时以顺序 PC 产生 `Wfi` redirect/flush，丢弃所有年轻推测状态。顶层进入 quiescent 并停止取指；`EligibleInterrupt` 变为有效后唤醒取指，随后在下一条 live ROB 指令边界执行精确中断。控制器不会允许 WFI 与第二条指令同周期退休。
 - 普通 FENCE 等待 `serializingReady` 后独占退休，但不产生 redirect。
 
 ## Flush 与状态更新顺序
@@ -57,7 +57,7 @@ rollback 则必须立即阻塞，edge 后清空其余 ROB 状态。
 - faulting instruction 不得进入正常退休或 rename commit。
 - lane 1 exception 同周期只允许 lane 0 的普通结果成为架构可见。
 - interruptBlocked 时不得产生 interrupt trap；lane 0 synchronous fault 始终压过 interrupt。
-- redirect 必须伴随 flush，且 exception/interrupt/MRET/FENCE.I target 分别来自 trap vector、MRET target 或顺序 PC。
+- redirect 必须伴随 flush，且 exception/interrupt/MRET/FENCE.I/WFI target 分别来自 trap vector、MRET target 或顺序 PC。
 - CSR side effect 只能附属于 CSR uop；无效 ROB lane 的 side effect 不得被采用。
 
 ## 验证映射

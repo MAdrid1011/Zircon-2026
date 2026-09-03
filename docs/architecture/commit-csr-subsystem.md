@@ -2,8 +2,8 @@
 
 `CommitCSRSubsystem` 把无状态 `CommitController` 与有状态 `MachineCSRFile` 组成 M1
 架构提交域，并在该边界执行单端口 BDB 的 branch retirement 调度。E0 CSR/System
-side-effect 生成、memory/device drain、interrupt EPC 选择、WFI 睡眠状态和 frontend
-redirect consumer 仍在外部，因此该模块尚未与整数后端组成完整 core。
+side-effect 生成、memory/device drain、interrupt EPC 选择和 frontend redirect consumer
+仍在外部；WFI 的 quiescent/wakeup 状态机已由 `ZirconCore` 集成。
 
 ## 接口与状态
 

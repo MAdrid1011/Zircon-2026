@@ -56,6 +56,17 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
   val externalCoherence = Module(new ExternalCoherenceController)
 
+  // WFI is a commit-qualified quiescent state.  Younger speculative work is
+  // flushed by the WFI redirect; fetch resumes only after an enabled
+  // interrupt becomes pending, at which point normal precise trap handling
+  // can observe a newly fetched live ROB head.
+  val wfiSleeping = RegInit(false.B)
+  when(backend.io.wfiCommit) {
+    wfiSleeping := true.B
+  }.elsewhen(backend.io.eligibleInterrupt.valid) {
+    wfiSleeping := false.B
+  }
+
   externalCoherence.io.request.valid := io.externalCoherence.request.valid
   externalCoherence.io.request.bits := io.externalCoherence.request.bits
   io.externalCoherence.request.ready := externalCoherence.io.request.ready
@@ -65,7 +76,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   externalCoherence.io.instructionDrained := frontend.io.coherenceDrained
   externalCoherence.io.writebackComplete := l2WritebackEngine.io.completed
 
-  frontend.io.enable := true.B
+  frontend.io.enable := !wfiSleeping
   frontend.io.coherenceBlock := externalCoherence.io.cacheableIngressBlocked
   frontend.io.coherenceInvalidate := externalCoherence.io.l1iInvalidate
   for (lane <- 0 until cfg.decodeWidth) {

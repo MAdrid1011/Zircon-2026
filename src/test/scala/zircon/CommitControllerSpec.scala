@@ -280,7 +280,10 @@ class CommitControllerSpec extends AnyFunSpec with ChiselSim {
         driveRobLane(dut, 0, 20, BigInt("80000050", 16),
           IntOperation.Wfi, UopClass.System, allocatesPhysical = false)
         dut.io.wfiCommit.expect(true)
-        dut.io.flush.expect(false)
+        dut.io.flush.expect(true)
+        dut.io.redirect.valid.expect(true)
+        dut.io.redirect.bits.target.expect(BigInt("80000054", 16))
+        dut.io.redirect.bits.reason.expect(CommitRedirectReason.Wfi)
 
         driveRobLane(dut, 0, 20, BigInt("80000050", 16),
           IntOperation.Fence, UopClass.System, allocatesPhysical = false)
