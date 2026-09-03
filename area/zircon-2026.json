@@ -515,6 +515,33 @@
       "instances": 1,
       "replication_factor": 1,
       "source": "ExternalCoherenceAdapter retained {four-state control, kind, 32-bit line address}"
+    },
+    {
+      "name": "btb_target_data",
+      "class": "memory_data",
+      "entries": 64,
+      "bits_per_entry": 32,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "BankedBranchTargetBuffer: four banks x two ways x eight rows, BranchTargetMemory target field"
+    },
+    {
+      "name": "btb_tag_and_control",
+      "class": "tag_metadata",
+      "entries": 64,
+      "bits_per_entry": 29,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "BankedBranchTargetBuffer: valid, 25-bit tag, conditional/call/return fields in 64-bit distributed entries"
+    },
+    {
+      "name": "btb_replacement_state",
+      "class": "register_control",
+      "entries": 32,
+      "bits_per_entry": 1,
+      "instances": 1,
+      "replication_factor": 1,
+      "source": "BankedBranchTargetBuffer: one replacement bit per bank and row"
     }
   ],
   "logic": [
@@ -1213,6 +1240,22 @@
       "width": 57,
       "fanin": 1,
       "source": "FloatingMovePipe FMA sign/magnitude ordering and exponent-range decisions"
+    },
+    {
+      "name": "btb_tag_compare_units",
+      "metric": "comparator32_units",
+      "units": 8,
+      "width": 1,
+      "fanin": 1,
+      "source": "BankedBranchTargetBuffer two-way tag comparison for each of four fetch slots"
+    },
+    {
+      "name": "btb_way_select_priority_bits",
+      "metric": "priority_select_bits",
+      "units": 4,
+      "width": 1,
+      "fanin": 2,
+      "source": "BankedBranchTargetBuffer two-way hit selection for four fetch slots"
     }
   ]
 }
