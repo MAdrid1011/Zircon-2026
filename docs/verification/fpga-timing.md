@@ -123,8 +123,9 @@ and are not rerun here.
 
 `make test-m3-external-coherence` is the focused sideband tier. It runs the
 retained core controller and platform gate, then clean/dirty/retry, in-flight
-I/D refill, and reset-epoch complete-core cases. On 2026-09-03 it completed
-nine component tests plus fourteen core cases in about 274 seconds. The target
+I/D refill, and reset-epoch complete-core cases. On 2026-09-04, after selector
+deduplication, it completed nine component tests plus thirteen core cases in
+224 seconds. The target
 uses two SBT invocations rather than four by selecting all sideband cases in one
 CoreShell run. This remains within the five-minute component simulation budget.
 

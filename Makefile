@@ -78,7 +78,7 @@ test-m3-mshr-pressure:
 # invalidation at the complete-core boundary.
 test-m3-external-coherence:
 	./scripts/sbtw "testOnly zircon.ExternalCoherenceControllerSpec zircon.ExternalCoherenceAdapterSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "external cacheable" -z "external-coherence" -z "external coherence" -z "external invalidation" -z "external modifier"'
 
 # Fast, focused exclusive L1D-L2 transfer regression. It covers clean victim
 # handoff, L2 hit ownership transfer, dirty-victim FIFO backpressure, recovery

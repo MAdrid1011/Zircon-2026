@@ -251,8 +251,8 @@ LR reservation 和 response backpressure 场景均有本地证据。`ZirconBoard
 工程只提供 clk/reset/LED 和本地 AXI BRAM，没有可验证的外部 master/DDR pinout。
 因此 core boundary 已闭环，真实 platform-master wiring 仍是 M3 发布前的明确缺口，
 不能用 idle 输入或 local BRAM 代替该证据。
-2026-09-03 当前提交的 `make test-m3-external-coherence` 实测组件 9/9、
-CoreShell 14/14 全部通过，耗时约 234 秒；该结果覆盖 response backpressure、
+2026-09-04 selector 去重后的 `make test-m3-external-coherence` 实测组件 9/9、
+CoreShell 13/13 全部通过，耗时 224 秒；该结果覆盖 response backpressure、
 I/D in-flight drain、dirty writeback/retry、reset、LR reservation 和 cacheable
 store gating。它仍不替代真实平台 master 的板级接线证据。
 
