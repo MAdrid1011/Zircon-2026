@@ -176,6 +176,9 @@ owner，可同时接受 4 个 outstanding burst，并在不同 ID 间交错 R be
 committed-memory differential 均在 2026-09-03 本地通过。该项关闭仿真器的
 单 owner 限制，但不等于完整 M3 随机 AXI、Cache conflict 或平台 master
 矩阵已完成。
+2026-09-04 在当前 RTL 上重跑 `make -C ZirconSim tohost`：RV32I prefix、
+ALU/branch、RV32M 和 RV32A 四项均 `status=tohost`、退出码 0，分别退休
+19/34/19/12 条指令，耗时 246/294/277/226 cycles；seed 均为 1。
 
 The earlier M3 row's statement that ADR-0023 had no controller or integration
 is superseded. `ZirconCoreIO.externalCoherence` now implements the retained
