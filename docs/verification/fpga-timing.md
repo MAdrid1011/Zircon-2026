@@ -28,6 +28,18 @@ not produce a timing pass or bitstream. This is a measured failure baseline,
 not release evidence; it blocks the final `v1.0.0` release until BRAM/resource
 mapping is corrected and post-route timing is committed.
 
+The first BRAM-mapping repair was measured locally with Vivado 2023.1 on the
+same part and 10.000 ns constraint. `ZirconAxiBram` now uses one XPM
+simple-dual-port block RAM: synthesis reports 64 `RAMB36E1`, no large
+distributed-RAM array, and zero synthesis errors. A wrapper-only XSIM test
+also passes two-beat and maximum 256-beat reads, held `RVALID` payloads,
+byte-write strobes, and `B` responses. The complete-core synthesis still
+fails the pre-placement resource DRC at `138,940` Slice LUTs and `138,748`
+LUT-as-Logic (103.23% and 103.08% of the 134,600 available sites); no
+post-route WNS exists for this worktree experiment. The hierarchy report
+identifies `ExclusiveL2TransferStore` (about 62k LUTs), `M1Frontend` (about
+26k), and `L1DLoadCache` (about 24k) as the dominant structural hotspots.
+
 On 2026-09-03, a read-only local workspace audit found the LA32R Vivado project
 at `/home/madrid/LA32R/LA32R.xpr`, whose project metadata targets
 `xc7a200tfbg676-2L`. Its retained generated clock-IP constraint applies a

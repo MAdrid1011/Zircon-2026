@@ -5,7 +5,7 @@
 // for timing closure and for board bring-up while a board-specific external
 // master contract is completed separately.
 module ZirconBoard #(
-  parameter MEM_INIT_FILE = ""
+  parameter string MEM_INIT_FILE = ""
 ) (
   input  wire        clk,
   input  wire        rstn,
@@ -159,7 +159,7 @@ module ZirconBoard #(
 endmodule
 
 module ZirconAxiBram #(
-  parameter MEM_INIT_FILE = ""
+  parameter string MEM_INIT_FILE = ""
 ) (
   input  wire        clk,
   input  wire        reset,
@@ -193,31 +193,85 @@ module ZirconAxiBram #(
   output wire        s_axi_rvalid,
   input  wire        s_axi_rready
 );
-  localparam WORDS = 65536;
-  (* ram_style = "block" *) reg [31:0] mem [0:WORDS-1];
-
   reg        read_active;
   reg [3:0]  read_id;
   reg [31:0] read_address;
   reg [7:0]  read_remaining;
-  reg [31:0] read_data;
+  reg        read_valid;
+  reg        read_last;
   reg        write_address_valid;
   reg [3:0]  write_id;
   reg [31:0] write_address;
   reg        write_response_valid;
-  integer i;
 
-  initial begin
-    if (MEM_INIT_FILE != "")
-      $readmemh(MEM_INIT_FILE, mem);
-  end
+  // Keep the 64 Kiword image in true block RAM.  The previous inferred array
+  // used a byte-enable loop in the same process as the read path; Vivado
+  // dissolved that array into LUTRAM (and then registers) because it saw
+  // multiple writes.  XPM exposes one write port and one synchronous read
+  // port explicitly, preserving the AXI protocol while making the intended
+  // RAMB36 implementation unambiguous.
+  localparam string XPM_MEMORY_INIT_FILE =
+    (MEM_INIT_FILE == "") ? "none" : MEM_INIT_FILE;
+  wire [31:0] bram_read_data;
+  wire        bram_sbiterr;
+  wire        bram_dbiterr;
+  wire        bram_read_issue;
+  wire        write_fire;
+
+  assign bram_read_issue = read_active &&
+    (!read_valid || (s_axi_rready && (read_remaining != 8'b0)));
+  assign write_fire = s_axi_wvalid && s_axi_wready;
+
+  xpm_memory_sdpram #(
+    .ADDR_WIDTH_A(16),
+    .ADDR_WIDTH_B(16),
+    .AUTO_SLEEP_TIME(0),
+    .BYTE_WRITE_WIDTH_A(8),
+    .CASCADE_HEIGHT(0),
+    .CLOCKING_MODE("common_clock"),
+    .ECC_MODE("no_ecc"),
+    .MEMORY_INIT_FILE(XPM_MEMORY_INIT_FILE),
+    .MEMORY_INIT_PARAM(""),
+    .MEMORY_OPTIMIZATION("true"),
+    .MEMORY_PRIMITIVE("block"),
+    .MEMORY_SIZE(2097152),
+    .MESSAGE_CONTROL(0),
+    .READ_DATA_WIDTH_B(32),
+    .READ_LATENCY_B(1),
+    .READ_RESET_VALUE_B("0"),
+    .RST_MODE_A("SYNC"),
+    .RST_MODE_B("SYNC"),
+    .SIM_ASSERT_CHK(0),
+    .USE_EMBEDDED_CONSTRAINT(0),
+    .USE_MEM_INIT(1),
+    .WAKEUP_TIME("disable_sleep"),
+    .WRITE_DATA_WIDTH_A(32),
+    .WRITE_MODE_B("read_first")
+  ) memory (
+    .addra(write_address[17:2]),
+    .addrb(read_address[17:2]),
+    .clka(clk),
+    .clkb(clk),
+    .dina(s_axi_wdata),
+    .doutb(bram_read_data),
+    .sbiterrb(bram_sbiterr),
+    .dbiterrb(bram_dbiterr),
+    .ena(write_fire),
+    .enb(bram_read_issue),
+    .injectdbiterra(1'b0),
+    .injectsbiterra(1'b0),
+    .regceb(1'b1),
+    .rstb(reset),
+    .sleep(1'b0),
+    .wea(write_fire ? s_axi_wstrb : 4'b0)
+  );
 
   assign s_axi_arready = !read_active;
-  assign s_axi_rvalid = read_active;
+  assign s_axi_rvalid = read_valid;
   assign s_axi_rid = read_id;
-  assign s_axi_rdata = read_data;
+  assign s_axi_rdata = bram_read_data;
   assign s_axi_rresp = 2'b00;
-  assign s_axi_rlast = read_remaining == 8'b0;
+  assign s_axi_rlast = read_last;
 
   assign s_axi_awready = !write_address_valid && !write_response_valid;
   assign s_axi_wready = write_address_valid && !write_response_valid;
@@ -231,7 +285,8 @@ module ZirconAxiBram #(
       read_id <= 4'b0;
       read_address <= 32'b0;
       read_remaining <= 8'b0;
-      read_data <= 32'b0;
+      read_valid <= 1'b0;
+      read_last <= 1'b0;
       write_address_valid <= 1'b0;
       write_id <= 4'b0;
       write_address <= 32'b0;
@@ -242,14 +297,28 @@ module ZirconAxiBram #(
         read_id <= s_axi_arid;
         read_address <= s_axi_araddr;
         read_remaining <= s_axi_arlen;
-        read_data <= mem[s_axi_araddr[17:2]];
-      end else if (read_active && s_axi_rready) begin
-        if (read_remaining == 8'b0) begin
-          read_active <= 1'b0;
-        end else begin
+        read_valid <= 1'b0;
+        read_last <= 1'b0;
+      end else if (read_active) begin
+        if (read_valid && s_axi_rready) begin
+          if (read_remaining == 8'b0) begin
+            read_active <= 1'b0;
+            read_valid <= 1'b0;
+            read_last <= 1'b0;
+          end else begin
+            // A ready handshake on the current beat launches the next
+            // synchronous BRAM read in the same cycle.
+            read_address <= read_address + 32'd4;
+            read_remaining <= read_remaining - 1'b1;
+            read_valid <= 1'b1;
+            read_last <= read_remaining == 8'd1;
+          end
+        end else if (!read_valid) begin
+          // The first beat is issued one cycle after AR, matching the XPM
+          // synchronous read latency.
           read_address <= read_address + 32'd4;
-          read_remaining <= read_remaining - 1'b1;
-          read_data <= mem[read_address[17:2] + 1'b1];
+          read_valid <= 1'b1;
+          read_last <= read_remaining == 8'b0;
         end
       end
 
@@ -259,10 +328,7 @@ module ZirconAxiBram #(
         write_address <= s_axi_awaddr;
       end
 
-      if (s_axi_wvalid && s_axi_wready) begin
-        for (i = 0; i < 4; i = i + 1)
-          if (s_axi_wstrb[i])
-            mem[write_address[17:2]][8*i +: 8] <= s_axi_wdata[8*i +: 8];
+      if (write_fire) begin
         write_address <= write_address + 32'd4;
         if (s_axi_wlast) begin
           write_address_valid <= 1'b0;

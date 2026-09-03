@@ -41,6 +41,13 @@ separate external-master integration requirement.
 
 ## Validation
 
+The local AXI/BRAM wrapper regression runs quickly in XSIM and exercises the
+XPM block-memory implementation used by the fixed target:
+
+```bash
+make test-fpga-bram
+```
+
 Copy the template, populate it from an actual Vivado post-route run, and run:
 
 ```bash
