@@ -535,6 +535,51 @@ class LoadStoreQueuesSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("combines disjoint partial stores byte-by-byte before a cache load") {
+      simulate(new LoadStoreQueues) { dut =>
+        clear(dut)
+        allocate(dut, 0, 1, load = false, store = true)
+        allocate(dut, 1, 2, load = false, store = true)
+        dut.clock.step()
+        noAllocations(dut)
+        allocate(dut, 0, 3, load = true, store = false)
+        dut.clock.step()
+        noAllocations(dut)
+
+        // Older stores cover disjoint bytes of one word. Forwarding must
+        // combine both entries rather than selecting one store wholesale.
+        updateStoreAddress(dut, 1, BigInt("80001000", 16), 2)
+        updateStoreData(dut, 1, BigInt("0000bb00", 16))
+        updateStoreAddress(dut, 2, BigInt("80001000", 16), 8)
+        updateStoreData(dut, 2, BigInt("aa000000", 16))
+
+        queryLoad(dut, 3, BigInt("80001000", 16), 15)
+        dut.io.loadAddress(0).ready.expect(true)
+        dut.io.loadForward(0).valid.expect(true)
+        dut.io.loadForward(0).bits.forwardMask.expect(10)
+        dut.io.loadForward(0).bits.forwardData.expect(BigInt("aa00bb00", 16))
+        dut.io.loadForward(0).bits.requiresCache.expect(true)
+        dut.clock.step()
+        dut.io.loadAddress(0).valid.poke(false)
+
+        dut.io.loadComplete.valid.poke(true)
+        dut.io.loadComplete.bits.robTag.poke(3)
+        dut.io.loadComplete.bits.cacheData.poke(BigInt("11223344", 16))
+        dut.io.loadComplete.ready.expect(true)
+        dut.io.loadResult.valid.expect(true)
+        dut.io.loadResult.bits.data.expect(BigInt("aa22bb44", 16))
+        dut.clock.step()
+        dut.io.loadComplete.valid.poke(false)
+
+        dut.io.retire(0).valid.poke(true)
+        dut.io.retire(0).bits.poke(3)
+        dut.io.retireMetadata(0).valid.expect(true)
+        dut.io.retireMetadata(0).bits.address.expect(BigInt("80001000", 16))
+        dut.io.retireMetadata(0).bits.readMask.expect(15)
+        dut.io.retireMetadata(0).bits.readData.expect(BigInt("aa22bb44", 16))
+      }
+    }
+
     it("selects the youngest matching older store for every forwarded byte") {
       simulate(new LoadStoreQueues) { dut =>
         clear(dut)

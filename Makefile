@@ -65,6 +65,7 @@ test-m3-dual-resource:
 # older SB and both aligned SH lane pairs to merge with a cacheable refill read
 # by a younger LW.
 test-m3-partial-store-forward:
+	./scripts/sbtw 'testOnly zircon.LoadStoreQueuesSpec -- -z "combines disjoint partial stores byte-by-byte"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older partial store forward with a cacheable refill"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older halfword store forward with a cacheable refill"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older low-halfword store forward with a cacheable refill"'
