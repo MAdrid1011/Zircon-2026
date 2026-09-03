@@ -75,6 +75,11 @@ miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-on
 与 `M1FrontendSpec` 聚焦回归共 7/7 通过。逐 slot folded-history 查询、完整
 alias/替换矩阵和性能收敛仍未完成。
 
+`AXIInstructionFetchSpec` 现已对 M1 取指 transport 完成 9/9 单元回归（约 14 秒）：
+覆盖普通四拍 INCR、4 KiB 边界缩短、AR/R backpressure、redirect/drain、Present
+阶段取消、逐 beat RRESP fault，以及未知 ID、错误 RLAST 和未对齐目标断言。该结果
+仅证明 transport 契约，不替代完整 L1I 或最终顶层取指验证。
+
 同日将固定深度 2 的 L2 dirty-victim FIFO 从通用 `Queue` 改为显式寄存器环形队列，
 `ExclusiveL2TransferStoreSpec` 为 12/12、顶层 FIFO 压力场景为 1/1；目标是消除综合
 层级中约 30k LUT 的小深度宽 payload 异步读 mux，待新提交的 Vivado 结果确认收益。
