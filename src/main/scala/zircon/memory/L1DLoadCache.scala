@@ -85,7 +85,54 @@ class L1DLoadCache(
   val cacheValid = RegInit(VecInit(Seq.fill(ways)(VecInit(Seq.fill(sets)(false.B)))))
   val cacheDirty = RegInit(VecInit(Seq.fill(ways)(VecInit(Seq.fill(sets)(false.B)))))
   val cacheTag = Reg(Vec(ways, Vec(sets, UInt(tagWidth.W))))
-  val cacheData = Reg(Vec(ways, Vec(sets, Vec(wordsPerLine, UInt(32.W)))))
+  private val lineWidth = wordsPerLine * 32
+  // Three replicated read views keep the two load lookups independent from
+  // victim/store reads while every update remains a single logical line write.
+  val loadDataMemories = Seq.fill(ways)(Module(new L1DDataMemory(sets, lineWidth)))
+  val loadDataMemoriesB = Seq.fill(ways)(Module(new L1DDataMemory(sets, lineWidth)))
+  val sideDataMemories = Seq.fill(ways)(Module(new L1DDataMemory(sets, lineWidth)))
+  val arrayWriteEnable = WireDefault(false.B)
+  val arrayWriteWay = WireDefault(0.U(log2Ceil(ways).W))
+  val arrayWriteSet = WireDefault(0.U(setWidth.W))
+  val arrayWriteData = WireDefault(0.U(lineWidth.W))
+  val sideReadAddressA = WireDefault(0.U(setWidth.W))
+  val sideReadAddressB = WireDefault(0.U(setWidth.W))
+  val loadReadSetA = WireDefault(0.U(setWidth.W))
+  val loadReadSetB = WireDefault(0.U(setWidth.W))
+  val portReadData = Seq.fill(config.decodeWidth)(Wire(Vec(ways, UInt(lineWidth.W))))
+  for (way <- 0 until ways) {
+    loadDataMemories(way).io.clk := clock
+    loadDataMemories(way).io.readEnableA := true.B
+    loadDataMemories(way).io.readAddressA := loadReadSetA
+    loadDataMemories(way).io.readEnableB := false.B
+    loadDataMemories(way).io.readAddressB := 0.U
+    loadDataMemories(way).io.writeEnable := arrayWriteEnable &&
+      arrayWriteWay === way.U
+    loadDataMemories(way).io.writeAddress := arrayWriteSet
+    loadDataMemories(way).io.writeData := arrayWriteData
+    portReadData(0)(way) := loadDataMemories(way).io.readDataA
+
+    loadDataMemoriesB(way).io.clk := clock
+    loadDataMemoriesB(way).io.readEnableA := true.B
+    loadDataMemoriesB(way).io.readAddressA := loadReadSetB
+    loadDataMemoriesB(way).io.readEnableB := false.B
+    loadDataMemoriesB(way).io.readAddressB := 0.U
+    loadDataMemoriesB(way).io.writeEnable := arrayWriteEnable &&
+      arrayWriteWay === way.U
+    loadDataMemoriesB(way).io.writeAddress := arrayWriteSet
+    loadDataMemoriesB(way).io.writeData := arrayWriteData
+    portReadData(1)(way) := loadDataMemoriesB(way).io.readDataA
+
+    sideDataMemories(way).io.clk := clock
+    sideDataMemories(way).io.readEnableA := true.B
+    sideDataMemories(way).io.readAddressA := sideReadAddressA
+    sideDataMemories(way).io.readEnableB := true.B
+    sideDataMemories(way).io.readAddressB := sideReadAddressB
+    sideDataMemories(way).io.writeEnable := arrayWriteEnable &&
+      arrayWriteWay === way.U
+    sideDataMemories(way).io.writeAddress := arrayWriteSet
+    sideDataMemories(way).io.writeData := arrayWriteData
+  }
 
   val mshrValid = RegInit(VecInit.fill(mshrCount)(false.B))
   val mshrIssued = RegInit(VecInit.fill(mshrCount)(false.B))
@@ -98,6 +145,7 @@ class L1DLoadCache(
   val mshrLineAddress = Reg(Vec(mshrCount, UInt(32.W)))
   val mshrSet = Reg(Vec(mshrCount, UInt(setWidth.W)))
   val mshrWay = Reg(Vec(mshrCount, UInt(log2Ceil(ways).W)))
+  val mshrLineData = Reg(Vec(mshrCount, Vec(wordsPerLine, UInt(32.W))))
 
   val waiterValid = RegInit(VecInit.fill(waiterCount)(false.B))
   val waiterMshr = Reg(Vec(waiterCount, UInt(mshrWidth.W)))
@@ -120,6 +168,21 @@ class L1DLoadCache(
   val immediateResponse = Reg(Vec(config.decodeWidth, new LoadCompletion(config)))
   val storeResultValid = RegInit(false.B)
   val storeResultBits = Reg(new StoreWriteResult(config))
+  val hitPending = RegInit(VecInit.fill(config.decodeWidth)(false.B))
+  val hitPendingTag = Reg(Vec(config.decodeWidth, UInt(config.robTagWidth.W)))
+  val hitPendingAddress = Reg(Vec(config.decodeWidth, UInt(32.W)))
+  val hitPendingWay = Reg(Vec(config.decodeWidth, UInt(log2Ceil(ways).W)))
+  val hitPendingSet = Reg(Vec(config.decodeWidth, UInt(setWidth.W)))
+  val hitPendingWord = Reg(Vec(config.decodeWidth, UInt(log2Ceil(wordsPerLine).W)))
+  val storeHitPending = RegInit(false.B)
+  val storeHitPendingWay = Reg(UInt(log2Ceil(ways).W))
+  val storeHitPendingSet = Reg(UInt(setWidth.W))
+  val storeHitPendingWord = Reg(UInt(log2Ceil(wordsPerLine).W))
+  val storeHitPendingEffect = Reg(new StoreEffect(config))
+  loadReadSetA := Mux(hitPending(0), hitPendingSet(0), io.request(0).bits.address(
+    lineOffsetWidth + setWidth - 1, lineOffsetWidth))
+  loadReadSetB := Mux(hitPending(1), hitPendingSet(1), io.request(1).bits.address(
+    lineOffsetWidth + setWidth - 1, lineOffsetWidth))
   val l2ProbeActive = RegInit(false.B)
   val l2ProbeMshr = Reg(UInt(mshrWidth.W))
   val recoveryBlocked = io.flush || io.squash.valid
@@ -150,16 +213,6 @@ class L1DLoadCache(
     (0 until ways).map(way => cacheValid(way)(portSet(port)) &&
       cacheTag(way)(portSet(port)) === portTag(port))))
   val portAnyCacheHit = portCacheHit.map(_.asUInt.orR)
-  val portHitData = (0 until config.decodeWidth).map { port =>
-    val data = Wire(UInt(32.W))
-    data := 0.U
-    for (way <- 0 until ways) {
-      when(portCacheHit(port)(way)) {
-        data := cacheData(way)(portSet(port))(portWord(port))
-      }
-    }
-    data
-  }
 
   val requestSet = selectedRequest.address(lineOffsetWidth + setWidth - 1,
     lineOffsetWidth)
@@ -192,6 +245,7 @@ class L1DLoadCache(
   val storeWord = io.storeRequest.bits.address(lineOffsetWidth - 1, 2)
   val storeLineAddress = Cat(io.storeRequest.bits.address(31, lineOffsetWidth),
     0.U(lineOffsetWidth.W))
+  sideReadAddressB := Mux(storeHitPending, storeHitPendingSet, storeSet)
   val storeCacheHit = VecInit((0 until ways).map(way =>
     cacheValid(way)(storeSet) && cacheTag(way)(storeSet) === storeTag))
   val anyStoreCacheHit = storeCacheHit.asUInt.orR
@@ -205,7 +259,8 @@ class L1DLoadCache(
     mshrValid(index) && mshrLineAddress(index) === storeLineAddress))
   val anyStoreLineMshr = storeLineMshr.asUInt.orR
   val anyMshrStorePending = mshrStorePending.asUInt.orR
-  val storeOwnerAvailable = !storeResultValid && !anyMshrStorePending
+  val storeOwnerAvailable = !storeResultValid && !anyMshrStorePending &&
+    !storeHitPending
   val atomicLineAddress = Cat(io.atomicAccept.bits.address(31, lineOffsetWidth),
     0.U(lineOffsetWidth.W))
   val atomicMatchesMshr = VecInit((0 until mshrCount).map(index =>
@@ -247,8 +302,9 @@ class L1DLoadCache(
   }
   val completionImmediateFire = io.completion.fire && selectedImmediateValid
   val immediateSlotAvailable = VecInit((0 until config.decodeWidth).map(slot =>
-    !immediateValid(slot) || (completionImmediateFire &&
+    !hitPending(slot) && (!immediateValid(slot) || (completionImmediateFire &&
       selectedImmediateIndex === slot.U)))
+  )
 
   val fenceCanTransfer = io.fenceDrain && !anyMshrValid && !storeResultValid &&
     !selectedImmediateValid && !l2ProbeActive
@@ -436,13 +492,64 @@ class L1DLoadCache(
   val l2InsertSet = Mux(flushL2Insert, flushSet,
     Mux(fenceL2Insert, fenceDirtySet, Mux(l2InsertForStore, storeSet,
       Mux(dualHitMissL2Insert, dualHitMissSet, requestSet))))
-  io.l2Insert.valid := flushL2Insert || fenceL2Insert || loadL2Insert || storeL2Insert ||
-    dualHitMissL2Insert
+  sideReadAddressA := l2InsertSet
+  val sideReadLine = Wire(Vec(ways, UInt(lineWidth.W)))
+  val sideReadLineB = Wire(Vec(ways, UInt(lineWidth.W)))
+  for (way <- 0 until ways) {
+    sideReadLine(way) := sideDataMemories(way).io.readDataA
+    sideReadLineB(way) := sideDataMemories(way).io.readDataB
+  }
+  val dataResponseMshr = io.dataResponse.bits.clientMshr
+  val dataResponseStore = mshrStoreEffect(dataResponseMshr)
+  val dataResponseHasStore = mshrStorePending(dataResponseMshr)
+  val dataResponseWriteWords = Wire(Vec(wordsPerLine, UInt(32.W)))
+  for (word <- 0 until wordsPerLine) {
+    dataResponseWriteWords(word) := Mux(dataResponseHasStore &&
+      dataResponseStore.address(lineOffsetWidth - 1, 2) === word.U,
+      MemoryByteLanes.merge(io.dataResponse.bits.lineData(word),
+        dataResponseStore.writeData, dataResponseStore.writeMask),
+      io.dataResponse.bits.lineData(word))
+  }
+  val lookupResponseWriteWords = Wire(Vec(wordsPerLine, UInt(32.W)))
+  for (word <- 0 until wordsPerLine) {
+    lookupResponseWriteWords(word) := io.l2Response.bits.transfer.lineData(word)
+  }
+  val storeHitReadWords = sideReadLineB(storeHitPendingWay).asTypeOf(
+    Vec(wordsPerLine, UInt(32.W)))
+  val storeHitWriteWords = Wire(Vec(wordsPerLine, UInt(32.W)))
+  for (word <- 0 until wordsPerLine) {
+    storeHitWriteWords(word) := Mux(storeHitPendingWord === word.U,
+      MemoryByteLanes.merge(storeHitReadWords(word),
+        storeHitPendingEffect.writeData, storeHitPendingEffect.writeMask),
+      storeHitReadWords(word))
+  }
+  val arrayWriteFromStore = storeHitPending
+  val arrayWriteFromDemand = io.dataResponse.fire &&
+    !io.dataResponse.bits.accessFault
+  val arrayWriteFromLookup = io.l2Response.fire && io.l2Response.bits.hit
+  arrayWriteEnable := arrayWriteFromStore || arrayWriteFromDemand ||
+    arrayWriteFromLookup
+  arrayWriteWay := Mux(arrayWriteFromStore, storeHitPendingWay,
+    Mux(arrayWriteFromDemand, mshrWay(dataResponseMshr),
+      mshrWay(l2ProbeMshr)))
+  arrayWriteSet := Mux(arrayWriteFromStore, storeHitPendingSet,
+    Mux(arrayWriteFromDemand, mshrSet(dataResponseMshr), mshrSet(l2ProbeMshr)))
+  arrayWriteData := Cat(storeHitWriteWords.reverse)
+  when(!arrayWriteFromStore && arrayWriteFromDemand) {
+    arrayWriteData := Cat(dataResponseWriteWords.reverse)
+  }.elsewhen(!arrayWriteFromStore && !arrayWriteFromDemand &&
+    arrayWriteFromLookup) {
+    arrayWriteData := Cat(lookupResponseWriteWords.reverse)
+  }
+  val l2InsertRequested = flushL2Insert || fenceL2Insert || loadL2Insert ||
+    storeL2Insert || dualHitMissL2Insert
+  io.l2Insert.valid := l2InsertRequested
   io.l2Insert.bits.lineAddress := Cat(cacheTag(l2InsertWay)(l2InsertSet), l2InsertSet,
     0.U(lineOffsetWidth.W))
   io.l2Insert.bits.dirty := cacheDirty(l2InsertWay)(l2InsertSet)
   for (word <- 0 until wordsPerLine) {
-    io.l2Insert.bits.lineData(word) := cacheData(l2InsertWay)(l2InsertSet)(word)
+    io.l2Insert.bits.lineData(word) := sideReadLine(l2InsertWay).asTypeOf(
+      Vec(wordsPerLine, UInt(32.W)))(word)
   }
   io.flushLine.ready := Mux(flushL2Insert, io.l2Insert.ready, flushCleanOrAbsent)
   val missResources = anyFreeWaiter && (anyMatchingMshr ||
@@ -493,7 +600,7 @@ class L1DLoadCache(
     (anyStoreCacheHit || storeMissResources)
   io.storeResult.valid := storeResultValid
   io.storeResult.bits := storeResultBits
-  io.storeBusy := storeResultValid || anyMshrStorePending
+  io.storeBusy := storeResultValid || anyMshrStorePending || storeHitPending
 
   val unresolvedL2 = VecInit((0 until mshrCount).map(index =>
     mshrValid(index) && !mshrL2ProbeIssued(index) && !mshrFilled(index)))
@@ -555,20 +662,23 @@ class L1DLoadCache(
     Cat(waiterWord(selectedWaiterIndex), 0.U(2.W))
   val selectedWaiterData = Wire(UInt(32.W))
   selectedWaiterData := 0.U
-  for (way <- 0 until ways) {
-    when(mshrWay(selectedWaiterMshr) === way.U) {
-      selectedWaiterData := cacheData(way)(mshrSet(selectedWaiterMshr))(
-        waiterWord(selectedWaiterIndex))
-    }
-  }
+  selectedWaiterData := mshrLineData(selectedWaiterMshr)(
+    waiterWord(selectedWaiterIndex))
 
   io.completion.valid := !recoveryBlocked &&
     (selectedImmediateValid || selectedWaiterValid)
+  val immediateReadData = Wire(Vec(config.decodeWidth, UInt(32.W)))
+  immediateReadData(0) := portReadData(0)(hitPendingWay(0)).asTypeOf(
+    Vec(wordsPerLine, UInt(32.W)))(hitPendingWord(0))
+  immediateReadData(1) := portReadData(1)(hitPendingWay(1)).asTypeOf(
+    Vec(wordsPerLine, UInt(32.W)))(hitPendingWord(1))
   io.completion.bits.robTag := Mux(selectedImmediateValid,
     immediateResponse(selectedImmediateIndex).robTag,
     waiterTag(selectedWaiterIndex))
   io.completion.bits.cacheData := Mux(selectedImmediateValid,
-    immediateResponse(selectedImmediateIndex).cacheData,
+    Mux(hitPending(selectedImmediateIndex),
+      immediateReadData(selectedImmediateIndex),
+      immediateResponse(selectedImmediateIndex).cacheData),
     selectedWaiterData)
   io.completion.bits.accessFault := Mux(selectedImmediateValid,
     immediateResponse(selectedImmediateIndex).accessFault,
@@ -586,8 +696,20 @@ class L1DLoadCache(
     }.reduce(_ || _)
   }
 
+  // A store hit is accepted after its line-read address has been registered;
+  // the write and exact result are committed from the returned line here.
+  when(storeHitPending) {
+    for (way <- 0 until ways) {
+      when(storeHitPendingWay === way.U) {
+        cacheDirty(way)(storeHitPendingSet) := true.B
+      }
+    }
+    storeHitPending := false.B
+  }
+
   when(io.flush) {
     immediateValid.foreach(_ := false.B)
+    hitPending.foreach(_ := false.B)
     waiterValid.foreach(_ := false.B)
     for (mshr <- 0 until mshrCount) {
       // A commit-authorized store cannot be cancelled by later recovery. It
@@ -605,6 +727,10 @@ class L1DLoadCache(
       when(immediateValid(slot) && ROBTagOrder.isYounger(
         immediateResponse(slot).robTag, io.squash.bits, io.robHeadTag, config)) {
         immediateValid(slot) := false.B
+      }
+      when(hitPending(slot) && ROBTagOrder.isYounger(
+        hitPendingTag(slot), io.squash.bits, io.robHeadTag, config)) {
+        hitPending(slot) := false.B
       }
     }
     for (waiter <- 0 until waiterCount) {
@@ -632,6 +758,7 @@ class L1DLoadCache(
     when(io.completion.fire) {
       when(selectedImmediateValid) {
         immediateValid(selectedImmediateIndex) := false.B
+        hitPending(selectedImmediateIndex) := false.B
       }.otherwise {
         waiterValid(selectedWaiterIndex) := false.B
       }
@@ -640,10 +767,15 @@ class L1DLoadCache(
       when(io.request(port).fire && portImmediateRequest(port)) {
         immediateValid(port) := true.B
         immediateResponse(port).robTag := io.request(port).bits.robTag
-        immediateResponse(port).cacheData := Mux(io.request(port).bits.requiresCache,
-          portHitData(port), 0.U)
+        immediateResponse(port).cacheData := 0.U
         immediateResponse(port).accessFault := false.B
         immediateResponse(port).faultAddress := io.request(port).bits.address
+        hitPending(port) := true.B
+        hitPendingTag(port) := io.request(port).bits.robTag
+        hitPendingAddress(port) := io.request(port).bits.address
+        hitPendingWay(port) := PriorityEncoder(portCacheHit(port).asUInt)
+        hitPendingSet(port) := portSet(port)
+        hitPendingWord(port) := portWord(port)
       }
     }
     val selectedRequestFire = selectedRequestValid && Mux(selectFirstRequest,
@@ -736,18 +868,11 @@ class L1DLoadCache(
       assert(!io.storeRequest.bits.isAtomic,
         "L1D store path cannot accept an atomic effect")
       when(anyStoreCacheHit) {
-        for (way <- 0 until ways) {
-          when(storeHitWay === way.U) {
-            cacheDirty(way)(storeSet) := true.B
-            for (word <- 0 until wordsPerLine) {
-              when(storeWord === word.U) {
-                cacheData(way)(storeSet)(word) := MemoryByteLanes.merge(
-                  cacheData(way)(storeSet)(word), io.storeRequest.bits.writeData,
-                  io.storeRequest.bits.writeMask)
-              }
-            }
-          }
-        }
+        storeHitPending := true.B
+        storeHitPendingWay := storeHitWay
+        storeHitPendingSet := storeSet
+        storeHitPendingWord := storeWord
+        storeHitPendingEffect := io.storeRequest.bits
         storeResultValid := true.B
         storeResultBits.robTag := io.storeRequest.bits.robTag
         storeResultBits.address := io.storeRequest.bits.address
@@ -785,6 +910,9 @@ class L1DLoadCache(
     val responseMshr = io.dataResponse.bits.clientMshr
     val responseHasStore = mshrStorePending(responseMshr)
     val responseStore = mshrStoreEffect(responseMshr)
+    for (word <- 0 until wordsPerLine) {
+      mshrLineData(responseMshr)(word) := io.dataResponse.bits.lineData(word)
+    }
     mshrFilled(responseMshr) := true.B
     mshrFault(responseMshr) := io.dataResponse.bits.accessFault
     when(responseHasStore) {
@@ -803,13 +931,6 @@ class L1DLoadCache(
           cacheDirty(way)(fillSet) := responseHasStore
           cacheTag(way)(fillSet) := mshrLineAddress(responseMshr)(31,
             lineOffsetWidth + setWidth)
-          for (word <- 0 until wordsPerLine) {
-            cacheData(way)(fillSet)(word) := Mux(responseHasStore &&
-              responseStore.address(lineOffsetWidth - 1, 2) === word.U,
-              MemoryByteLanes.merge(io.dataResponse.bits.lineData(word),
-                responseStore.writeData, responseStore.writeMask),
-              io.dataResponse.bits.lineData(word))
-          }
         }
       }
     }
@@ -832,6 +953,9 @@ class L1DLoadCache(
       }
       val fillWay = mshrWay(responseMshr)
       val fillSet = mshrSet(responseMshr)
+      for (word <- 0 until wordsPerLine) {
+        mshrLineData(responseMshr)(word) := io.l2Response.bits.transfer.lineData(word)
+      }
       for (way <- 0 until ways) {
         when(fillWay === way.U) {
           cacheValid(way)(fillSet) := true.B
@@ -839,13 +963,6 @@ class L1DLoadCache(
             responseHasStore
           cacheTag(way)(fillSet) := mshrLineAddress(responseMshr)(31,
             lineOffsetWidth + setWidth)
-          for (word <- 0 until wordsPerLine) {
-            cacheData(way)(fillSet)(word) := Mux(responseHasStore &&
-              responseStore.address(lineOffsetWidth - 1, 2) === word.U,
-              MemoryByteLanes.merge(io.l2Response.bits.transfer.lineData(word),
-                responseStore.writeData, responseStore.writeMask),
-              io.l2Response.bits.transfer.lineData(word))
-          }
         }
       }
     }
