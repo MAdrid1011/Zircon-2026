@@ -350,6 +350,13 @@ SHA256, RTL/submodule/tool SHA, minimized stream, retire trace, and waveform
 path. No timeout increase, response filtering, or seed replacement is a valid
 fix for an unexplained mismatch.
 
+On 2026-09-03, BRAM-backed L2 exposed a stale-line failure in the top-level
+self-modifying `FENCE.I` test. Commit `710e7d0` records the fix: resident
+instruction probes now wait for the matching registered set/way read address,
+and an L1D store that hits resident L2 merges its byte mask before array
+writeback. The focused test and the complete `make test-m3-ordering` target
+then passed (52 base/ordering tests, 55 L1D tests, and four CoreShell cases).
+
 ## FPGA and Throughput Gate
 
 [`fpga-timing.md`](fpga-timing.md) defines the mandatory
