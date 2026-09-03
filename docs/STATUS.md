@@ -8,8 +8,9 @@ retire metadata；`FloatingAdmissionSpec`、`MemoryAddressUnitSpec`、
 `MiniTagePredictor` 并接入 `M1Frontend`，其最小回归为 2/2、前端回归为 4/4，
 顶层 AXI-fed RV32I/FMA 子集为 2/2。完整
 `CoreShellSpec` 当前 108 个场景，不能作为每次改动的快速门禁；其中“selected dirty
-L2 victim”失败可在未改动的 `af0904f` 基线复现，属于既有问题，不能计为本次浮点回归
-失败或通过。后续采用聚焦门禁加完整夜间回归，保留所有非重复 corner-case 覆盖。
+L2 victim”曾可在未改动的 `af0904f` 基线复现；本轮修复了显式 BRAM 一拍读地址未匹配
+就消费旧 line payload 的问题，该场景及相关 L2/L1I 回归现已通过。后续采用聚焦门禁
+加完整夜间回归，保留所有非重复 corner-case 覆盖。
 
 同日 `LongPipe` 将 MUL/MULH/MULHSU/MULHU 的 signedness 变换统一到一个 raw
 unsigned product 和符号修正网络，保持四个 16x16 partial-product 单元边界；
