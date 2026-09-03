@@ -9,7 +9,7 @@
     "ROB, BDB, predictor, rename-map, free-list, ready-table, and completion control bits are not yet fully inventoried",
     "IQ valid, age, replay, wakeup-CAM, and selector proxies are not yet included",
     "memory ingress buffers, completion buffers, full dual-LSU miss/resource conflict logic, and the final cache hierarchy control proxies are not yet fully inventoried",
-    "The initial RV32F E2 path, including five-mode/dynamic integer-to-single and single-to-integer conversion, FPR/fflags commit state, FS admission barrier, and trace integration are implemented and conservatively inventoried below. The complete arithmetic FPU, FMA source-read path, floating memory operations, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
+    "The RV32F E2 path, including five-mode/dynamic conversions, FADD.S/FSUB.S/FMUL.S/FDIV.S/FSQRT.S, FPR/fflags commit state, FS admission barrier, and trace integration is implemented but not yet fully inventoried below. FMA source-read path, floating memory operations, complete differential coverage, and broader floating execution remain unimplemented; this partial ledger is not an area sign-off"
   ],
   "storage": [
     {
