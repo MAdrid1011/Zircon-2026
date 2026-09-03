@@ -16,6 +16,13 @@ unsigned product 和符号修正网络，保持四个 16x16 partial-product 单�
 `LongPipeSpec` 5/5、顶层 RV32M 2/2 通过。固定器件综合正在后台运行，尚未据此宣称
 DSP/LUT 或 100 MHz 时序达标。
 
+随后撤回了仅供实验的 24-bit LUT 浮点乘法，改为 `ZirconCore` 内唯一的
+`ZirconSharedMultiplier`；整数 MUL 与浮点 MUL/FMA 通过互斥 E2 请求共享四个
+16x16 partial-product 单元。`FloatingMovePipeSpec` 12/12、`LongPipeSpec` 5/5、
+两条顶层 FMA/RV32M 场景 2/2 及 `make platform-verilog` 均通过。此前的
+`mul24-lut` synthesis-only 运行超过 28 分钟未产生 utilization report，已终止，
+不能作为当前结构或 FPGA 门槛证据。
+
 同日新增顶层 `MEI > MSI > MTI` 优先级回归，`make test-m4-interrupt-priority`
 以三线同时 pending 验证 `mcause=0x8000000b`、精确 EPC、MRET 和被中断指令单次
 重执行，结果 1/1。ZirconSim `make -C ZirconSim tohost` 在同一 RTL 上完成 RV32I
