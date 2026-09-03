@@ -16,6 +16,12 @@ unsigned product 和符号修正网络，保持四个 16x16 partial-product 单�
 `LongPipeSpec` 5/5、顶层 RV32M 2/2 通过。固定器件综合正在后台运行，尚未据此宣称
 DSP/LUT 或 100 MHz 时序达标。
 
+同日新增顶层 `MEI > MSI > MTI` 优先级回归，`make test-m4-interrupt-priority`
+以三线同时 pending 验证 `mcause=0x8000000b`、精确 EPC、MRET 和被中断指令单次
+重执行，结果 1/1。ZirconSim `make -C ZirconSim tohost` 在同一 RTL 上完成 RV32I
+prefix 19 条、ALU/branch 34 条、RV32M 19 条和 RV32A 12 条退休的 backing-memory
+gate，四项均 `status=tohost`、退出码 0。
+
 miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-only training、
 误预测分配、useful 饱和更新和 scrub；逐 slot folded-history 查询、完整 alias/替换
 矩阵和性能收敛仍未完成。

@@ -72,6 +72,11 @@ case each, while `test-m3-device-io` selects only the basic ID-6 ownership and
 response-error cases. The complete `./scripts/sbtw test` run remains unchanged
 and is still required for the PR/nightly release evidence.
 
+The top-level M-mode interrupt slice also includes
+`make test-m4-interrupt-priority`: with MEI, MSI, and MTI asserted together,
+the AXI-fed core must retire one precise MEI trap (`mcause=0x8000000b`, exact
+EPC), return through MRET, and execute the interrupted instruction once.
+
 ## M3 planned verification contract
 
 M3 is partially executable. The following records actual local directed

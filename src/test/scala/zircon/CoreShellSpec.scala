@@ -2144,6 +2144,48 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("prioritizes MEI over simultaneous MSI and MTI at the live head") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
+        clearInputs(dut)
+        val handler = ResetVector + 64
+        var interruptTaken = false
+        val events = throughTrap(runProgram(
+          dut,
+          Map(
+            ResetVector -> BigInt("800000b7", 16), // lui x1,0x80000
+            ResetVector + 4 -> BigInt("04008093", 16), // x1=mtvec handler
+            ResetVector + 8 -> BigInt("30509073", 16), // csrw mtvec,x1
+            ResetVector + 12 -> BigInt("00001137", 16), // lui x2,0x1
+            ResetVector + 16 -> BigInt("88810113", 16), // x2=MEIE|MTIE|MSIE
+            ResetVector + 20 -> BigInt("30411073", 16), // csrw mie,x2
+            ResetVector + 24 -> BigInt("30045073", 16), // csrrwi x0,mstatus,8
+            ResetVector + 28 -> BigInt("00300193", 16), // interrupted addi x3,x0,3
+            ResetVector + 32 -> BigInt("00100073", 16), // ebreak
+            handler -> BigInt("30200073", 16) // mret
+          ),
+          cycles = 224,
+          driveInterrupts = (core, observed) => {
+            interruptTaken ||= observed.exists(event => event.trap && event.interrupt)
+            core.io.interrupts.meip.poke(!interruptTaken)
+            core.io.interrupts.msip.poke(!interruptTaken)
+            core.io.interrupts.mtip.poke(!interruptTaken)
+          }
+        ), count = 2)
+
+        val interrupt = events.find(event => event.trap && event.interrupt).getOrElse(
+          fail(s"simultaneous interrupts did not trap: $events"))
+        assert(interrupt.cause == BigInt("8000000b", 16) &&
+          interrupt.pc == ResetVector + 28 && interrupt.trapValue == 0,
+          s"MEI did not win the MEI>MSI>MTI priority or preserve exact EPC: $interrupt")
+        assert(events.count(event => event.pc == ResetVector + 28 &&
+          event.gprWrite && event.gprAddress == 3 && event.gprData == 3) == 1,
+          s"the interrupted instruction was not reexecuted exactly once: $events")
+        assert(events.exists(_.instruction == BigInt("30200073", 16)),
+          s"the MEI handler did not return through MRET: $events")
+        assert(events.last.trap && !events.last.interrupt && events.last.cause == 3)
+      }
+    }
+
     it("preserves AXI instruction traffic through deterministic channel backpressure") {
       simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true))) { dut =>
         clearInputs(dut)
