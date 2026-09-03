@@ -89,5 +89,29 @@ class MiniTagePredictorSpec extends AnyFunSpec with ChiselSim {
         dut.io.predictions(0).taken.expect(true)
       }
     }
+
+    it("uses the independent folded-history checkpoint for every fetch slot") {
+      simulate(new MiniTagePredictor) { dut =>
+        clear(dut)
+        finishScrub(dut)
+
+        // Train the second fetch slot only for a non-zero history.  Its
+        // bank differs from slot zero, so the check isolates history from
+        // the predictor's banked read routing.
+        val secondPc = Pc + 4
+        train(dut, secondPc, history = 1, taken = true,
+          BranchProvider.Base, prediction = false)
+
+        dut.io.historyBefore(0).poke(0)
+        dut.io.historyBefore(1).poke(0)
+        dut.io.predictions(1).provider.expect(BranchProvider.Base)
+
+        dut.io.historyBefore(1).poke(1)
+        dut.io.predictions(1).provider.expect(BranchProvider.Tagged0)
+        dut.io.predictions(1).providerPrediction.expect(true)
+        dut.io.predictions(1).taken.expect(true)
+      }
+    }
+
   }
 }

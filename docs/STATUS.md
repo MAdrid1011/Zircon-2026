@@ -79,7 +79,8 @@ MSI pending 后恢复取指，在下一条 live ROB 指令处产生精确 EPC，
 miniTAGE 当前已完成可执行方向 provider 的 Base/tagged 表、commit-only training、
 误预测分配、useful 饱和更新和 scrub；当三张 tagged 表均命中时，误预测不会再因
 `PriorityEncoder(0)` 静默覆盖表 0，新增全命中保护回归。`MiniTagePredictorSpec`
-与 `M1FrontendSpec` 聚焦回归共 7/7 通过。逐 slot folded-history 查询、完整
+与 `M1FrontendSpec` 聚焦回归现为 8/8 通过；新增用例明确验证不同 slot 的
+folded-history checkpoint。逐 slot folded-history 查询、完整
 alias/替换矩阵和性能收敛仍未完成。
 
 `AXIInstructionFetchSpec` 现已对 M1 取指 transport 完成 9/9 单元回归（约 14 秒）：
