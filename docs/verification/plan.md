@@ -63,6 +63,15 @@ run contains 63 reports and 410 tests with zero failures or errors.
 `make verilog` elaborates the same configuration. New randomized tests must declare a seed and persist the ELF,
 trace, tool SHA, and waveform on failure.
 
+The Makefile M3 targets are focused slices, not an additional release suite.
+Their top-level `CoreShellSpec` selectors must remain scenario-specific: broad
+substring filters are prohibited because they rerun cases owned by the
+dedicated AXI, MMIO-group, interrupt, and error slices. In particular,
+`test-m3-atomic` selects one basic LR/SC, reservation-loss, and AMO completion
+case each, while `test-m3-device-io` selects only the basic ID-6 ownership and
+response-error cases. The complete `./scripts/sbtw test` run remains unchanged
+and is still required for the PR/nightly release evidence.
+
 ## M3 planned verification contract
 
 M3 is partially executable. The following records actual local directed

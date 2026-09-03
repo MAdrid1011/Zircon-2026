@@ -109,7 +109,14 @@ test-m3-ordered-io-fetch-pressure:
 # bridge through ID 6 and stays below the five-minute component-simulation gate.
 test-m3-device-io:
 	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec zircon.AXIOrderedIOEngineSpec zircon.OrderedIOCombinerSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "Device"'
+	# Keep this slice to the basic M0/ID-6 ownership cases.  The broad
+	# "Device" selector also reran the dedicated mixed-AXI, grouped-MMIO,
+	# fetch-pressure, and interrupt cases below.
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceStrong load"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceBurstable load"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "turns a DeviceStrong RRESP error"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceStrong store"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "turns a DeviceBurstable store BRESP error"'
 
 # Fast full-channel AXI stress tier. It keeps the explicit-seed read/write
 # backpressure, bounded two/four-owner data beat interleaving, and RRESP/BRESP
@@ -165,9 +172,11 @@ test-m3-axi-mixed:
 # L1D same-line exclusion/invalidation.
 test-m3-atomic:
 	./scripts/sbtw "testOnly zircon.AtomicMemoryEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec zircon.MemIssueQueueSpec"
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "atomic"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "LR/SC"'
-	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "reservation"'
+	# Use exact scenario selectors: the former broad selectors overlapped
+	# heavily and also pulled in the dedicated AXI/error/ordering cases.
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes response-gated LR/SC through the ID-7 atomic owner"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "invalidates LR/SC reservation on a conflicting local store"'
+	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "returns the old AMO value only after its ID-7 read-modify-write response"'
 
 # Three deterministic full-channel RV32A streams. Each mixes cache refill,
 # ID-7 AMO read/modify/write, ID-6 device traffic, and FENCE ID-5 writeback
