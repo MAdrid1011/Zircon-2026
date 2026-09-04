@@ -4,7 +4,7 @@ import chisel3._
 import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter, Valid}
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, FloatingCommitState,
-  FloatingIssueQueue, FloatingMovePipe, FloatingResultBridge, FloatingScoreboard,
+  FloatingIssueQueue, FloatingMovePipe, RegisteredFloatingResultBridge, FloatingScoreboard,
   LongIssueQueue, LongPipe, M1BackendSubsystem, MemIssueQueue, ROBTagOrder,
   ZirconSharedMultiplier,
   SourceKind, UopClass}
@@ -38,7 +38,10 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val floatingQueue = Module(new FloatingIssueQueue(cfg))
   val floatingScoreboard = Module(new FloatingScoreboard(cfg))
   val floatingMovePipe = Module(new FloatingMovePipe(cfg, useExternalMultiplier = true))
-  val floatingResultBridge = Module(new FloatingResultBridge(cfg))
+  // Registered boundary isolates FPU payload/ready from the ROB and LSU
+  // control cones. Focused bridge tests retain the zero-latency compatibility
+  // module, while the production core uses the timing-safe variant.
+  val floatingResultBridge = Module(new RegisteredFloatingResultBridge(cfg))
   val floatingCommitState = Module(new FloatingCommitState(cfg))
   val floatingLoadArbiter = Module(new Arbiter(new zircon.backend.FloatingResult(cfg), 2))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))

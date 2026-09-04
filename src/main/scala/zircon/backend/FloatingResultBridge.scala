@@ -13,7 +13,7 @@ import zircon.ZirconCoreConfig
   * without an exact queued FPR result, while avoiding a completion-ready to
   * result-queue-ready combinational loop.
   */
-class FloatingResultBridge(
+class RegisteredFloatingResultBridge(
     config: ZirconCoreConfig = ZirconCoreConfig.default
 ) extends Module {
   val io = IO(new Bundle {
@@ -25,14 +25,119 @@ class FloatingResultBridge(
     val flush = Input(Bool())
   })
 
+  // Capture every E2 result before exposing it to the ROB or FPR queue.  The
+  // old direct pass-through coupled FPU output ready to the complete LSU/ROB
+  // next-state cone, producing a multi-hundred-level timing path.  This
+  // register is deliberately a one-entry boundary; the producer holds its
+  // result until this slot is available.
+  val pendingInputValid = RegInit(false.B)
+  val pendingInput = Reg(new FloatingMoveResult(config))
   val pendingCompletion = RegInit(false.B)
   val pending = Reg(new CompletionResult(config))
   val recoveryBlocked = io.flush || io.squash.valid
   // Integer-result F operations normally bypass FloatingResultQueue, but an
   // IEEE exception flag is architectural floating state and therefore needs
   // the same ROB-tagged commit ownership as an FPR write.
-  val requiresFloatingCommit = io.input.bits.requiresFloatingCommit
+  val requiresFloatingCommit = pendingInput.requiresFloatingCommit
 
+  io.completion.valid := !recoveryBlocked && (pendingCompletion ||
+    (pendingInputValid && !requiresFloatingCommit && !pendingCompletion))
+  io.completion.bits.robTag := Mux(pendingCompletion, pending.robTag,
+    pendingInput.robTag)
+  io.completion.bits.writesInteger := Mux(pendingCompletion,
+    pending.writesInteger, pendingInput.writesInteger)
+  io.completion.bits.destinationPhysical := Mux(pendingCompletion,
+    pending.destinationPhysical, pendingInput.integerDestinationPhysical)
+  io.completion.bits.data := Mux(pendingCompletion, pending.data,
+    pendingInput.integerData)
+
+  io.floatingResult.valid := pendingInputValid && requiresFloatingCommit &&
+    !pendingCompletion && !recoveryBlocked
+  io.floatingResult.bits.robTag := pendingInput.robTag
+  io.floatingResult.bits.writesFloat := pendingInput.writesFloat
+  io.floatingResult.bits.fprAddress := pendingInput.floatDestination
+  io.floatingResult.bits.fprData := pendingInput.floatData
+  io.floatingResult.bits.flags := pendingInput.flags
+
+  // Keep the common FPR-producing path out of the payload-dependent ready
+  // cone.  `requiresFloatingCommit` was captured with the result payload, so
+  // the bridge no longer scans the wide IEEE flags bus while driving ready.
+  // This preserves the direct one-cycle behavior for integer-only results.
+  // Downstream ready is intentionally absent from this expression.  It can
+  // only affect the already-captured pending entry, never the FPU request
+  // launch path in the same cycle.
+  io.input.ready := !recoveryBlocked && !pendingInputValid && !pendingCompletion
+
+  val pendingInputYounger = pendingInputValid && ROBTagOrder.isYounger(
+    pendingInput.robTag, io.squash.bits, io.robHeadTag, config)
+  val pendingYounger = pendingCompletion && ROBTagOrder.isYounger(
+    pending.robTag, io.squash.bits, io.robHeadTag, config)
+  when(io.flush) {
+    pendingInputValid := false.B
+    pendingCompletion := false.B
+  }.elsewhen(io.squash.valid) {
+    when(pendingInputYounger) { pendingInputValid := false.B }
+    when(pendingYounger) { pendingCompletion := false.B }
+  }.otherwise {
+    when(pendingCompletion && io.completion.fire) {
+      pendingCompletion := false.B
+    }
+    when(pendingInputValid && !requiresFloatingCommit && io.completion.fire) {
+      pendingInputValid := false.B
+    }
+    when(pendingInputValid && requiresFloatingCommit && io.floatingResult.fire) {
+      pendingInputValid := false.B
+      pendingCompletion := true.B
+      pending.robTag := pendingInput.robTag
+      pending.writesInteger := pendingInput.writesInteger
+      pending.destinationPhysical := pendingInput.integerDestinationPhysical
+      pending.data := pendingInput.integerData
+    }
+    when(io.input.fire) {
+      pendingInput := io.input.bits
+      pendingInputValid := true.B
+    }
+  }
+
+  when(pendingInputValid) {
+    assert(pendingInput.robTag(config.robIndexWidth - 1, 0) < config.robEntries.U,
+      "floating result bridge received an out-of-range ROB tag")
+    assert(pendingInput.writesInteger || pendingInput.writesFloat,
+      "floating result bridge received a completion without a destination")
+    assert(!(pendingInput.writesInteger && pendingInput.writesFloat),
+      "floating result bridge cannot split a dual-namespace result")
+  }
+  when(pendingInputValid && requiresFloatingCommit && io.floatingResult.fire) {
+    assert(!io.completion.fire,
+      "floating-state result completed the ROB before entering its retained queue")
+  }
+  when(io.floatingResult.fire) {
+    assert(pendingInputValid && !pendingCompletion,
+      "floating result queue accepted a tag without capturing its completion")
+  }
+  when(io.squash.valid) {
+    assert(!io.input.fire && !io.floatingResult.fire && !io.completion.fire,
+      "floating result bridge transferred work during selective squash")
+  }
+}
+
+/** Zero-latency compatibility bridge used by focused unit tests. Production
+  * integration uses RegisteredFloatingResultBridge to isolate timing paths. */
+class FloatingResultBridge(
+    config: ZirconCoreConfig = ZirconCoreConfig.default
+) extends Module {
+  val io = IO(new Bundle {
+    val input = Flipped(Decoupled(new FloatingMoveResult(config)))
+    val completion = Decoupled(new CompletionResult(config))
+    val floatingResult = Decoupled(new FloatingResult(config))
+    val robHeadTag = Input(UInt(config.robTagWidth.W))
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
+    val flush = Input(Bool())
+  })
+  val pendingCompletion = RegInit(false.B)
+  val pending = Reg(new CompletionResult(config))
+  val recoveryBlocked = io.flush || io.squash.valid
+  val requiresFloatingCommit = io.input.bits.requiresFloatingCommit
   io.completion.valid := !recoveryBlocked && (pendingCompletion ||
     (io.input.valid && !requiresFloatingCommit && !pendingCompletion))
   io.completion.bits.robTag := Mux(pendingCompletion, pending.robTag,
@@ -43,7 +148,6 @@ class FloatingResultBridge(
     pending.destinationPhysical, io.input.bits.integerDestinationPhysical)
   io.completion.bits.data := Mux(pendingCompletion, pending.data,
     io.input.bits.integerData)
-
   io.floatingResult.valid := io.input.valid && requiresFloatingCommit &&
     !pendingCompletion && !recoveryBlocked
   io.floatingResult.bits.robTag := io.input.bits.robTag
@@ -51,14 +155,8 @@ class FloatingResultBridge(
   io.floatingResult.bits.fprAddress := io.input.bits.floatDestination
   io.floatingResult.bits.fprData := io.input.bits.floatData
   io.floatingResult.bits.flags := io.input.bits.flags
-
-  // Keep the common FPR-producing path out of the payload-dependent ready
-  // cone.  `requiresFloatingCommit` was captured with the result payload, so
-  // the bridge no longer scans the wide IEEE flags bus while driving ready.
-  // This preserves the direct one-cycle behavior for integer-only results.
   io.input.ready := !recoveryBlocked && !pendingCompletion && Mux(
     requiresFloatingCommit, io.floatingResult.ready, io.completion.ready)
-
   val pendingYounger = pendingCompletion && ROBTagOrder.isYounger(
     pending.robTag, io.squash.bits, io.robHeadTag, config)
   when(io.flush) {
@@ -77,7 +175,6 @@ class FloatingResultBridge(
       pending.data := io.input.bits.integerData
     }
   }
-
   when(io.input.valid) {
     assert(io.input.bits.robTag(config.robIndexWidth - 1, 0) < config.robEntries.U,
       "floating result bridge received an out-of-range ROB tag")
