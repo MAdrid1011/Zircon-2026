@@ -651,18 +651,43 @@ class L1DLoadCache(
     assert(responseMshrValid, "L1D received a response without a live MSHR owner")
   }
 
-  var selectedWaiterValid: Bool = false.B
-  var selectedWaiterIndex: UInt = 0.U(waiterWidth.W)
-  var selectedWaiterAge: UInt = 0.U((config.robIndexWidth + 1).W)
-  for (index <- 0 until waiterCount) {
-    val candidate = waiterValid(index) && mshrValid(waiterMshr(index)) &&
-      mshrFilled(waiterMshr(index))
-    val age = ROBTagOrder.ageFromHead(waiterTag(index), io.robHeadTag, config)
-    val take = candidate && (!selectedWaiterValid || age < selectedWaiterAge)
-    selectedWaiterValid = selectedWaiterValid || candidate
-    selectedWaiterIndex = Mux(take, index.U, selectedWaiterIndex)
-    selectedWaiterAge = Mux(take, age, selectedWaiterAge)
+  val waiterCandidates = (0 until waiterCount).map(index =>
+    waiterValid(index) && mshrValid(waiterMshr(index)) &&
+      mshrFilled(waiterMshr(index)))
+  val waiterAges = waiterTag.map(tag =>
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)).toVector
+  // Completed waiters are retired in ROB order.  A balanced reduction keeps
+  // the eight-entry age/mux decision out of one serial critical path while
+  // retaining the lowest-index tie-break for equal ages.
+  var waiterValidTree = waiterCandidates.toVector
+  var waiterIndexTree = (0 until waiterCount).map(_.U(waiterWidth.W)).toVector
+  var waiterAgeTree = waiterAges
+  while (waiterValidTree.length > 1) {
+    val nextValid = Vector.newBuilder[Bool]
+    val nextIndex = Vector.newBuilder[UInt]
+    val nextAge = Vector.newBuilder[UInt]
+    var pair = 0
+    while (pair < waiterValidTree.length) {
+      if (pair + 1 == waiterValidTree.length) {
+        nextValid += waiterValidTree(pair)
+        nextIndex += waiterIndexTree(pair)
+        nextAge += waiterAgeTree(pair)
+      } else {
+        val rightWins = waiterValidTree(pair + 1) &&
+          (!waiterValidTree(pair) ||
+            waiterAgeTree(pair + 1) < waiterAgeTree(pair))
+        nextValid += (waiterValidTree(pair) || waiterValidTree(pair + 1))
+        nextIndex += Mux(rightWins, waiterIndexTree(pair + 1), waiterIndexTree(pair))
+        nextAge += Mux(rightWins, waiterAgeTree(pair + 1), waiterAgeTree(pair))
+      }
+      pair += 2
+    }
+    waiterValidTree = nextValid.result()
+    waiterIndexTree = nextIndex.result()
+    waiterAgeTree = nextAge.result()
   }
+  val selectedWaiterValid = waiterValidTree.head
+  val selectedWaiterIndex = waiterIndexTree.head
   val selectedWaiterMshr = waiterMshr(selectedWaiterIndex)
   val selectedWaiterAddress = mshrLineAddress(selectedWaiterMshr) +
     Cat(waiterWord(selectedWaiterIndex), 0.U(2.W))
