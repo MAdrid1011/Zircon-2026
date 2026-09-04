@@ -132,6 +132,14 @@ class LoadStoreQueues(
   val sqMetadataValid = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqMetadata = Reg(Vec(sqEntries, new MemoryRetireMetadata(config)))
 
+  // ROB distance is shared by forwarding, effect arbitration, recovery, and
+  // ordering checks.  Materializing it once per queue entry avoids rebuilding
+  // the same modulo-age arithmetic in every consumer.
+  val lqAge = VecInit(lqTag.map(tag =>
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)))
+  val sqAge = VecInit(sqTag.map(tag =>
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)))
+
   val burstableGroupWaitValid = RegInit(false.B)
   val burstableGroupWaitHead = Reg(UInt(config.robTagWidth.W))
   val burstableGroupWaitCycles = RegInit(0.U(3.W))
@@ -197,15 +205,15 @@ class LoadStoreQueues(
       lqValid, lqTag, io.loadAddress(request).bits.robTag, lqEntries, lqIndexWidth)
     loadAddressMatch(request) := addressMatch
     loadAddressIndex(request) := addressIndex
+    val queryAge = ROBTagOrder.ageFromHead(
+      io.loadAddress(request).bits.robTag, io.robHeadTag, config)
     val queryWordAddress = MemoryByteLanes.wordAddress(io.loadAddress(request).bits.address)
     val olderUnknownAddress = (0 until sqEntries).map(index =>
-      sqValid(index) && ROBTagOrder.isYounger(
-        io.loadAddress(request).bits.robTag, sqTag(index), io.robHeadTag, config) &&
+      sqValid(index) && queryAge > sqAge(index) &&
         !sqAddressValid(index)).reduce(_ || _)
     val olderUnknownData = (0 until sqEntries).map(index =>
       sqValid(index) && sqAddressValid(index) &&
-        ROBTagOrder.isYounger(
-          io.loadAddress(request).bits.robTag, sqTag(index), io.robHeadTag, config) &&
+        queryAge > sqAge(index) &&
         MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
         (sqWriteMask(index) & io.loadAddress(request).bits.readMask).orR &&
         !sqDataValid(index)).reduce(_ || _)
@@ -215,16 +223,16 @@ class LoadStoreQueues(
     for (byte <- 0 until 4) {
       var chosenValid: Bool = false.B
       var chosenTag: UInt = 0.U(config.robTagWidth.W)
+      var chosenAge: UInt = 0.U((config.robIndexWidth + 1).W)
       var chosenData: UInt = 0.U(8.W)
       for (index <- 0 until sqEntries) {
         val candidate = sqValid(index) && sqAddressValid(index) && sqDataValid(index) &&
-          ROBTagOrder.isYounger(
-            io.loadAddress(request).bits.robTag, sqTag(index), io.robHeadTag, config) &&
+          queryAge > sqAge(index) &&
           MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
           sqWriteMask(index)(byte)
-        val take = candidate && (!chosenValid || ROBTagOrder.isYounger(
-          sqTag(index), chosenTag, io.robHeadTag, config))
+        val take = candidate && (!chosenValid || sqAge(index) > chosenAge)
         chosenTag = Mux(take, sqTag(index), chosenTag)
+        chosenAge = Mux(take, sqAge(index), chosenAge)
         chosenData = Mux(take, sqWriteData(index)(8 * byte + 7, 8 * byte), chosenData)
         chosenValid = chosenValid || candidate
       }
@@ -330,7 +338,7 @@ class LoadStoreQueues(
     val candidate = sqValid(index) && sqCommitAuthorized(index) &&
       !sqEffectIssued(index) &&
       sqPmaKind(index) =/= PMARegionKind.DeviceBurstable.code.U
-    val age = ROBTagOrder.ageFromHead(sqTag(index), io.robHeadTag, config)
+    val age = sqAge(index)
     val take = candidate && (!selectedStoreValid || age < selectedStoreAge)
     selectedStoreIndex = Mux(take, index.U, selectedStoreIndex)
     selectedStoreAge = Mux(take, age, selectedStoreAge)
@@ -546,11 +554,11 @@ class LoadStoreQueues(
   }
 
   val lqSquashSurvivor = VecInit((0 until lqEntries).map(index =>
-    lqValid(index) && !ROBTagOrder.isYounger(
-      lqTag(index), io.squash.bits, io.robHeadTag, config)))
+    lqValid(index) && !(lqAge(index) > ROBTagOrder.ageFromHead(
+      io.squash.bits, io.robHeadTag, config))))
   val sqSquashSurvivor = VecInit((0 until sqEntries).map(index =>
-    sqValid(index) && !ROBTagOrder.isYounger(
-      sqTag(index), io.squash.bits, io.robHeadTag, config)))
+    sqValid(index) && !(sqAge(index) > ROBTagOrder.ageFromHead(
+      io.squash.bits, io.robHeadTag, config))))
 
   when(io.flush) {
     for (index <- 0 until sqEntries) {
@@ -575,8 +583,9 @@ class LoadStoreQueues(
     for (index <- 0 until sqEntries) {
       sqValid(index) := sqSquashSurvivor(index)
     }
-    when(atomicResultValid && ROBTagOrder.isYounger(
-        atomicResultBits.robTag, io.squash.bits, io.robHeadTag, config)) {
+    when(atomicResultValid && ROBTagOrder.ageFromHead(
+        atomicResultBits.robTag, io.robHeadTag, config) >
+        ROBTagOrder.ageFromHead(io.squash.bits, io.robHeadTag, config)) {
       atomicResultValid := false.B
     }
     burstableGroupWaitValid := false.B
@@ -824,11 +833,9 @@ class LoadStoreQueues(
   val orderingBarrierAge = ROBTagOrder.ageFromHead(
     io.orderingBarrier.bits, io.robHeadTag, config)
   val olderLoadPending = VecInit((0 until lqEntries).map(index =>
-    lqValid(index) && ROBTagOrder.ageFromHead(
-      lqTag(index), io.robHeadTag, config) < orderingBarrierAge)).asUInt.orR
+    lqValid(index) && lqAge(index) < orderingBarrierAge)).asUInt.orR
   val olderStorePending = VecInit((0 until sqEntries).map(index =>
-    sqValid(index) && ROBTagOrder.ageFromHead(
-      sqTag(index), io.robHeadTag, config) < orderingBarrierAge)).asUInt.orR
+    sqValid(index) && sqAge(index) < orderingBarrierAge)).asUInt.orR
   io.orderingReady := !io.orderingBarrier.valid ||
     !(olderLoadPending || olderStorePending)
   io.loadCount := PopCount(lqValid)
@@ -851,7 +858,7 @@ class LoadStoreQueues(
   var acquireBarrierAge: UInt = 0.U((config.robIndexWidth + 1).W)
   for (index <- 0 until lqEntries) {
     val candidate = lqValid(index) && lqIsAtomic(index) && lqAq(index)
-    val age = ROBTagOrder.ageFromHead(lqTag(index), io.robHeadTag, config)
+    val age = lqAge(index)
     val take = candidate && (!acquireBarrierValid || age < acquireBarrierAge)
     acquireBarrierTag = Mux(take, lqTag(index), acquireBarrierTag)
     acquireBarrierAge = Mux(take, age, acquireBarrierAge)
@@ -859,7 +866,7 @@ class LoadStoreQueues(
   }
   for (index <- 0 until sqEntries) {
     val candidate = sqValid(index) && sqIsAtomic(index) && sqAq(index)
-    val age = ROBTagOrder.ageFromHead(sqTag(index), io.robHeadTag, config)
+    val age = sqAge(index)
     val take = candidate && (!acquireBarrierValid || age < acquireBarrierAge)
     acquireBarrierTag = Mux(take, sqTag(index), acquireBarrierTag)
     acquireBarrierAge = Mux(take, age, acquireBarrierAge)
