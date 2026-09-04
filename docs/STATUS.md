@@ -92,6 +92,14 @@ WNS/utilization 结论。
 atomic 交叉 `23/23` 通过。该优化依据旧 post-route report 的高扇出路径，仍需新的
 固定器件 synthesis/implementation 报告确认布线改善。
 
+2026-09-05 narrow wakeup state：依据固定器件 place 路径，将 `IntegerIssueQueue`
+的动态 `sourceReady` 从宽 `UopRef` entry 中分离为独立三比特寄存器 bank；唤醒只
+更新窄状态，issue 输出再覆盖 readiness，保持同拍 wakeup、年龄选择、squash/flush
+和双发射语义。IntIQ、IntegerExecutionBackend、IntegerDispatchRecoveryBackend
+聚焦回归 `12/12`，`make platform-verilog` 和 ZirconSim deterministic
+RV32I/RV32M/RV32A `tohost` 均通过。固定器件新一轮实现尚未完成，不能据此宣称 WNS
+或面积通过。
+
 2026-09-04 FMA 分阶段时序边界：`FloatingMovePipe` 现在分别寄存 FMA 对齐、幅值/符号归约和最终舍入结果。宽 57-bit priority/shift/add 组合网络不再直达 completion/LSU 输出路径；FMA 延迟在有界窗口内增加。`./scripts/sbtw compile`、`make test-m4-fp-move`（组件 20/20，顶层 RV32F 12/12）及 `make verilog` 均通过。仍需新的固定器件综合/实现结果后才能宣称 LUT 或 WNS 改善。
 
 2026-09-04 针对固定器件时序热点收窄 `FloatingMovePipe` 的 FMA 结果选择：FMA

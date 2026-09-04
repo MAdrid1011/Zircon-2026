@@ -28,6 +28,9 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
 
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
   val entryUop = Reg(Vec(entries, new UopRef(config)))
+  // Readiness is dynamic state. Keep it in a narrow bank so wakeup updates
+  // do not rewrite the full UopRef payload or route through its metadata.
+  val entrySourceReady = Reg(Vec(entries, Vec(3, Bool())))
   // Endpoint eligibility is immutable for a retained uop.  Keep one local
   // copy per selector so the wide UopRef register does not fan out through
   // both oldest-candidate trees and the issue payloads.
@@ -74,25 +77,24 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     (valid.head, indices.head)
   }
 
-  private def allSourcesReady(uop: UopRef): Bool = uop.sourceReady.asUInt.andR
-  private def withWakeup(uop: UopRef): UopRef = {
-    val updated = WireDefault(uop)
-    for (source <- 0 until 2) {
-      val wakes = io.wakeup.map(wakeup =>
-        wakeup.valid && wakeup.physical === uop.sourcePhysical(source)).reduce(_ || _)
-      updated.sourceReady(source) := uop.sourceReady(source) || wakes
-    }
-    updated
-  }
-
-  // Reuse the same wakeup result for readiness, issue payloads, and the
-  // retained entry update.  This keeps the two-wakeup comparator bank from
-  // being replicated at each consumer.
+  // Compute wakeup only against the narrow readiness bank. The source
+  // physical numbers remain static in entryUop, while sourceReady updates
+  // stay local to this bank.
+  val awakenedSourceReady = Wire(Vec(entries, Vec(3, Bool())))
   val awakenedEntries = Wire(Vec(entries, new UopRef(config)))
   for (index <- 0 until entries) {
-    awakenedEntries(index) := withWakeup(entryUop(index))
+    awakenedEntries(index) := entryUop(index)
+    for (source <- 0 until 3) {
+      val wakes = if (source < 2) {
+        io.wakeup.map(wakeup =>
+          wakeup.valid && wakeup.physical === entryUop(index).sourcePhysical(source))
+          .reduce(_ || _)
+      } else false.B
+      awakenedSourceReady(index)(source) := entrySourceReady(index)(source) || wakes
+      awakenedEntries(index).sourceReady(source) := awakenedSourceReady(index)(source)
+    }
   }
-  val ready = awakenedEntries.map(allSourcesReady)
+  val ready = awakenedSourceReady.map(_.asUInt.andR)
   val e0ExclusiveCandidates = (0 until entries).map(index =>
     entryValid(index) && ready(index) &&
       entryAllowE0(index) && !entryAllowE1(index))
@@ -177,7 +179,7 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     count := count + enqueueCount - issueCount
     for (index <- 0 until entries) {
       when(entryValid(index)) {
-        entryUop(index) := awakenedEntries(index)
+        entrySourceReady(index) := awakenedSourceReady(index)
       }
     }
     when(io.issueE0.fire) { entryValid(selectedE0Index) := false.B }
@@ -185,7 +187,16 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     for (lane <- 0 until 2) {
       when(io.enqueue(lane).fire) {
         entryValid(allocationIndex(lane)) := true.B
-        entryUop(allocationIndex(lane)) := withWakeup(io.enqueue(lane).bits)
+        entryUop(allocationIndex(lane)) := io.enqueue(lane).bits
+        for (source <- 0 until 3) {
+          val wakes = if (source < 2) {
+            io.wakeup.map(wakeup =>
+              wakeup.valid && wakeup.physical ===
+                io.enqueue(lane).bits.sourcePhysical(source)).reduce(_ || _)
+          } else false.B
+          entrySourceReady(allocationIndex(lane))(source) :=
+            io.enqueue(lane).bits.sourceReady(source) || wakes
+        }
         entryAllowE0(allocationIndex(lane)) :=
           io.enqueue(lane).bits.allowedEndpoints(0)
         entryAllowE1(allocationIndex(lane)) :=

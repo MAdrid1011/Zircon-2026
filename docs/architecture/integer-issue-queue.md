@@ -18,7 +18,10 @@ endpoint mask，而不是在 dispatch 时静态绑定一个 endpoint。
 
 ## Wakeup 与容量
 
-两个统一 completion physical-destination wakeup 在周期边界更新源 ready。入队项和
+两个统一 completion physical-destination wakeup 在周期边界更新源 ready。IntIQ 将
+动态 `sourceReady` 保存在独立的窄三比特寄存器 bank，`UopRef` entry 仅保存静态
+payload 和 source physical；issue 输出时再把当前 readiness 覆盖回 `UopRef`。这样
+唤醒不会重写宽 payload，也不会把无关元数据带入选择器和 fault 路径。入队项和
 已经排队的 issue candidate 都组合观察同周期 wakeup：前者避免“完成与 consumer
 dispatch 同周期”丢失唤醒，后者允许 producer completion 与 dependent consumer issue
 同周期发生。issue 输出携带已经旁路后的 source-ready 位，operand-read 不会把它误判为
