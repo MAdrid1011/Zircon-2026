@@ -29,6 +29,13 @@ operands. M2 arithmetic does not need PC or wider ROB context; its tag is retain
 completion and recovery. It returns existing `CompletionResult` records through two
 decoupled result slots. A response remains stable until accepted or discarded.
 
+In the production core, the selected LongIQ/FloatingIQ uop first crosses an elastic
+registered issue boundary, and resolved LongPipe operands cross a second elastic
+boundary. Scheduling uses a registered ROB head tag. These boundaries are part of the
+E2 contract: they clear on global flush, discard younger held work on selective squash,
+and never manufacture completion. The observation-only M2 configuration uses transparent
+boundaries to retain the existing same-cycle E0/E1/E2 start probe.
+
 ## Decode and arithmetic
 
 `OP` with `funct7=1` is the only M encoding. `funct3=0..3` maps to `MUL`, `MULH`,

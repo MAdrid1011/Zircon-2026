@@ -1,5 +1,16 @@
 # Zircon-2026 实施状态
 
+2026-09-04 E2 组合锥结构重构：固定器件 `xc7a200tfbg676-2L`、Vivado 2023.1 的完整
+post-route 报告（`fpga/runs/impl-981d4e0`）确认 WNS `-92.911 ns`、TNS
+`-2,212,998.750 ns`，58,409/72,622 个 setup 端点失败；前 20 条路径全部从
+`ROB headIndex` 经过 ROB/commit、Long/MemIQ、auxiliary PRF 到
+`LongPipe.divSpecialResult`，169 级、103.587 ns，其中 81.050% 为布线。针对这一
+共享结构新增注册 ROB-head scheduling、Long/Floating issue 边界和 LongPipe operand
+边界，均支持 ready/valid、global flush 与 selective squash；观测配置保持旧的
+E0/E1/E2 同周期启动契约。`compile`、`make platform-verilog`、CoreShell RV32M/
+RV32F 聚焦 13/13 通过。该 WNS 是改造前的实测失败基线，下一轮固定器件实现尚未
+开始，不能据此宣称 100 MHz 通过。
+
 2026-09-04 集中时序重构：旧固定器件 post-route 最差路径由 FMA/issue 状态跨越
 IntIQ、MemIQ、PRF、PMA、LSQ 直达 L1D 控制，达 `411` 逻辑级且 `75.7%` 为布线。
 当前将所有 issue queue 的输出 endpoint mask 固化为已选端点的局部 mask，避免原始

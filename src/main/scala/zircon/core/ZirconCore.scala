@@ -5,7 +5,8 @@ import chisel3.util.{Arbiter, Decoupled, PopCount, RRArbiter, Valid}
 import zircon.{PMARegionKind, ZirconCoreConfig}
 import zircon.backend.{CompletionResult, FaultCandidate, FloatingCommitState,
   FloatingIssueQueue, FloatingMovePipe, RegisteredFloatingResultBridge, FloatingScoreboard,
-  LongIssueQueue, LongPipe, M1BackendSubsystem, MemIssueQueue, ROBTagOrder,
+  LongIssueQueue, LongPipe, LongOperandBoundary, M1BackendSubsystem, MemIssueQueue,
+  ROBTagOrder, UopIssueBoundary,
   ZirconSharedMultiplier,
   SourceKind, UopClass}
 import zircon.frontend.{IntOperation, M1Frontend}
@@ -33,9 +34,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val frontend = Module(new M1Frontend(cfg))
   val backend = Module(new M1BackendSubsystem(cfg))
   val longQueue = Module(new LongIssueQueue(cfg))
+  val longIssueBoundary = Module(new UopIssueBoundary(cfg,
+    registered = !cfg.enableM2Observation))
+  val longOperandBoundary = Module(new LongOperandBoundary(cfg,
+    registered = !cfg.enableM2Observation))
   val longPipe = Module(new LongPipe(cfg, useExternalMultiplier = true))
   val sharedMultiplier = Module(new ZirconSharedMultiplier)
   val floatingQueue = Module(new FloatingIssueQueue(cfg))
+  val floatingIssueBoundary = Module(new UopIssueBoundary(cfg,
+    registered = !cfg.enableM2Observation))
   val floatingScoreboard = Module(new FloatingScoreboard(cfg))
   val floatingMovePipe = Module(new FloatingMovePipe(cfg, useExternalMultiplier = true))
   // Registered boundary isolates FPU payload/ready from the ROB and LSU
@@ -61,6 +68,11 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val orderedIOStreamer = Module(new OrderedIOGroupStreamer(config = cfg))
   val auxiliaryRead = Module(new AuxiliaryReadArbiter(cfg))
   val externalCoherence = Module(new ExternalCoherenceController)
+
+  // Scheduling observes a registered ROB head.  This keeps retirement's
+  // head-index update out of the issue/operand timing cone while preserving
+  // the same age ordering for every live ROB tag.
+  val scheduledRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
 
   // WFI is a commit-qualified quiescent state.  Younger speculative work is
   // flushed by the WFI redirect; fetch resumes only after an enabled
@@ -99,18 +111,29 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     floatingQueue.io.enqueue(lane) <> backend.io.floatingEnqueue(lane)
     floatingScoreboard.io.allocate(lane) := backend.io.floatingAllocate(lane)
   }
+  longIssueBoundary.io.input <> longQueue.io.issue
+  longIssueBoundary.io.squash := backend.io.squash
+  longIssueBoundary.io.robHeadTag := scheduledRobHeadTag
+  longIssueBoundary.io.flush := backend.io.globalFlush
+  floatingIssueBoundary.io.input <> floatingQueue.io.issue
+  floatingIssueBoundary.io.squash := backend.io.squash
+  floatingIssueBoundary.io.robHeadTag := scheduledRobHeadTag
+  floatingIssueBoundary.io.flush := backend.io.globalFlush
+  longOperandBoundary.io.squash := backend.io.squash
+  longOperandBoundary.io.robHeadTag := scheduledRobHeadTag
+  longOperandBoundary.io.flush := backend.io.globalFlush
   backend.io.longCapacity := longQueue.io.enqueueCapacity
   backend.io.floatingCapacity := floatingQueue.io.enqueueCapacity
   backend.io.floatingScoreboardEmpty := floatingScoreboard.io.empty
   floatingQueue.io.integerReady := backend.io.integerReady
-  floatingQueue.io.robHeadTag := backend.io.robHead.bits.robTag
+  floatingQueue.io.robHeadTag := scheduledRobHeadTag
   floatingQueue.io.squash := backend.io.squash
   floatingQueue.io.flush := backend.io.globalFlush
   floatingScoreboard.io.robHeadTag := backend.io.robHead.bits.robTag
   floatingScoreboard.io.squash := backend.io.squash
   floatingScoreboard.io.flush := backend.io.globalFlush
   longQueue.io.integerReady := backend.io.integerReady
-  longQueue.io.robHeadTag := backend.io.robHead.bits.robTag
+  longQueue.io.robHeadTag := scheduledRobHeadTag
   longQueue.io.squash := backend.io.squash
   longQueue.io.flush := backend.io.globalFlush
   val traceReadRequired = if (cfg.enableTrace) {
@@ -120,7 +143,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val integerStarts = PopCount(Seq(backend.io.e0Start, backend.io.e1Start))
   auxiliaryRead.io.traceReadRequired := traceReadRequired
   auxiliaryRead.io.startSlots := 3.U - integerStarts
-  auxiliaryRead.io.robHeadTag := backend.io.robHead.bits.robTag
+  auxiliaryRead.io.robHeadTag := scheduledRobHeadTag
   auxiliaryRead.io.readData := backend.io.auxReadData
 
   // The architectural FPR file has three read ports.  A floating E2 uop can
@@ -135,15 +158,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       memQueue.io.m1Issue.bits.sourceKind(1) === SourceKind.FloatingRegister)
 
   val floatingIssueAge = ROBTagOrder.ageFromHead(
-    floatingQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
+    floatingIssueBoundary.io.output.bits.robTag, scheduledRobHeadTag, cfg)
   val longIssueAge = ROBTagOrder.ageFromHead(
-    longQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
-  val floatingOlderThanLong = floatingQueue.io.issue.valid &&
-    (!longQueue.io.issue.valid || floatingIssueAge < longIssueAge)
+    longIssueBoundary.io.output.bits.robTag, scheduledRobHeadTag, cfg)
+  val floatingOlderThanLong = floatingIssueBoundary.io.output.valid &&
+    (!longIssueBoundary.io.output.valid || floatingIssueAge < longIssueAge)
   val selectFloatingE2 = floatingOlderThanLong && !pendingFloatingStore
-  val selectLongE2 = longQueue.io.issue.valid && !selectFloatingE2
-  val selectedE2Uop = Mux(selectFloatingE2, floatingQueue.io.issue.bits,
-    longQueue.io.issue.bits)
+  val selectLongE2 = longIssueBoundary.io.output.valid && !selectFloatingE2
+  val selectedE2Uop = Mux(selectFloatingE2, floatingIssueBoundary.io.output.bits,
+    longIssueBoundary.io.output.bits)
   val selectedE2Valid = selectFloatingE2 || selectLongE2
   auxiliaryRead.io.candidate(0).valid := selectedE2Valid
   auxiliaryRead.io.candidate(0).bits.robTag := selectedE2Uop.robTag
@@ -156,27 +179,28 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   longPipe.io.robHeadTag := backend.io.robHead.bits.robTag
   longPipe.io.squash := backend.io.squash
   longPipe.io.flush := backend.io.globalFlush
-  longPipe.io.input.valid := selectLongE2 && auxiliaryRead.io.grant(0)
-  longPipe.io.input.bits.uop := longQueue.io.issue.bits
-  longPipe.io.input.bits.lhs := auxiliaryRead.io.candidateData(0)(0)
-  longPipe.io.input.bits.rhs := auxiliaryRead.io.candidateData(0)(1)
-  longQueue.io.issue.ready := selectLongE2 && longPipe.io.input.ready &&
-    auxiliaryRead.io.grant(0)
+  longOperandBoundary.io.input.valid := selectLongE2 && auxiliaryRead.io.grant(0)
+  longOperandBoundary.io.input.bits.uop := longIssueBoundary.io.output.bits
+  longOperandBoundary.io.input.bits.lhs := auxiliaryRead.io.candidateData(0)(0)
+  longOperandBoundary.io.input.bits.rhs := auxiliaryRead.io.candidateData(0)(1)
+  longPipe.io.input <> longOperandBoundary.io.output
+  longIssueBoundary.io.output.ready := selectLongE2 &&
+    longOperandBoundary.io.input.ready && auxiliaryRead.io.grant(0)
 
   floatingMovePipe.io.robHeadTag := backend.io.robHead.bits.robTag
   floatingMovePipe.io.squash := backend.io.squash
   floatingMovePipe.io.flush := backend.io.globalFlush
   floatingMovePipe.io.input.valid := selectFloatingE2 && auxiliaryRead.io.grant(0)
-  floatingMovePipe.io.input.bits.robTag := floatingQueue.io.issue.bits.robTag
-  floatingMovePipe.io.input.bits.operation := floatingQueue.io.issue.bits.floatingOperation
+  floatingMovePipe.io.input.bits.robTag := floatingIssueBoundary.io.output.bits.robTag
+  floatingMovePipe.io.input.bits.operation := floatingIssueBoundary.io.output.bits.floatingOperation
   floatingMovePipe.io.input.bits.integerDestinationPhysical :=
-    floatingQueue.io.issue.bits.destinationPhysical
+    floatingIssueBoundary.io.output.bits.destinationPhysical
   floatingMovePipe.io.input.bits.integerSource := auxiliaryRead.io.candidateData(0)(0)
   floatingMovePipe.io.input.bits.floatSource := floatingCommitState.io.readData
   floatingMovePipe.io.input.bits.floatDestination :=
-    floatingQueue.io.issue.bits.floatingDestination
+    floatingIssueBoundary.io.output.bits.floatingDestination
   floatingMovePipe.io.input.bits.roundingMode :=
-    floatingQueue.io.issue.bits.floatingRoundingMode
+    floatingIssueBoundary.io.output.bits.floatingRoundingMode
 
   // Integer MUL and floating MUL/FMA share one physical four-partial-product
   // multiplier. E2 arbitration guarantees that only the selected pipe asks
@@ -191,34 +215,34 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   floatingMovePipe.io.multiplierProduct := sharedMultiplier.io.product
   assert(!(longPipe.io.multiplierEnable && floatingMovePipe.io.multiplierEnable),
     "LongPipe and FloatingMovePipe contended for the shared multiplier")
-  floatingQueue.io.issue.ready := selectFloatingE2 && floatingMovePipe.io.input.ready &&
+  floatingIssueBoundary.io.output.ready := selectFloatingE2 && floatingMovePipe.io.input.ready &&
     auxiliaryRead.io.grant(0)
 
-  floatingCommitState.io.readAddress(0) := floatingQueue.io.issue.bits.floatingSource(0)
+  floatingCommitState.io.readAddress(0) := floatingIssueBoundary.io.output.bits.floatingSource(0)
   floatingCommitState.io.readAddress(1) := Mux(
     lsuIngress.io.floatingReadValid(0),
     lsuIngress.io.floatingReadAddress(0),
-    floatingQueue.io.issue.bits.floatingSource(1))
+    floatingIssueBoundary.io.output.bits.floatingSource(1))
   floatingCommitState.io.readAddress(2) := Mux(
     lsuIngress.io.floatingReadValid(1),
     lsuIngress.io.floatingReadAddress(1),
-    floatingQueue.io.issue.bits.floatingSource(2))
+    floatingIssueBoundary.io.output.bits.floatingSource(2))
   // Only instructions that actually read FPR operands consume a scoreboard
   // reservation. Source-less moves (for example FMV.W.X) are already marked
   // consumed at allocation and must not generate a second release event.
   floatingScoreboard.io.readRelease.valid := floatingMovePipe.io.input.fire &&
-    floatingQueue.io.issue.bits.sourceKind.map(_ === SourceKind.FloatingRegister).reduce(_ || _)
-  floatingScoreboard.io.readRelease.bits.robTag := floatingQueue.io.issue.bits.robTag
+    floatingIssueBoundary.io.output.bits.sourceKind.map(_ === SourceKind.FloatingRegister).reduce(_ || _)
+  floatingScoreboard.io.readRelease.bits.robTag := floatingIssueBoundary.io.output.bits.robTag
   for (source <- 0 until 3) {
     floatingScoreboard.io.readRelease.bits.sourceValid(source) :=
-      floatingQueue.io.issue.bits.sourceKind(source) === SourceKind.FloatingRegister
+      floatingIssueBoundary.io.output.bits.sourceKind(source) === SourceKind.FloatingRegister
     floatingScoreboard.io.readRelease.bits.source(source) :=
-      floatingQueue.io.issue.bits.floatingSource(source)
+      floatingIssueBoundary.io.output.bits.floatingSource(source)
   }
   floatingScoreboard.io.readRelease.bits.destinationValid :=
-    floatingQueue.io.issue.bits.writesFloat
+    floatingIssueBoundary.io.output.bits.writesFloat
   floatingScoreboard.io.readRelease.bits.destination :=
-    floatingQueue.io.issue.bits.floatingDestination
+    floatingIssueBoundary.io.output.bits.floatingDestination
 
   floatingResultBridge.io.input <> floatingMovePipe.io.output
   floatingResultBridge.io.robHeadTag := backend.io.robHead.bits.robTag
