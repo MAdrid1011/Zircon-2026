@@ -158,6 +158,42 @@ class LoadStoreQueues(
     (matches.asUInt.orR, PriorityEncoder(matches.asUInt)(indexWidth - 1, 0))
   }
 
+  /** Select the lowest ROB-age candidate with a balanced reduction tree. */
+  private def selectOldest(
+      candidates: Seq[Bool],
+      ages: Seq[UInt],
+      indexWidth: Int
+  ): (Bool, UInt) = {
+    require(candidates.nonEmpty && candidates.length == ages.length)
+    var valid = candidates.toVector
+    var indices = candidates.indices.map(_.U(indexWidth.W)).toVector
+    var ageTree = ages.toVector
+    while (valid.length > 1) {
+      val nextValid = Vector.newBuilder[Bool]
+      val nextIndices = Vector.newBuilder[UInt]
+      val nextAges = Vector.newBuilder[UInt]
+      var pair = 0
+      while (pair < valid.length) {
+        if (pair + 1 == valid.length) {
+          nextValid += valid(pair)
+          nextIndices += indices(pair)
+          nextAges += ageTree(pair)
+        } else {
+          val rightWins = valid(pair + 1) &&
+            (!valid(pair) || ageTree(pair + 1) < ageTree(pair))
+          nextValid += (valid(pair) || valid(pair + 1))
+          nextIndices += Mux(rightWins, indices(pair + 1), indices(pair))
+          nextAges += Mux(rightWins, ageTree(pair + 1), ageTree(pair))
+        }
+        pair += 2
+      }
+      valid = nextValid.result()
+      indices = nextIndices.result()
+      ageTree = nextAges.result()
+    }
+    (valid.head, indices.head)
+  }
+
   private def capacity(free: UInt, entries: Int): UInt =
     Mux(PopCount(free) >= config.decodeWidth.U, config.decodeWidth.U,
       PopCount(free)(1, 0))
@@ -331,19 +367,13 @@ class LoadStoreQueues(
       isDevicePma(sqPmaKind(commitIndex)))
   io.commitAuthorize.ready := !recoveryBlocked && commitEligible
 
-  var selectedStoreValid: Bool = false.B
-  var selectedStoreIndex: UInt = 0.U(sqIndexWidth.W)
-  var selectedStoreAge: UInt = 0.U((config.robIndexWidth + 1).W)
-  for (index <- 0 until sqEntries) {
-    val candidate = sqValid(index) && sqCommitAuthorized(index) &&
+  val storeCandidates = (0 until sqEntries).map { index =>
+    sqValid(index) && sqCommitAuthorized(index) &&
       !sqEffectIssued(index) &&
       sqPmaKind(index) =/= PMARegionKind.DeviceBurstable.code.U
-    val age = sqAge(index)
-    val take = candidate && (!selectedStoreValid || age < selectedStoreAge)
-    selectedStoreIndex = Mux(take, index.U, selectedStoreIndex)
-    selectedStoreAge = Mux(take, age, selectedStoreAge)
-    selectedStoreValid = selectedStoreValid || candidate
   }
+  val (selectedStoreValid, selectedStoreIndex) = selectOldest(
+    storeCandidates, sqAge.toSeq, sqIndexWidth)
   io.storeEffect.valid := selectedStoreValid && !recoveryBlocked
   io.storeEffect.bits.robTag := sqTag(selectedStoreIndex)
   io.storeEffect.bits.address := sqAddress(selectedStoreIndex)
@@ -853,25 +883,14 @@ class LoadStoreQueues(
       sqValid(index) && sqIsAtomic(index) && sqEffectIssued(index))).asUInt.orR ||
     atomicResultValid
 
-  var acquireBarrierValid: Bool = false.B
-  var acquireBarrierTag: UInt = 0.U(config.robTagWidth.W)
-  var acquireBarrierAge: UInt = 0.U((config.robIndexWidth + 1).W)
-  for (index <- 0 until lqEntries) {
-    val candidate = lqValid(index) && lqIsAtomic(index) && lqAq(index)
-    val age = lqAge(index)
-    val take = candidate && (!acquireBarrierValid || age < acquireBarrierAge)
-    acquireBarrierTag = Mux(take, lqTag(index), acquireBarrierTag)
-    acquireBarrierAge = Mux(take, age, acquireBarrierAge)
-    acquireBarrierValid = acquireBarrierValid || candidate
-  }
-  for (index <- 0 until sqEntries) {
-    val candidate = sqValid(index) && sqIsAtomic(index) && sqAq(index)
-    val age = sqAge(index)
-    val take = candidate && (!acquireBarrierValid || age < acquireBarrierAge)
-    acquireBarrierTag = Mux(take, sqTag(index), acquireBarrierTag)
-    acquireBarrierAge = Mux(take, age, acquireBarrierAge)
-    acquireBarrierValid = acquireBarrierValid || candidate
-  }
+  val acquireCandidates = (0 until lqEntries).map(index =>
+    lqValid(index) && lqIsAtomic(index) && lqAq(index)) ++
+    (0 until sqEntries).map(index =>
+      sqValid(index) && sqIsAtomic(index) && sqAq(index))
+  val acquireAges = lqAge.toSeq ++ sqAge.toSeq
+  val acquireTags = VecInit(lqTag.toSeq ++ sqTag.toSeq)
+  val (acquireBarrierValid, acquireBarrierIndex) = selectOldest(
+    acquireCandidates, acquireAges, log2Ceil(lqEntries + sqEntries))
   io.atomicAcquireBarrier.valid := acquireBarrierValid && !recoveryBlocked
-  io.atomicAcquireBarrier.bits := acquireBarrierTag
+  io.atomicAcquireBarrier.bits := acquireTags(acquireBarrierIndex)
 }
