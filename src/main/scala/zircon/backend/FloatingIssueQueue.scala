@@ -52,27 +52,49 @@ class FloatingIssueQueue(
   private def ready(uop: UopRef): Bool =
     (0 until 3).map(sourceReady(uop, _)).reduce(_ && _)
 
-  private def ageFromHead(tag: UInt): UInt =
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
+  val entryAge = VecInit(entryUop.map(uop =>
+    ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
+  val readyEntries = Wire(Vec(entries, new UopRef(config)))
+  for (index <- 0 until entries) {
+    readyEntries(index) := withReady(entryUop(index))
+  }
 
   val candidates = (0 until entries).map(index =>
-    entryValid(index) && ready(entryUop(index)) &&
+    entryValid(index) && ready(readyEntries(index)) &&
       entryUop(index).uopClass === UopClass.Floating &&
       entryUop(index).allowedEndpoints(ExecutionEndpoint.E2LongPipe.asUInt))
-  var selectedValid: Bool = false.B
-  var selectedIndex: UInt = 0.U(indexWidth.W)
-  var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
-  for (index <- 0 until entries) {
-    val age = ageFromHead(entryUop(index).robTag)
-    val take = candidates(index) && (!selectedValid || age < selectedAge)
-    selectedIndex = Mux(take, index.U, selectedIndex)
-    selectedAge = Mux(take, age, selectedAge)
-    selectedValid = selectedValid || candidates(index)
+  var candidateValid = candidates.toVector
+  var candidateIndex = (0 until entries).map(_.U(indexWidth.W)).toVector
+  var candidateAge = entryAge.toVector
+  while (candidateValid.length > 1) {
+    val nextValid = Vector.newBuilder[Bool]
+    val nextIndex = Vector.newBuilder[UInt]
+    val nextAge = Vector.newBuilder[UInt]
+    var pair = 0
+    while (pair < candidateValid.length) {
+      if (pair + 1 == candidateValid.length) {
+        nextValid += candidateValid(pair)
+        nextIndex += candidateIndex(pair)
+        nextAge += candidateAge(pair)
+      } else {
+        val rightWins = candidateValid(pair + 1) &&
+          (!candidateValid(pair) || candidateAge(pair + 1) < candidateAge(pair))
+        nextValid += (candidateValid(pair) || candidateValid(pair + 1))
+        nextIndex += Mux(rightWins, candidateIndex(pair + 1), candidateIndex(pair))
+        nextAge += Mux(rightWins, candidateAge(pair + 1), candidateAge(pair))
+      }
+      pair += 2
+    }
+    candidateValid = nextValid.result()
+    candidateIndex = nextIndex.result()
+    candidateAge = nextAge.result()
   }
+  val selectedValid = candidateValid.head
+  val selectedIndex = candidateIndex.head
 
   val recoveryBlocked = io.flush || io.squash.valid
   io.issue.valid := selectedValid && !recoveryBlocked
-  io.issue.bits := withReady(entryUop(selectedIndex))
+  io.issue.bits := readyEntries(selectedIndex)
   when(io.issue.valid) {
     assert(io.issue.bits.uopClass === UopClass.Floating,
       "FloatingIQ issued an operation outside the RV32F namespace")
@@ -115,7 +137,7 @@ class FloatingIssueQueue(
     count := count + enqueueCount - io.issue.fire
     for (index <- 0 until entries) {
       when(entryValid(index)) {
-        entryUop(index) := withReady(entryUop(index))
+        entryUop(index) := readyEntries(index)
       }
     }
     when(io.issue.fire) { entryValid(selectedIndex) := false.B }
