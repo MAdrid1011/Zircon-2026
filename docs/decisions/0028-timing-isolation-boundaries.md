@@ -29,6 +29,11 @@ one cycle stale at most; it prevents completion/commit feedback from
 re-entering all three queue candidate trees and the auxiliary PRF path in the
 same cycle.
 
+All non-commit consumers of ROB age (issue queues, operand boundaries, LSU,
+floating state, and L1D scheduling) use the same registered head tag.  Commit
+authorization and retire observation intentionally remain on the live head so
+precise architectural ownership is unchanged.
+
 Each boundary is ready/valid, clears on global flush, and removes a younger
    held entry on selective squash using its real ROB tag.  No boundary creates
    a completion or changes ROB ownership.  The `enableM2Observation` test

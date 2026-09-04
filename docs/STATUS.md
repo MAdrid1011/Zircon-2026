@@ -450,3 +450,9 @@ so predictor alignment assertions are deterministic while response is
 invalid.  Scala compile and the RV32I dependency-chain and RV32F move
 CoreShell scenarios pass after these changes.  A new fixed-target synthesis
 only run is required before claiming any timing improvement.
+
+The follow-up timing pass also routes every issue/LSU/FPU/Cache age comparison
+through the registered head tag; only commit authorization and retire
+observation retain the live ROB head.  The minimal RV32I dependency and M3
+inaccessible-load scenarios pass after this change.  Its timing effect is
+pending the next fixed-device implementation.
