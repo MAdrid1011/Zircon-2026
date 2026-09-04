@@ -99,8 +99,15 @@ class BranchDataBuffer(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
   val commitIndex = io.commit.bits.index
   val resolveIndex = io.resolve.bits.reference.index
-  val commitEntry = entryData(commitIndex)
-  val resolveEntry = entryData(resolveIndex)
+
+  // Commit and resolve are mutually exclusive users of the single BDB read
+  // port. Share the wide metadata mux instead of synthesizing one dynamic
+  // read for each consumer. Commit wins whenever it is presented, matching
+  // resolveCanProceed below and preserving the existing single-port rule.
+  val readIndex = Mux(io.commit.valid, commitIndex, resolveIndex)
+  val readEntry = Mux1H(UIntToOH(readIndex, entries), entryData)
+  val commitEntry = readEntry
+  val resolveEntry = readEntry
   val commitMatch = entryValid(commitIndex) &&
     commitEntry.robTag === io.commit.bits.robTag
   val resolveMatch = entryValid(resolveIndex) &&
