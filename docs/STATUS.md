@@ -531,3 +531,12 @@ through the registered head tag; only commit authorization and retire
 observation retain the live ROB head.  The minimal RV32I dependency and M3
 inaccessible-load scenarios pass after this change.  Its timing effect is
 pending the next fixed-device implementation.
+# 2026-09-05 registered LSU load-forward boundary：依据上一轮固定器件报告中
+`ROB.entryData[*].decoded.operation -> LSU lqForwardData` 的共同超时簇，生产
+`ZirconCore` 在每个 load lane 的 LSQ forward 与 L1D 之间加入非 fall-through
+`LoadForwardBoundary`。输入 ready 只由本地占用和 recovery 决定，L1D bank/MSHR
+反压不再同周期返回 LSQ 宽 payload；flush 和 selective squash 按 ROB tag 精确丢弃，
+不产生伪造 completion。`LoadForwardBoundarySpec` 2/2、`make test-m3-load-boundary`
+2/2、compile 和 `make platform-verilog` 通过；包含旧 replay 断言的 CoreShell 场景
+仍按交接记录归属于父基线失败。提交 `b093e22` 已推送，等待包含该 RTL 的
+`xc7a200tfbg676-2L` 固定器件实现报告。
