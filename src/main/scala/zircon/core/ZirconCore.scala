@@ -32,7 +32,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val io = IO(new ZirconCoreIO(cfg))
 
   val frontend = Module(new M1Frontend(cfg))
-  val backend = Module(new M1BackendSubsystem(cfg))
+  // Production timing build keeps completion wakeup out of IntIQ's same-cycle
+  // candidate cone. Standalone M1/backend tests retain the transparent mode.
+  val backend = Module(new M1BackendSubsystem(cfg, registeredWakeup = true))
   // Dispatch-to-queue ingress is registered per lane in production. Besides
   // breaking the large ROB/rename/queue timing cone, each boundary owns
   // squash/flush so a recovered uop can never leak into a later issue queue.

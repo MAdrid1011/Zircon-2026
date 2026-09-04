@@ -13,7 +13,8 @@ import zircon.frontend.FetchQueueEntry
   * recovery invariants.
   */
 class IntegerDispatchRecoveryBackend(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+  config: ZirconCoreConfig = ZirconCoreConfig.default,
+  registeredWakeup: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
   private val freeCountWidth = log2Ceil(config.intPhysicalRegisters + 1)
@@ -86,10 +87,15 @@ class IntegerDispatchRecoveryBackend(
 
   val dispatch = Module(new BackendDispatch(config))
   val rename = Module(new IntegerRename(config))
-  val execution = Module(new IntegerExecutionBackend(config))
+  val execution = Module(new IntegerExecutionBackend(config, registeredWakeup))
   val recovery = Module(new BranchRecoverySubsystem(config))
   val firstFault = Module(new FirstFaultTracker(
     candidateWidth = config.decodeWidth + 1 + 3, config = config))
+  // E0 faults are sampled after execution has resolved the ROB entry. Keep a
+  // production-only registered candidate so completion/short-pipe control
+  // cannot feed the FirstFault arbiter through the same cycle's ready cone.
+  val e0FaultForTracker = if (registeredWakeup) RegNext(execution.io.e0Fault)
+    else execution.io.e0Fault
   val floatingAdmissionBlocked = RegInit(false.B)
   val floatingControlTag = Reg(UInt(config.robTagWidth.W))
 
@@ -184,7 +190,7 @@ class IntegerDispatchRecoveryBackend(
   for (lane <- 0 until config.decodeWidth) {
     firstFault.io.candidates(lane) := dispatch.io.faultCandidate(lane)
   }
-  firstFault.io.candidates(config.decodeWidth) := execution.io.e0Fault
+  firstFault.io.candidates(config.decodeWidth) := e0FaultForTracker
   for (endpoint <- 0 until 3) {
     firstFault.io.candidates(config.decodeWidth + 1 + endpoint) :=
       io.otherFault(endpoint)

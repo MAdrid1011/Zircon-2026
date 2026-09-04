@@ -14,7 +14,8 @@ import zircon.frontend.FetchQueueEntry
   * ports, so this is not yet the final RV32IMAF core.
   */
 class M1BackendSubsystem(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    registeredWakeup: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
 
@@ -89,7 +90,7 @@ class M1BackendSubsystem(
     val e2Completion = Output(Bool())
   })
 
-  val backend = Module(new IntegerDispatchRecoveryBackend(config))
+  val backend = Module(new IntegerDispatchRecoveryBackend(config, registeredWakeup))
   val commit = Module(new CommitCSRSubsystem(config))
 
   for (lane <- 0 until config.decodeWidth) {

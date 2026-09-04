@@ -11,7 +11,8 @@ import zircon.ZirconCoreConfig
   * and the shared ROB/PRF/ready state used by that path.
   */
 class IntegerExecutionBackend(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+  config: ZirconCoreConfig = ZirconCoreConfig.default,
+  registeredWakeup: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
   private val robCountWidth = log2Ceil(config.robEntries + 1)
@@ -101,9 +102,16 @@ class IntegerExecutionBackend(
   // bounded snapshot lag; generation checks continue to reject stale work.
   val scheduledRobHeadTag = RegNext(state.io.robHeadTag)
   io.scheduledRobHeadTag := scheduledRobHeadTag
+  // Wakeup is a control-only hint; delaying it by one cycle keeps completion
+  // and PRF writeback from feeding the IntIQ candidate/update cone directly.
+  // Dispatch still uses the separately registered ready bitmap at the core
+  // boundary, while retained queue entries preserve their own source-ready
+  // state until this snapshot arrives.
+  val scheduledWakeup = if (registeredWakeup) RegNext(state.io.wakeup)
+    else state.io.wakeup
 
   issue.io.enqueue <> io.intEnqueue
-  issue.io.wakeup := state.io.wakeup
+  issue.io.wakeup := scheduledWakeup
   issue.io.robHeadTag := scheduledRobHeadTag
   issue.io.squash := io.squash
   issue.io.flush := io.flush
