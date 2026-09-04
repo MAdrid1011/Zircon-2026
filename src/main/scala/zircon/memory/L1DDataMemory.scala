@@ -117,7 +117,8 @@ class L1DDataMemory(depth: Int, width: Int) extends BlackBox
        |    .rsta(1'b0),
        |    .rstb(1'b0),
        |    .sleep(1'b0),
-       |    .wea({WIDTH/8{writeEnable}}),
+       |    // BYTE_WRITE_WIDTH_A equals WIDTH, so XPM exposes one enable bit.
+       |    .wea(writeEnable),
        |    .web({WIDTH/8{1'b0}}),
        |    .sbiterra(sbiterrA_unused),
        |    .dbiterra(dbiterrA_unused),
