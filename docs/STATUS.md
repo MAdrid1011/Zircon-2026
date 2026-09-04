@@ -1,5 +1,12 @@
 # Zircon-2026 实施状态
 
+2026-09-04 参考模型复核：当前父仓 `921b6c6`、ZirconSim
+`df0265c`、RV-Software `11d6eae` 的 deterministic `tohost` ELF 使用 seed 1
+完成 Spike 与 Sail committed-memory 差分；RV32I/ALU-branch/RV32M/RV32A 分别
+匹配 19/34/19/12 条退休和所有 touched backing-memory word，周期为
+246/294/277/226，四项均 exit 0。该证据仍是 bounded differential，不代表
+ACT4、随机回归或 v1.0.0 release gate。
+
 2026-09-04 本地增量证据：FLW/FSW 接入双 LSU、L1D/L2、精确 FPR completion 和
 retire metadata；`FloatingAdmissionSpec`、`MemoryAddressUnitSpec`、
 `DualMemoryLoadCompletionSpec`、`FloatingScoreboardSpec` 聚焦回归为 17/17，

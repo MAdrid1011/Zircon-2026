@@ -4,6 +4,27 @@ This record binds deterministic, `tohost`-completing M3 ELF runs and the first
 bounded committed-memory comparisons to the exact local source revisions and
 generated artifacts. It is local execution evidence, not an M3 release claim.
 
+## Current rerun (2026-09-04)
+
+At parent revision `921b6c603314bf930b779fe54120fce7ac1fd8a3`, with ZirconSim
+`df0265c54b44a779b2447aee69f25e55ef16e04e` and RV-Software
+`11d6eae150d47aab32aca3340e30ba61ddcbb2f0`, the deterministic images were
+rerun with seed `1` and locally installed Verilator
+`5.029 devel (v5.028-222-g469eca7de)`. Both reference-model commands completed:
+
+```bash
+make -C ZirconSim diff-memory-spike \
+  SPIKE=/home/madrid/.cache/zircon-2026-spike-c09c0cce/build/spike
+make -C ZirconSim diff-memory-sail \
+  SAIL=/home/madrid/.cache/zircon-2026-sail-riscv-beaf4499/build/c_emulator/sail_riscv_sim
+```
+
+The RTL reached `tohost` with exit code 0 in 246/294/277/226 cycles and retired
+19/34/19/12 instructions for RV32I CSR, RV32I ALU/branch, RV32M, and RV32A.
+`CommitTraceDiff` matched every ordered retirement and touched backing-memory
+word against both Spike and Sail. This is a current bounded differential rerun,
+not full ACT4, random, or release evidence.
+
 ## Revisions and invocation
 
 The first completion pass used parent source
