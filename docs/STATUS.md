@@ -394,3 +394,14 @@ external-master wiring, full pressure/broader-reset/error
 matrix, bounded formal, and multi-master system integration remain incomplete.
 
 状态只能在对应自动测试或报告进入 Git 后更新；控制文档更新本身不等价于硬件进展。
+
+### Timing Boundary Update (2026-09-04)
+
+Production `ZirconCore` now instantiates `RegisteredFloatingResultBridge`, a
+one-entry registered boundary between the FPU result and ROB/FPR completion
+fabric. The original `FloatingResultBridge` remains as the zero-latency unit
+model so its focused handshake contract is unchanged. `make verilog` and
+Scala compilation pass on commit `61749bb`. A fixed-target Vivado 2023.1
+synthesis-only run for `xc7a200tfbg676-2L` reached Timing Optimization but
+produced no utilization or timing report within the 30-minute local budget;
+this is recorded as a timeout, not a timing or area pass.
