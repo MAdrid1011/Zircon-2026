@@ -25,6 +25,10 @@ class FirstFaultTracker(
 ) extends Module {
   val io = IO(new Bundle {
     val robHeadTag = Input(UInt(config.robTagWidth.W))
+    // Number of instructions retired at the current edge.  The tracker uses
+    // this to advance its local head snapshot without putting the live ROB
+    // head into the candidate-selection combinational cone.
+    val headAdvance = Input(UInt(2.W))
     val candidates = Input(Vec(candidateWidth, new FaultCandidate(config)))
     val clear = Input(Bool())
     val flush = Input(Bool())
@@ -35,13 +39,34 @@ class FirstFaultTracker(
 
   val validReg = RegInit(false.B)
   val recordReg = RegInit(0.U.asTypeOf(new FirstFaultRecord(config)))
+  val headTagReg = RegInit(0.U(config.robTagWidth.W))
+  val headTagInitialized = RegInit(false.B)
+
+  private def advanceHeadTag(tagValue: UInt, amount: UInt): UInt = {
+    val index = tagValue(config.robIndexWidth - 1, 0)
+    val generation = tagValue(config.robTagWidth - 1)
+    val sum = index +& amount
+    val wrapped = sum >= config.robEntries.U
+    val nextIndex = Mux(wrapped, sum - config.robEntries.U, sum)
+    (generation ^ wrapped) ## nextIndex(config.robIndexWidth - 1, 0)
+  }
+
+  // ROB and tracker update on the same edge.  Predicting the post-retirement
+  // tag here keeps the snapshot aligned with ROB.headTag in the following
+  // cycle, including the non-power-of-two 24-entry wrap.
+  when(!headTagInitialized || io.flush || io.robHeadTag =/= headTagReg) {
+    headTagReg := io.robHeadTag
+    headTagInitialized := true.B
+  }.otherwise {
+    headTagReg := advanceHeadTag(headTagReg, io.headAdvance)
+  }
 
   private def ageFromHead(tag: UInt): UInt =
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
+    ROBTagOrder.ageFromHead(tag, headTagReg, config)
 
   private def survivesSquash(tag: UInt): Bool =
     !io.squash.valid || !ROBTagOrder.isYounger(
-      tag, io.squash.bits, io.robHeadTag, config)
+      tag, io.squash.bits, headTagReg, config)
 
   var selectedValid: Bool = validReg && survivesSquash(recordReg.robTag)
   var selectedRecord: FirstFaultRecord = recordReg
@@ -73,5 +98,10 @@ class FirstFaultTracker(
   when(io.squash.valid) {
     assert(io.squash.bits(config.robIndexWidth - 1, 0) < config.robEntries.U,
       "FirstFault squash boundary ROB index out of range")
+  }
+
+  when(!io.flush) {
+    assert(io.headAdvance <= 2.U,
+      "FirstFault head advance exceeded the two-wide commit bound")
   }
 }

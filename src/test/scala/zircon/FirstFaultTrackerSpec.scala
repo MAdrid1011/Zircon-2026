@@ -9,6 +9,7 @@ class FirstFaultTrackerSpec extends AnyFunSpec with ChiselSim {
     it("retains the oldest fault independent of detection order") {
       simulate(new FirstFaultTracker(2)) { dut =>
         dut.io.robHeadTag.poke(8)
+        dut.io.headAdvance.poke(0)
         dut.io.clear.poke(false)
         dut.io.flush.poke(false)
         dut.io.squash.valid.poke(false)
@@ -34,6 +35,7 @@ class FirstFaultTrackerSpec extends AnyFunSpec with ChiselSim {
 
         // Index 2 is younger than index 22 when head is 20, despite numeric order.
         dut.io.robHeadTag.poke(20)
+        dut.io.headAdvance.poke(0)
         dut.io.clear.poke(true)
         dut.io.candidates.foreach(_.valid.poke(false))
         dut.clock.step()

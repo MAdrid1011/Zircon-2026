@@ -180,6 +180,7 @@ class IntegerDispatchRecoveryBackend(
   }
 
   firstFault.io.robHeadTag := execution.io.robHeadTag
+  firstFault.io.headAdvance := PopCount(io.commit.map(_.fire))
   for (lane <- 0 until config.decodeWidth) {
     firstFault.io.candidates(lane) := dispatch.io.faultCandidate(lane)
   }
