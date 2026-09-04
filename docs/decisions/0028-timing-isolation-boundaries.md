@@ -53,7 +53,20 @@ run's `-88.879 ns` are measured failures, not release results.
 
 ## Verification
 
-`./scripts/sbtw compile`, `make platform-verilog`, and the 13 RV32M/RV32F
-`CoreShellSpec` scenarios pass after the change, including seeded recovery and
-the observed three-start case.  Focused M3/M4 regressions remain required
-before the next fixed-target implementation.
+`./scripts/sbtw compile`, `make platform-verilog`, and the focused production
+CoreShell scenarios pass after the change.  The observation-only three-start
+scenario remains a pre-existing failure: the same start mask and cycle list
+fails on a clean `46cd3ac` worktree, so it is not attributed to these ingress
+boundaries. Focused M3/M4 regressions remain required before the next
+fixed-target implementation.
+
+## Timing isolation follow-up (2026-09-04)
+
+The post-route report still showed a 119-level ROB-head-to-MemIQ path. The
+production core now adds a registered, squash-aware ingress for each MemIQ,
+LongIQ, and FloatingIQ lane. Dispatch observes MemIQ boundary readiness before
+allocating a ROB entry, while production queue capacities are held at the
+two-wide boundary capacity to remove queue occupancy from the ROB/rename
+feedback cone. The `enableM2Observation` configuration is compile-time
+transparent and retains the original direct queue wiring for cycle-accurate
+start-mask tests.

@@ -153,6 +153,36 @@ class BackendDispatch(
   val selected = VecInit(selectOne || selectTwo, selectTwo)
   val selectedCount = Mux(selectTwo, 2.U, Mux(selectOne, 1.U, 0.U))
 
+  // Endpoint ingress is an architectural part of dispatch acceptance.  The
+  // production core places a recoverable register boundary in front of each
+  // non-integer queue; requiring that boundary to accept the selected prefix
+  // prevents ROB/rename state from advancing while an endpoint is blocked.
+  // The helper mirrors driveQueue's compact-prefix mapping: lane zero is the
+  // first selected uop for an endpoint, and lane one is present only when both
+  // selected uops target that endpoint.
+  private def endpointReady(
+      output: Vec[DecoupledIO[UopRef]],
+      needed: Vec[Bool]
+  ): Bool = {
+    val matches = VecInit((0 until config.decodeWidth).map(lane =>
+      selected(lane) && needed(lane)))
+    !matches.asUInt.orR ||
+      (output(0).ready && (!matches.asUInt.andR || output(1).ready))
+  }
+
+  // Integer IQ already exposes its registered capacity promise through
+  // `intCapacity`; including its lane-ready feedback here would recreate its
+  // existing two-lane valid/ready dependency. The three non-integer ingress
+  // boundaries have occupancy-only ready signals, so they can be checked
+  // directly without forming a combinational loop.
+  val selectedOutputsReady = if (config.enableM2Observation) {
+    // Observation builds intentionally retain the zero-latency endpoint
+    // contract used by the cycle-accurate start-mask tests.
+    true.B
+  } else endpointReady(io.longEnqueue, needsLong) &&
+    endpointReady(io.memEnqueue, needsMem) &&
+    endpointReady(io.floatingEnqueue, needsFloating)
+
   for (lane <- 0 until config.decodeWidth) {
     val requestExecutes = selected(lane) && !fetchFault(lane) &&
       (decoded(lane).legal || floatingAdmissions(lane).io.live)
@@ -171,7 +201,11 @@ class BackendDispatch(
       floatingAdmissions(lane).io.decoded.writesIntegerRd, decoded(lane).writesRd)
   }
 
-  val dispatchFire = selectedCount =/= 0.U && io.renameReady
+  val dispatchFire = if (config.enableM2Observation) {
+    selectedCount =/= 0.U && io.renameReady
+  } else {
+    selectedCount =/= 0.U && io.renameReady && selectedOutputsReady
+  }
   io.renameAccept := dispatchFire
   io.input(0).ready := dispatchFire
   io.input(1).ready := dispatchFire && selectTwo

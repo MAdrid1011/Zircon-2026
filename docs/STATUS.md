@@ -432,6 +432,18 @@ Scala compilation pass on commit `61749bb`. A fixed-target Vivado 2023.1
 synthesis-only run for `xc7a200tfbg676-2L` reached Timing Optimization but
 produced no utilization or timing report within the 30-minute local budget;
 this is recorded as a timeout, not a timing or area pass.
+
+### Timing Isolation Follow-up (2026-09-04)
+
+The latest post-route evidence on `xc7a200tfbg676-2L` remained a measured
+failure (`WNS=-61.879 ns`, `TNS=-1,957,012.340 ns`, 60,132 setup-failing
+endpoints). Its worst path was 123 logic levels from ROB `headIndex` into
+FirstFault; this run was launched before the next RTL edit and is therefore
+not evidence for the new boundaries. The current production RTL adds
+squash-aware registered ingress on all Mem/Long/Floating queue lanes and
+requires MemIQ boundary readiness at dispatch. Compile, platform RTL
+generation, and focused production CoreShell/Backend tests pass. A new fixed
+device implementation is running; no timing or area pass is claimed yet.
 # 2026-09-04 Timing isolation follow-up
 
 The fixed `xc7a200tfbg676-2L` implementation `fpga/runs/impl-88c5ea3`

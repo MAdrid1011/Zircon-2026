@@ -31,7 +31,11 @@ class UopIssueBoundary(
 
     io.output.valid := validReg && !recoveryBlocked
     io.output.bits := uopReg
-    io.input.ready := !recoveryBlocked && (!validReg || io.output.ready)
+    // Do not let downstream queue ready feed back into dispatch through this
+    // boundary. A full boundary waits for its payload to leave before
+    // accepting another one; the extra bubble is bounded and removes the
+    // two-lane valid/ready loop at integrated queue ingress.
+    io.input.ready := !recoveryBlocked && !validReg
 
     val heldYounger = validReg && ROBTagOrder.isYounger(
       uopReg.robTag, io.squash.bits, io.robHeadTag, config)
@@ -79,7 +83,7 @@ class LongOperandBoundary(
 
     io.output.valid := validReg && !recoveryBlocked
     io.output.bits := requestReg
-    io.input.ready := !recoveryBlocked && (!validReg || io.output.ready)
+    io.input.ready := !recoveryBlocked && !validReg
 
     val heldYounger = validReg && ROBTagOrder.isYounger(
       requestReg.uop.robTag, io.squash.bits, io.robHeadTag, config)

@@ -33,6 +33,21 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   val frontend = Module(new M1Frontend(cfg))
   val backend = Module(new M1BackendSubsystem(cfg))
+  // Dispatch-to-queue ingress is registered per lane in production. Besides
+  // breaking the large ROB/rename/queue timing cone, each boundary owns
+  // squash/flush so a recovered uop can never leak into a later issue queue.
+  val longEnqueueBoundary = if (cfg.enableM2Observation) {
+    Seq.empty[UopIssueBoundary]
+  } else Seq.fill(cfg.decodeWidth)(Module(new UopIssueBoundary(cfg,
+    registered = true)))
+  val memEnqueueBoundary = if (cfg.enableM2Observation) {
+    Seq.empty[UopIssueBoundary]
+  } else Seq.fill(cfg.decodeWidth)(Module(new UopIssueBoundary(cfg,
+    registered = true)))
+  val floatingEnqueueBoundary = if (cfg.enableM2Observation) {
+    Seq.empty[UopIssueBoundary]
+  } else Seq.fill(cfg.decodeWidth)(Module(new UopIssueBoundary(cfg,
+    registered = true)))
   val longQueue = Module(new LongIssueQueue(cfg))
   val longIssueBoundary = Module(new UopIssueBoundary(cfg,
     registered = !cfg.enableM2Observation))
@@ -113,8 +128,30 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   frontend.io.commitRedirect := backend.io.redirect
 
   for (lane <- 0 until cfg.decodeWidth) {
-    longQueue.io.enqueue(lane) <> backend.io.longEnqueue(lane)
-    floatingQueue.io.enqueue(lane) <> backend.io.floatingEnqueue(lane)
+    if (cfg.enableM2Observation) {
+      longQueue.io.enqueue(lane) <> backend.io.longEnqueue(lane)
+      memQueue.io.enqueue(lane) <> backend.io.memEnqueue(lane)
+      floatingQueue.io.enqueue(lane) <> backend.io.floatingEnqueue(lane)
+    } else {
+      longEnqueueBoundary(lane).io.input <> backend.io.longEnqueue(lane)
+      longEnqueueBoundary(lane).io.output <> longQueue.io.enqueue(lane)
+      longEnqueueBoundary(lane).io.squash := backend.io.squash
+      longEnqueueBoundary(lane).io.robHeadTag := scheduledRobHeadTag
+      longEnqueueBoundary(lane).io.flush := backend.io.globalFlush
+
+      memEnqueueBoundary(lane).io.input <> backend.io.memEnqueue(lane)
+      memEnqueueBoundary(lane).io.output <> memQueue.io.enqueue(lane)
+      memEnqueueBoundary(lane).io.squash := backend.io.squash
+      memEnqueueBoundary(lane).io.robHeadTag := scheduledRobHeadTag
+      memEnqueueBoundary(lane).io.flush := backend.io.globalFlush
+
+      floatingEnqueueBoundary(lane).io.input <> backend.io.floatingEnqueue(lane)
+      floatingEnqueueBoundary(lane).io.output <> floatingQueue.io.enqueue(lane)
+      floatingEnqueueBoundary(lane).io.squash := backend.io.squash
+      floatingEnqueueBoundary(lane).io.robHeadTag := scheduledRobHeadTag
+      floatingEnqueueBoundary(lane).io.flush := backend.io.globalFlush
+    }
+
     floatingScoreboard.io.allocate(lane) := backend.io.floatingAllocate(lane)
   }
   longIssueBoundary.io.input <> longQueue.io.issue
@@ -128,8 +165,18 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   longOperandBoundary.io.squash := backend.io.squash
   longOperandBoundary.io.robHeadTag := scheduledRobHeadTag
   longOperandBoundary.io.flush := backend.io.globalFlush
-  backend.io.longCapacity := longQueue.io.enqueueCapacity
-  backend.io.floatingCapacity := floatingQueue.io.enqueueCapacity
+  // MemIQ occupancy is hidden behind its ingress boundaries. A static two-uop
+  // promise keeps that queue state out of the dispatch critical path;
+  // dispatchFire observes each MemIQ boundary's ready signal exactly. Long
+  // The static two-uop promise keeps all three queue occupancies out of the
+  // dispatch critical path; dispatchFire observes each boundary's ready
+  // signal exactly. Observation builds retain the original capacity feedback.
+  backend.io.longCapacity := (if (cfg.enableM2Observation)
+    longQueue.io.enqueueCapacity else cfg.decodeWidth.U)
+  backend.io.memCapacity := (if (cfg.enableM2Observation)
+    memQueue.io.enqueueCapacity else cfg.decodeWidth.U)
+  backend.io.floatingCapacity := (if (cfg.enableM2Observation)
+    floatingQueue.io.enqueueCapacity else cfg.decodeWidth.U)
   backend.io.floatingScoreboardEmpty := floatingScoreboard.io.empty
   floatingQueue.io.integerReady := scheduledIntegerReady
   floatingQueue.io.robHeadTag := scheduledRobHeadTag
@@ -268,10 +315,6 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     backend.io.retired(0).bits.robTag, backend.io.retired(1).bits.robTag)
   floatingScoreboard.io.complete := floatingCommitState.io.scoreboardComplete
 
-  for (lane <- 0 until cfg.decodeWidth) {
-    memQueue.io.enqueue(lane) <> backend.io.memEnqueue(lane)
-  }
-  backend.io.memCapacity := memQueue.io.enqueueCapacity
   memQueue.io.integerReady := scheduledIntegerReady
   memQueue.io.robHeadTag := scheduledRobHeadTag
   memQueue.io.squash := backend.io.squash
