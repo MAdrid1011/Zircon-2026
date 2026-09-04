@@ -1,5 +1,16 @@
 # Zircon-2026 实施状态
 
+2026-09-05 FirstFault 路径结构隔离：最新固定器件 place 路径仍显示
+`ROB.entryComplete/headIndex -> LSU/Issue 状态 -> FirstFault.recordReg` 的
+119--130 级跨域控制链。生产 `IntegerDispatchRecoveryBackend` 现在在 FirstFault
+年龄仲裁器前统一寄存外部 endpoint fault candidate，并在捕获同周期遇到 global
+flush/selective squash 时抑制脉冲；decode fault 保持分配当周期可见，E0 fault
+保持已有寄存采样。这样切断完成/LSU ready 网络进入 fault metadata 的组合路径，
+不改变 ROB completion ownership 或精确提交顺序。`compile`、保留 `frm` 精确
+illegal trap、data AXI RRESP 精确 load fault、`make platform-verilog` 和
+ZirconSim seed-1 RV32I/ALU-branch/RV32M/RV32A `tohost`（19/34/19/12 retired）
+均通过；新固定器件实现尚未完成，不能宣称 WNS 或 100 MHz 达标。
+
 2026-09-05 backend 时序隔离续作：固定器件 `xc7a200tfbg676-2L` 的提交
 `7be7aaa` 完整 post-route 实测 WNS `-59.628 ns`、TNS
 `-1,850,192.202 ns`，62,698 个 setup 端点失败；LUT `66,565/134,600`

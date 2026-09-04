@@ -94,3 +94,20 @@ after 37 minutes. Its place checkpoint measured `entryComplete_9` to
 registered IntIQ wakeup; synthesis-only maps to 65,754 LUTs, 32,801 FFs, 133
 BRAM tiles, and 4 DSPs. These are structural/timing-progress data, not a
 100-MHz release result.
+
+## Fault-candidate boundary (2026-09-05)
+
+The next place checkpoint still showed `entryComplete_9` traversing the LSU
+completion and issue-control network into `FirstFault.recordReg` (130 logic
+levels, `-64.900 ns` estimated place WNS). Production
+`IntegerDispatchRecoveryBackend` now registers all external endpoint fault
+candidates before the age arbiter. The register clears on global flush or
+selective squash in the capture cycle. Decode faults remain direct so an
+illegal instruction is visible at allocation; E0 faults retain their existing
+registered sample.
+
+This changes only fault-observation latency, not completion ownership: the ROB
+completion edge is followed by a registered candidate and the tracker output is
+visible before the next commit decision. Focused reserved-`frm`, data AXI RRESP,
+platform RTL, and deterministic `tohost` regressions pass. A fresh post-route
+report is required to quantify the timing effect.

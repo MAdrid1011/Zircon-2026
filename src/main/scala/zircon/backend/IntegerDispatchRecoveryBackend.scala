@@ -96,6 +96,32 @@ class IntegerDispatchRecoveryBackend(
   // cannot feed the FirstFault arbiter through the same cycle's ready cone.
   val e0FaultForTracker = if (registeredWakeup) RegNext(execution.io.e0Fault)
     else execution.io.e0Fault
+  // Fault candidates are control metadata, not a completion handshake.  In
+  // the integrated production core, keep every producer behind the same
+  // register boundary before the age-selecting FirstFault arbiter.  Without
+  // this boundary a memory fault's accepted completion can traverse the ROB,
+  // issue queues, and LSU bookkeeping before reaching recordReg in one cycle.
+  // A simultaneous flush/squash suppresses the captured pulse so a younger
+  // wrong-path fault cannot survive into the following cycle.
+  // Dispatch/decode faults are born at the ROB allocation edge and must stay
+  // visible in that same cycle so an illegal instruction cannot be overtaken
+  // by a younger system instruction.  They do not depend on completion state,
+  // so they are intentionally kept on the direct path.
+  val dispatchFaultForTracker = dispatch.io.faultCandidate
+  val otherFaultForTracker = if (registeredWakeup) {
+    val delayed = RegInit(VecInit.fill(3)(
+      0.U.asTypeOf(new FaultCandidate(config))))
+    when(io.globalFlush || io.squash.valid) {
+      delayed.foreach(_.valid := false.B)
+    }.otherwise {
+      for (endpoint <- 0 until 3) {
+        delayed(endpoint) := io.otherFault(endpoint)
+      }
+    }
+    delayed
+  } else {
+    io.otherFault
+  }
   val floatingAdmissionBlocked = RegInit(false.B)
   val floatingControlTag = Reg(UInt(config.robTagWidth.W))
 
@@ -188,12 +214,12 @@ class IntegerDispatchRecoveryBackend(
   firstFault.io.robHeadTag := execution.io.scheduledRobHeadTag
   firstFault.io.headAdvance := PopCount(io.commit.map(_.fire))
   for (lane <- 0 until config.decodeWidth) {
-    firstFault.io.candidates(lane) := dispatch.io.faultCandidate(lane)
+    firstFault.io.candidates(lane) := dispatchFaultForTracker(lane)
   }
   firstFault.io.candidates(config.decodeWidth) := e0FaultForTracker
   for (endpoint <- 0 until 3) {
     firstFault.io.candidates(config.decodeWidth + 1 + endpoint) :=
-      io.otherFault(endpoint)
+      otherFaultForTracker(endpoint)
   }
   firstFault.io.clear := io.firstFaultClear
   firstFault.io.flush := io.globalFlush
