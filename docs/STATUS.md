@@ -1,5 +1,18 @@
 # Zircon-2026 实施状态
 
+2026-09-05 ROB age/ready 高扇出域隔离：以固定器件
+`xc7a200tfbg676-2L` 的 `393e07e` post-route WNS `-40.479 ns`、TNS
+`-1,445,001.875 ns`、62,874 个 setup failing endpoints 为基线，Vivado
+反复将单一 `scheduledRobHeadTag` 复制到 IntIQ、MemIQ、双 LSU、L1D、Long 和
+Floating 路径，仍留下跨域重收敛。生产顶层现改为从同一 ROB head 并行采样 Long、
+Floating、MemIQ、LSU、L1D 和 auxiliary-read 的一拍 age snapshot；整数执行域也为
+IntIQ 与短流水各采样一拍。Long/Floating/MemIQ 的整数 ready bitmap 同样并行采样。
+这些寄存器不串联，因此不增加原有一拍调度延迟，也不改变 modulo-24 ordering、
+generation、squash 或 flush 语义。`./scripts/sbtw compile` 与 `make platform-verilog`
+通过；新 fixed-device implementation 尚未运行，不能宣称 WNS、频率或面积改善。
+`CoreShellSpec` 的 wrong-path refill 场景仍以 `dataArs=0` 和提前 cause=27 trap
+失败，正在与父提交比对归因，不能计为本次时序隔离回归。
+
 2026-09-05 FirstFault 路径结构隔离：最新固定器件 place 路径仍显示
 `ROB.entryComplete/headIndex -> LSU/Issue 状态 -> FirstFault.recordReg` 的
 119--130 级跨域控制链。生产 `IntegerDispatchRecoveryBackend` 现在在 FirstFault

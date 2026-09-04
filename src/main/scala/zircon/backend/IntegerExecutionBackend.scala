@@ -102,6 +102,14 @@ class IntegerExecutionBackend(
   // bounded snapshot lag; generation checks continue to reject stale work.
   val scheduledRobHeadTag = RegNext(state.io.robHeadTag)
   io.scheduledRobHeadTag := scheduledRobHeadTag
+  // Keep age consumers in separate physical fanout domains.  Each snapshot
+  // has the same one-cycle latency as the architectural scheduling tag; only
+  // the physical driver is split so ROB head movement does not form one
+  // high-fanout route through every execution sub-block.
+  val issueRobHeadTag = RegNext(state.io.robHeadTag)
+  val shortPipeRobHeadTag = RegNext(state.io.robHeadTag)
+  dontTouch(issueRobHeadTag)
+  dontTouch(shortPipeRobHeadTag)
   // Wakeup is a control-only hint; delaying it by one cycle keeps completion
   // and PRF writeback from feeding the IntIQ candidate/update cone directly.
   // Dispatch still uses the separately registered ready bitmap at the core
@@ -112,7 +120,7 @@ class IntegerExecutionBackend(
 
   issue.io.enqueue <> io.intEnqueue
   issue.io.wakeup := scheduledWakeup
-  issue.io.robHeadTag := scheduledRobHeadTag
+  issue.io.robHeadTag := issueRobHeadTag
   issue.io.squash := io.squash
   issue.io.flush := io.flush
   io.intCapacity := issue.io.enqueueCapacity
@@ -138,7 +146,7 @@ class IntegerExecutionBackend(
 
   shortPipes.io.e0 <> operandRead.io.execute(0)
   shortPipes.io.e1 <> operandRead.io.execute(1)
-  shortPipes.io.robHeadTag := scheduledRobHeadTag
+  shortPipes.io.robHeadTag := shortPipeRobHeadTag
   shortPipes.io.squash := io.squash
   shortPipes.io.recoveryActive := io.recoveryActive
   shortPipes.io.flush := io.flush

@@ -89,13 +89,33 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // Scheduling observes a registered ROB head.  This keeps retirement's
   // head-index update out of the issue/operand timing cone while preserving
   // the same age ordering for every live ROB tag.
-  val scheduledRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  // Same-cycle snapshots for independent age-control domains.  These are
+  // deliberately sourced from the ROB head in parallel (rather than chained)
+  // so the existing one-cycle scheduling contract is unchanged while Vivado
+  // can place each fanout cluster locally.
+  val longRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  val floatingRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  val memRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  val lsuRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  val cacheRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  val auxiliaryRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  dontTouch(longRobHeadTag)
+  dontTouch(floatingRobHeadTag)
+  dontTouch(memRobHeadTag)
+  dontTouch(lsuRobHeadTag)
+  dontTouch(cacheRobHeadTag)
+  dontTouch(auxiliaryRobHeadTag)
   // Wakeup state is produced by the integer backend's completion/commit
   // network.  Feeding that wide bitmap directly into every issue queue makes
   // the ROB payload and PRF ready cones re-converge before queue selection.
   // A registered snapshot adds at most one wakeup cycle, but prevents that
   // feedback path from crossing the queue/operand boundary in one cycle.
-  val scheduledIntegerReady = RegNext(backend.io.integerReady)
+  val longIntegerReady = RegNext(backend.io.integerReady)
+  val floatingIntegerReady = RegNext(backend.io.integerReady)
+  val memIntegerReady = RegNext(backend.io.integerReady)
+  dontTouch(longIntegerReady)
+  dontTouch(floatingIntegerReady)
+  dontTouch(memIntegerReady)
 
   // WFI is a commit-qualified quiescent state.  Younger speculative work is
   // flushed by the WFI redirect; fetch resumes only after an enabled
@@ -138,19 +158,19 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       longEnqueueBoundary(lane).io.input <> backend.io.longEnqueue(lane)
       longEnqueueBoundary(lane).io.output <> longQueue.io.enqueue(lane)
       longEnqueueBoundary(lane).io.squash := backend.io.squash
-      longEnqueueBoundary(lane).io.robHeadTag := scheduledRobHeadTag
+      longEnqueueBoundary(lane).io.robHeadTag := longRobHeadTag
       longEnqueueBoundary(lane).io.flush := backend.io.globalFlush
 
       memEnqueueBoundary(lane).io.input <> backend.io.memEnqueue(lane)
       memEnqueueBoundary(lane).io.output <> memQueue.io.enqueue(lane)
       memEnqueueBoundary(lane).io.squash := backend.io.squash
-      memEnqueueBoundary(lane).io.robHeadTag := scheduledRobHeadTag
+      memEnqueueBoundary(lane).io.robHeadTag := memRobHeadTag
       memEnqueueBoundary(lane).io.flush := backend.io.globalFlush
 
       floatingEnqueueBoundary(lane).io.input <> backend.io.floatingEnqueue(lane)
       floatingEnqueueBoundary(lane).io.output <> floatingQueue.io.enqueue(lane)
       floatingEnqueueBoundary(lane).io.squash := backend.io.squash
-      floatingEnqueueBoundary(lane).io.robHeadTag := scheduledRobHeadTag
+      floatingEnqueueBoundary(lane).io.robHeadTag := floatingRobHeadTag
       floatingEnqueueBoundary(lane).io.flush := backend.io.globalFlush
     }
 
@@ -158,14 +178,14 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   }
   longIssueBoundary.io.input <> longQueue.io.issue
   longIssueBoundary.io.squash := backend.io.squash
-  longIssueBoundary.io.robHeadTag := scheduledRobHeadTag
+  longIssueBoundary.io.robHeadTag := longRobHeadTag
   longIssueBoundary.io.flush := backend.io.globalFlush
   floatingIssueBoundary.io.input <> floatingQueue.io.issue
   floatingIssueBoundary.io.squash := backend.io.squash
-  floatingIssueBoundary.io.robHeadTag := scheduledRobHeadTag
+  floatingIssueBoundary.io.robHeadTag := floatingRobHeadTag
   floatingIssueBoundary.io.flush := backend.io.globalFlush
   longOperandBoundary.io.squash := backend.io.squash
-  longOperandBoundary.io.robHeadTag := scheduledRobHeadTag
+  longOperandBoundary.io.robHeadTag := longRobHeadTag
   longOperandBoundary.io.flush := backend.io.globalFlush
   // MemIQ occupancy is hidden behind its ingress boundaries. A static two-uop
   // promise keeps that queue state out of the dispatch critical path;
@@ -180,15 +200,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.floatingCapacity := (if (cfg.enableM2Observation)
     floatingQueue.io.enqueueCapacity else cfg.decodeWidth.U)
   backend.io.floatingScoreboardEmpty := floatingScoreboard.io.empty
-  floatingQueue.io.integerReady := scheduledIntegerReady
-  floatingQueue.io.robHeadTag := scheduledRobHeadTag
+  floatingQueue.io.integerReady := floatingIntegerReady
+  floatingQueue.io.robHeadTag := floatingRobHeadTag
   floatingQueue.io.squash := backend.io.squash
   floatingQueue.io.flush := backend.io.globalFlush
-  floatingScoreboard.io.robHeadTag := scheduledRobHeadTag
+  floatingScoreboard.io.robHeadTag := floatingRobHeadTag
   floatingScoreboard.io.squash := backend.io.squash
   floatingScoreboard.io.flush := backend.io.globalFlush
-  longQueue.io.integerReady := scheduledIntegerReady
-  longQueue.io.robHeadTag := scheduledRobHeadTag
+  longQueue.io.integerReady := longIntegerReady
+  longQueue.io.robHeadTag := longRobHeadTag
   longQueue.io.squash := backend.io.squash
   longQueue.io.flush := backend.io.globalFlush
   val traceReadRequired = if (cfg.enableTrace) {
@@ -198,7 +218,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val integerStarts = PopCount(Seq(backend.io.e0Start, backend.io.e1Start))
   auxiliaryRead.io.traceReadRequired := traceReadRequired
   auxiliaryRead.io.startSlots := 3.U - integerStarts
-  auxiliaryRead.io.robHeadTag := scheduledRobHeadTag
+  auxiliaryRead.io.robHeadTag := auxiliaryRobHeadTag
   auxiliaryRead.io.readData := backend.io.auxReadData
 
   // The architectural FPR file has three read ports.  A floating E2 uop can
@@ -213,9 +233,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
       memQueue.io.m1Issue.bits.sourceKind(1) === SourceKind.FloatingRegister)
 
   val floatingIssueAge = ROBTagOrder.ageFromHead(
-    floatingIssueBoundary.io.output.bits.robTag, scheduledRobHeadTag, cfg)
+    floatingIssueBoundary.io.output.bits.robTag, floatingRobHeadTag, cfg)
   val longIssueAge = ROBTagOrder.ageFromHead(
-    longIssueBoundary.io.output.bits.robTag, scheduledRobHeadTag, cfg)
+    longIssueBoundary.io.output.bits.robTag, longRobHeadTag, cfg)
   val floatingOlderThanLong = floatingIssueBoundary.io.output.valid &&
     (!longIssueBoundary.io.output.valid || floatingIssueAge < longIssueAge)
   val selectFloatingE2 = floatingOlderThanLong && !pendingFloatingStore
@@ -231,7 +251,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     auxiliaryRead.io.candidate(0).bits.sourceRequired(source) :=
       selectedE2Uop.sourceKind(source) === SourceKind.IntegerRegister
   }
-  longPipe.io.robHeadTag := scheduledRobHeadTag
+  longPipe.io.robHeadTag := longRobHeadTag
   longPipe.io.squash := backend.io.squash
   longPipe.io.flush := backend.io.globalFlush
   longOperandBoundary.io.input.valid := selectLongE2 && auxiliaryRead.io.grant(0)
@@ -242,7 +262,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   longIssueBoundary.io.output.ready := selectLongE2 &&
     longOperandBoundary.io.input.ready && auxiliaryRead.io.grant(0)
 
-  floatingMovePipe.io.robHeadTag := scheduledRobHeadTag
+  floatingMovePipe.io.robHeadTag := floatingRobHeadTag
   floatingMovePipe.io.squash := backend.io.squash
   floatingMovePipe.io.flush := backend.io.globalFlush
   floatingMovePipe.io.input.valid := selectFloatingE2 && auxiliaryRead.io.grant(0)
@@ -300,13 +320,13 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     floatingIssueBoundary.io.output.bits.floatingDestination
 
   floatingResultBridge.io.input <> floatingMovePipe.io.output
-  floatingResultBridge.io.robHeadTag := scheduledRobHeadTag
+  floatingResultBridge.io.robHeadTag := floatingRobHeadTag
   floatingResultBridge.io.squash := backend.io.squash
   floatingResultBridge.io.flush := backend.io.globalFlush
   floatingLoadArbiter.io.in(0) <> floatingResultBridge.io.floatingResult
   floatingLoadArbiter.io.in(1) <> lsuIngress.io.floatingResult
   floatingCommitState.io.enqueue <> floatingLoadArbiter.io.out
-  floatingCommitState.io.robHeadTag := scheduledRobHeadTag
+  floatingCommitState.io.robHeadTag := floatingRobHeadTag
   floatingCommitState.io.squash := backend.io.squash
   floatingCommitState.io.flush := backend.io.globalFlush
   val floatingRetires = VecInit((0 until cfg.commitWidth).map(lane =>
@@ -317,34 +337,34 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     backend.io.retired(0).bits.robTag, backend.io.retired(1).bits.robTag)
   floatingScoreboard.io.complete := floatingCommitState.io.scoreboardComplete
 
-  memQueue.io.integerReady := scheduledIntegerReady
-  memQueue.io.robHeadTag := scheduledRobHeadTag
+  memQueue.io.integerReady := memIntegerReady
+  memQueue.io.robHeadTag := memRobHeadTag
   memQueue.io.squash := backend.io.squash
   memQueue.io.flush := backend.io.globalFlush
 
   val atomicBarrierAge = ROBTagOrder.ageFromHead(
-    lsuIngress.io.atomicAcquireBarrier.bits, scheduledRobHeadTag, cfg)
+    lsuIngress.io.atomicAcquireBarrier.bits, lsuRobHeadTag, cfg)
   val m0IssueAge = ROBTagOrder.ageFromHead(
-    memQueue.io.m0Issue.bits.robTag, scheduledRobHeadTag, cfg)
+    memQueue.io.m0Issue.bits.robTag, memRobHeadTag, cfg)
   val m1IssueAge = ROBTagOrder.ageFromHead(
-    memQueue.io.m1Issue.bits.robTag, scheduledRobHeadTag, cfg)
+    memQueue.io.m1Issue.bits.robTag, memRobHeadTag, cfg)
   val m0BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
     m0IssueAge > atomicBarrierAge
   val m1BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
     m1IssueAge > atomicBarrierAge
   val olderPendingStore = lsuIngress.io.storeBarrier.valid &&
     !ROBTagOrder.isYounger(lsuIngress.io.storeBarrier.bits,
-      memQueue.io.m1Issue.bits.robTag, scheduledRobHeadTag, cfg)
+      memQueue.io.m1Issue.bits.robTag, memRobHeadTag, cfg)
   val olderPendingStoreForM0 = lsuIngress.io.storeBarrier.valid &&
     !ROBTagOrder.isYounger(lsuIngress.io.storeBarrier.bits,
-      memQueue.io.m0Issue.bits.robTag, scheduledRobHeadTag, cfg)
+      memQueue.io.m0Issue.bits.robTag, memRobHeadTag, cfg)
   // Also cover the edge on which an older store leaves MemIQ for M0.  The
   // registered barrier becomes visible one cycle later, so without this
   // check a younger M1 load could issue in parallel with that first transfer.
   val olderStoreSelectedSameCycle = memQueue.io.m0Issue.valid &&
     memQueue.io.m0Issue.bits.uopClass === UopClass.Store &&
     !ROBTagOrder.isYounger(memQueue.io.m0Issue.bits.robTag,
-      memQueue.io.m1Issue.bits.robTag, scheduledRobHeadTag, cfg)
+      memQueue.io.m1Issue.bits.robTag, memRobHeadTag, cfg)
   val m0IssueAllowed = !m0BlockedByAcquire &&
     !(memQueue.io.m0Issue.bits.uopClass === UopClass.Load &&
       olderPendingStoreForM0)
@@ -387,7 +407,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.floatingWrite.bits.address := floatingCommitState.io.fprWrite.bits.address
   backend.io.memoryExecutionRead := lsuIngress.io.robRead
   lsuIngress.io.robContext := backend.io.memoryExecutionContext
-  lsuIngress.io.robHeadTag := scheduledRobHeadTag
+  lsuIngress.io.robHeadTag := lsuRobHeadTag
   lsuIngress.io.squash := backend.io.squash
   lsuIngress.io.flush := backend.io.globalFlush
   // Device and atomic candidates retain their ordered M0 owner. Cacheable
@@ -439,7 +459,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   cacheFenceDrain.io.l1dDrained := l1dLoadCache.io.fenceDrained
   cacheFenceDrain.io.l2Drained := l2TransferStore.io.fenceDrained
   cacheFenceDrain.io.writebackBusy := l2WritebackEngine.io.busy
-  l1dLoadCache.io.robHeadTag := scheduledRobHeadTag
+  l1dLoadCache.io.robHeadTag := cacheRobHeadTag
   l1dLoadCache.io.squash := backend.io.squash
   l1dLoadCache.io.flush := backend.io.globalFlush
 
