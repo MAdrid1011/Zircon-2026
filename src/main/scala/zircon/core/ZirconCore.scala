@@ -128,11 +128,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     (memQueue.io.m1Issue.valid &&
       memQueue.io.m1Issue.bits.sourceKind(1) === SourceKind.FloatingRegister)
 
+  val floatingIssueAge = ROBTagOrder.ageFromHead(
+    floatingQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
+  val longIssueAge = ROBTagOrder.ageFromHead(
+    longQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
   val floatingOlderThanLong = floatingQueue.io.issue.valid &&
-    (!longQueue.io.issue.valid || ROBTagOrder.ageFromHead(
-      floatingQueue.io.issue.bits.robTag, backend.io.robHead.bits.robTag, cfg) <
-      ROBTagOrder.ageFromHead(longQueue.io.issue.bits.robTag,
-        backend.io.robHead.bits.robTag, cfg))
+    (!longQueue.io.issue.valid || floatingIssueAge < longIssueAge)
   val selectFloatingE2 = floatingOlderThanLong && !pendingFloatingStore
   val selectLongE2 = longQueue.io.issue.valid && !selectFloatingE2
   val selectedE2Uop = Mux(selectFloatingE2, floatingQueue.io.issue.bits,
@@ -240,12 +241,16 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   memQueue.io.squash := backend.io.squash
   memQueue.io.flush := backend.io.globalFlush
 
+  val atomicBarrierAge = ROBTagOrder.ageFromHead(
+    lsuIngress.io.atomicAcquireBarrier.bits, backend.io.robHead.bits.robTag, cfg)
+  val m0IssueAge = ROBTagOrder.ageFromHead(
+    memQueue.io.m0Issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
+  val m1IssueAge = ROBTagOrder.ageFromHead(
+    memQueue.io.m1Issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
   val m0BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
-    ROBTagOrder.isYounger(memQueue.io.m0Issue.bits.robTag,
-      lsuIngress.io.atomicAcquireBarrier.bits, backend.io.robHead.bits.robTag, cfg)
+    m0IssueAge > atomicBarrierAge
   val m1BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
-    ROBTagOrder.isYounger(memQueue.io.m1Issue.bits.robTag,
-      lsuIngress.io.atomicAcquireBarrier.bits, backend.io.robHead.bits.robTag, cfg)
+    m1IssueAge > atomicBarrierAge
   val m0IssueAllowed = !m0BlockedByAcquire
   val m1IssueAllowed = !m1BlockedByAcquire
   for ((queueIssue, candidate, allowed) <- Seq(
