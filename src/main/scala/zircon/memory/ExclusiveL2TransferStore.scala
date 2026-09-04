@@ -142,7 +142,11 @@ class ExclusiveL2TransferStore(
     lineMemories(way).io.writeAddress := lineWriteSet
     lineMemories(way).io.writeData := lineWriteData
   }
-  val replacementWay = RegInit(VecInit.fill(sets)(0.U(wayWidth.W)))
+  // Keep policy state local to D and I insertion traffic. Sharing one
+  // dynamic vector made its bits fan out across both paths and the victim
+  // payload logic; replicated 2-bit state is a negligible area cost.
+  val replacementWayData = RegInit(VecInit.fill(sets)(0.U(wayWidth.W)))
+  val replacementWayInstruction = RegInit(VecInit.fill(sets)(0.U(wayWidth.W)))
 
   val responseValid = RegInit(false.B)
   val responseBits = Reg(new L2LookupResponse(config))
@@ -170,7 +174,7 @@ class ExclusiveL2TransferStore(
   val insertInvalidWays = VecInit((0 until ways).map(way => !lineValid(way)(insertSet)))
   val insertHasInvalidWay = insertInvalidWays.asUInt.orR
   val insertWay = Mux(insertHasInvalidWay, PriorityEncoder(insertInvalidWays.asUInt),
-    replacementWay(insertSet))
+    replacementWayData(insertSet))
   // Decode the selected way once.  The insertion path fans this decision into
   // the victim payload, line metadata updates, and four BRAM write enables;
   // one-hot consumers avoid repeatedly routing the two-bit index through
@@ -201,7 +205,7 @@ class ExclusiveL2TransferStore(
     !lineValid(way)(instructionInsertSet)))
   val instructionInsertWay = Mux(instructionInsertInvalidWays.asUInt.orR,
     PriorityEncoder(instructionInsertInvalidWays.asUInt),
-    replacementWay(instructionInsertSet))
+    replacementWayInstruction(instructionInsertSet))
   val instructionInsertReadWay = Mux(instructionInsertHit,
     instructionInsertHitWay, instructionInsertWay)
   val instructionReplacingValid = lineValid(instructionInsertWay)(instructionInsertSet)
@@ -433,7 +437,9 @@ class ExclusiveL2TransferStore(
         lineTag(way)(insertSet) := insertTag
       }
     }
-    replacementWay(insertSet) := Mux(insertWay === (ways - 1).U,
+    replacementWayData(insertSet) := Mux(insertWay === (ways - 1).U,
+      0.U(wayWidth.W), insertWay + 1.U)
+    replacementWayInstruction(insertSet) := Mux(insertWay === (ways - 1).U,
       0.U(wayWidth.W), insertWay + 1.U)
   }.elsewhen(io.instructionInsert.fire) {
     when(!instructionInsertHit) {
@@ -455,7 +461,9 @@ class ExclusiveL2TransferStore(
           lineTag(way)(instructionInsertSet) := instructionInsertTag
         }
       }
-      replacementWay(instructionInsertSet) := Mux(instructionInsertWay ===
+      replacementWayInstruction(instructionInsertSet) := Mux(instructionInsertWay ===
+        (ways - 1).U, 0.U(wayWidth.W), instructionInsertWay + 1.U)
+      replacementWayData(instructionInsertSet) := Mux(instructionInsertWay ===
         (ways - 1).U, 0.U(wayWidth.W), instructionInsertWay + 1.U)
     }
   }.elsewhen(io.lookup.fire) {

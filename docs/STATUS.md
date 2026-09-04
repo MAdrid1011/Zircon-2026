@@ -1,5 +1,10 @@
 # Zircon-2026 实施状态
 
+2026-09-04 replacement policy fanout replication：`ExclusiveL2TransferStore` 将
+32-set replacement policy 拆为 D/I 两份同步状态，避免单一动态索引网络同时驱动两类
+插入与 victim payload。`ExclusiveL2TransferStoreSpec` `12/12`、`L1DLoadCacheSpec`
+`58/58` 通过，`make verilog` 通过；尚无新 Vivado WNS/utilization 结论。
+
 2026-09-04 固定器件综合预算记录：提交 `10c9928` 在
 `xc7a200tfbg676-2L`、Vivado 2023.1 上完成 RTL/RAM/DSP 映射并进入
 `Start Timing Optimization`，约 20 分钟仍未产生 utilization、WNS 或 checkpoint，
