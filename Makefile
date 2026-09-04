@@ -37,6 +37,7 @@ test-m3-store:
 # unfinished M0 device/atomic owner cannot leak through the executable L1D
 # path, and remains bounded below the five-minute component-simulation gate.
 test-m3-load-boundary:
+	./scripts/sbtw "testOnly zircon.LoadForwardBoundarySpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z inaccessible'
 
 # Six explicit-seed complete-core same-bank merge and same-address resident-hit

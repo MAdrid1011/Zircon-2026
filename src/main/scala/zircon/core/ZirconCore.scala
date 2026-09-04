@@ -14,6 +14,7 @@ import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngin
   AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress,
   ExclusiveL2TransferStore, ExternalCoherenceController, L1DLoadCache,
   HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
+  LoadForwardBoundary,
   OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
@@ -73,6 +74,9 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // contract unchanged, while registering the wide operand/PMA handoff in
   // the integrated core to break the MemIQ-to-LSQ ready chain.
   val lsuIngress = Module(new DualLSUIngress(cfg, registeredOperandBoundary = true))
+  // A non-fall-through boundary prevents L1D bank/MSHR ready from returning
+  // through the LSQ forward-data write-enable cone in the same cycle.
+  val loadForwardBoundary = Seq.fill(cfg.decodeWidth)(Module(new LoadForwardBoundary(cfg)))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
@@ -414,12 +418,16 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // LQ forwards enter the two-port L1D directly; it owns bank conflict and
   // miss-resource backpressure, so an unaccepted payload remains at its LQ.
   for (lane <- 0 until cfg.decodeWidth) {
-    val cacheableLoadForward = lsuIngress.io.loadForward(lane).bits.cacheable
+    loadForwardBoundary(lane).io.input <> lsuIngress.io.loadForward(lane)
+    loadForwardBoundary(lane).io.robHeadTag := lsuRobHeadTag
+    loadForwardBoundary(lane).io.squash := backend.io.squash
+    loadForwardBoundary(lane).io.flush := backend.io.globalFlush
+    val cacheableLoadForward = loadForwardBoundary(lane).io.output.bits.cacheable
     l1dLoadCache.io.request(lane).valid :=
-      lsuIngress.io.loadForward(lane).valid && cacheableLoadForward &&
+      loadForwardBoundary(lane).io.output.valid && cacheableLoadForward &&
         !externalCoherence.io.cacheableIngressBlocked
-    l1dLoadCache.io.request(lane).bits := lsuIngress.io.loadForward(lane).bits
-    lsuIngress.io.loadForward(lane).ready := Mux(cacheableLoadForward,
+    l1dLoadCache.io.request(lane).bits := loadForwardBoundary(lane).io.output.bits
+    loadForwardBoundary(lane).io.output.ready := Mux(cacheableLoadForward,
       l1dLoadCache.io.request(lane).ready &&
         !externalCoherence.io.cacheableIngressBlocked, true.B)
   }
