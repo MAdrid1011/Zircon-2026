@@ -229,12 +229,14 @@ class FloatingMovePipeSpec extends AnyFunSpec with ChiselSim {
             roundingMode = rounding)
           accept(dut)
           dut.io.output.valid.expect(false)
-          dut.clock.step()
-          // FMA keeps the wide align/normalize cone behind a result
-          // register; completion is therefore visible one cycle after the
-          // product capture.
-          dut.io.output.valid.expect(false)
-          dut.clock.step()
+          // FMA keeps alignment, magnitude reduction, and final rounding
+          // behind registered boundaries. Keep the latency assertion bounded
+          // without tying the test to a particular pipeline depth.
+          var cycles = 0
+          while (!dut.io.output.valid.peek().litToBoolean && cycles < 8) {
+            dut.clock.step()
+            cycles += 1
+          }
           dut.io.output.valid.expect(true)
           dut.io.output.bits.writesFloat.expect(true)
           dut.io.output.bits.floatData.expect(expected)

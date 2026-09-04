@@ -1,5 +1,7 @@
 # Zircon-2026 实施状态
 
+2026-09-04 FMA 分阶段时序边界：`FloatingMovePipe` 现在分别寄存 FMA 对齐、幅值/符号归约和最终舍入结果。宽 57-bit priority/shift/add 组合网络不再直达 completion/LSU 输出路径；FMA 延迟在有界窗口内增加。`./scripts/sbtw compile`、`make test-m4-fp-move`（组件 20/20，顶层 RV32F 12/12）及 `make verilog` 均通过。仍需新的固定器件综合/实现结果后才能宣称 LUT 或 WNS 改善。
+
 2026-09-04 针对固定器件时序热点收窄 `FloatingMovePipe` 的 FMA 结果选择：FMA
 只有在 `fmaResultCaptured` 后才会对外 `valid`，因此结果和 flags 现在始终来自已
 注册的 capture，而不再把未选中的 57-bit 对齐/归一化组合锥连接到完成和 LSU 路径。

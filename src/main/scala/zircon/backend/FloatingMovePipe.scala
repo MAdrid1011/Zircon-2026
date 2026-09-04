@@ -100,6 +100,16 @@ class FloatingMovePipe(
   val fmaResultDataReg = RegInit(0.U(32.W))
   val fmaResultFlagsReg = RegInit(0.U(5.W))
   val fmaResultCaptured = RegInit(false.B)
+  // FMA is split into registered alignment, magnitude reduction, and final
+  // rounding stages.  These boundaries keep the wide priority/shift network
+  // from becoming one timing path into the completion fabric.
+  val fmaAlignCaptured = RegInit(false.B)
+  val fmaProductAtCommonTopReg = RegInit(0.U(56.W))
+  val fmaAddendAtCommonTopReg = RegInit(0.U(56.W))
+  val fmaCommonTopCoordReg = RegInit(0.U(11.W))
+  val fmaMagnitudeCaptured = RegInit(false.B)
+  val fmaMagnitudeReg = RegInit(0.U(57.W))
+  val fmaInitialSignReg = RegInit(false.B)
   val sqrtInitialized = RegInit(false.B)
   val sqrtRadicand = Reg(UInt(54.W))
   val sqrtRemainder = Reg(UInt(56.W))
@@ -400,15 +410,18 @@ class FloatingMovePipe(
     fmaAddendTopCoord, fmaProductTopCoord)
   val fmaAddendTopForAlign = Mux(fmaAddendZero,
     fmaProductTopForAlign, fmaAddendTopCoord)
-  val fmaCommonTopCoord = Mux(fmaProductTopForAlign >= fmaAddendTopForAlign,
+  val fmaCommonTopCoordNext = Mux(fmaProductTopForAlign >= fmaAddendTopForAlign,
     fmaProductTopForAlign, fmaAddendTopForAlign)
   val fmaProductAligned = (Cat(0.U(8.W), fmaProduct) <<
     Mux(fmaProduct(47), 5.U(6.W), 6.U(6.W)))(55, 0)
   val fmaAddendAligned = Cat(0.U(3.W), fmaAddendSignificand, 0.U(29.W))
-  val fmaProductAtCommonTop = rightJamMasked(fmaProductAligned,
-    fmaCommonTopCoord - fmaProductTopForAlign, 56)
-  val fmaAddendAtCommonTop = rightJamMasked(fmaAddendAligned,
-    fmaCommonTopCoord - fmaAddendTopForAlign, 56)
+  val fmaProductAtCommonTopNext = rightJamMasked(fmaProductAligned,
+    fmaCommonTopCoordNext - fmaProductTopForAlign, 56)
+  val fmaAddendAtCommonTopNext = rightJamMasked(fmaAddendAligned,
+    fmaCommonTopCoordNext - fmaAddendTopForAlign, 56)
+  val fmaProductAtCommonTop = fmaProductAtCommonTopReg
+  val fmaAddendAtCommonTop = fmaAddendAtCommonTopReg
+  val fmaCommonTopCoord = fmaCommonTopCoordReg
   val fmaProductEffectiveSign = fmaProductSign
   val fmaAddendEffectiveSign = fmaAddend(31) ^ fmaAddendSubtracted
   val fmaSameSign = fmaProductEffectiveSign === fmaAddendEffectiveSign
@@ -417,10 +430,12 @@ class FloatingMovePipe(
   val fmaMagnitudeDifference = Mux(fmaProductAtCommonTop >= fmaAddendAtCommonTop,
     Cat(0.U(1.W), fmaProductAtCommonTop) - Cat(0.U(1.W), fmaAddendAtCommonTop),
     Cat(0.U(1.W), fmaAddendAtCommonTop) - Cat(0.U(1.W), fmaProductAtCommonTop))
-  val fmaMagnitude = Mux(fmaSameSign, fmaMagnitudeSum, fmaMagnitudeDifference)
-  val fmaInitialSign = Mux(fmaSameSign, fmaProductEffectiveSign,
+  val fmaMagnitudeNext = Mux(fmaSameSign, fmaMagnitudeSum, fmaMagnitudeDifference)
+  val fmaInitialSignNext = Mux(fmaSameSign, fmaProductEffectiveSign,
     Mux(fmaProductAtCommonTop >= fmaAddendAtCommonTop,
       fmaProductEffectiveSign, fmaAddendEffectiveSign))
+  val fmaMagnitude = fmaMagnitudeReg
+  val fmaInitialSign = fmaInitialSignReg
   val fmaLeadingZeros = PriorityEncoder(Reverse(fmaMagnitude))
   val fmaLeadingBit = 56.U(6.W) - fmaLeadingZeros
   val fmaNormalized = Mux(fmaLeadingBit >= 26.U,
@@ -860,6 +875,8 @@ class FloatingMovePipe(
     resultPending := false.B
     divInitialized := false.B
     fmaInitialized := false.B
+    fmaAlignCaptured := false.B
+    fmaMagnitudeCaptured := false.B
     fmaResultCaptured := false.B
     sqrtInitialized := false.B
   }.elsewhen(io.squash.valid) {
@@ -867,6 +884,9 @@ class FloatingMovePipe(
       active := false.B
       divInitialized := false.B
       fmaInitialized := false.B
+      fmaAlignCaptured := false.B
+      fmaMagnitudeCaptured := false.B
+      fmaResultCaptured := false.B
       sqrtInitialized := false.B
     }
     when(pendingYounger) { resultPending := false.B }
@@ -898,6 +918,8 @@ class FloatingMovePipe(
         io.input.bits.operation === FloatingOperation.FmsubS ||
         io.input.bits.operation === FloatingOperation.FnmsubS ||
         io.input.bits.operation === FloatingOperation.FnmaddS)
+      fmaAlignCaptured := false.B
+      fmaMagnitudeCaptured := false.B
       fmaResultCaptured := false.B
     }
     when(active && division && !divInitialized) {
@@ -927,7 +949,18 @@ class FloatingMovePipe(
       fmaProductZero := fmaProductRawZero
       fmaProductInfinity := lhsInfinity || rhsInfinity
     }
-    when(active && fma && fmaInitialized && !fmaResultCaptured) {
+    when(active && fma && fmaInitialized && !fmaAlignCaptured) {
+      fmaProductAtCommonTopReg := fmaProductAtCommonTopNext
+      fmaAddendAtCommonTopReg := fmaAddendAtCommonTopNext
+      fmaCommonTopCoordReg := fmaCommonTopCoordNext
+      fmaAlignCaptured := true.B
+    }
+    when(active && fma && fmaAlignCaptured && !fmaMagnitudeCaptured) {
+      fmaMagnitudeReg := fmaMagnitudeNext
+      fmaInitialSignReg := fmaInitialSignNext
+      fmaMagnitudeCaptured := true.B
+    }
+    when(active && fma && fmaMagnitudeCaptured && !fmaResultCaptured) {
       fmaResultDataReg := fmaResultData
       fmaResultFlagsReg := fmaFlags
       fmaResultCaptured := true.B
