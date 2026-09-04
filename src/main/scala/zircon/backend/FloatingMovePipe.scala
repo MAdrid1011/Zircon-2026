@@ -777,8 +777,11 @@ class FloatingMovePipe(
   result.flags := 0.U
   when(fma) {
     result.writesFloat := true.B
-    result.floatData := Mux(fmaResultCaptured, fmaResultDataReg, fmaResultData)
-    result.flags := Mux(fmaResultCaptured, fmaResultFlagsReg, fmaFlags)
+    // FMA output is valid only after the registered capture below. Driving
+    // the result exclusively from that register keeps the wide align,
+    // normalize, and rounding cone out of the completion/LSU path.
+    result.floatData := fmaResultDataReg
+    result.flags := fmaResultFlagsReg
   }.elsewhen(multiplication) {
     result.writesFloat := true.B
     result.floatData := multiplicationResultData

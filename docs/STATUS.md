@@ -1,5 +1,11 @@
 # Zircon-2026 实施状态
 
+2026-09-04 针对固定器件时序热点收窄 `FloatingMovePipe` 的 FMA 结果选择：FMA
+只有在 `fmaResultCaptured` 后才会对外 `valid`，因此结果和 flags 现在始终来自已
+注册的 capture，而不再把未选中的 57-bit 对齐/归一化组合锥连接到完成和 LSU 路径。
+`make test-m4-fp-move` 的组件 `20/20` 与顶层 RV32F 聚焦场景 `12/12` 均通过。
+需要新一轮固定器件综合确认实际 LUT/WNS 变化。
+
 2026-09-04 修复真实 picotest 暴露的 store-load 顺序漏洞：MemIssueQueue、M0
 request arbiter、MemoryQueueIngress、DualLSUIngress 和 ZirconCore 现在共同阻止
 年轻 M0/M1 load 越过尚未准备好或尚未完成 LSQ 更新的老 store，并覆盖老 store
