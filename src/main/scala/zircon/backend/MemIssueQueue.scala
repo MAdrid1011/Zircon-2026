@@ -110,12 +110,17 @@ class MemIssueQueue(
   private def readyForIssue(index: Int): Bool =
     entryValid(index) && allSourcesReady(readyEntries(index))
 
+  // Reduce the store-order barrier once. The previous implementation rebuilt
+  // an age comparison against every store slot for every load candidate
+  // (64+ comparators in the eight-entry queue), which dominated the integrated
+  // MemIQ/LSU selection cone. Only the oldest live store can constrain a load.
+  val storeCandidates = (0 until entries).map(index =>
+    entryValid(index) && entryUop(index).uopClass === UopClass.Store)
+  val (oldestStoreValid, oldestStoreIndex) = selectOldest(storeCandidates)
+  val oldestStoreTag = entryUop(oldestStoreIndex).robTag
   private def olderStoreInQueue(index: Int): Bool =
-    (0 until entries).map(storeIndex =>
-      entryValid(storeIndex) &&
-        entryUop(storeIndex).uopClass === UopClass.Store &&
-        !ROBTagOrder.isYounger(entryUop(storeIndex).robTag,
-          entryUop(index).robTag, io.robHeadTag, config)).reduce(_ || _)
+    oldestStoreValid && !ROBTagOrder.isYounger(oldestStoreTag,
+      entryUop(index).robTag, io.robHeadTag, config)
 
   // aq/rl remains authoritative in the ROB execution context. Before an
   // atomic reaches that context, however, its compact MemIQ record must stop

@@ -1,5 +1,10 @@
 # Zircon-2026 实施状态
 
+2026-09-04 MemIQ store-barrier reduction：`MemIssueQueue` 先用一个平衡年龄树
+选出最老 live store，再让 load 候选只与该 barrier tag 比较，去掉每个 load 对全部
+store 槽位的重复扫描。`MemIssueQueueSpec` `8/8`、`IntegerIssueQueueSpec` `4/4`
+通过，compile 通过；本轮后台 Vivado 综合基于前一提交运行，下一轮将包含该改动。
+
 2026-09-04 replacement policy fanout replication：`ExclusiveL2TransferStore` 将
 32-set replacement policy 拆为 D/I 两份同步状态，避免单一动态索引网络同时驱动两类
 插入与 victim payload。`ExclusiveL2TransferStoreSpec` `12/12`、`L1DLoadCacheSpec`
