@@ -138,7 +138,7 @@ class IntegerDispatchRecoveryBackend(
   dispatch.io.bdbAllocate <> recovery.io.allocate
   dispatch.io.bdbAllocatedIndex := recovery.io.allocatedIndex
   recovery.io.resolve <> execution.io.branchResolve
-  recovery.io.robHeadTag := execution.io.robHeadTag
+  recovery.io.robHeadTag := execution.io.scheduledRobHeadTag
   recovery.io.robRollback <> execution.io.rollback
   recovery.io.robRollbackDone := execution.io.rollbackDone
   recovery.io.commit <> io.branchCommit
@@ -179,7 +179,7 @@ class IntegerDispatchRecoveryBackend(
     execution.io.commit(lane).ready := io.commit(lane).ready
   }
 
-  firstFault.io.robHeadTag := execution.io.robHeadTag
+  firstFault.io.robHeadTag := execution.io.scheduledRobHeadTag
   firstFault.io.headAdvance := PopCount(io.commit.map(_.fire))
   for (lane <- 0 until config.decodeWidth) {
     firstFault.io.candidates(lane) := dispatch.io.faultCandidate(lane)
@@ -213,7 +213,8 @@ class IntegerDispatchRecoveryBackend(
       commit.bits.entry.decoded.csrAddress === MachineCSRAddress.Fcsr.U)).reduce(_ || _)
   val controlWriteSquashed = recovery.io.squash.valid &&
     floatingAdmissionBlocked && ROBTagOrder.isYounger(
-      floatingControlTag, recovery.io.squash.bits, execution.io.robHeadTag, config)
+      floatingControlTag, recovery.io.squash.bits,
+      execution.io.scheduledRobHeadTag, config)
   when(io.globalFlush) {
     floatingAdmissionBlocked := false.B
   }.elsewhen(floatingControlRetires || controlWriteSquashed) {

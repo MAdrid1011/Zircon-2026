@@ -67,6 +67,9 @@ class IntegerExecutionBackend(
     val rollbackActive = Output(Bool())
     val rollbackDone = Output(Bool())
     val robHeadTag = Output(UInt(config.robTagWidth.W))
+    // One-cycle head snapshot for age-only scheduling and recovery consumers.
+    // The ROB/commit interface above remains live and architecturally exact.
+    val scheduledRobHeadTag = Output(UInt(config.robTagWidth.W))
     val robHead = Output(Valid(new ROBCommit(config)))
     val robCount = Output(UInt(robCountWidth.W))
 
@@ -93,9 +96,15 @@ class IntegerExecutionBackend(
   io.robHead := state.io.robHead
   io.robCount := state.io.robCount
 
+  // Keep ROB head movement out of the issue/operand/fault combinational
+  // domain. Relative age ordering of live tags is invariant across this
+  // bounded snapshot lag; generation checks continue to reject stale work.
+  val scheduledRobHeadTag = RegNext(state.io.robHeadTag)
+  io.scheduledRobHeadTag := scheduledRobHeadTag
+
   issue.io.enqueue <> io.intEnqueue
   issue.io.wakeup := state.io.wakeup
-  issue.io.robHeadTag := state.io.robHeadTag
+  issue.io.robHeadTag := scheduledRobHeadTag
   issue.io.squash := io.squash
   issue.io.flush := io.flush
   io.intCapacity := issue.io.enqueueCapacity
@@ -121,7 +130,7 @@ class IntegerExecutionBackend(
 
   shortPipes.io.e0 <> operandRead.io.execute(0)
   shortPipes.io.e1 <> operandRead.io.execute(1)
-  shortPipes.io.robHeadTag := state.io.robHeadTag
+  shortPipes.io.robHeadTag := scheduledRobHeadTag
   shortPipes.io.squash := io.squash
   shortPipes.io.recoveryActive := io.recoveryActive
   shortPipes.io.flush := io.flush

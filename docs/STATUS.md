@@ -1,5 +1,16 @@
 # Zircon-2026 实施状态
 
+2026-09-05 backend 时序隔离续作：固定器件 `xc7a200tfbg676-2L` 的提交
+`7be7aaa` 完整 post-route 实测 WNS `-59.628 ns`、TNS
+`-1,850,192.202 ns`，62,698 个 setup 端点失败；LUT `66,565/134,600`
+（逻辑 LUT 49.50%）、FF `32,744/269,200`、BRAM tile `133`、DSP `4`。最差路径仍由
+ROB live `headIndex` 进入 FirstFault/IntIQ/operand 域，119--120 级，说明
+外层 E2/LSU 边界不足。当前已在 `IntegerExecutionBackend` 内将 issue、短执行、
+branch recovery、FirstFault 改用一拍 head 快照，并将 `IntegerRename` 的 64 位
+free-mask PopCount 替换为窄事件计数器；`compile`、backend 9/9、
+`make platform-verilog`、ZirconSim trace 构建均通过。新的固定器件实现尚未完成，
+因此不宣称 WNS 改善或 100 MHz 达标。
+
 2026-09-04 E2 组合锥结构重构：固定器件 `xc7a200tfbg676-2L`、Vivado 2023.1 的完整
 post-route 报告（`fpga/runs/impl-981d4e0`）确认 WNS `-92.911 ns`、TNS
 `-2,212,998.750 ns`，58,409/72,622 个 setup 端点失败；前 20 条路径全部从

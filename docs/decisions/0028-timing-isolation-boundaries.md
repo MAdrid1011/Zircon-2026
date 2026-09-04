@@ -70,3 +70,18 @@ two-wide boundary capacity to remove queue occupancy from the ROB/rename
 feedback cone. The `enableM2Observation` configuration is compile-time
 transparent and retains the original direct queue wiring for cycle-accurate
 start-mask tests.
+
+## Measured follow-up (2026-09-05)
+
+The complete implementation of commit `7be7aaa` on `xc7a200tfbg676-2L`
+completed with WNS `-59.628 ns`, TNS `-1,850,192.202 ns`, and 62,698 failing
+setup endpoints. The worst path was still a 119-level live-ROB-head cone
+reaching FirstFault and issue state, showing that outer boundaries did not
+isolate the internal integer backend.
+
+The follow-up adds a registered head snapshot inside `IntegerExecutionBackend`
+and feeds it to IntIQ, short pipes, branch recovery, and FirstFault; live
+ROB/commit signals remain unchanged. `IntegerRename` also maintains a narrow
+event-updated free-register counter instead of a 64-bit PopCount in dispatch
+ready logic. A fresh fixed-target post-route run is required before claiming
+timing improvement.

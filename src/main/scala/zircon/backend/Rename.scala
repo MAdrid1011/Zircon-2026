@@ -57,11 +57,18 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
   val committedMap = RegInit(VecInit.tabulate(32)(index => index.U(physicalWidth.W)))
   val speculativeFree = RegInit(initialFreeMask.U(physicalRegisters.W))
   val committedFree = RegInit(initialFreeMask.U(physicalRegisters.W))
+  // Keep free-register population in a narrow counter.  Recomputing a
+  // 64-bit PopCount in the admission path fans into frontend backpressure and
+  // makes rename availability part of the longest global control cone.
+  private val freeCountWidth = log2Ceil(physicalRegisters + 1)
+  val initialFreeCount = initialFreeMask.bitCount.U(freeCountWidth.W)
+  val speculativeFreeCount = RegInit(initialFreeCount)
+  val committedFreeCount = RegInit(initialFreeCount)
 
   val allocate = VecInit(io.request.map(request =>
     request.valid && request.writesRd && request.rd =/= 0.U))
   val requiredPhysical = PopCount(allocate)
-  val normalCanAllocate = PopCount(speculativeFree) >= requiredPhysical
+  val normalCanAllocate = speculativeFreeCount >= requiredPhysical
   io.canAllocate := normalCanAllocate && !io.rollback.valid &&
     !io.flushToCommitted
 
@@ -124,6 +131,12 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
   }.reduce(_ | _)
   val speculativeFreeAfterNormalOperation =
     (speculativeFree | releasedMask) & ~allocationMask
+
+  val committedReleaseCount = PopCount(io.commit.map(commit =>
+    commit.valid && commit.oldPhysical =/= 0.U))
+  val normalAllocationCount = PopCount(allocate.map(_ && io.canAllocate))
+  val speculativeFreeCountAfterNormal =
+    speculativeFreeCount + committedReleaseCount - normalAllocationCount
 
   val speculativeMapAfterLane0 = WireDefault(speculativeMap)
   when(doRename && allocate(0)) {
@@ -193,6 +206,16 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
     io.rollback.bits.records(0), rollbackRecordValid(0))
   val rollbackFreeAfterLane1 = undoFreeMask(rollbackFreeAfterLane0,
     io.rollback.bits.records(1), rollbackRecordValid(1))
+  val rollbackAllocationCount = PopCount(rollbackRecordValid)
+  val speculativeFreeCountAfterRollback =
+    speculativeFreeCount + rollbackAllocationCount
+
+  // A committed mapping normally replaces an already-held old mapping, so
+  // free population is unchanged.  Keep the p0 case explicit for robustness
+  // even though architectural writes to x0 are rejected above.
+  val committedFreeCountAfter = committedFreeCount -
+    PopCount(io.commit.map(commit =>
+      commit.valid && commit.oldPhysical === 0.U))
 
   when(io.rollback.valid) {
     assert(io.rollback.bits.count >= 1.U && io.rollback.bits.count <= 2.U,
@@ -214,15 +237,19 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
 
   committedMap := committedMapAfterLane1
   committedFree := committedFreeAfterLane1
+  committedFreeCount := committedFreeCountAfter
   when(io.flushToCommitted) {
     speculativeMap := committedMapAfterLane1
     speculativeFree := committedFreeAfterLane1
+    speculativeFreeCount := committedFreeCountAfter
   }.elsewhen(rollbackFire) {
     speculativeMap := rollbackMapAfterLane1
     speculativeFree := rollbackFreeAfterLane1
+    speculativeFreeCount := speculativeFreeCountAfterRollback
   }.otherwise {
     speculativeMap := speculativeMapAfterLane1
     speculativeFree := speculativeFreeAfterNormalOperation
+    speculativeFreeCount := speculativeFreeCountAfterNormal
   }
 
   assert(speculativeMap(0) === 0.U && committedMap(0) === 0.U,
@@ -242,5 +269,5 @@ class IntegerRename(config: ZirconCoreConfig) extends Module {
   io.committedMap := committedMap
   io.speculativeFree := speculativeFree
   io.committedFree := committedFree
-  io.freeCount := PopCount(speculativeFree)
+  io.freeCount := speculativeFreeCount
 }
