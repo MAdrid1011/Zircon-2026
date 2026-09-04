@@ -105,21 +105,41 @@ class UnifiedCompletionArbiter(
     val flush = Input(Bool())
   })
 
-  private def ageFromHead(tag: UInt): UInt =
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
+  // Both output selections use the same ROB-distance values.  Materialize
+  // them once so the common completion path does not replicate comparators.
+  val inputAge = VecInit(io.inputs.map(input =>
+    ROBTagOrder.ageFromHead(input.bits.robTag, io.robHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
-    var selectedValid: Bool = false.B
-    var selectedIndex: UInt = 0.U(endpointIndexWidth.W)
-    var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
-    for (index <- 0 until endpointCount) {
-      val candidateAge = ageFromHead(io.inputs(index).bits.robTag)
-      val take = candidates(index) && (!selectedValid || candidateAge < selectedAge)
-      selectedIndex = Mux(take, index.U, selectedIndex)
-      selectedAge = Mux(take, candidateAge, selectedAge)
-      selectedValid = selectedValid || candidates(index)
+    // Use a balanced tournament instead of a serial five-input fold.  Left
+    // wins equal ages, preserving the previous deterministic endpoint order.
+    var valid = candidates.toVector
+    var indices = (0 until endpointCount).map(_.U(endpointIndexWidth.W)).toVector
+    var ages = inputAge.toVector
+    while (valid.length > 1) {
+      val nextValid = Vector.newBuilder[Bool]
+      val nextIndices = Vector.newBuilder[UInt]
+      val nextAges = Vector.newBuilder[UInt]
+      var pair = 0
+      while (pair < valid.length) {
+        if (pair + 1 == valid.length) {
+          nextValid += valid(pair)
+          nextIndices += indices(pair)
+          nextAges += ages(pair)
+        } else {
+          val rightWins = valid(pair + 1) &&
+            (!valid(pair) || ages(pair + 1) < ages(pair))
+          nextValid += (valid(pair) || valid(pair + 1))
+          nextIndices += Mux(rightWins, indices(pair + 1), indices(pair))
+          nextAges += Mux(rightWins, ages(pair + 1), ages(pair))
+        }
+        pair += 2
+      }
+      valid = nextValid.result()
+      indices = nextIndices.result()
+      ages = nextAges.result()
     }
-    (selectedValid, selectedIndex)
+    (valid.head, indices.head)
   }
 
   val (firstValid, firstIndex) = selectOldest(io.inputs.map(_.valid))
