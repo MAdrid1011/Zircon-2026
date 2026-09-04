@@ -3,7 +3,8 @@
 2026-09-05 backend 时序隔离续作：固定器件 `xc7a200tfbg676-2L` 的提交
 `7be7aaa` 完整 post-route 实测 WNS `-59.628 ns`、TNS
 `-1,850,192.202 ns`，62,698 个 setup 端点失败；LUT `66,565/134,600`
-（逻辑 LUT 49.50%）、FF `32,744/269,200`、BRAM tile `133`、DSP `4`。最差路径仍由
+（逻辑 LUT `66,229/133,800`，Slice LUT `66,565/133,800`）、FF
+`32,744/269,200`、BRAM tile `133`、DSP `4`。最差路径仍由
 ROB live `headIndex` 进入 FirstFault/IntIQ/operand 域，119--120 级，说明
 外层 E2/LSU 边界不足。当前已在 `IntegerExecutionBackend` 内将 issue、短执行、
 branch recovery、FirstFault 改用一拍 head 快照，并将 `IntegerRename` 的 64 位
