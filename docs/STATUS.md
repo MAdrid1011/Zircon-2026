@@ -12,6 +12,15 @@ free-mask PopCount 替换为窄事件计数器；`compile`、backend 9/9、
 `make platform-verilog`、ZirconSim trace 构建均通过。新的固定器件实现尚未完成，
 因此不宣称 WNS 改善或 100 MHz 达标。
 
+2026-09-05 fault/wakeup 边界复核：提交 `128d81b` 在固定器件 synthesis-only
+下完成，LUT `65,754/134,600`（48.85%，逻辑 LUT 48.60%）、FF `32,801/269,200`
+（12.18%）、BRAM tile `133/365`、DSP `4/740`，0 errors/0 critical warnings。
+相对前一 synthesis 约增加 400 LUT；该提交的完整 implementation 在
+`9e6fc83` 版本曾因布线拥塞中止，route 中间 WNS `-65.163 ns`，因此没有
+post-route 通过结论。place 路径确认最差 `entryComplete_9 -> FirstFault`
+为 130 级、`-64.900 ns`，当前已加入生产专用 E0 fault candidate 与 IntIQ
+wakeup 寄存边界；backend 3/3、CoreShell RV32I 1/1、compile 通过。
+
 2026-09-04 E2 组合锥结构重构：固定器件 `xc7a200tfbg676-2L`、Vivado 2023.1 的完整
 post-route 报告（`fpga/runs/impl-981d4e0`）确认 WNS `-92.911 ns`、TNS
 `-2,212,998.750 ns`，58,409/72,622 个 setup 端点失败；前 20 条路径全部从

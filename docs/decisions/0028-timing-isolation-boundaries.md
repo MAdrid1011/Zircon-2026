@@ -85,3 +85,12 @@ ROB/commit signals remain unchanged. `IntegerRename` also maintains a narrow
 event-updated free-register counter instead of a 64-bit PopCount in dispatch
 ready logic. A fresh fixed-target post-route run is required before claiming
 timing improvement.
+
+The subsequent `9e6fc83` full implementation did not complete routing: the
+router oscillated between 41,224 and 24,826 overlap nodes and was interrupted
+after 37 minutes. Its place checkpoint measured `entryComplete_9` to
+`FirstFault.recordReg_robTag` at 130 levels and `-64.900 ns` WNS. Commit
+`128d81b` therefore adds a production-only registered E0 fault candidate and
+registered IntIQ wakeup; synthesis-only maps to 65,754 LUTs, 32,801 FFs, 133
+BRAM tiles, and 4 DSPs. These are structural/timing-progress data, not a
+100-MHz release result.
