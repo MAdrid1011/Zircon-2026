@@ -91,6 +91,8 @@ class MemoryLoadResult(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
   val floatingDestination = UInt(5.W)
   val writesFloat = Bool()
   val m1Owner = Bool()
+  /** Effective byte address is retained so narrow loads select their lane. */
+  val address = UInt(32.W)
   val accessSize = UInt(2.W)
   val unsignedLoad = Bool()
   val data = UInt(32.W)

@@ -25,8 +25,16 @@ class MemoryLoadCompletion(
   })
 
   val buffer = Module(new CompletionBuffer(config, depth = 2))
-  val byte = io.loadResult.bits.data(7, 0)
-  val half = io.loadResult.bits.data(15, 0)
+  // Cache and forwarding data are word aligned.  Narrow loads retain the
+  // effective address so the architectural byte/halfword lane is selected
+  // before sign or zero extension.
+  val byte = MuxLookup(io.loadResult.bits.address(1, 0),
+    io.loadResult.bits.data(7, 0))(Seq(
+      1.U -> io.loadResult.bits.data(15, 8),
+      2.U -> io.loadResult.bits.data(23, 16),
+      3.U -> io.loadResult.bits.data(31, 24)))
+  val half = Mux(io.loadResult.bits.address(1),
+    io.loadResult.bits.data(31, 16), io.loadResult.bits.data(15, 0))
   val byteExtended = Mux(io.loadResult.bits.unsignedLoad,
     Cat(0.U(24.W), byte), Cat(Fill(24, byte(7)), byte))
   val halfExtended = Mux(io.loadResult.bits.unsignedLoad,

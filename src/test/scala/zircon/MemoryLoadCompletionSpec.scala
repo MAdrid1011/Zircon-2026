@@ -11,6 +11,7 @@ class MemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
     dut.io.loadResult.bits.destinationPhysical.poke(32)
     dut.io.loadResult.bits.writesInteger.poke(true)
     dut.io.loadResult.bits.m1Owner.poke(false)
+    dut.io.loadResult.bits.address.poke(0)
     dut.io.loadResult.bits.accessSize.poke(2)
     dut.io.loadResult.bits.unsignedLoad.poke(false)
     dut.io.loadResult.bits.data.poke(0)
@@ -36,13 +37,15 @@ class MemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
       destination: Int,
       size: Int,
       unsigned: Boolean,
-      data: BigInt
+      data: BigInt,
+      address: BigInt = 0
   ): Unit = {
     dut.io.loadResult.valid.poke(true)
     dut.io.loadResult.bits.robTag.poke(tag)
     dut.io.loadResult.bits.destinationPhysical.poke(destination)
     dut.io.loadResult.bits.writesInteger.poke(true)
     dut.io.loadResult.bits.m1Owner.poke(false)
+    dut.io.loadResult.bits.address.poke(address)
     dut.io.loadResult.bits.accessSize.poke(size)
     dut.io.loadResult.bits.unsignedLoad.poke(unsigned)
     dut.io.loadResult.bits.data.poke(data)
@@ -69,6 +72,28 @@ class MemoryLoadCompletionSpec extends AnyFunSpec with ChiselSim {
         dut.io.completion.valid.expect(true)
         dut.io.completion.bits.robTag.expect(5)
         dut.io.completion.bits.data.expect(BigInt("00008001", 16))
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+
+        result(dut, tag = 6, destination = 34, size = 0, unsigned = false,
+          data = BigInt("1234ff80", 16), address = 1)
+        dut.io.loadResult.bits.address.expect(1)
+        dut.io.loadResult.bits.accessSize.expect(0)
+        dut.io.loadResult.bits.unsignedLoad.expect(false)
+        dut.io.loadResult.bits.data.expect(BigInt("1234ff80", 16))
+        dut.io.loadResult.ready.expect(true)
+        dut.clock.step()
+        dut.io.loadResult.valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.data.expect(BigInt("ffffffff", 16))
+
+        result(dut, tag = 7, destination = 35, size = 1, unsigned = true,
+          data = BigInt("12348001", 16), address = 2)
+        dut.io.loadResult.ready.expect(true)
+        dut.clock.step()
+        dut.io.loadResult.valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.data.expect(BigInt("00001234", 16))
       }
     }
 

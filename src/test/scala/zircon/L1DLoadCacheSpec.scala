@@ -594,6 +594,40 @@ class L1DLoadCacheSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("updates an L2-hit line across consecutive byte store hits") {
+      simulate(new L1DLoadCache) { dut =>
+        clear(dut)
+        val line = BigInt("80003000", 16)
+        val words = Seq.fill(8)(BigInt("efefefef", 16))
+        submit(dut, tag = 1, line)
+        dut.io.l2Lookup.ready.poke(true)
+        dut.clock.step()
+        dut.io.l2Lookup.ready.poke(false)
+        dut.io.l2Response.valid.poke(true)
+        dut.io.l2Response.bits.hit.poke(true)
+        dut.io.l2Response.bits.transfer.lineAddress.poke(line)
+        dut.io.l2Response.bits.transfer.dirty.poke(false)
+        words.foreach(word => dut.io.l2Response.bits.transfer.lineData(words.indexOf(word)).poke(word))
+        dut.clock.step()
+        dut.io.l2Response.valid.poke(false)
+        dut.io.completion.ready.poke(true)
+        dut.clock.step()
+        dut.io.completion.ready.poke(false)
+
+        submitStore(dut, tag = 2, line, mask = 1, data = BigInt("000000aa", 16))
+        consumeStoreResult(dut, tag = 2, line)
+        submitStore(dut, tag = 3, line + 1, mask = 2, data = 0)
+        consumeStoreResult(dut, tag = 3, line + 1)
+
+        presentLoad(dut, lane = 0, tag = 4, address = line + 1)
+        dut.io.request(0).ready.expect(true)
+        dut.clock.step()
+        dut.io.request(0).valid.poke(false)
+        dut.io.completion.valid.expect(true)
+        dut.io.completion.bits.cacheData.expect(BigInt("efef00aa", 16))
+      }
+    }
+
     it("accepts two hit loads from different word banks and retains both exact results") {
       simulate(new L1DLoadCache) { dut =>
         clear(dut)

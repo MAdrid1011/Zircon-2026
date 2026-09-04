@@ -4105,6 +4105,62 @@ class CoreShellSpec extends AnyFunSpec with ChiselSim {
       }
     }
 
+    it("updates a resident cache line for a zero byte store before an immediate load") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val line = BigInt("80001000", 16)
+        val initialWord = BigInt("efefefef", 16)
+        val program = Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("0000a103", 16), // lw x2,0(x1), preload
+          ResetVector + 8 -> BigInt("00000113", 16), // addi x2,x0,0
+          ResetVector + 12 -> BigInt("002080a3", 16), // sb x2,1(x1)
+          ResetVector + 16 -> BigInt("00108183", 16), // lb x3,1(x1)
+          ResetVector + 20 -> BigInt("00100073", 16), // ebreak
+          line -> initialWord)
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 768))
+        val store = events.find(_.pc == ResetVector + 12).getOrElse(
+          fail(s"resident zero byte store did not retire: trace=$events"))
+        val load = events.find(_.pc == ResetVector + 16).getOrElse(
+          fail(s"resident zero byte load did not retire: trace=$events"))
+        assert(store.memoryAddress == line + 1 && store.memoryWriteMask == 2 &&
+          store.memoryWriteData == 0 && !store.trap)
+        assert(load.gprWrite && load.gprAddress == 3 && load.gprData == 0 &&
+          load.memoryAddress == line + 1 && load.memoryReadMask == 2 &&
+          load.memoryReadData == 0 && !load.trap)
+      }
+    }
+
+    it("keeps a store-miss line coherent across two adjacent byte stores") {
+      simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,
+        enableM2Observation = true))) { dut =>
+        clearInputs(dut)
+        val line = BigInt("80001000", 16)
+        val initialWord = BigInt("efefefef", 16)
+        val program = Map(
+          ResetVector -> BigInt("800010b7", 16), // lui x1,0x80001
+          ResetVector + 4 -> BigInt("0aa00113", 16), // addi x2,x0,0xaa
+          ResetVector + 8 -> BigInt("00208023", 16), // sb x2,0(x1)
+          ResetVector + 12 -> BigInt("00008183", 16), // lb x3,0(x1)
+          ResetVector + 16 -> BigInt("00000113", 16), // addi x2,x0,0
+          ResetVector + 20 -> BigInt("002080a3", 16), // sb x2,1(x1)
+          ResetVector + 24 -> BigInt("00108183", 16), // lb x3,1(x1)
+          ResetVector + 28 -> BigInt("00100073", 16), // ebreak
+          line -> initialWord)
+        val events = throughFirstTrap(runProgram(dut, program, cycles = 1024))
+        val secondStore = events.find(_.pc == ResetVector + 20).getOrElse(
+          fail(s"second byte store did not retire: trace=$events"))
+        val secondLoad = events.find(_.pc == ResetVector + 24).getOrElse(
+          fail(s"second byte load did not retire: trace=$events"))
+        assert(secondStore.memoryAddress == line + 1 && secondStore.memoryWriteMask == 2 &&
+          secondStore.memoryWriteData == 0 && !secondStore.trap)
+        assert(secondLoad.gprWrite && secondLoad.gprAddress == 3 && secondLoad.gprData == 0 &&
+          secondLoad.memoryAddress == line + 1 && secondLoad.memoryReadMask == 2 &&
+          secondLoad.memoryReadData == 0 && !secondLoad.trap)
+      }
+    }
+
     it("merges an older halfword store forward with a cacheable refill") {
       for (seed <- M3PartialStoreForwardSeeds) {
         simulate(new ZirconCore(ZirconCoreConfig.default.copy(enableTrace = true,

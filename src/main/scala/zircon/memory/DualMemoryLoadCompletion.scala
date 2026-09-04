@@ -50,6 +50,7 @@ class DualMemoryLoadCompletion(
   atomicAsLoadResult.floatingDestination := 0.U
   atomicAsLoadResult.writesFloat := false.B
   atomicAsLoadResult.m1Owner := false.B
+  atomicAsLoadResult.address := 0.U
   atomicAsLoadResult.accessSize := 2.U
   atomicAsLoadResult.unsignedLoad := false.B
   atomicAsLoadResult.data := io.atomicResult.bits.data

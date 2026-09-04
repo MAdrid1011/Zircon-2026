@@ -50,8 +50,12 @@ class BankedBranchTargetBuffer(
 
   private val entryWidth = 1 + 25 + 32 + 1 + 1 + 1
   private val storageWidth = 64
-  val arrays = Seq.tabulate(banksCount, waysCount)((_, _) =>
-    Module(new BranchTargetMemory(rowsPerBank, storageWidth)))
+  // Pack the two ways into one physical RAM per bank.  Keeping both ways in
+  // the same read word removes eight tiny distributed-RAM instances and their
+  // replicated address/decode muxes.  A training write preserves the other
+  // way using the old read word (the RAM is read-first).
+  val arrays = Seq.tabulate(banksCount)((_) =>
+    Module(new BranchTargetMemory(rowsPerBank, storageWidth * waysCount)))
   val replacement = RegInit(VecInit.fill(banksCount)(
     VecInit.fill(rowsPerBank)(false.B)))
   val scrubbing = RegInit(true.B)
@@ -78,11 +82,13 @@ class BankedBranchTargetBuffer(
     val trainingThisBank = training && trainBank === bank.U
     val readRow = Mux(trainingThisBank, trainRow, queryRowForBank)
 
+    arrays(bank).io.clk := clock
+    arrays(bank).io.readAddress := readRow
+    val packedRead = arrays(bank).io.readData
     for (way <- 0 until waysCount) {
-      arrays(bank)(way).io.clk := clock
-      arrays(bank)(way).io.readAddress := readRow
-      bankReads(bank)(way) := arrays(bank)(way).io.readData(entryWidth - 1, 0).asTypeOf(
-        new BranchTargetEntry)
+      bankReads(bank)(way) := packedRead(
+        way * storageWidth + entryWidth - 1,
+        way * storageWidth).asTypeOf(new BranchTargetEntry)
     }
 
     assert(PopCount(slotMatches) === 1.U,
@@ -108,18 +114,18 @@ class BankedBranchTargetBuffer(
   trainedEntry.call := io.train.bits.call
   trainedEntry.ret := io.train.bits.ret
 
+  val trainedStorage = Cat(0.U((storageWidth - entryWidth).W), trainedEntry.asUInt)
   for (bank <- 0 until banksCount) {
-    for (way <- 0 until waysCount) {
-      arrays(bank)(way).io.writeEnable := training && trainBank === bank.U &&
-        trainWay === way.U
-      arrays(bank)(way).io.writeAddress := trainRow
-      arrays(bank)(way).io.writeData := Cat(0.U((storageWidth - entryWidth).W),
-        trainedEntry.asUInt)
-      when(scrubbing && !io.invalidate) {
-        arrays(bank)(way).io.writeEnable := true.B
-        arrays(bank)(way).io.writeAddress := scrubRow
-        arrays(bank)(way).io.writeData := 0.U(storageWidth.W)
-      }
+    arrays(bank).io.writeEnable := training && trainBank === bank.U
+    arrays(bank).io.writeAddress := trainRow
+    val oldWay0 = bankReads(bank)(0).asUInt.pad(storageWidth)
+    val oldWay1 = bankReads(bank)(1).asUInt.pad(storageWidth)
+    arrays(bank).io.writeData := Mux(trainWay === 0.U,
+      Cat(oldWay1, trainedStorage), Cat(trainedStorage, oldWay0))
+    when(scrubbing && !io.invalidate) {
+      arrays(bank).io.writeEnable := true.B
+      arrays(bank).io.writeAddress := scrubRow
+      arrays(bank).io.writeData := 0.U((storageWidth * waysCount).W)
     }
 
     when(scrubbing && !io.invalidate) {

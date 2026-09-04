@@ -309,6 +309,7 @@ class LoadStoreQueues(
   io.loadResult.bits.floatingDestination := lqFloatingDestination(loadCompleteIndex)
   io.loadResult.bits.writesFloat := lqWritesFloat(loadCompleteIndex)
   io.loadResult.bits.m1Owner := lqM1Owner(loadCompleteIndex)
+  io.loadResult.bits.address := lqAddress(loadCompleteIndex)
   io.loadResult.bits.accessSize := lqAccessSize(loadCompleteIndex)
   io.loadResult.bits.unsignedLoad := lqUnsignedLoad(loadCompleteIndex)
   io.loadResult.bits.data := completedLoadData

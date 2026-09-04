@@ -572,7 +572,7 @@ class L1DLoadCache(
   // widened. Two immediate hits may proceed together only when their data
   // reads use different word banks and both retained result slots are free.
   val requestAdmissionOpen = !io.fenceDrain && !recoveryBlocked &&
-    !io.storeRequest.valid && !io.flushLine.valid
+    !io.storeRequest.valid && !io.flushLine.valid && !storeHitPending
   val selectedRequestReady = selectedRequest.cacheable && requestAdmissionOpen &&
     Mux(immediateRequest, selectedImmediateSlotAvailable, missResources)
   val dualImmediateReady = dualImmediateCompatible && requestAdmissionOpen &&
@@ -899,6 +899,18 @@ class L1DLoadCache(
       assert(!io.storeRequest.bits.isAtomic,
         "L1D store path cannot accept an atomic effect")
       when(anyStoreCacheHit) {
+        // A younger load may have entered the one-cycle hit pipeline before
+        // this commit-authorized store became visible.  Its retained result
+        // was read from the pre-store line; discard it so the LQ can replay
+        // after the store-hit array update instead of retiring stale data.
+        for (slot <- 0 until config.decodeWidth) {
+          when(immediateValid(slot) && ROBTagOrder.isYounger(
+              immediateResponse(slot).robTag, io.storeRequest.bits.robTag,
+              io.robHeadTag, config)) {
+            immediateValid(slot) := false.B
+            hitPending(slot) := false.B
+          }
+        }
         storeHitPending := true.B
         storeHitPendingWay := storeHitWay
         storeHitPendingSet := storeSet
@@ -942,7 +954,10 @@ class L1DLoadCache(
     val responseHasStore = mshrStorePending(responseMshr)
     val responseStore = mshrStoreEffect(responseMshr)
     for (word <- 0 until wordsPerLine) {
-      mshrLineData(responseMshr)(word) := io.dataResponse.bits.lineData(word)
+      // A store miss may share its refill MSHR with a younger load waiter.
+      // Retain the same merged line that is written to all data-array views;
+      // otherwise that waiter can complete from the pre-store payload.
+      mshrLineData(responseMshr)(word) := dataResponseWriteWords(word)
     }
     mshrFilled(responseMshr) := true.B
     mshrFault(responseMshr) := io.dataResponse.bits.accessFault
@@ -985,7 +1000,9 @@ class L1DLoadCache(
       val fillWay = mshrWay(responseMshr)
       val fillSet = mshrSet(responseMshr)
       for (word <- 0 until wordsPerLine) {
-        mshrLineData(responseMshr)(word) := io.l2Response.bits.transfer.lineData(word)
+        // L2 hits follow the same write-allocate path as AXI refills and must
+        // expose a committed store to any exact waiter merged on this MSHR.
+        mshrLineData(responseMshr)(word) := lookupResponseWriteWords(word)
       }
       for (way <- 0 until ways) {
         when(fillWay === way.U) {
