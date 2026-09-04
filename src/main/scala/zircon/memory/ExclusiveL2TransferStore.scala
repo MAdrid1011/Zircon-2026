@@ -126,6 +126,7 @@ class ExclusiveL2TransferStore(
   val lineWriteSet = WireDefault(0.U(setWidth.W))
   val lineWriteWay = WireDefault(0.U(wayWidth.W))
   val lineWriteData = WireDefault(0.U((wordsPerLine * 32).W))
+  val lineWriteWayOH = UIntToOH(lineWriteWay, ways)
   // Reads from the explicit BRAM line store are one cycle. Keep the address
   // corresponding to the currently visible lineRead so consumers can retain
   // immediate handshakes when the same set/way is already resident.
@@ -137,7 +138,7 @@ class ExclusiveL2TransferStore(
     lineMemories(way).io.clk := clock
     lineMemories(way).io.readEnable := true.B
     lineMemories(way).io.readAddress := readSet
-    lineMemories(way).io.writeEnable := lineWriteEnable && lineWriteWay === way.U
+    lineMemories(way).io.writeEnable := lineWriteEnable && lineWriteWayOH(way)
     lineMemories(way).io.writeAddress := lineWriteSet
     lineMemories(way).io.writeData := lineWriteData
   }
@@ -170,8 +171,15 @@ class ExclusiveL2TransferStore(
   val insertHasInvalidWay = insertInvalidWays.asUInt.orR
   val insertWay = Mux(insertHasInvalidWay, PriorityEncoder(insertInvalidWays.asUInt),
     replacementWay(insertSet))
-  val replacingValid = lineValid(insertWay)(insertSet)
-  val replacingDirty = replacingValid && lineDirty(insertWay)(insertSet)
+  // Decode the selected way once.  The insertion path fans this decision into
+  // the victim payload, line metadata updates, and four BRAM write enables;
+  // one-hot consumers avoid repeatedly routing the two-bit index through
+  // dynamic Vec indexing and equality comparators.
+  val insertWayOH = UIntToOH(insertWay, ways)
+  val replacingValid = Mux1H(insertWayOH.asBools,
+    (0 until ways).map(way => lineValid(way)(insertSet)))
+  val replacingDirty = replacingValid && Mux1H(insertWayOH.asBools,
+    (0 until ways).map(way => lineDirty(way)(insertSet)))
   val insertLine = lineRead
   val canInsert = !insertHit && (!replacingDirty ||
     (victimQueue.io.enq.ready && lineReadMatches(insertWay, insertSet)))
@@ -410,7 +418,8 @@ class ExclusiveL2TransferStore(
   }.elsewhen(io.insert.fire) {
     when(replacingDirty) {
       victimQueue.io.enq.valid := true.B
-      victimQueue.io.enq.bits.lineAddress := Cat(lineTag(insertWay)(insertSet),
+      victimQueue.io.enq.bits.lineAddress := Cat(Mux1H(insertWayOH.asBools,
+        (0 until ways).map(way => lineTag(way)(insertSet))),
         insertSet, 0.U(lineOffsetWidth.W))
       victimQueue.io.enq.bits.dirty := true.B
       for (word <- 0 until wordsPerLine) {
@@ -418,7 +427,7 @@ class ExclusiveL2TransferStore(
       }
     }
     for (way <- 0 until ways) {
-      when(insertWay === way.U) {
+      when(insertWayOH(way)) {
         lineValid(way)(insertSet) := true.B
         lineDirty(way)(insertSet) := io.insert.bits.dirty
         lineTag(way)(insertSet) := insertTag
