@@ -1,5 +1,10 @@
 # Zircon-2026 实施状态
 
+2026-09-04 L1D victim selection one-hot：`L1DLoadCache` 对 load/store victim
+validity 改用 one-hot `Mux1H`，保留最低 way 优先规则，减少动态 way 解码和跨 way
+扇出。`L1DLoadCacheSpec` `58/58` 通过（244.8 s，仍低于单组件 5 分钟预算）。
+后台 `24bb7b5` 综合仍在 timing optimization；该改动将在下一轮综合纳入。
+
 2026-09-04 MemIQ store-barrier reduction：`MemIssueQueue` 先用一个平衡年龄树
 选出最老 live store，再让 load 候选只与该 barrier tag 比较，去掉每个 load 对全部
 store 槽位的重复扫描。`MemIssueQueueSpec` `8/8`、`IntegerIssueQueueSpec` `4/4`

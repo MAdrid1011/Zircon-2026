@@ -339,7 +339,12 @@ class L1DLoadCache(
   val victimWays = Mux(hasInvalidWay, invalidWay.asUInt, usableWay.asUInt)
   val hasVictimWay = victimWays.orR
   val victimWay = PriorityEncoder(victimWays)
-  val victimValid = cacheValid(victimWay)(requestSet)
+  // Keep the selection one-hot for the wide per-way metadata fanout. The
+  // binary index remains available for state fields, while validity is read
+  // through a balanced one-hot mux instead of a dynamic Vec index.
+  val victimWayOH = victimWays
+  val victimValid = Mux1H(victimWayOH.asBools,
+    (0 until ways).map(way => cacheValid(way)(requestSet)))
 
   val storeReservedWay = Wire(Vec(ways, Bool()))
   for (way <- 0 until ways) {
@@ -355,7 +360,9 @@ class L1DLoadCache(
     storeUsableWay.asUInt)
   val storeHasVictimWay = storeVictimWays.orR
   val storeVictimWay = PriorityEncoder(storeVictimWays)
-  val storeVictimValid = cacheValid(storeVictimWay)(storeSet)
+  val storeVictimWayOH = storeVictimWays
+  val storeVictimValid = Mux1H(storeVictimWayOH.asBools,
+    (0 until ways).map(way => cacheValid(way)(storeSet)))
 
   val portImmediateRequest = VecInit((0 until config.decodeWidth).map(port =>
     !io.request(port).bits.requiresCache || portAnyCacheHit(port)))
