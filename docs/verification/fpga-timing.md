@@ -101,8 +101,9 @@ runs independent AXI/SQ/cache suites followed by the normal and BRESP-error
 top-level tests. `make test-m3-load-boundary` is the equivalent M0/M1 load tier:
 it runs the focused inaccessible-load top-level check. The canonical
 `LoadStoreQueuesSpec`/LSU ownership suite lives in `make test-m3-device-io`,
-while the L1D/cache suites live in `make test-m3-store`; the dual-load component suite lives in
-`make test-m3-dual-load-forward`. New feature work should
+while the L1D/cache suites live in `make test-m3-store`; direct dual-load
+ownership is covered by those canonical suites and the top-level CoreShell
+scenarios. New feature work should
 add an equivalent focused target instead of requiring the complete test corpus
 for every edit.
 
