@@ -308,16 +308,16 @@ class L1DLoadCache(
 
   val fenceCanTransfer = io.fenceDrain && !anyMshrValid && !storeResultValid &&
     !selectedImmediateValid && !l2ProbeActive
-  var fenceDirtyFound: Bool = false.B
-  var fenceDirtyWay: UInt = 0.U(log2Ceil(ways).W)
-  var fenceDirtySet: UInt = 0.U(setWidth.W)
-  for (set <- 0 until sets; way <- 0 until ways) {
-    val dirty = cacheValid(way)(set) && cacheDirty(way)(set)
-    val take = dirty && !fenceDirtyFound
-    fenceDirtyWay = Mux(take, way.U, fenceDirtyWay)
-    fenceDirtySet = Mux(take, set.U, fenceDirtySet)
-    fenceDirtyFound = fenceDirtyFound || dirty
-  }
+  // Preserve set-major/way-minor victim priority while presenting synthesis
+  // with a bitmap encoder instead of a linear chain of wide Muxes.
+  val fenceDirtyBits = VecInit((0 until sets).flatMap { set =>
+    (0 until ways).map { way => cacheValid(way)(set) && cacheDirty(way)(set) }
+  }).asUInt
+  val fenceDirtyFound = fenceDirtyBits.orR
+  val fenceDirtyIndex = PriorityEncoder(fenceDirtyBits)
+  val fenceDirtyWay = fenceDirtyIndex(log2Ceil(ways) - 1, 0)
+  val fenceDirtySet = fenceDirtyIndex(log2Ceil(ways) + setWidth - 1,
+    log2Ceil(ways))
   val fenceL2Insert = fenceCanTransfer && !io.flushLine.valid && fenceDirtyFound
   io.fenceDrained := !anyMshrValid && !storeResultValid && !selectedImmediateValid &&
     !l2ProbeActive && !fenceDirtyFound

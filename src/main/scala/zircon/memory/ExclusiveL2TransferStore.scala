@@ -271,16 +271,16 @@ class ExclusiveL2TransferStore(
   // can cross the top-level LSU/cache boundary.
   io.invalidateReady := !io.fenceDrain && !responseValid && !io.flushLine.valid && !invalidateDirty
 
-  var fenceDirtyFound: Bool = false.B
-  var fenceDirtyWay: UInt = 0.U(wayWidth.W)
-  var fenceDirtySet: UInt = 0.U(setWidth.W)
-  for (set <- 0 until sets; way <- 0 until ways) {
-    val dirty = lineValid(way)(set) && lineDirty(way)(set)
-    val take = dirty && !fenceDirtyFound
-    fenceDirtyWay = Mux(take, way.U, fenceDirtyWay)
-    fenceDirtySet = Mux(take, set.U, fenceDirtySet)
-    fenceDirtyFound = fenceDirtyFound || dirty
-  }
+  // Encode the same set-major, way-minor priority as a flat bitmap.  The
+  // previous accumulator built a linear chain of wide Muxes across every
+  // line; PriorityEncoder lets synthesis balance this selection cone.
+  val fenceDirtyBits = VecInit((0 until sets).flatMap { set =>
+    (0 until ways).map { way => lineValid(way)(set) && lineDirty(way)(set) }
+  }).asUInt
+  val fenceDirtyFound = fenceDirtyBits.orR
+  val fenceDirtyIndex = PriorityEncoder(fenceDirtyBits)
+  val fenceDirtyWay = fenceDirtyIndex(wayWidth - 1, 0)
+  val fenceDirtySet = fenceDirtyIndex(wayWidth + setWidth - 1, wayWidth)
   val fenceEvict = io.fenceDrain && !responseValid && !instructionResponseValid &&
     fenceDirtyFound && victimQueue.io.enq.ready &&
     lineReadMatches(fenceDirtyWay, fenceDirtySet)
