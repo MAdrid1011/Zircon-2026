@@ -583,12 +583,11 @@ class LoadStoreQueues(
     }
   }
 
+  val squashAge = ROBTagOrder.ageFromHead(io.squash.bits, io.robHeadTag, config)
   val lqSquashSurvivor = VecInit((0 until lqEntries).map(index =>
-    lqValid(index) && !(lqAge(index) > ROBTagOrder.ageFromHead(
-      io.squash.bits, io.robHeadTag, config))))
+    lqValid(index) && !(lqAge(index) > squashAge)))
   val sqSquashSurvivor = VecInit((0 until sqEntries).map(index =>
-    sqValid(index) && !(sqAge(index) > ROBTagOrder.ageFromHead(
-      io.squash.bits, io.robHeadTag, config))))
+    sqValid(index) && !(sqAge(index) > squashAge)))
 
   when(io.flush) {
     for (index <- 0 until sqEntries) {
