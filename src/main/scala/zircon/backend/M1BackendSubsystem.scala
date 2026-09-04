@@ -79,6 +79,7 @@ class M1BackendSubsystem(
     val renameFreeCount = Output(UInt(
       log2Ceil(config.intPhysicalRegisters + 1).W))
     val robHead = Output(Valid(new ROBCommit(config)))
+    val robHeadControl = Output(Vec(2, new ROBControlInfo))
     val robCount = Output(UInt(log2Ceil(config.robEntries + 1).W))
     val intCount = Output(UInt(log2Ceil(config.intIssueEntries + 1).W))
     val branchDataCount = Output(UInt(
@@ -110,10 +111,11 @@ class M1BackendSubsystem(
   }
 
   for (lane <- 0 until config.commitWidth) {
-    commit.io.rob(lane) <> backend.io.commit(lane)
+  commit.io.rob(lane) <> backend.io.commit(lane)
     backend.io.renameCommit(lane) := commit.io.renameCommit(lane)
   }
   commit.io.sideEffect := backend.io.commitSideEffect
+  commit.io.robControl := backend.io.robHeadControl
   commit.io.firstFault := backend.io.firstFault
   backend.io.firstFaultClear := commit.io.firstFaultClear
   commit.io.branchCommit <> backend.io.branchCommit
@@ -162,6 +164,7 @@ class M1BackendSubsystem(
   io.acceptedCount := backend.io.acceptedCount
   io.renameFreeCount := backend.io.renameFreeCount
   io.robHead := backend.io.robHead
+  io.robHeadControl := backend.io.robHeadControl
   io.robCount := backend.io.robCount
   io.intCount := backend.io.intCount
   io.branchDataCount := backend.io.branchDataCount

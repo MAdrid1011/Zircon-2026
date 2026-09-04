@@ -29,6 +29,7 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
   val io = IO(new Bundle {
     val rob = Flipped(Vec(config.commitWidth, Decoupled(new ROBCommit(config))))
+    val robControl = Input(Vec(config.commitWidth, new ROBControlInfo))
     val sideEffect = Input(Vec(config.commitWidth, new CommitSideEffect))
 
     val firstFault = Input(Valid(new FirstFaultRecord(config)))
@@ -56,10 +57,18 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
 
   require(config.commitWidth == 2, "the frozen commit policy has two lanes")
 
-  val lane0Serialized = io.rob(0).bits.entry.decoded.uopClass === UopClass.Csr ||
-    io.rob(0).bits.entry.decoded.uopClass === UopClass.System
-  val lane1Serialized = io.rob(1).bits.entry.decoded.uopClass === UopClass.Csr ||
-    io.rob(1).bits.entry.decoded.uopClass === UopClass.System
+  // Production control comes from the narrow ROB sideband. The decoded
+  // fallback keeps standalone policy tests source-compatible.
+  val lane0Class = Mux(io.robControl(0).valid,
+    io.robControl(0).uopClass, io.rob(0).bits.entry.decoded.uopClass.asUInt)
+  val lane1Class = Mux(io.robControl(1).valid,
+    io.robControl(1).uopClass, io.rob(1).bits.entry.decoded.uopClass.asUInt)
+  val lane0Operation = Mux(io.robControl(0).valid,
+    io.robControl(0).operation, io.rob(0).bits.entry.decoded.operation.asUInt)
+  val lane0Serialized = lane0Class === UopClass.Csr.asUInt ||
+    lane0Class === UopClass.System.asUInt
+  val lane1Serialized = lane1Class === UopClass.Csr.asUInt ||
+    lane1Class === UopClass.System.asUInt
   val lane0WritesFloat = io.rob(0).bits.entry.floating.legal &&
     io.rob(0).bits.entry.floating.writesFloatRd
 
@@ -110,22 +119,21 @@ class CommitController(config: ZirconCoreConfig = ZirconCoreConfig.default) exte
       io.rob(lane).bits.entry.newPhysicalDestination
 
     when(io.rob(lane).valid && io.sideEffect(lane).csrWrite) {
-      assert(io.rob(lane).bits.entry.decoded.uopClass === UopClass.Csr,
+      val laneClass = if (lane == 0) lane0Class else lane1Class
+      assert(laneClass === UopClass.Csr.asUInt,
         "a CSR side effect must belong to a CSR uop")
     }
   }
   io.retiredInstructions := PopCount(retireLane)
 
-  val lane0CsrRetires = retireLane(0) &&
-    io.rob(0).bits.entry.decoded.uopClass === UopClass.Csr
+  val lane0CsrRetires = retireLane(0) && lane0Class === UopClass.Csr.asUInt
   io.csrWrite.valid := lane0CsrRetires && io.sideEffect(0).csrWrite
   io.csrWrite.bits.address := io.sideEffect(0).csrAddress
   io.csrWrite.bits.data := io.sideEffect(0).csrData
 
-  val lane0Operation = io.rob(0).bits.entry.decoded.operation
-  io.mretCommit := retireLane(0) && lane0Operation === IntOperation.Mret
-  io.fenceICommit := retireLane(0) && lane0Operation === IntOperation.FenceI
-  io.wfiCommit := retireLane(0) && lane0Operation === IntOperation.Wfi
+  io.mretCommit := retireLane(0) && lane0Operation === IntOperation.Mret.asUInt
+  io.fenceICommit := retireLane(0) && lane0Operation === IntOperation.FenceI.asUInt
+  io.wfiCommit := retireLane(0) && lane0Operation === IntOperation.Wfi.asUInt
 
   io.trapCommit.valid := exceptionValid || interruptAccepted
   io.trapCommit.bits.interrupt := interruptAccepted

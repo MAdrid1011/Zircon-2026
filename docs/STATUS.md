@@ -1,5 +1,15 @@
 # Zircon-2026 实施状态
 
+2026-09-05 ROB control sideband：最新 `393e07e` 后的 post-route 最差路径为
+`ROB.entryData[*].decoded.operation -> LSU lqForwardData`，WNS `-38.261 ns`，
+其中 82% 为布线。ROB 现为每个条目并行保存窄 `ROBControlInfo`，提交串行化、
+MRET/FENCE.I/WFI 以及顶层 Load/Store/FENCE 判定都读取 sideband；完整
+`ROBEntry` 仍保留给精确 EPC、fault metadata、rename retirement 和 trace，
+未删减任何 ISA 或异常载荷。生产 sideband 与 live head 同步有效，独立
+`CommitController` 测试在 sideband 无效时使用 decoded fallback。Compile、
+`CommitControllerSpec` 6/6、后端 5/5、CoreShell RV32I smoke 1/1 通过；新
+fixed-device implementation 尚未启动，不能宣称 WNS/面积改善。
+
 2026-09-05 ROB age/ready 高扇出域隔离：以固定器件
 `xc7a200tfbg676-2L` 的 `393e07e` post-route WNS `-40.479 ns`、TNS
 `-1,445,001.875 ns`、62,874 个 setup failing endpoints 为基线，Vivado

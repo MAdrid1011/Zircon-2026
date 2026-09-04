@@ -498,7 +498,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceStrong.code.U
   val deviceLoadEffect = lsuIngress.io.deviceLoadEffect
   val deviceLoadAtLiveHead = deviceLoadEffect.valid && backend.io.robHead.valid &&
-    backend.io.robHead.bits.entry.decoded.uopClass === UopClass.Load
+    backend.io.robHeadControl(0).isLoad
   val singleDeviceGroupFromLoad = deviceLoadAtLiveHead
   val singleDeviceGroupFromStore = !singleDeviceGroupFromLoad && deviceStoreEffect
   val singleDeviceGroupValid = (singleDeviceGroupFromLoad || singleDeviceGroupFromStore) &&
@@ -617,7 +617,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   lsuIngress.io.loadContextRead.valid := false.B
   lsuIngress.io.loadContextRead.bits := 0.U
   val robHeadIsStore = backend.io.robHead.valid &&
-    backend.io.robHead.bits.entry.decoded.uopClass === UopClass.Store
+    backend.io.robHeadControl(0).isStore
   // A store becomes externally visible only when its true ROB head owns an SQ
   // record. It remains incomplete until the exact B response reaches M0.
   lsuIngress.io.commitAuthorize.valid := robHeadIsStore
@@ -649,8 +649,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // drains older owners; the cache controller then writes every older dirty
   // L1D/L2 line through ID-5 before commit may retire the serializing uop.
   val headFence = backend.io.robHead.valid &&
-    (backend.io.robHead.bits.entry.decoded.operation === IntOperation.Fence ||
-      backend.io.robHead.bits.entry.decoded.operation === IntOperation.FenceI)
+    (backend.io.robHeadControl(0).isFence ||
+      backend.io.robHeadControl(0).isFenceI)
   lsuIngress.io.orderingBarrier.valid := headFence
   lsuIngress.io.orderingBarrier.bits := backend.io.robHead.bits.robTag
   cacheFenceDrain.io.request := headFence && lsuIngress.io.orderingReady

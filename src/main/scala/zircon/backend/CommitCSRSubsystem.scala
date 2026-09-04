@@ -20,6 +20,7 @@ class CommitCSRSubsystem(
   val io = IO(new Bundle {
     val rob = Flipped(Vec(config.commitWidth,
       Decoupled(new ROBCommit(config))))
+    val robControl = Input(Vec(config.commitWidth, new ROBControlInfo))
     val sideEffect = Input(Vec(config.commitWidth, new CommitSideEffect))
     val firstFault = Input(Valid(new FirstFaultRecord(config)))
 
@@ -80,6 +81,7 @@ class CommitCSRSubsystem(
     controller.io.sideEffect(lane) := io.sideEffect(lane)
   }
   controller.io.firstFault := io.firstFault
+  controller.io.robControl := io.robControl
   controller.io.eligibleInterrupt := csr.io.eligibleInterrupt
   controller.io.interruptHead := io.interruptHead
   controller.io.interruptBlocked := io.interruptBlocked

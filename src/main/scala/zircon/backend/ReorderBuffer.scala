@@ -38,6 +38,22 @@ class ROBCommit(config: ZirconCoreConfig) extends Bundle {
   val entry = new ROBEntry(config)
 }
 
+/** Narrow control metadata kept beside the wide ROB payload.
+  *
+  * Commit, fence, and memory-order control must not route the complete decoded
+  * entry through the LSU ready network.  The wide entry remains available for
+  * precise retirement and trace; this snapshot carries only control bits.
+  */
+class ROBControlInfo extends Bundle {
+  val valid = Bool()
+  val uopClass = UInt(4.W)
+  val operation = UInt(7.W)
+  val isLoad = Bool()
+  val isStore = Bool()
+  val isFence = Bool()
+  val isFenceI = Bool()
+}
+
 /** Narrow context read by E0/E1 after issue; large ROB-only fields stay out of IQ. */
 class ROBExecutionContext(config: ZirconCoreConfig) extends Bundle {
   val robTag = UInt(config.robTagWidth.W)
@@ -95,11 +111,13 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
 
     val headTag = Output(UInt(config.robTagWidth.W))
     val head = Output(Valid(new ROBCommit(config)))
+    val headControl = Output(Vec(2, new ROBControlInfo))
     val count = Output(UInt(countWidth.W))
     val enqueueCapacity = Output(UInt(2.W))
   })
 
   val entryData = Reg(Vec(entries, new ROBEntry(config)))
+  val controlData = RegInit(VecInit.fill(entries)(0.U.asTypeOf(new ROBControlInfo)))
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
   val entryComplete = RegInit(VecInit.fill(entries)(false.B))
   // Initialize to one so the first allocation receives generation zero.
@@ -129,6 +147,20 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
   io.head.valid := count =/= 0.U && headMatches
   io.head.bits.robTag := tag(entryGeneration(headIndex), headIndex)
   io.head.bits.entry := entryData(headIndex)
+  io.headControl(0).valid := io.head.valid
+  io.headControl(0).uopClass := controlData(headIndex).uopClass
+  io.headControl(0).operation := controlData(headIndex).operation
+  io.headControl(0).isLoad := controlData(headIndex).isLoad
+  io.headControl(0).isStore := controlData(headIndex).isStore
+  io.headControl(0).isFence := controlData(headIndex).isFence
+  io.headControl(0).isFenceI := controlData(headIndex).isFenceI
+  io.headControl(1).valid := count > 1.U && secondHeadMatches
+  io.headControl(1).uopClass := controlData(secondHeadIndex).uopClass
+  io.headControl(1).operation := controlData(secondHeadIndex).operation
+  io.headControl(1).isLoad := controlData(secondHeadIndex).isLoad
+  io.headControl(1).isStore := controlData(secondHeadIndex).isStore
+  io.headControl(1).isFence := controlData(secondHeadIndex).isFence
+  io.headControl(1).isFenceI := controlData(secondHeadIndex).isFenceI
   // A commit decision may itself generate io.flush (exception after lane 0,
   // MRET, or FENCE.I). Keep completed heads visible during that cycle so the
   // retiring prefix can fire; flush still blocks enqueue, completion, context
@@ -346,12 +378,26 @@ class ReorderBuffer(config: ZirconCoreConfig) extends Module {
 
     when(io.enqueue(0).fire) {
       entryData(tailIndex) := io.enqueue(0).bits.entry
+      controlData(tailIndex).valid := true.B
+      controlData(tailIndex).uopClass := io.enqueue(0).bits.entry.decoded.uopClass.asUInt
+      controlData(tailIndex).operation := io.enqueue(0).bits.entry.decoded.operation.asUInt
+      controlData(tailIndex).isLoad := io.enqueue(0).bits.entry.decoded.uopClass === UopClass.Load
+      controlData(tailIndex).isStore := io.enqueue(0).bits.entry.decoded.uopClass === UopClass.Store
+      controlData(tailIndex).isFence := io.enqueue(0).bits.entry.decoded.operation === zircon.frontend.IntOperation.Fence
+      controlData(tailIndex).isFenceI := io.enqueue(0).bits.entry.decoded.operation === zircon.frontend.IntOperation.FenceI
       entryValid(tailIndex) := true.B
       entryComplete(tailIndex) := io.enqueue(0).bits.initiallyComplete
       entryGeneration(tailIndex) := allocationGeneration(0)
     }
     when(io.enqueue(1).fire) {
       entryData(secondTailIndex) := io.enqueue(1).bits.entry
+      controlData(secondTailIndex).valid := true.B
+      controlData(secondTailIndex).uopClass := io.enqueue(1).bits.entry.decoded.uopClass.asUInt
+      controlData(secondTailIndex).operation := io.enqueue(1).bits.entry.decoded.operation.asUInt
+      controlData(secondTailIndex).isLoad := io.enqueue(1).bits.entry.decoded.uopClass === UopClass.Load
+      controlData(secondTailIndex).isStore := io.enqueue(1).bits.entry.decoded.uopClass === UopClass.Store
+      controlData(secondTailIndex).isFence := io.enqueue(1).bits.entry.decoded.operation === zircon.frontend.IntOperation.Fence
+      controlData(secondTailIndex).isFenceI := io.enqueue(1).bits.entry.decoded.operation === zircon.frontend.IntOperation.FenceI
       entryValid(secondTailIndex) := true.B
       entryComplete(secondTailIndex) := io.enqueue(1).bits.initiallyComplete
       entryGeneration(secondTailIndex) := allocationGeneration(1)

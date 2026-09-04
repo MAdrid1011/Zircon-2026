@@ -68,6 +68,7 @@ class IntegerExecutionBackend(
     val rollbackActive = Output(Bool())
     val rollbackDone = Output(Bool())
     val robHeadTag = Output(UInt(config.robTagWidth.W))
+    val robHeadControl = Output(Vec(2, new ROBControlInfo))
     // One-cycle head snapshot for age-only scheduling and recovery consumers.
     // The ROB/commit interface above remains live and architecturally exact.
     val scheduledRobHeadTag = Output(UInt(config.robTagWidth.W))
@@ -95,6 +96,7 @@ class IntegerExecutionBackend(
   io.rollbackDone := state.io.rollbackDone
   io.robHeadTag := state.io.robHeadTag
   io.robHead := state.io.robHead
+  io.robHeadControl := state.io.robHeadControl
   io.robCount := state.io.robCount
 
   // Keep ROB head movement out of the issue/operand/fault combinational
