@@ -73,6 +73,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // head-index update out of the issue/operand timing cone while preserving
   // the same age ordering for every live ROB tag.
   val scheduledRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  // Wakeup state is produced by the integer backend's completion/commit
+  // network.  Feeding that wide bitmap directly into every issue queue makes
+  // the ROB payload and PRF ready cones re-converge before queue selection.
+  // A registered snapshot adds at most one wakeup cycle, but prevents that
+  // feedback path from crossing the queue/operand boundary in one cycle.
+  val scheduledIntegerReady = RegNext(backend.io.integerReady)
 
   // WFI is a commit-qualified quiescent state.  Younger speculative work is
   // flushed by the WFI redirect; fetch resumes only after an enabled
@@ -125,14 +131,14 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   backend.io.longCapacity := longQueue.io.enqueueCapacity
   backend.io.floatingCapacity := floatingQueue.io.enqueueCapacity
   backend.io.floatingScoreboardEmpty := floatingScoreboard.io.empty
-  floatingQueue.io.integerReady := backend.io.integerReady
+  floatingQueue.io.integerReady := scheduledIntegerReady
   floatingQueue.io.robHeadTag := scheduledRobHeadTag
   floatingQueue.io.squash := backend.io.squash
   floatingQueue.io.flush := backend.io.globalFlush
   floatingScoreboard.io.robHeadTag := backend.io.robHead.bits.robTag
   floatingScoreboard.io.squash := backend.io.squash
   floatingScoreboard.io.flush := backend.io.globalFlush
-  longQueue.io.integerReady := backend.io.integerReady
+  longQueue.io.integerReady := scheduledIntegerReady
   longQueue.io.robHeadTag := scheduledRobHeadTag
   longQueue.io.squash := backend.io.squash
   longQueue.io.flush := backend.io.globalFlush
@@ -266,7 +272,7 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     memQueue.io.enqueue(lane) <> backend.io.memEnqueue(lane)
   }
   backend.io.memCapacity := memQueue.io.enqueueCapacity
-  memQueue.io.integerReady := backend.io.integerReady
+  memQueue.io.integerReady := scheduledIntegerReady
   memQueue.io.robHeadTag := backend.io.robHead.bits.robTag
   memQueue.io.squash := backend.io.squash
   memQueue.io.flush := backend.io.globalFlush

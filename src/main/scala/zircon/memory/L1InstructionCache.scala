@@ -63,9 +63,13 @@ class L1InstructionCache(
 
   val state = RegInit(L1InstructionCacheState.Idle)
   val pc = RegInit(config.resetVector.U(32.W))
-  val requestBase = Reg(UInt(32.W))
-  val requestCount = Reg(UInt(countWidth.W))
-  val requestLine = Reg(UInt(32.W))
+  // Predictors observe the response payload even while response.valid is
+  // low.  Initialize the retained request fields so their architectural
+  // alignment invariants hold from reset rather than depending on simulator
+  // treatment of uninitialized registers.
+  val requestBase = RegInit(config.resetVector.U(32.W))
+  val requestCount = RegInit(0.U(countWidth.W))
+  val requestLine = RegInit(0.U(32.W))
   val missWay = Reg(UInt(log2Ceil(ways).W))
   val packetWords = Reg(Vec(config.fetchWidth, new InstructionFetchWord))
   val lookaheadIssued = RegInit(false.B)

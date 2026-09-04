@@ -23,6 +23,12 @@ Production `ZirconCore` inserts three elastic timing boundaries around E2:
    arbitration; and
 3. resolved LongPipe operands are captured before the arithmetic engine.
 
+The production core also registers the backend `integerReady` bitmap before
+feeding LongIQ, FloatingIQ, and MemIQ.  This wakeup snapshot is deliberately
+one cycle stale at most; it prevents completion/commit feedback from
+re-entering all three queue candidate trees and the auxiliary PRF path in the
+same cycle.
+
 Each boundary is ready/valid, clears on global flush, and removes a younger
    held entry on selective squash using its real ROB tag.  No boundary creates
    a completion or changes ROB ownership.  The `enableM2Observation` test
@@ -34,9 +40,11 @@ Each boundary is ready/valid, clears on global flush, and removes a younger
 
 The E2 path gains bounded launch latency and may reduce peak issue throughput
 when a boundary is full, but preserves age ordering, kill/drain behavior, and
-the shared three-start/two-completion contract.  Post-route timing must be
-remeasured on the same device after every subsequent structural change; the
-`-92.911 ns` baseline is a measured failure, not a release result.
+the shared three-start/two-completion contract.  Wakeup may arrive one cycle
+later, which is legal for the issue queues and keeps completion ownership
+unchanged.  Post-route timing must be remeasured on the same device after every
+subsequent structural change; the `-92.911 ns` baseline and the first boundary
+run's `-88.879 ns` are measured failures, not release results.
 
 ## Verification
 

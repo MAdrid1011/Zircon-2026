@@ -432,3 +432,21 @@ Scala compilation pass on commit `61749bb`. A fixed-target Vivado 2023.1
 synthesis-only run for `xc7a200tfbg676-2L` reached Timing Optimization but
 produced no utilization or timing report within the 30-minute local budget;
 this is recorded as a timeout, not a timing or area pass.
+# 2026-09-04 Timing isolation follow-up
+
+The fixed `xc7a200tfbg676-2L` implementation `fpga/runs/impl-88c5ea3`
+completed synthesis, place/route, DRC, and bitstream generation after the
+initial E2 boundaries.  Post-route timing is still a measured failure:
+setup WNS `-88.879 ns`, TNS `-2,003,910.020 ns`, 61,723 failing endpoints,
+hold WNS `+0.057 ns`; the worst path is 179 logic levels and 98.762 ns data
+delay (79.240% routing), from ROB decoded operation through commit/issue/
+rename/MemIQ and the auxiliary PRF into `LongOperandBoundary`.  Synthesis
+used 65,945 LUTs, 32,195 registers, 133 BRAM tiles, and 4 DSPs.
+
+The next RTL iteration registers the backend `integerReady` bitmap before all
+three non-integer issue queues, in addition to the existing ROB-head and E2
+operand boundaries.  The L1I retained request fields are initialized at reset
+so predictor alignment assertions are deterministic while response is
+invalid.  Scala compile and the RV32I dependency-chain and RV32F move
+CoreShell scenarios pass after these changes.  A new fixed-target synthesis
+only run is required before claiming any timing improvement.
