@@ -261,8 +261,9 @@ failure.
 
 ### External Coherence Integration
 
-2026-09-03 的 `make test-m3-external-coherence` 运行 9 个 controller/adapter component
-tests 和 14 个 complete-core cases，零失败，约 274 秒。新增 seed
+2026-09-04 的 `make test-m3-external-coherence` 运行 9 个 controller/adapter component
+tests 和 13 个 complete-core cases，零失败，约 224 秒。去重后的精确 selector
+仍覆盖全部独有场景；新增 seed
 `0x5eeded01`--`0x5eeded03` 将 committed dirty store 的 ID-5 eight-beat writeback、一个
 已获得 owner 的独立 data refill、五通道 backpressure 和 held sideband response 放在同一
 窗口；每例验证 B-gated acknowledgement 与精确 load/store retire metadata。失败包保留
