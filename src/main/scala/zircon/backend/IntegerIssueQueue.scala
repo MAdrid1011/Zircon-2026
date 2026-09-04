@@ -9,7 +9,10 @@ class PhysicalWakeup(config: ZirconCoreConfig) extends Bundle {
   val physical = UInt(log2Ceil(config.intPhysicalRegisters).W)
 }
 
-class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
+class IntegerIssueQueue(
+    config: ZirconCoreConfig,
+    registeredWakeupMatch: Boolean = false
+) extends Module {
   private val entries = config.intIssueEntries
   private val indexWidth = log2Ceil(entries)
   private val countWidth = log2Ceil(entries + 1)
@@ -77,20 +80,31 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     (valid.head, indices.head)
   }
 
-  // Compute wakeup only against the narrow readiness bank. The source
-  // physical numbers remain static in entryUop, while sourceReady updates
-  // stay local to this bank.
+  // Compute wakeup only against the narrow readiness bank. In the production
+  // timing build the 5-bit physical comparisons are captured before they
+  // reach this state update, breaking the entry payload -> ready-state cone.
+  // Standalone queue users retain the same-cycle bypass contract.
+  val directWakeupMatch = Wire(Vec(entries, Vec(3, Bool())))
+  for (index <- 0 until entries; source <- 0 until 3) {
+    directWakeupMatch(index)(source) := (if (source < 2) {
+      io.wakeup.map(wakeup =>
+        wakeup.valid && wakeup.physical === entryUop(index).sourcePhysical(source))
+        .reduce(_ || _)
+    } else false.B)
+  }
+  val capturedWakeupMatch = RegInit(VecInit.fill(entries)(
+    VecInit.fill(3)(false.B)))
+  capturedWakeupMatch := directWakeupMatch
+  val wakeupMatch = if (registeredWakeupMatch) capturedWakeupMatch
+    else directWakeupMatch
+
   val awakenedSourceReady = Wire(Vec(entries, Vec(3, Bool())))
   val awakenedEntries = Wire(Vec(entries, new UopRef(config)))
   for (index <- 0 until entries) {
     awakenedEntries(index) := entryUop(index)
     for (source <- 0 until 3) {
-      val wakes = if (source < 2) {
-        io.wakeup.map(wakeup =>
-          wakeup.valid && wakeup.physical === entryUop(index).sourcePhysical(source))
-          .reduce(_ || _)
-      } else false.B
-      awakenedSourceReady(index)(source) := entrySourceReady(index)(source) || wakes
+      awakenedSourceReady(index)(source) :=
+        entrySourceReady(index)(source) || wakeupMatch(index)(source)
       awakenedEntries(index).sourceReady(source) := awakenedSourceReady(index)(source)
     }
   }

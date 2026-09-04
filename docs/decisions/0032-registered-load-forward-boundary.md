@@ -1,6 +1,6 @@
 # ADR-0032: Registered load-forward boundary
 
-状态：Accepted
+状态：Rejected after fixed-device review
 
 ## 背景
 
@@ -23,6 +23,14 @@ The boundary does not emit completion or fault information.  It only retains a
 real `LoadStoreForward` transaction until L1D accepts it, preserving existing
 cache/MMIO ownership and exact retirement behavior.  A full boundary may insert
 one bubble, which is an allowed ready/valid behavior.
+
+## 结果
+
+The boundary was implemented and measured in `impl-b093e22`. It added little
+area, but post-route WNS regressed from `-37.289 ns` to `-39.298 ns` and the
+worst path moved into the IntIQ/FirstFault wakeup cone. The production
+connection was therefore removed. The standalone module and tests remain as
+evidence and as a reusable option for a later floorplan.
 
 ## Verification
 

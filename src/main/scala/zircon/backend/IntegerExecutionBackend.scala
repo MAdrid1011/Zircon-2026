@@ -81,7 +81,8 @@ class IntegerExecutionBackend(
   })
 
   val state = Module(new IntegerBackendState(config))
-  val issue = Module(new IntegerIssueQueue(config))
+  val issue = Module(new IntegerIssueQueue(config,
+    registeredWakeupMatch = registeredWakeup))
   val operandRead = Module(new IntegerOperandRead(config))
   val shortPipes = Module(new IntegerShortPipes(config))
 

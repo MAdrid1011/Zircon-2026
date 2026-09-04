@@ -532,11 +532,15 @@ observation retain the live ROB head.  The minimal RV32I dependency and M3
 inaccessible-load scenarios pass after this change.  Its timing effect is
 pending the next fixed-device implementation.
 # 2026-09-05 registered LSU load-forward boundary：依据上一轮固定器件报告中
-`ROB.entryData[*].decoded.operation -> LSU lqForwardData` 的共同超时簇，生产
-`ZirconCore` 在每个 load lane 的 LSQ forward 与 L1D 之间加入非 fall-through
-`LoadForwardBoundary`。输入 ready 只由本地占用和 recovery 决定，L1D bank/MSHR
-反压不再同周期返回 LSQ 宽 payload；flush 和 selective squash 按 ROB tag 精确丢弃，
-不产生伪造 completion。`LoadForwardBoundarySpec` 2/2、`make test-m3-load-boundary`
-2/2、compile 和 `make platform-verilog` 通过；包含旧 replay 断言的 CoreShell 场景
-仍按交接记录归属于父基线失败。提交 `b093e22` 已推送，等待包含该 RTL 的
-`xc7a200tfbg676-2L` 固定器件实现报告。
+`ROB.entryData[*].decoded.operation -> LSU lqForwardData` 的共同超时簇，曾在生产
+`ZirconCore` 每个 load lane 的 LSQ forward 与 L1D 之间加入非 fall-through
+`LoadForwardBoundary`。独立测试、compile 和 RTL 生成均通过，但固定器件
+`impl-b093e22` post-route WNS 从 `-37.289 ns` 退化到 `-39.298 ns`，因此已移除
+生产接入；ADR-0032 标记为 rejected，模块和测试保留供后续 floorplan 复用。
+
+# 2026-09-05 IntIQ wakeup-match timing isolation：固定器件最差路径已转为
+`IntegerIssueQueue.entryUop[*].sourcePhysical -> entrySourceReady`，数据延迟
+约 49.415 ns、其中 81.6% 为布线。生产 `IntegerExecutionBackend` 现将窄 wakeup
+命中矩阵先寄存，再更新 ready bank；独立 IntIQ 仍保留同周期 wakeup 语义，生产
+CoreShell 的 RV32I cacheable/inaccessible smoke 2/2、IntIQ/backend/recovery
+聚焦 12/12 通过。下一步需用固定器件实现验证该分域是否切断 79 级路径。
