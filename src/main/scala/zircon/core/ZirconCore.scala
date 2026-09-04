@@ -45,7 +45,10 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val floatingCommitState = Module(new FloatingCommitState(cfg))
   val floatingLoadArbiter = Module(new Arbiter(new zircon.backend.FloatingResult(cfg), 2))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
-  val lsuIngress = Module(new DualLSUIngress(cfg))
+  // Production timing boundary: keep the independently tested ingress
+  // contract unchanged, while registering the wide operand/PMA handoff in
+  // the integrated core to break the MemIQ-to-LSQ ready chain.
+  val lsuIngress = Module(new DualLSUIngress(cfg, registeredOperandBoundary = true))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))

@@ -1,5 +1,19 @@
 # Zircon-2026 实施状态
 
+2026-09-04 集中时序重构：旧固定器件 post-route 最差路径由 FMA/issue 状态跨越
+IntIQ、MemIQ、PRF、PMA、LSQ 直达 L1D 控制，达 `411` 逻辑级且 `75.7%` 为布线。
+当前将所有 issue queue 的输出 endpoint mask 固化为已选端点的局部 mask，避免原始
+5-bit `UopRef.allowedEndpoints` 穿过宽动态 payload mux；并在生产 `ZirconCore` 的
+两条 `MemoryOperandRead -> DualLSUAdmission` 路径各加入一项可 squash/flush 的
+`MemoryOperandBoundary`，切断 operand/PMA/LSQ ready 反馈。边界保留真实 tag、
+operands 与 aq/rl，不产生 completion；独立 `DualLSUIngress` 默认接口不变。`compile`、
+`DualLSUIngressSpec`/`DualLSUAdmissionSpec`/`MemoryOperandReadSpec` `14/14`、
+`make test-m3-load-boundary` `1/1`、`make test-m3-store` `87/87` 通过。此前
+`RuntimeOptimized` 固定器件 synthesis-only 成功但 LUT 为 `77,322/134,600`
+(`57.45%`)、FF `32,767`、BRAM tile `133`、DSP `4`；无 place/route/WNS，且该
+directive 不作为面积门槛结论。下一轮以 `AreaOptimized_medium` 复核本次 RTL，
+随后才开始完整 implementation。
+
 2026-09-04 L1D victim selection one-hot：`L1DLoadCache` 对 load/store victim
 validity 改用 one-hot `Mux1H`，保留最低 way 优先规则，减少动态 way 解码和跨 way
 扇出。`L1DLoadCacheSpec` `58/58` 通过（244.8 s，仍低于单组件 5 分钟预算）。

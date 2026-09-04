@@ -160,15 +160,18 @@ class MemIssueQueue(
   val recoveryBlocked = io.flush || io.squash.valid
   io.m0Issue.valid := m0SelectedValid && !recoveryBlocked
   io.m0Issue.bits := readyEntries(m0SelectedIndex)
+  io.m0Issue.bits.allowedEndpoints := EndpointMask.M0.U(EndpointMask.Width.W)
   io.m1Issue.valid := m1SelectedValid && !recoveryBlocked
   io.m1Issue.bits := readyEntries(m1SelectedIndex)
+  // M1 loads may replay through the M0 owner, so retain both memory bits.
+  io.m1Issue.bits.allowedEndpoints := EndpointMask.CacheableLoadCandidate.U(EndpointMask.Width.W)
 
   when(io.m0Issue.valid) {
-    assert(io.m0Issue.bits.allowedEndpoints(ExecutionEndpoint.M0General.asUInt),
+    assert(entryAllowM0(m0SelectedIndex),
       "MemIQ sent an ineligible uop to M0")
   }
   when(io.m1Issue.valid) {
-    assert(io.m1Issue.bits.allowedEndpoints(ExecutionEndpoint.M1Load.asUInt),
+    assert(entryAllowM1(m1SelectedIndex),
       "MemIQ sent an ineligible uop to M1")
   }
   when(io.m0Issue.valid && io.m1Issue.valid) {

@@ -95,10 +95,11 @@ class FloatingIssueQueue(
   val recoveryBlocked = io.flush || io.squash.valid
   io.issue.valid := selectedValid && !recoveryBlocked
   io.issue.bits := readyEntries(selectedIndex)
+  io.issue.bits.allowedEndpoints := EndpointMask.E2.U(EndpointMask.Width.W)
   when(io.issue.valid) {
     assert(io.issue.bits.uopClass === UopClass.Floating,
       "FloatingIQ issued an operation outside the RV32F namespace")
-    assert(io.issue.bits.allowedEndpoints(ExecutionEndpoint.E2LongPipe.asUInt),
+    assert(entryUop(selectedIndex).allowedEndpoints(ExecutionEndpoint.E2LongPipe.asUInt),
       "FloatingIQ issued a uop not eligible for E2")
   }
 

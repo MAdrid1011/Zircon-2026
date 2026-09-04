@@ -90,8 +90,9 @@ class LongIssueQueue(
   val recoveryBlocked = io.flush || io.squash.valid
   io.issue.valid := selectedValid && !recoveryBlocked
   io.issue.bits := readyEntries(selectedIndex)
+  io.issue.bits.allowedEndpoints := EndpointMask.E2.U(EndpointMask.Width.W)
   when(io.issue.valid) {
-    assert(io.issue.bits.allowedEndpoints(ExecutionEndpoint.E2LongPipe.asUInt),
+    assert(entryUop(selectedIndex).allowedEndpoints(ExecutionEndpoint.E2LongPipe.asUInt),
       "LongIQ issued a uop not eligible for E2")
     assert(io.issue.bits.uopClass === UopClass.Multiply ||
       io.issue.bits.uopClass === UopClass.Divide,

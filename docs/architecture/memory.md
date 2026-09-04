@@ -111,6 +111,14 @@ ROB-owned atomic `aq/rl` bits in `MemoryAddressRequest`. A missing/mismatched
 context or global flush blocks the handshake. This ensures an LSU never rebuilds
 ordering metadata by re-decoding a current instruction stream.
 
+The production `ZirconCore` configuration places one recoverable registered
+`MemoryOperandBoundary` per M0/M1 lane after this read. It retains the complete
+`MemoryAddressRequest` (including exact tag, operands and `aq/rl`) and drops it
+only on global flush or when its tag is younger than a selective squash point.
+The standalone `DualLSUIngress` default remains direct for its component-level
+same-cycle contract; this explicit production option prevents address/PMA and
+LSQ ready feedback from extending the MemIQ/ROB selection cone.
+
 ### Auxiliary PRF and start arbitration
 
 M0/M1 have four virtual operand positions but do not add integer PRF ports.

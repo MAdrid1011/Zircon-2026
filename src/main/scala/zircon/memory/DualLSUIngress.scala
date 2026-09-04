@@ -5,6 +5,50 @@ import chisel3.util._
 import zircon.ZirconCoreConfig
 import zircon.backend.{CompletionResult, FaultCandidate, ROBExecutionContext, ROBTagOrder, UopRef}
 
+/** Registered boundary for the operand-read to address/admission path.
+  *
+  * Address/PMA calculation and the downstream queue must not feed their
+  * ready signals back through the wide MemIQ/ROB payload in the same cycle.
+  * The boundary owns a real MemoryAddressRequest, and drops it only for an
+  * explicit flush or a selective squash that makes its ROB tag younger.
+  */
+class MemoryOperandBoundary(config: ZirconCoreConfig) extends Module {
+  val io = IO(new Bundle {
+    val input = Flipped(Decoupled(new MemoryAddressRequest(config)))
+    val output = Decoupled(new MemoryAddressRequest(config))
+    val robHeadTag = Input(UInt(config.robTagWidth.W))
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
+    val flush = Input(Bool())
+  })
+
+  val occupied = RegInit(false.B)
+  val payload = Reg(new MemoryAddressRequest(config))
+  val killed = io.squash.valid && ROBTagOrder.isYounger(
+    payload.uop.robTag, io.squash.bits, io.robHeadTag, config)
+  val blocked = io.flush || io.squash.valid
+  io.output.valid := occupied && !io.flush && !killed
+  io.output.bits := payload
+  io.input.ready := !blocked && (!occupied || io.output.ready)
+
+  when(io.flush) {
+    occupied := false.B
+  }.elsewhen(io.squash.valid) {
+    when(occupied && killed) { occupied := false.B }
+  }.otherwise {
+    when(io.input.fire) {
+      payload := io.input.bits
+      occupied := true.B
+    }.elsewhen(io.output.fire) {
+      occupied := false.B
+    }
+  }
+
+  when(io.squash.valid) {
+    assert(!io.input.fire && !io.output.fire,
+      "operand boundary transferred work during selective squash")
+  }
+}
+
 /** Composes the pre-execution ownership path for the two M3 LSU roles.
   *
   * MemIQ uops obtain operands and ROB context, receive M0/M1 admission, merge
@@ -13,7 +57,8 @@ import zircon.backend.{CompletionResult, FaultCandidate, ROBExecutionContext, RO
   * next lifecycle layer and must supply real data or exact faults.
   */
 class DualLSUIngress(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+  config: ZirconCoreConfig = ZirconCoreConfig.default,
+  registeredOperandBoundary: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
 
@@ -69,6 +114,9 @@ class DualLSUIngress(
   })
 
   val operandRead = Module(new MemoryOperandRead(config))
+  val operandBoundary = if (registeredOperandBoundary) {
+    Some(Seq.fill(2)(Module(new MemoryOperandBoundary(config))))
+  } else None
   val admission = Module(new DualLSUAdmission(config))
   val m0Arbiter = Module(new M0RequestArbiter(config))
   val ingress = Module(new MemoryQueueIngress(config))
@@ -90,8 +138,19 @@ class DualLSUIngress(
   io.floatingReadValid := operandRead.io.floatingReadValid
   operandRead.io.flush := io.flush
 
-  admission.io.m0Input <> operandRead.io.request(0)
-  admission.io.m1Input <> operandRead.io.request(1)
+  if (registeredOperandBoundary) {
+    for (lane <- 0 until 2) {
+      operandBoundary.get(lane).io.input <> operandRead.io.request(lane)
+      operandBoundary.get(lane).io.robHeadTag := io.robHeadTag
+      operandBoundary.get(lane).io.squash := io.squash
+      operandBoundary.get(lane).io.flush := io.flush
+    }
+    admission.io.m0Input <> operandBoundary.get(0).io.output
+    admission.io.m1Input <> operandBoundary.get(1).io.output
+  } else {
+    admission.io.m0Input <> operandRead.io.request(0)
+    admission.io.m1Input <> operandRead.io.request(1)
+  }
   admission.io.robHeadTag := io.robHeadTag
   admission.io.squash := io.squash
   admission.io.flush := io.flush

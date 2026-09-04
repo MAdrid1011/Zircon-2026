@@ -120,13 +120,17 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val recoveryBlocked = io.flush || io.squash.valid
   io.issueE0.valid := selectedE0Valid && !recoveryBlocked
   io.issueE0.bits := awakenedEntries(selectedE0Index)
+  // Endpoint eligibility is already held in local one-bit state.  Replacing
+  // the wide mask on the dynamic payload mux keeps it off the issue/LSU cone.
+  io.issueE0.bits.allowedEndpoints := EndpointMask.E0.U(EndpointMask.Width.W)
   io.issueE1.valid := selectedE1Valid && !recoveryBlocked
   io.issueE1.bits := awakenedEntries(selectedE1Index)
+  io.issueE1.bits.allowedEndpoints := EndpointMask.E1.U(EndpointMask.Width.W)
   when(io.issueE0.valid) {
-    assert(io.issueE0.bits.allowedEndpoints(0), "IntIQ sent an ineligible uop to E0")
+    assert(entryAllowE0(selectedE0Index), "IntIQ sent an ineligible uop to E0")
   }
   when(io.issueE1.valid) {
-    assert(io.issueE1.bits.allowedEndpoints(1), "IntIQ sent an ineligible uop to E1")
+    assert(entryAllowE1(selectedE1Index), "IntIQ sent an ineligible uop to E1")
   }
   when(io.issueE0.valid && io.issueE1.valid) {
     assert(selectedE0Index =/= selectedE1Index,
