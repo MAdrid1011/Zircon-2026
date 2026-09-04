@@ -26,7 +26,7 @@ verify-fpga-timing:
 # Fast, focused M3 cacheable-store regression. Each invocation is intentionally
 # bounded well below the five-minute component-simulation target.
 test-m3-store:
-	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.AXIL2WritebackEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.ExclusiveL2TransferStoreSpec zircon.HostStoreFlushSpec zircon.LoadStoreQueuesSpec zircon.L1DLoadCacheSpec"
+	./scripts/sbtw "testOnly zircon.AXIDataStoreEngineSpec zircon.AXIL2WritebackEngineSpec zircon.DualMemoryLoadCompletionSpec zircon.ExclusiveL2TransferStoreSpec zircon.HostStoreFlushSpec zircon.L1DLoadCacheSpec"
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "write-allocates a cacheable store" -z "keeps a cacheable store local" -z "delays a trace-selected cacheable store retirement"'
 
 # Focused M3 component suites have one canonical Make target each. Other M3
@@ -64,7 +64,6 @@ test-m3-dual-resource:
 # older SB and both aligned SH lane pairs to merge with a cacheable refill read
 # by a younger LW.
 test-m3-partial-store-forward:
-	./scripts/sbtw 'testOnly zircon.LoadStoreQueuesSpec -- -z "combines disjoint partial stores byte-by-byte"'
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "merges an older partial store forward with a cacheable refill" -z "merges an older halfword store forward with a cacheable refill" -z "merges an older low-halfword store forward with a cacheable refill"'
 
 # Four explicit-seed complete-core MSHR pressure runs. Four data lines hold all
@@ -107,9 +106,9 @@ test-m3-ordered-io-fetch-pressure:
 # transport target above; rerunning them here added no device-ownership coverage.
 test-m3-device-io:
 	./scripts/sbtw "testOnly zircon.LoadStoreQueuesSpec zircon.MemoryQueueIngressSpec zircon.DualLSUIngressSpec"
-	# Keep this slice to the basic M0/ID-6 ownership cases.  The broad
-	# "Device" selector also reran the dedicated mixed-AXI, grouped-MMIO,
-	# fetch-pressure, and interrupt cases below.
+		# Keep this slice to the basic M0/ID-6 ownership cases; the exact
+		# selectors avoid rerunning the dedicated mixed-AXI, grouped-MMIO,
+		# fetch-pressure, and interrupt cases below.
 	./scripts/sbtw 'testOnly zircon.CoreShellSpec -- -z "executes a DeviceStrong load" -z "executes a DeviceBurstable load" -z "turns a DeviceStrong RRESP error" -z "executes a DeviceStrong store" -z "turns a DeviceBurstable store BRESP error"'
 
 # Fast full-channel AXI stress tier. It keeps the explicit-seed read/write

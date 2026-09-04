@@ -79,11 +79,13 @@ as one `testOnly` invocation with repeated `-z` filters. This preserves the
 scenario and explicit-seed set while avoiding repeated SBT/JVM project startup;
 targets that split component suites remain split when needed for the five-minute
 simulation budget. Component suites also have a single canonical focused owner:
-`test-m3-store` owns cache/store suites, `test-m3-device-io` owns LSQ/device
+`test-m3-store` owns cache/store suites, `test-m3-device-io` owns the full LSQ/device
 ingress suites, `test-m3-atomic` owns the RV32A/MemIQ suites, and
 `test-m3-ordering` owns `CacheFenceDrainControllerSpec`. The remaining M3
 targets intentionally run only their unique component suite (when one exists)
-and their precise top-level scenarios. This removes whole-suite reruns without
+and their precise top-level scenarios. A small `L1DLoadCacheSpec` selector is
+retained in `test-m3-dual-resource` as a fast reproducer; it is not a second
+canonical suite run. This removes whole-suite reruns without
 removing any scenario or changing the complete `./scripts/sbtw test` release
 gate.
 
@@ -201,8 +203,8 @@ accepted, then require two L1D handshakes and both exact retirements. This
 proves the uncontented and invalid-way top-level dual-LSU paths; victim and
 recovery conflict matrices remain separate obligations.
 
-`make test-m3-partial-store-forward` runs byte and both aligned halfword lane
-pairs for each of three explicit seeds `0x5eedfd01`--`0x5eedfd03` through
+`make test-m3-partial-store-forward` runs the three top-level byte and aligned
+halfword lane pairs for explicit seeds `0x5eedfd01`--`0x5eedfd03` through
 independent five-channel AXI backpressure. The byte program stores byte-1 of an initially uncached
 `0x11223344` word, then executes a younger `lw`; it requires exactly one
 data-line refill, exact store metadata `{address+1, mask=0x2, data=0xbb00}`,
