@@ -57,15 +57,18 @@ class MemIssueQueue(
   private def allSourcesReady(uop: UopRef): Bool =
     (0 until 3).map(sourceReady(uop, _)).reduce(_ && _)
 
-  private def ageFromHead(tag: UInt): UInt =
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
+  // The same age ordering feeds atomic, M1, and M0 selection.  Materialize
+  // it once per entry instead of rebuilding the ROB-distance comparator for
+  // every candidate set.
+  val entryAge = VecInit(entryUop.map(uop =>
+    ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     var selectedValid: Bool = false.B
     var selectedIndex: UInt = 0.U(indexWidth.W)
     var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
     for (index <- 0 until entries) {
-      val age = ageFromHead(entryUop(index).robTag)
+      val age = entryAge(index)
       val take = candidates(index) && (!selectedValid || age < selectedAge)
       selectedIndex = Mux(take, index.U, selectedIndex)
       selectedAge = Mux(take, age, selectedAge)
@@ -74,8 +77,15 @@ class MemIssueQueue(
     (selectedValid, selectedIndex)
   }
 
+  // Source wakeup is shared by both issue ports and by the retained entry
+  // update, avoiding duplicate integer-ready comparator banks.
+  val readyEntries = Wire(Vec(entries, new UopRef(config)))
+  for (index <- 0 until entries) {
+    readyEntries(index) := withReady(entryUop(index))
+  }
+
   private def readyForIssue(index: Int): Bool =
-    entryValid(index) && allSourcesReady(entryUop(index))
+    entryValid(index) && allSourcesReady(readyEntries(index))
 
   // aq/rl remains authoritative in the ROB execution context. Before an
   // atomic reaches that context, however, its compact MemIQ record must stop
@@ -105,9 +115,9 @@ class MemIssueQueue(
 
   val recoveryBlocked = io.flush || io.squash.valid
   io.m0Issue.valid := m0SelectedValid && !recoveryBlocked
-  io.m0Issue.bits := withReady(entryUop(m0SelectedIndex))
+  io.m0Issue.bits := readyEntries(m0SelectedIndex)
   io.m1Issue.valid := m1SelectedValid && !recoveryBlocked
-  io.m1Issue.bits := withReady(entryUop(m1SelectedIndex))
+  io.m1Issue.bits := readyEntries(m1SelectedIndex)
 
   when(io.m0Issue.valid) {
     assert(io.m0Issue.bits.allowedEndpoints(ExecutionEndpoint.M0General.asUInt),
@@ -167,7 +177,7 @@ class MemIssueQueue(
     count := count + enqueueCount - issueCount
     for (index <- 0 until entries) {
       when(entryValid(index)) {
-        entryUop(index) := withReady(entryUop(index))
+        entryUop(index) := readyEntries(index)
       }
     }
     when(io.m0Issue.fire) { entryValid(m0SelectedIndex) := false.B }

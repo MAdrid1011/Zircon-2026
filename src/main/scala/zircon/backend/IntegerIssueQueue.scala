@@ -30,15 +30,18 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val entryUop = Reg(Vec(entries, new UopRef(config)))
   val count = RegInit(0.U(countWidth.W))
 
-  private def ageFromHead(tag: UInt): UInt =
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)
+  // Compute each age once.  The selector is used for several endpoint
+  // candidate sets; rebuilding the ROB-distance comparator in every call
+  // creates a large, high-fanout cone in the integrated core.
+  val entryAge = VecInit(entryUop.map(uop =>
+    ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     var selectedValid: Bool = false.B
     var selectedIndex: UInt = 0.U(indexWidth.W)
     var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
     for (index <- 0 until entries) {
-      val candidateAge = ageFromHead(entryUop(index).robTag)
+      val candidateAge = entryAge(index)
       val take = candidates(index) && (!selectedValid || candidateAge < selectedAge)
       selectedIndex = Mux(take, index.U, selectedIndex)
       selectedAge = Mux(take, candidateAge, selectedAge)
@@ -61,7 +64,14 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     updated
   }
 
-  val ready = entryUop.map(uop => allSourcesReady(withWakeup(uop)))
+  // Reuse the same wakeup result for readiness, issue payloads, and the
+  // retained entry update.  This keeps the two-wakeup comparator bank from
+  // being replicated at each consumer.
+  val awakenedEntries = Wire(Vec(entries, new UopRef(config)))
+  for (index <- 0 until entries) {
+    awakenedEntries(index) := withWakeup(entryUop(index))
+  }
+  val ready = awakenedEntries.map(allSourcesReady)
   val e0ExclusiveCandidates = (0 until entries).map(index =>
     entryValid(index) && ready(index) &&
       allows(entryUop(index), 0) && !allows(entryUop(index), 1))
@@ -88,9 +98,9 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
 
   val recoveryBlocked = io.flush || io.squash.valid
   io.issueE0.valid := selectedE0Valid && !recoveryBlocked
-  io.issueE0.bits := withWakeup(entryUop(selectedE0Index))
+  io.issueE0.bits := awakenedEntries(selectedE0Index)
   io.issueE1.valid := selectedE1Valid && !recoveryBlocked
-  io.issueE1.bits := withWakeup(entryUop(selectedE1Index))
+  io.issueE1.bits := awakenedEntries(selectedE1Index)
   when(io.issueE0.valid) {
     assert(io.issueE0.bits.allowedEndpoints(0), "IntIQ sent an ineligible uop to E0")
   }
@@ -142,7 +152,7 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     count := count + enqueueCount - issueCount
     for (index <- 0 until entries) {
       when(entryValid(index)) {
-        entryUop(index) := withWakeup(entryUop(index))
+        entryUop(index) := awakenedEntries(index)
       }
     }
     when(io.issueE0.fire) { entryValid(selectedE0Index) := false.B }
