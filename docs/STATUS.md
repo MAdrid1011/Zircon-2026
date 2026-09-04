@@ -7,6 +7,14 @@
 246/294/277/226，四项均 exit 0。该证据仍是 bounded differential，不代表
 ACT4、随机回归或 v1.0.0 release gate。
 
+2026-09-04 完成生产浮点结果寄存器边界和顶层 ROB age wire 复用后，在固定器件
+`xc7a200tfbg676-2L`、Vivado 2023.1、`AreaOptimized_medium` 下完成
+`fpga/runs/synth-d5d501b` synthesis-only。综合结果为 LUT
+`65,322/134,600 = 48.53%`、FF `31,569/269,200 = 11.73%`、BRAM tile
+`133/365 = 36.44%`、DSP `4/740 = 0.54%`，0 errors/0 critical warnings。
+相对 `synth-29237b4` 的 65,951 LUT（49.00%）减少 629 LUT；该运行没有
+place/route、WNS 或 bitstream，仍不是 FPGA release gate。
+
 2026-09-04 本地增量证据：FLW/FSW 接入双 LSU、L1D/L2、精确 FPR completion 和
 retire metadata；`FloatingAdmissionSpec`、`MemoryAddressUnitSpec`、
 `DualMemoryLoadCompletionSpec`、`FloatingScoreboardSpec` 聚焦回归为 17/17，
