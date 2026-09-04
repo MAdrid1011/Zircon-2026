@@ -3,7 +3,7 @@ package zircon.memory
 import chisel3._
 import chisel3.util._
 import zircon.ZirconCoreConfig
-import zircon.backend.{CompletionResult, FaultCandidate, ROBExecutionContext, UopRef}
+import zircon.backend.{CompletionResult, FaultCandidate, ROBExecutionContext, ROBTagOrder, UopRef}
 
 /** Composes the pre-execution ownership path for the two M3 LSU roles.
   *
@@ -64,6 +64,8 @@ class DualLSUIngress(
     val flush = Input(Bool())
     val loadCount = Output(UInt(log2Ceil(config.loadQueueEntries + 1).W))
     val storeCount = Output(UInt(log2Ceil(config.storeQueueEntries + 1).W))
+    /** Oldest store still ahead of LSQ visibility. */
+    val storeBarrier = Output(Valid(UInt(config.robTagWidth.W)))
   })
 
   val operandRead = Module(new MemoryOperandRead(config))
@@ -99,6 +101,17 @@ class DualLSUIngress(
   m0Arbiter.io.robHeadTag := io.robHeadTag
   m0Arbiter.io.squash := io.squash
   m0Arbiter.io.flush := io.flush
+
+  val arbiterBarrierAge = ROBTagOrder.ageFromHead(
+    m0Arbiter.io.storeBarrier.bits, io.robHeadTag, config)
+  val ingressBarrierAge = ROBTagOrder.ageFromHead(
+    ingress.io.storeBarrier.bits, io.robHeadTag, config)
+  val arbiterBarrierWins = m0Arbiter.io.storeBarrier.valid &&
+    (!ingress.io.storeBarrier.valid || arbiterBarrierAge < ingressBarrierAge)
+  io.storeBarrier.valid := m0Arbiter.io.storeBarrier.valid ||
+    ingress.io.storeBarrier.valid
+  io.storeBarrier.bits := Mux(arbiterBarrierWins,
+    m0Arbiter.io.storeBarrier.bits, ingress.io.storeBarrier.bits)
 
   ingress.io.input(0) <> m0Arbiter.io.output
   ingress.io.input(1) <> admission.io.m1Issue

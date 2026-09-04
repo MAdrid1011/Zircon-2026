@@ -25,6 +25,8 @@ class M0RequestArbiter(
     val robHeadTag = Input(UInt(config.robTagWidth.W))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val flush = Input(Bool())
+    /** Oldest store retained before the request reaches the LSQ. */
+    val storeBarrier = Output(Valid(UInt(config.robTagWidth.W)))
   })
 
   val directBuffered = RegInit(false.B)
@@ -54,6 +56,30 @@ class M0RequestArbiter(
   io.replay.ready := !replayBuffered && !recoveryBlocked
 
   val selectedBuffered = Mux(selectedDirect, directBuffered, replayBuffered)
+
+  // A direct M0 store may spend cycles in this arbiter while the downstream
+  // ingress is backpressured.  Keep that store visible to the top-level M1
+  // ordering gate; otherwise a younger load could issue before the store has
+  // an LSQ entry and cannot be forwarded.
+  val bufferedStoreCandidates = Seq(
+    directBuffered && directBuffer.address.isStore,
+    replayBuffered && replayBuffer.address.isStore)
+  val bufferedStoreTags = Seq(directBuffer.address.robTag, replayBuffer.address.robTag)
+  val bufferedStoreAges = bufferedStoreTags.map(tag =>
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config))
+  var barrierValid: Bool = false.B
+  var barrierTag: UInt = 0.U(config.robTagWidth.W)
+  var barrierAge: UInt = 0.U((config.robIndexWidth + 1).W)
+  for (index <- bufferedStoreCandidates.indices) {
+    val take = bufferedStoreCandidates(index) &&
+      (!barrierValid || bufferedStoreAges(index) < barrierAge)
+    barrierTag = Mux(take, bufferedStoreTags(index), barrierTag)
+    barrierAge = Mux(take, bufferedStoreAges(index), barrierAge)
+    barrierValid = barrierValid || bufferedStoreCandidates(index)
+  }
+  io.storeBarrier.valid := barrierValid
+  io.storeBarrier.bits := barrierTag
+
   val directFlows = io.output.fire && selectedDirect && !directBuffered
   val replayFlows = io.output.fire && !selectedDirect && !replayBuffered
 

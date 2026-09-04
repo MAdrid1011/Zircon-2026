@@ -251,8 +251,24 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     m0IssueAge > atomicBarrierAge
   val m1BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
     m1IssueAge > atomicBarrierAge
-  val m0IssueAllowed = !m0BlockedByAcquire
-  val m1IssueAllowed = !m1BlockedByAcquire
+  val olderPendingStore = lsuIngress.io.storeBarrier.valid &&
+    !ROBTagOrder.isYounger(lsuIngress.io.storeBarrier.bits,
+      memQueue.io.m1Issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
+  val olderPendingStoreForM0 = lsuIngress.io.storeBarrier.valid &&
+    !ROBTagOrder.isYounger(lsuIngress.io.storeBarrier.bits,
+      memQueue.io.m0Issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
+  // Also cover the edge on which an older store leaves MemIQ for M0.  The
+  // registered barrier becomes visible one cycle later, so without this
+  // check a younger M1 load could issue in parallel with that first transfer.
+  val olderStoreSelectedSameCycle = memQueue.io.m0Issue.valid &&
+    memQueue.io.m0Issue.bits.uopClass === UopClass.Store &&
+    !ROBTagOrder.isYounger(memQueue.io.m0Issue.bits.robTag,
+      memQueue.io.m1Issue.bits.robTag, backend.io.robHead.bits.robTag, cfg)
+  val m0IssueAllowed = !m0BlockedByAcquire &&
+    !(memQueue.io.m0Issue.bits.uopClass === UopClass.Load &&
+      olderPendingStoreForM0)
+  val m1IssueAllowed = !m1BlockedByAcquire &&
+    !olderPendingStore && !olderStoreSelectedSameCycle
   for ((queueIssue, candidate, allowed) <- Seq(
       (memQueue.io.m0Issue, 1, m0IssueAllowed),
       (memQueue.io.m1Issue, 2, m1IssueAllowed))) {

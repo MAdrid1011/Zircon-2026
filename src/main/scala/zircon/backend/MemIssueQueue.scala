@@ -106,6 +106,13 @@ class MemIssueQueue(
   private def readyForIssue(index: Int): Bool =
     entryValid(index) && allSourcesReady(readyEntries(index))
 
+  private def olderStoreInQueue(index: Int): Bool =
+    (0 until entries).map(storeIndex =>
+      entryValid(storeIndex) &&
+        entryUop(storeIndex).uopClass === UopClass.Store &&
+        !ROBTagOrder.isYounger(entryUop(storeIndex).robTag,
+          entryUop(index).robTag, io.robHeadTag, config)).reduce(_ || _)
+
   // aq/rl remains authoritative in the ROB execution context. Before an
   // atomic reaches that context, however, its compact MemIQ record must stop
   // younger M0 and M1 work from escaping in the same issue window.
@@ -120,6 +127,10 @@ class MemIssueQueue(
   val m1Candidates = (0 until entries).map(index =>
     readyForIssue(index) &&
       entryUop(index).allowedEndpoints(ExecutionEndpoint.M1Load.asUInt) &&
+      // A cacheable load cannot pass an older store that is still waiting for
+      // its operands.  Such a store is not yet visible to the LSQ, so letting
+      // M1 issue would make forwarding impossible and can expose stale data.
+      !olderStoreInQueue(index) &&
       (!oldestAtomicValid || !ROBTagOrder.isYounger(
         entryUop(index).robTag, oldestAtomicTag, io.robHeadTag, config)))
   val (m1SelectedValid, m1SelectedIndex) = selectOldest(m1Candidates)
@@ -127,6 +138,11 @@ class MemIssueQueue(
   val m0Candidates = (0 until entries).map(index =>
     readyForIssue(index) &&
       entryUop(index).allowedEndpoints(ExecutionEndpoint.M0General.asUInt) &&
+      // M0 is also a legal endpoint for ordinary loads.  They obey the same
+      // unresolved-older-store rule as M1; otherwise M0 fallback can bypass
+      // the barrier that protects the cacheable-load path.
+      !(entryUop(index).uopClass === UopClass.Load &&
+        olderStoreInQueue(index)) &&
       (!oldestAtomicValid || !ROBTagOrder.isYounger(
         entryUop(index).robTag, oldestAtomicTag, io.robHeadTag, config)) &&
       !(m1SelectedValid && m1SelectedIndex === index.U))

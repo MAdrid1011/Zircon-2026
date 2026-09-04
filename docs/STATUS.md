@@ -1,5 +1,16 @@
 # Zircon-2026 实施状态
 
+2026-09-04 修复真实 picotest 暴露的 store-load 顺序漏洞：MemIssueQueue、M0
+request arbiter、MemoryQueueIngress、DualLSUIngress 和 ZirconCore 现在共同阻止
+年轻 M0/M1 load 越过尚未准备好或尚未完成 LSQ 更新的老 store，并覆盖老 store
+同周期进入 M0 的情况。新增 MemIssueQueue 定向回归当前 `8/8`，CoreShell 的
+FENCE/atomic/store-order 聚焦场景 `4/4`，均通过。修复后 picotest 已越过原
+窄 store/load 错误，观察到 byte-merge 结果 `0xefef00aa`；后续仍在测试其
+`mstatus` 随机保留位检查。该检查要求未实现 WPRI/MPP 位原样回显，与冻结的
+M-mode WARL 规格不一致，当前不据此修改架构语义。ZirconSim 确定性 RV32I、
+RV32M、RV32A 四项 `tohost` 均正常退出，退休数为 `19/34/19/12`。本轮尚未
+生成新的 Vivado 面积或 WNS 结果。
+
 2026-09-04 针对固定器件 post-route 最差路径，从浮点提交旁路到浮点 store/L2
 写口的同周期数据锥做了结构隔离：`FloatingRegisterFile` 保留 FPU 执行所需的
 write-through 读口，同时新增无旁路架构读口供 LSU store 使用；当同周期提交写入

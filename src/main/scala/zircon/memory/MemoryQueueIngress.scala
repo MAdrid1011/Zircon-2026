@@ -60,6 +60,8 @@ class MemoryQueueIngress(
     val updateCount = Output(UInt(2.W))
     val loadCount = Output(UInt(log2Ceil(config.loadQueueEntries + 1).W))
     val storeCount = Output(UInt(log2Ceil(config.storeQueueEntries + 1).W))
+    /** Oldest store not yet fully represented in the LSQ. */
+    val storeBarrier = Output(Valid(UInt(config.robTagWidth.W)))
   })
 
   val queues = Module(new LoadStoreQueues(config))
@@ -111,6 +113,30 @@ class MemoryQueueIngress(
   val loadAddressPending = RegInit(VecInit.fill(batchWidth)(false.B))
   val storeAddressPending = RegInit(VecInit.fill(batchWidth)(false.B))
   val storeDataPending = RegInit(VecInit.fill(batchWidth)(false.B))
+
+  // Intake/update are registered ahead of LSQ allocation.  Their stores must
+  // participate in load ordering even though LoadStoreQueues cannot see them
+  // until the allocation edge has completed.
+  val pendingStoreCandidates = (0 until batchWidth).map(lane =>
+    (intakeValid(lane) && intakeRequest(lane).address.isStore) ||
+      (updateValid(lane) && updateRequest(lane).address.isStore))
+  val pendingStoreTags = (0 until batchWidth).map(lane =>
+    Mux(intakeValid(lane) && intakeRequest(lane).address.isStore,
+      intakeRequest(lane).address.robTag, updateRequest(lane).address.robTag))
+  val pendingStoreAges = pendingStoreTags.map(tag =>
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config))
+  var pendingBarrierValid: Bool = false.B
+  var pendingBarrierTag: UInt = 0.U(config.robTagWidth.W)
+  var pendingBarrierAge: UInt = 0.U((config.robIndexWidth + 1).W)
+  for (lane <- 0 until batchWidth) {
+    val take = pendingStoreCandidates(lane) &&
+      (!pendingBarrierValid || pendingStoreAges(lane) < pendingBarrierAge)
+    pendingBarrierTag = Mux(take, pendingStoreTags(lane), pendingBarrierTag)
+    pendingBarrierAge = Mux(take, pendingStoreAges(lane), pendingBarrierAge)
+    pendingBarrierValid = pendingBarrierValid || pendingStoreCandidates(lane)
+  }
+  io.storeBarrier.valid := pendingBarrierValid
+  io.storeBarrier.bits := pendingBarrierTag
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     var selectedValid: Bool = false.B
