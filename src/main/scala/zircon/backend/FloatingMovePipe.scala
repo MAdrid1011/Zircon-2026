@@ -71,6 +71,12 @@ class FloatingMovePipe(
 
   val active = RegInit(false.B)
   val request = Reg(new FloatingMoveRequest(config))
+  // Keep every completed result behind a registered ready/valid boundary.
+  // Without this skid register, the result payload and its backpressure path
+  // remain combinationally coupled to the ROB, IQ, and LSU control network.
+  val resultPending = RegInit(false.B)
+  val resultReg = Reg(new FloatingMoveResult(config))
+  private val productionResultPipeline = useExternalMultiplier
   val divInitialized = RegInit(false.B)
   val divDividend = Reg(UInt(24.W))
   val divDivisor = Reg(UInt(25.W))
@@ -823,18 +829,32 @@ class FloatingMovePipe(
     result.floatData := signInjected
   }
 
-  io.input.ready := !active && !recoveryBlocked
   val divisionDone = divInitialized && (divSpecial || divIteration === 51.U)
   val sqrtDone = sqrtInitialized && (sqrtSpecial || sqrtIteration === 27.U)
-  io.output.valid := active && !recoveryBlocked &&
+  val resultReadyToCapture = active &&
     (!fma || fmaResultCaptured) && (!division || divisionDone) &&
     (!squareRoot || sqrtDone)
-  io.output.bits := result
+  if (productionResultPipeline) {
+    io.input.ready := !active && !resultPending && !recoveryBlocked
+    io.output.valid := resultPending && !recoveryBlocked
+    io.output.bits := resultReg
+  } else {
+    // The standalone model keeps its historical one-cycle result contract;
+    // production uses the registered boundary above.
+    io.input.ready := !active && !recoveryBlocked
+    io.output.valid := active && !recoveryBlocked &&
+      (!fma || fmaResultCaptured) && (!division || divisionDone) &&
+      (!squareRoot || sqrtDone)
+    io.output.bits := result
+  }
 
   val activeYounger = active && ROBTagOrder.isYounger(
     request.robTag, io.squash.bits, io.robHeadTag, config)
+  val pendingYounger = productionResultPipeline.B && resultPending &&
+    ROBTagOrder.isYounger(resultReg.robTag, io.squash.bits, io.robHeadTag, config)
   when(io.flush) {
     active := false.B
+    resultPending := false.B
     divInitialized := false.B
     fmaInitialized := false.B
     fmaResultCaptured := false.B
@@ -846,8 +866,18 @@ class FloatingMovePipe(
       fmaInitialized := false.B
       sqrtInitialized := false.B
     }
+    when(pendingYounger) { resultPending := false.B }
   }.otherwise {
-    when(io.output.fire) { active := false.B }
+    if (productionResultPipeline) {
+      when(io.output.fire) { resultPending := false.B }
+      when(resultReadyToCapture) {
+        resultReg := result
+        resultPending := true.B
+        active := false.B
+      }
+    } else {
+      when(io.output.fire) { active := false.B }
+    }
     when(io.input.fire) {
       request := io.input.bits
       active := true.B
@@ -961,7 +991,8 @@ class FloatingMovePipe(
   when(io.output.valid) {
     assert(supported(request.operation),
       "FloatingMovePipe retained an unsupported operation")
-    assert(!(result.writesInteger && result.writesFloat),
+    val outputResult = if (productionResultPipeline) resultReg else result
+    assert(!(outputResult.writesInteger && outputResult.writesFloat),
       "floating E2 operation cannot write both register namespaces")
   }
   when(io.squash.valid) {
