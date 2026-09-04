@@ -64,17 +64,36 @@ class MemIssueQueue(
     ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
-    var selectedValid: Bool = false.B
-    var selectedIndex: UInt = 0.U(indexWidth.W)
-    var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
-    for (index <- 0 until entries) {
-      val age = entryAge(index)
-      val take = candidates(index) && (!selectedValid || age < selectedAge)
-      selectedIndex = Mux(take, index.U, selectedIndex)
-      selectedAge = Mux(take, age, selectedAge)
-      selectedValid = selectedValid || candidates(index)
+    // Balance the oldest-candidate reduction.  The previous serial fold put
+    // every slot on one long ROB-age/mux path; this tree keeps the same
+    // left-wins tie-break with logarithmic decision depth.
+    var valid = candidates.toVector
+    var indices = (0 until entries).map(_.U(indexWidth.W)).toVector
+    var ages = entryAge.toVector
+    while (valid.length > 1) {
+      val nextValid = Vector.newBuilder[Bool]
+      val nextIndices = Vector.newBuilder[UInt]
+      val nextAges = Vector.newBuilder[UInt]
+      var pair = 0
+      while (pair < valid.length) {
+        if (pair + 1 == valid.length) {
+          nextValid += valid(pair)
+          nextIndices += indices(pair)
+          nextAges += ages(pair)
+        } else {
+          val rightWins = valid(pair + 1) &&
+            (!valid(pair) || ages(pair + 1) < ages(pair))
+          nextValid += (valid(pair) || valid(pair + 1))
+          nextIndices += Mux(rightWins, indices(pair + 1), indices(pair))
+          nextAges += Mux(rightWins, ages(pair + 1), ages(pair))
+        }
+        pair += 2
+      }
+      valid = nextValid.result()
+      indices = nextIndices.result()
+      ages = nextAges.result()
     }
-    (selectedValid, selectedIndex)
+    (valid.head, indices.head)
   }
 
   // Source wakeup is shared by both issue ports and by the retained entry

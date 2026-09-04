@@ -37,17 +37,36 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
     ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
-    var selectedValid: Bool = false.B
-    var selectedIndex: UInt = 0.U(indexWidth.W)
-    var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
-    for (index <- 0 until entries) {
-      val candidateAge = entryAge(index)
-      val take = candidates(index) && (!selectedValid || candidateAge < selectedAge)
-      selectedIndex = Mux(take, index.U, selectedIndex)
-      selectedAge = Mux(take, candidateAge, selectedAge)
-      selectedValid = selectedValid || candidates(index)
+    // A linear fold makes the oldest-entry decision traverse every slot in
+    // series.  Reduce adjacent candidates as a tree so the critical path is
+    // logarithmic in queue depth; left wins ties to preserve slot order.
+    var valid = candidates.toVector
+    var indices = (0 until entries).map(_.U(indexWidth.W)).toVector
+    var ages = entryAge.toVector
+    while (valid.length > 1) {
+      val nextValid = Vector.newBuilder[Bool]
+      val nextIndices = Vector.newBuilder[UInt]
+      val nextAges = Vector.newBuilder[UInt]
+      var pair = 0
+      while (pair < valid.length) {
+        if (pair + 1 == valid.length) {
+          nextValid += valid(pair)
+          nextIndices += indices(pair)
+          nextAges += ages(pair)
+        } else {
+          val rightWins = valid(pair + 1) &&
+            (!valid(pair) || ages(pair + 1) < ages(pair))
+          nextValid += (valid(pair) || valid(pair + 1))
+          nextIndices += Mux(rightWins, indices(pair + 1), indices(pair))
+          nextAges += Mux(rightWins, ages(pair + 1), ages(pair))
+        }
+        pair += 2
+      }
+      valid = nextValid.result()
+      indices = nextIndices.result()
+      ages = nextAges.result()
     }
-    (selectedValid, selectedIndex)
+    (valid.head, indices.head)
   }
 
   private def allSourcesReady(uop: UopRef): Bool = uop.sourceReady.asUInt.andR
