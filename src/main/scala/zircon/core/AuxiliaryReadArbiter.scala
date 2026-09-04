@@ -35,13 +35,18 @@ class AuxiliaryReadArbiter(
     val candidateData = Output(Vec(candidateCount, Vec(2, UInt(32.W))))
   })
 
+  // The same live-tag distance is consumed by each allocation round. Compute
+  // it once per candidate so the priority loop does not replicate the index
+  // compare/subtract cone three times.
+  private val candidateAge = VecInit((0 until candidateCount).map(index =>
+    ROBTagOrder.ageFromHead(io.candidate(index).bits.robTag, io.robHeadTag, config)))
+
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     var selectedValid: Bool = false.B
     var selectedIndex: UInt = 0.U(log2Ceil(candidateCount).W)
     var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
     for (index <- 0 until candidateCount) {
-      val age = ROBTagOrder.ageFromHead(
-        io.candidate(index).bits.robTag, io.robHeadTag, config)
+      val age = candidateAge(index)
       val take = candidates(index) && (!selectedValid || age < selectedAge)
       selectedValid = selectedValid || candidates(index)
       selectedIndex = Mux(take, index.U, selectedIndex)
