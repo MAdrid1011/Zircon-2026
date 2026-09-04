@@ -24,6 +24,9 @@ class MemoryOperandRead(
     val floatingReadData = Input(Vec(2, UInt(32.W)))
     val floatingReadAddress = Output(Vec(2, UInt(5.W)))
     val floatingReadValid = Output(Vec(2, Bool()))
+    val floatingWrite = Input(Valid(new Bundle {
+      val address = UInt(5.W)
+    }))
     val request = Vec(2, Decoupled(new MemoryAddressRequest(config)))
     val flush = Input(Bool())
   })
@@ -42,7 +45,11 @@ class MemoryOperandRead(
     io.prfReadPhysical(storePort) := Mux(issue.valid,
       issue.bits.sourcePhysical(1), 0.U)
 
-    request.valid := issue.valid && context.valid && !io.flush
+    val floatingWriteConflict = io.floatingWrite.valid &&
+      issue.bits.sourceKind(1) === SourceKind.FloatingRegister &&
+      issue.bits.floatingSource(1) === io.floatingWrite.bits.address
+    request.valid := issue.valid && context.valid && !io.flush &&
+      !floatingWriteConflict
     request.bits.uop := issue.bits
     request.bits.base := Mux(issue.bits.sourceKind(0) === SourceKind.IntegerRegister,
       io.prfReadData(basePort), 0.U)
@@ -57,7 +64,8 @@ class MemoryOperandRead(
       issue.bits.sourceKind(1) === SourceKind.FloatingRegister
     request.bits.atomicAq := context.bits.atomicAq
     request.bits.atomicRl := context.bits.atomicRl
-    issue.ready := request.ready && context.valid && !io.flush
+    issue.ready := request.ready && context.valid && !io.flush &&
+      !floatingWriteConflict
 
     when(issue.valid && !io.flush) {
       assert(context.valid,

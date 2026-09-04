@@ -27,6 +27,9 @@ class DualLSUIngress(
     val floatingReadData = Input(Vec(2, UInt(32.W)))
     val floatingReadAddress = Output(Vec(2, UInt(5.W)))
     val floatingReadValid = Output(Vec(2, Bool()))
+    val floatingWrite = Input(Valid(new Bundle {
+      val address = UInt(5.W)
+    }))
 
     val fault = Output(Vec(2, new FaultCandidate(config)))
     val loadForward = Vec(config.decodeWidth, Decoupled(new LoadStoreForward(config)))
@@ -80,6 +83,7 @@ class DualLSUIngress(
   io.prfReadPhysical := operandRead.io.prfReadPhysical
   operandRead.io.prfReadData := io.prfReadData
   operandRead.io.floatingReadData := io.floatingReadData
+  operandRead.io.floatingWrite := io.floatingWrite
   io.floatingReadAddress := operandRead.io.floatingReadAddress
   io.floatingReadValid := operandRead.io.floatingReadValid
   operandRead.io.flush := io.flush

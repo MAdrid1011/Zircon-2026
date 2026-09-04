@@ -1,5 +1,14 @@
 # Zircon-2026 实施状态
 
+2026-09-04 针对固定器件 post-route 最差路径，从浮点提交旁路到浮点 store/L2
+写口的同周期数据锥做了结构隔离：`FloatingRegisterFile` 保留 FPU 执行所需的
+write-through 读口，同时新增无旁路架构读口供 LSU store 使用；当同周期提交写入
+相同 FPR 时，`MemoryOperandRead` 暂停该 store 一个周期，避免读取旧值。新增的
+冲突回归为 1/1；受影响的
+`MemoryOperandRead`、`DualLSUIngress`、浮点状态和
+顶层 RV32F/双 FSW 聚焦回归均通过（组件与 CoreShell 聚焦命令均无失败）。本次
+变更尚无新的 Vivado 面积/WNS 结论，等待固定器件 synthesis-only 实测。
+
 2026-09-04 参考模型复核：当前父仓 `921b6c6`、ZirconSim
 `df0265c`、RV-Software `11d6eae` 的 deterministic `tohost` ELF 使用 seed 1
 完成 Spike 与 Sail committed-memory 差分；RV32I/ALU-branch/RV32M/RV32A 分别

@@ -281,8 +281,13 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     lsuIngress.io.prfReadData(source + 2) :=
       auxiliaryRead.io.candidateData(2)(source)
   }
-  lsuIngress.io.floatingReadData(0) := floatingCommitState.io.readData(1)
-  lsuIngress.io.floatingReadData(1) := floatingCommitState.io.readData(2)
+  // Stores consume the architectural array path.  If the exact same FPR is
+  // being written at commit, MemoryOperandRead holds that store for one cycle
+  // and observes the updated register on the following cycle.
+  lsuIngress.io.floatingReadData(0) := floatingCommitState.io.readDataNoBypass(1)
+  lsuIngress.io.floatingReadData(1) := floatingCommitState.io.readDataNoBypass(2)
+  lsuIngress.io.floatingWrite.valid := floatingCommitState.io.fprWrite.valid
+  lsuIngress.io.floatingWrite.bits.address := floatingCommitState.io.fprWrite.bits.address
   backend.io.memoryExecutionRead := lsuIngress.io.robRead
   lsuIngress.io.robContext := backend.io.memoryExecutionContext
   lsuIngress.io.robHeadTag := backend.io.robHead.bits.robTag

@@ -32,6 +32,7 @@ class FloatingCommitState(
 
     val readAddress = Input(Vec(3, UInt(5.W)))
     val readData = Output(Vec(3, UInt(32.W)))
+    val readDataNoBypass = Output(Vec(3, UInt(32.W)))
     val fprWrite = Output(Valid(new FloatingRegisterWrite(config)))
     val scoreboardComplete = Output(Valid(new FloatingScoreboardCompletion(config)))
     val fpCommit = Output(Valid(new FloatingStateCommit))
@@ -51,6 +52,7 @@ class FloatingCommitState(
 
   fpr.io.readAddress := io.readAddress
   io.readData := fpr.io.readData
+  io.readDataNoBypass := fpr.io.readDataNoBypass
   fpr.io.write.valid := resultQueue.io.commit.fire && resultQueue.io.commit.bits.writesFloat
   fpr.io.write.bits.address := resultQueue.io.commit.bits.fprAddress
   fpr.io.write.bits.data := resultQueue.io.commit.bits.fprData

@@ -17,6 +17,7 @@ class MemoryOperandReadSpec extends AnyFunSpec with ChiselSim {
       issue.bits.sourceKind.foreach(_.poke(SourceKind.None))
       issue.bits.sourcePhysical.foreach(_.poke(0))
       issue.bits.sourceReady.foreach(_.poke(true))
+      issue.bits.floatingSource.foreach(_.poke(0))
       issue.bits.destinationPhysical.poke(32)
       issue.bits.writesInteger.poke(true)
       issue.bits.writesFloat.poke(false)
@@ -38,6 +39,9 @@ class MemoryOperandReadSpec extends AnyFunSpec with ChiselSim {
       context.bits.branchDataIndex.poke(0)
     }
     dut.io.prfReadData.foreach(_.poke(0))
+    dut.io.floatingReadData.foreach(_.poke(0))
+    dut.io.floatingWrite.valid.poke(false)
+    dut.io.floatingWrite.bits.address.poke(0)
     dut.io.request.foreach(_.ready.poke(false))
     dut.io.flush.poke(false)
   }
@@ -127,6 +131,28 @@ class MemoryOperandReadSpec extends AnyFunSpec with ChiselSim {
         dut.io.request(1).valid.expect(false)
         dut.io.robRead(1).valid.expect(false)
         dut.io.issue(1).ready.expect(false)
+      }
+    }
+
+    it("stalls a floating store behind a same-cycle FPR commit") {
+      simulate(new MemoryOperandRead) { dut =>
+        clear(dut)
+        driveIssue(dut, 0, 6, IntOperation.Sw, UopClass.Store,
+          EndpointMask.M0, basePhysical = 8, storePhysical = 0, storeSource = false)
+        dut.io.issue(0).bits.sourceKind(1).poke(SourceKind.FloatingRegister)
+        dut.io.issue(0).bits.floatingSource(1).poke(3)
+        context(dut, 0, 6, aq = false, rl = false)
+        dut.io.floatingReadData(0).poke(BigInt("3f800000", 16))
+        dut.io.request(0).ready.poke(true)
+        dut.io.floatingWrite.valid.poke(true)
+        dut.io.floatingWrite.bits.address.poke(3)
+        dut.io.request(0).valid.expect(false)
+        dut.io.issue(0).ready.expect(false)
+
+        dut.io.floatingWrite.bits.address.poke(4)
+        dut.io.request(0).valid.expect(true)
+        dut.io.request(0).bits.floatingStoreData.expect(BigInt("3f800000", 16))
+        dut.io.issue(0).ready.expect(true)
       }
     }
   }
