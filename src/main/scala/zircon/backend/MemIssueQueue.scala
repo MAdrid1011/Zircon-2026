@@ -33,6 +33,10 @@ class MemIssueQueue(
 
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
   val entryUop = Reg(Vec(entries, new UopRef(config)))
+  // These eligibility bits are immutable while a uop is resident.  Local
+  // copies keep the endpoint candidate trees off the wide UopRef registers.
+  val entryAllowM0 = Reg(Vec(entries, Bool()))
+  val entryAllowM1 = Reg(Vec(entries, Bool()))
   val count = RegInit(0.U(countWidth.W))
 
   private def sourceReady(uop: UopRef, source: Int): Bool = {
@@ -125,8 +129,8 @@ class MemIssueQueue(
   val oldestAtomicTag = entryUop(oldestAtomicIndex).robTag
 
   val m1Candidates = (0 until entries).map(index =>
-    readyForIssue(index) &&
-      entryUop(index).allowedEndpoints(ExecutionEndpoint.M1Load.asUInt) &&
+      readyForIssue(index) &&
+      entryAllowM1(index) &&
       // A cacheable load cannot pass an older store that is still waiting for
       // its operands.  Such a store is not yet visible to the LSQ, so letting
       // M1 issue would make forwarding impossible and can expose stale data.
@@ -136,8 +140,8 @@ class MemIssueQueue(
   val (m1SelectedValid, m1SelectedIndex) = selectOldest(m1Candidates)
 
   val m0Candidates = (0 until entries).map(index =>
-    readyForIssue(index) &&
-      entryUop(index).allowedEndpoints(ExecutionEndpoint.M0General.asUInt) &&
+      readyForIssue(index) &&
+      entryAllowM0(index) &&
       // M0 is also a legal endpoint for ordinary loads.  They obey the same
       // unresolved-older-store rule as M1; otherwise M0 fallback can bypass
       // the barrier that protects the cacheable-load path.
@@ -221,6 +225,10 @@ class MemIssueQueue(
       when(io.enqueue(lane).fire) {
         entryValid(allocationIndex(lane)) := true.B
         entryUop(allocationIndex(lane)) := withReady(io.enqueue(lane).bits)
+        entryAllowM0(allocationIndex(lane)) :=
+          io.enqueue(lane).bits.allowedEndpoints(ExecutionEndpoint.M0General.asUInt)
+        entryAllowM1(allocationIndex(lane)) :=
+          io.enqueue(lane).bits.allowedEndpoints(ExecutionEndpoint.M1Load.asUInt)
       }
     }
   }

@@ -28,6 +28,11 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
 
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
   val entryUop = Reg(Vec(entries, new UopRef(config)))
+  // Endpoint eligibility is immutable for a retained uop.  Keep one local
+  // copy per selector so the wide UopRef register does not fan out through
+  // both oldest-candidate trees and the issue payloads.
+  val entryAllowE0 = Reg(Vec(entries, Bool()))
+  val entryAllowE1 = Reg(Vec(entries, Bool()))
   val count = RegInit(0.U(countWidth.W))
 
   // Compute each age once.  The selector is used for several endpoint
@@ -70,9 +75,6 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   }
 
   private def allSourcesReady(uop: UopRef): Bool = uop.sourceReady.asUInt.andR
-  private def allows(uop: UopRef, endpointBit: Int): Bool =
-    uop.allowedEndpoints(endpointBit)
-
   private def withWakeup(uop: UopRef): UopRef = {
     val updated = WireDefault(uop)
     for (source <- 0 until 2) {
@@ -93,20 +95,20 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
   val ready = awakenedEntries.map(allSourcesReady)
   val e0ExclusiveCandidates = (0 until entries).map(index =>
     entryValid(index) && ready(index) &&
-      allows(entryUop(index), 0) && !allows(entryUop(index), 1))
+      entryAllowE0(index) && !entryAllowE1(index))
   val (exclusiveE0Valid, exclusiveE0Index) = selectOldest(e0ExclusiveCandidates)
 
   val e1AfterExclusiveCandidates = (0 until entries).map(index =>
-    entryValid(index) && ready(index) && allows(entryUop(index), 1) &&
+    entryValid(index) && ready(index) && entryAllowE1(index) &&
       !(exclusiveE0Valid && exclusiveE0Index === index.U))
   val (e1AfterExclusiveValid, e1AfterExclusiveIndex) =
     selectOldest(e1AfterExclusiveCandidates)
 
   val normalE1Candidates = (0 until entries).map(index =>
-    entryValid(index) && ready(index) && allows(entryUop(index), 1))
+    entryValid(index) && ready(index) && entryAllowE1(index))
   val (normalE1Valid, normalE1Index) = selectOldest(normalE1Candidates)
   val normalE0Candidates = (0 until entries).map(index =>
-    entryValid(index) && ready(index) && allows(entryUop(index), 0) &&
+    entryValid(index) && ready(index) && entryAllowE0(index) &&
       !(normalE1Valid && normalE1Index === index.U))
   val (normalE0Valid, normalE0Index) = selectOldest(normalE0Candidates)
 
@@ -180,6 +182,10 @@ class IntegerIssueQueue(config: ZirconCoreConfig) extends Module {
       when(io.enqueue(lane).fire) {
         entryValid(allocationIndex(lane)) := true.B
         entryUop(allocationIndex(lane)) := withWakeup(io.enqueue(lane).bits)
+        entryAllowE0(allocationIndex(lane)) :=
+          io.enqueue(lane).bits.allowedEndpoints(0)
+        entryAllowE1(allocationIndex(lane)) :=
+          io.enqueue(lane).bits.allowedEndpoints(1)
       }
     }
   }
