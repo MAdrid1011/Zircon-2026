@@ -3,6 +3,9 @@
 # pinout is inferred from that project.
 set_property PACKAGE_PIN AC19 [get_ports clk]
 set_property IOSTANDARD LVCMOS33 [get_ports clk]
+# Preserve the board's recovered dedicated-clock backbone routing.  This is
+# the same constraint used by the LA32R reference project for AC19.
+set_property CLOCK_DEDICATED_ROUTE BACKBONE [get_nets clk]
 create_clock -name clk -period 10.000 -waveform {0.000 5.000} [get_ports clk]
 
 set_property PACKAGE_PIN Y3 [get_ports rstn]
