@@ -1,5 +1,12 @@
 # Zircon-2026 实施状态
 
+2026-09-04 浮点完成桥 ready 反馈收窄：`FloatingResultBridge` 以
+`writesFloat` 优先决定 FPR/普通完成路由，只有整数结果才检查 `flags.orR`。
+这保持了原有一周期直通和精确 fflags 语义，同时避免 FMA 的宽 flags 数据锥进入
+共享 ROB/MemIQ/LSU ready 网络。`FloatingResultBridgeSpec` `4/4`、`compile` 和
+`make verilog` 通过；固定 `xc7a200tfbg676-2L` synthesis-only 仍在运行，尚无新的
+WNS/utilization 结论。
+
 2026-09-04 issue-queue endpoint fanout：`IntegerIssueQueue` 与
 `MemIssueQueue` 为每个 endpoint selector 增加独立的 eligibility 寄存器副本，
 使 oldest-candidate 树不再直接扇出宽 `UopRef.allowedEndpoints` 状态；完整

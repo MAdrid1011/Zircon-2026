@@ -28,6 +28,8 @@ class FloatingMoveResult(config: ZirconCoreConfig) extends Bundle {
   val floatDestination = UInt(5.W)
   val floatData = UInt(32.W)
   val flags = UInt(5.W)
+  /** Latched routing metadata; avoids rescanning wide result flags downstream. */
+  val requiresFloatingCommit = Bool()
 }
 
 /** E2 execution for RV32F moves, sign injection, min/max, comparisons,
@@ -846,6 +848,10 @@ class FloatingMovePipe(
     result.writesFloat := true.B
     result.floatData := signInjected
   }
+  // This bit is computed before the production result register and consumed
+  // only after it.  It keeps the wide IEEE flags cone from feeding the shared
+  // completion ready network in the same cycle.
+  result.requiresFloatingCommit := result.writesFloat || result.flags.orR
 
   val divisionDone = divInitialized && (divSpecial || divIteration === 51.U)
   val sqrtDone = sqrtInitialized && (sqrtSpecial || sqrtIteration === 27.U)

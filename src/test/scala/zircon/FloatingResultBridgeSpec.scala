@@ -15,6 +15,7 @@ class FloatingResultBridgeSpec extends AnyFunSpec with ChiselSim {
     dut.io.input.bits.floatDestination.poke(0)
     dut.io.input.bits.floatData.poke(0)
     dut.io.input.bits.flags.poke(0)
+    dut.io.input.bits.requiresFloatingCommit.poke(false)
     dut.io.completion.ready.poke(false)
     dut.io.floatingResult.ready.poke(false)
     dut.io.robHeadTag.poke(0)
@@ -34,6 +35,7 @@ class FloatingResultBridgeSpec extends AnyFunSpec with ChiselSim {
     dut.io.input.bits.floatDestination.poke(destination)
     dut.io.input.bits.floatData.poke(data)
     dut.io.input.bits.flags.poke(0)
+    dut.io.input.bits.requiresFloatingCommit.poke(true)
   }
 
   describe("FloatingResultBridge") {
@@ -80,6 +82,7 @@ class FloatingResultBridgeSpec extends AnyFunSpec with ChiselSim {
         dut.io.input.bits.floatDestination.poke(0)
         dut.io.input.bits.floatData.poke(0)
         dut.io.input.bits.flags.poke(0)
+        dut.io.input.bits.requiresFloatingCommit.poke(false)
         dut.io.floatingResult.valid.expect(false)
         dut.io.completion.valid.expect(true)
         dut.io.input.ready.expect(false)
@@ -105,6 +108,7 @@ class FloatingResultBridgeSpec extends AnyFunSpec with ChiselSim {
         dut.io.input.bits.floatDestination.poke(0)
         dut.io.input.bits.floatData.poke(0)
         dut.io.input.bits.flags.poke(16)
+        dut.io.input.bits.requiresFloatingCommit.poke(true)
         dut.io.completion.ready.poke(true)
         dut.io.floatingResult.ready.poke(false)
         dut.io.completion.valid.expect(false)

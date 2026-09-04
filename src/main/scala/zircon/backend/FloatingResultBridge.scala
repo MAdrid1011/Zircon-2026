@@ -28,11 +28,10 @@ class FloatingResultBridge(
   val pendingCompletion = RegInit(false.B)
   val pending = Reg(new CompletionResult(config))
   val recoveryBlocked = io.flush || io.squash.valid
-  val inputFloatWrite = io.input.bits.writesFloat
   // Integer-result F operations normally bypass FloatingResultQueue, but an
   // IEEE exception flag is architectural floating state and therefore needs
   // the same ROB-tagged commit ownership as an FPR write.
-  val requiresFloatingCommit = inputFloatWrite || io.input.bits.flags.orR
+  val requiresFloatingCommit = io.input.bits.requiresFloatingCommit
 
   io.completion.valid := !recoveryBlocked && (pendingCompletion ||
     (io.input.valid && !requiresFloatingCommit && !pendingCompletion))
@@ -53,8 +52,12 @@ class FloatingResultBridge(
   io.floatingResult.bits.fprData := io.input.bits.floatData
   io.floatingResult.bits.flags := io.input.bits.flags
 
-  io.input.ready := !recoveryBlocked && !pendingCompletion && Mux(requiresFloatingCommit,
-    io.floatingResult.ready, io.completion.ready)
+  // Keep the common FPR-producing path out of the payload-dependent ready
+  // cone.  `requiresFloatingCommit` was captured with the result payload, so
+  // the bridge no longer scans the wide IEEE flags bus while driving ready.
+  // This preserves the direct one-cycle behavior for integer-only results.
+  io.input.ready := !recoveryBlocked && !pendingCompletion && Mux(
+    requiresFloatingCommit, io.floatingResult.ready, io.completion.ready)
 
   val pendingYounger = pendingCompletion && ROBTagOrder.isYounger(
     pending.robTag, io.squash.bits, io.robHeadTag, config)
