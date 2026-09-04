@@ -1,5 +1,11 @@
 # Zircon-2026 实施状态
 
+2026-09-04 固定器件综合预算记录：提交 `10c9928` 在
+`xc7a200tfbg676-2L`、Vivado 2023.1 上完成 RTL/RAM/DSP 映射并进入
+`Start Timing Optimization`，约 20 分钟仍未产生 utilization、WNS 或 checkpoint，
+随后按本地预算终止。该运行没有物理通过结论；需要进一步拆分共享 ready/选择锥后再
+启动下一轮综合。
+
 2026-09-04 浮点完成桥 ready 反馈收窄：`FloatingResultBridge` 以
 `writesFloat` 优先决定 FPR/普通完成路由，只有整数结果才检查 `flags.orR`。
 这保持了原有一周期直通和精确 fflags 语义，同时避免 FMA 的宽 flags 数据锥进入
