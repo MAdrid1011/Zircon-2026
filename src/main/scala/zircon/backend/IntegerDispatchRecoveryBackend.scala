@@ -97,6 +97,17 @@ class IntegerDispatchRecoveryBackend(
   // cannot feed the FirstFault arbiter through the same cycle's ready cone.
   val e0FaultForTracker = if (registeredWakeup) RegNext(execution.io.e0Fault)
     else execution.io.e0Fault
+  val e0FaultCandidate = if (registeredWakeup) {
+    val delayed = RegInit(0.U.asTypeOf(new FaultCandidate(config)))
+    when(io.globalFlush || io.squash.valid) {
+      delayed.valid := false.B
+    }.otherwise {
+      delayed := e0FaultForTracker
+    }
+    delayed
+  } else {
+    e0FaultForTracker
+  }
   // Fault candidates are control metadata, not a completion handshake.  In
   // the integrated production core, keep every producer behind the same
   // register boundary before the age-selecting FirstFault arbiter.  Without
@@ -217,7 +228,7 @@ class IntegerDispatchRecoveryBackend(
   for (lane <- 0 until config.decodeWidth) {
     firstFault.io.candidates(lane) := dispatchFaultForTracker(lane)
   }
-  firstFault.io.candidates(config.decodeWidth) := e0FaultForTracker
+  firstFault.io.candidates(config.decodeWidth) := e0FaultCandidate
   for (endpoint <- 0 until 3) {
     firstFault.io.candidates(config.decodeWidth + 1 + endpoint) :=
       otherFaultForTracker(endpoint)
