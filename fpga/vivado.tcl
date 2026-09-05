@@ -19,7 +19,12 @@ if {![file exists [file join $generated_dir ZirconPlatformCore.sv]]} {
 
 file mkdir $run_dir
 create_project -in_memory -part $target_part
-set_param general.maxThreads 8
+set vivado_threads 8
+if {[info exists ::env(FPGA_MAX_THREADS)] &&
+    $::env(FPGA_MAX_THREADS) ne ""} {
+  set vivado_threads $::env(FPGA_MAX_THREADS)
+}
+set_param general.maxThreads $vivado_threads
 foreach source [glob -nocomplain [file join $generated_dir *.sv]] {
   read_verilog -sv $source
 }
