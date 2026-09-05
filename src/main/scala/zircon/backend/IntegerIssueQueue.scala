@@ -194,9 +194,11 @@ class IntegerIssueQueue(
   }.otherwise {
     count := count + enqueueCount - issueCount
     for (index <- 0 until entries) {
-      when(entryValid(index)) {
-        entrySourceReady(index) := awakenedSourceReady(index)
-      }
+      // Readiness is a private scoreboard bank.  Updating it for invalid
+      // slots is harmless because enqueue writes the new entry's readiness
+      // below, and removes the entryValid -> issue/ready -> backend feedback
+      // mux from the wakeup critical path.
+      entrySourceReady(index) := awakenedSourceReady(index)
     }
     when(io.issueE0.fire) { entryValid(selectedE0Index) := false.B }
     when(io.issueE1.fire) { entryValid(selectedE1Index) := false.B }
