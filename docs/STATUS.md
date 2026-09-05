@@ -1,5 +1,16 @@
 # Zircon-2026 实施状态
 
+2026-09-05 Verilator 全量回归加速：提交 `7912633` 将 ScalaTest 套件并行度固定为
+`-P4`，把每个 ChiselSim harness 的 Verilator 编译切换到 `OptimizeForCompilationSpeed`
+并以内容寻址缓存复用相同 RTL 构建；缓存和临时目录均位于忽略的 `target/`。生产顶层
+`CoreShellSpec` 可并行执行，Verilator 内部并行度上限为 8。为保留 store 的完整
+DeviceBurstable 合并，LSQ 仍使用六周期 load 预览，经过已注册 operand/update 边界的
+顶层 store 使用八周期成熟门槛，计数器扩为 4 位。`./scripts/sbtw test` 实测 75 suites、
+532 tests 全部通过，墙钟 7 分 45 秒（SBT 7 分 42 秒），未删除或跳过任何测试；
+`make verilog` 与 `make platform-verilog` 也通过。固定器件实现随后以
+`xc7a200tfbg676-2L`、Vivado 2023.1、`general.maxThreads=2` 启动，新的 WNS/资源报告
+尚未生成，不能据此宣称时序或面积改善。
+
 2026-09-05 ROB control sideband：最新 `393e07e` 后的 post-route 最差路径为
 `ROB.entryData[*].decoded.operation -> LSU lqForwardData`，WNS `-38.261 ns`，
 其中 82% 为布线。ROB 现为每个条目并行保存窄 `ROBControlInfo`，提交串行化、
