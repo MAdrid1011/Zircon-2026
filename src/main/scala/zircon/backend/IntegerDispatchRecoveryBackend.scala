@@ -100,17 +100,10 @@ class IntegerDispatchRecoveryBackend(
   // cannot feed the FirstFault arbiter through the same cycle's ready cone.
   val e0FaultForTracker = if (registeredWakeup) RegNext(execution.io.e0Fault)
     else execution.io.e0Fault
-  val e0FaultCandidate = if (registeredWakeup) {
-    val delayed = RegInit(0.U.asTypeOf(new FaultCandidate(config)))
-    when(io.globalFlush || io.squash.valid) {
-      delayed.valid := false.B
-    }.otherwise {
-      delayed := e0FaultForTracker
-    }
-    delayed
-  } else {
-    e0FaultForTracker
-  }
+  // `e0FaultForTracker` is already registered when `registeredWakeup` is
+  // enabled. A second register would move the fault past the ROB head and
+  // allow the global trap flush to erase the candidate before retirement.
+  val e0FaultCandidate = e0FaultForTracker
   // Fault candidates are control metadata, not a completion handshake.  In
   // the integrated production core, keep every producer behind the same
   // register boundary before the age-selecting FirstFault arbiter.  Without
