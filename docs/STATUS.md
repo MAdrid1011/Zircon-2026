@@ -544,3 +544,7 @@ pending the next fixed-device implementation.
 命中矩阵先寄存，再更新 ready bank；独立 IntIQ 仍保留同周期 wakeup 语义，生产
 CoreShell 的 RV32I cacheable/inaccessible smoke 2/2、IntIQ/backend/recovery
 聚焦 12/12 通过。下一步需用固定器件实现验证该分域是否切断 79 级路径。
+# 2026-09-05 balanced FirstFault selector：`FirstFaultTracker` 的六路 fault
+candidate 线性 payload/age Mux 改为平衡 pairwise tree，保留同龄左优先、squash、
+flush、clear 和精确 fault metadata 语义。`FirstFaultTrackerSpec` 2/2、
+`IntegerDispatchRecoveryBackendSpec` 3/3 通过；固定器件实现待运行。

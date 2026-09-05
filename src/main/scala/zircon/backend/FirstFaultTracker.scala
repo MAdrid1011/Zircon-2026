@@ -68,15 +68,46 @@ class FirstFaultTracker(
     !io.squash.valid || !ROBTagOrder.isYounger(
       tag, io.squash.bits, headTagReg, config)
 
-  var selectedValid: Bool = validReg && survivesSquash(recordReg.robTag)
-  var selectedRecord: FirstFaultRecord = recordReg
-  for (candidate <- io.candidates) {
-    val candidateValid = candidate.valid && survivesSquash(candidate.record.robTag)
-    val take = candidateValid &&
-      (!selectedValid || ageFromHead(candidate.record.robTag) < ageFromHead(selectedRecord.robTag))
-    selectedRecord = Mux(take, candidate.record, selectedRecord)
-    selectedValid = selectedValid || candidateValid
+  // Select the oldest candidate with a balanced tree.  The previous linear
+  // fold put every candidate's age comparator and full 65-bit payload mux in
+  // series, which made the IntIQ/FirstFault path especially sensitive to
+  // placement.  Pairwise reduction preserves left-side priority on equal age.
+  var selectedValids = io.candidates.map(candidate =>
+    candidate.valid && survivesSquash(candidate.record.robTag)).toVector
+  var selectedRecords = io.candidates.map(_.record).toVector
+  while (selectedValids.length > 1) {
+    val nextValids = Vector.newBuilder[Bool]
+    val nextRecords = Vector.newBuilder[FirstFaultRecord]
+    var pair = 0
+    while (pair < selectedValids.length) {
+      if (pair + 1 == selectedValids.length) {
+        nextValids += selectedValids(pair)
+        nextRecords += selectedRecords(pair)
+      } else {
+        val leftValid = selectedValids(pair)
+        val rightValid = selectedValids(pair + 1)
+        val rightWins = rightValid &&
+          (!leftValid || ageFromHead(selectedRecords(pair + 1).robTag) <
+            ageFromHead(selectedRecords(pair).robTag))
+        val record = Wire(new FirstFaultRecord(config))
+        record := Mux(rightWins, selectedRecords(pair + 1), selectedRecords(pair))
+        nextValids += (leftValid || rightValid)
+        nextRecords += record
+      }
+      pair += 2
+    }
+    selectedValids = nextValids.result()
+    selectedRecords = nextRecords.result()
   }
+  val candidateValid = selectedValids.head
+  val candidateRecord = selectedRecords.head
+  val selectedValid = Wire(Bool())
+  val selectedRecord = Wire(new FirstFaultRecord(config))
+  val candidateWins = candidateValid &&
+    (!validReg || !survivesSquash(recordReg.robTag) ||
+      ageFromHead(candidateRecord.robTag) < ageFromHead(recordReg.robTag))
+  selectedValid := validReg && survivesSquash(recordReg.robTag) || candidateValid
+  selectedRecord := Mux(candidateWins, candidateRecord, recordReg)
 
   when(io.clear || io.flush) {
     validReg := false.B
