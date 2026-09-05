@@ -23,7 +23,11 @@ class LoadStoreQueues(
   private val lqCountWidth = log2Ceil(lqEntries + 1)
   private val sqCountWidth = log2Ceil(sqEntries + 1)
   // Covers the two-batch M0/M1 replay path before a head device group is sealed.
-  private val burstableGroupCollectionCycles = 6
+  // Registered LSQ update boundaries can make the final address/data beat
+  // visible a cycle or two after the head owner. Keep enough collection
+  // slack for a four-beat group; fetch-pressure still seals load groups
+  // immediately through the separate pressure path.
+  private val burstableGroupCollectionCycles = 7
 
   require(lqEntries == 8 && sqEntries == 8,
     "the frozen M3 contract requires eight LQ and SQ entries")
@@ -60,6 +64,10 @@ class LoadStoreQueues(
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
     val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
+    // A blocked instruction AR means no younger fetch packet can arrive in
+    // time to enlarge the current head device group.  This is a narrow
+    // early-seal hint; the normal fixed collection window remains unchanged.
+    val instructionFetchBlocked = Input(Bool())
 
     /** A FENCE/FENCE.I at the live ROB head asks whether every older local
       * memory owner has drained. The tag, rather than total occupancy, keeps
@@ -143,6 +151,7 @@ class LoadStoreQueues(
   val burstableGroupWaitValid = RegInit(false.B)
   val burstableGroupWaitHead = Reg(UInt(config.robTagWidth.W))
   val burstableGroupWaitCycles = RegInit(0.U(3.W))
+  val burstableGroupPressureSeen = RegInit(false.B)
   val atomicResultValid = RegInit(false.B)
   val atomicResultBits = Reg(new AtomicMemoryResult(config))
 
@@ -507,9 +516,12 @@ class LoadStoreQueues(
   val burstableGroupLoad = burstableHeadLoad
   val burstableGroupStore = !burstableGroupLoad && burstableHeadStore
   val burstableGroupEligible = burstableGroupLoad || burstableGroupStore
+  val burstableGroupPressure = io.instructionFetchBlocked ||
+    burstableGroupPressureSeen
   val burstableGroupWaitMature = burstableGroupWaitValid &&
     burstableGroupWaitHead === io.robHeadTag &&
-      burstableGroupWaitCycles === burstableGroupCollectionCycles.U
+      (burstableGroupWaitCycles === burstableGroupCollectionCycles.U ||
+        (burstableGroupPressure && burstableGroupLoad))
   val groupAddress = Mux(burstableGroupLoad,
     lqAddress(headLoadIndex), sqAddress(headStoreIndex))
   val groupSize = Mux(burstableGroupLoad,
@@ -543,13 +555,22 @@ class LoadStoreQueues(
       case 2 => groupAddress + groupStride + groupStride
       case 3 => groupAddress + groupStride + groupStride + groupStride
     }
-    val candidate = Mux(burstableGroupLoad, loadEligible, storeEligible) &&
+    // Once the instruction stream is known to be stalled, do not keep
+    // already-visible younger members in the current group.  Sealing the
+    // head beat is conservative but legal, and lets the blocked fetch packet
+    // make progress without changing the ordinary six-cycle merge window.
+    val candidate = (!burstableGroupPressure || !burstableGroupLoad) &&
+      Mux(burstableGroupLoad, loadEligible, storeEligible) &&
       memberAddress === expectedAddress && memberSize === groupSize
     groupMembers(member) := (if (member == 0) burstableGroupEligible else
       groupMembers(member - 1) && candidate)
 
     val request = group.requests(member)
-    request.order := ROBTagOrder.ageFromHead(expectedTag, io.robHeadTag, config)
+    // The ordered-device streamer can hold a group while older non-memory
+    // work retires and advances robHeadTag.  Group order is local to the
+    // captured four-beat sequence; deriving it from the live head would
+    // reset the final beat to zero and split one group into a 3+1 sequence.
+    request.order := member.U(64.W)
     request.robTag := expectedTag
     request.address := memberAddress
     request.write := burstableGroupStore
@@ -649,6 +670,7 @@ class LoadStoreQueues(
     atomicResultValid := false.B
     burstableGroupWaitValid := false.B
     burstableGroupWaitCycles := 0.U
+    burstableGroupPressureSeen := false.B
   }.elsewhen(io.squash.valid) {
     for (index <- 0 until sqEntries) {
       when(sqValid(index) && !sqSquashSurvivor(index)) {
@@ -669,6 +691,7 @@ class LoadStoreQueues(
     }
     burstableGroupWaitValid := false.B
     burstableGroupWaitCycles := 0.U
+    burstableGroupPressureSeen := false.B
   }.otherwise {
     for (index <- 0 until lqEntries) {
       when(lqRetire(index)) {
@@ -868,6 +891,13 @@ class LoadStoreQueues(
         sqMetadata(effectCompleteIndex).readData := 0.U
         sqMetadata(effectCompleteIndex).writeData := sqWriteData(effectCompleteIndex)
       }
+    }
+    when(io.burstableDeviceGroupAccepted.valid) {
+      burstableGroupWaitValid := false.B
+      burstableGroupWaitCycles := 0.U
+      burstableGroupPressureSeen := false.B
+    }.elsewhen(io.instructionFetchBlocked && burstableHeadLoad) {
+      burstableGroupPressureSeen := true.B
     }
     when(!burstableGroupEligible || io.burstableDeviceGroupAccepted.valid) {
       burstableGroupWaitValid := false.B

@@ -125,6 +125,7 @@ class IntegerExecutionBackend(
 
   issue.io.enqueue <> io.intEnqueue
   issue.io.wakeup := scheduledWakeup
+  issue.io.integerReady := state.io.integerReady
   issue.io.robHeadTag := issueRobHeadTag
   issue.io.squash := io.squash
   issue.io.flush := io.flush

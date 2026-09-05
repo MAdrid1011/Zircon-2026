@@ -101,6 +101,7 @@ class DualLSUIngress(
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
     val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
+    val instructionFetchBlocked = Input(Bool())
     val orderingBarrier = Input(Valid(UInt(config.robTagWidth.W)))
     val orderingReady = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
@@ -124,7 +125,11 @@ class DualLSUIngress(
   val admission = Module(new DualLSUAdmission(config))
   val m0Arbiter = Module(new M0RequestArbiter(config))
   val ingress = Module(new MemoryQueueIngress(config,
-    registeredUpdateBoundary = registeredUpdateBoundary))
+    registeredUpdateBoundary = registeredUpdateBoundary,
+    // Keep allocation and update ownership on separate edges in the
+    // production core until the full AXI/ordered-device lifecycle is
+    // complete; standalone ingress tests can opt into replacement explicitly.
+    allowIntakeReplace = false))
   val loadCompletion = Module(new DualMemoryLoadCompletion(config))
 
   operandRead.io.issue(0).valid := io.m0Issue.valid
@@ -182,6 +187,7 @@ class DualLSUIngress(
   ingress.io.robHeadTag := io.robHeadTag
   ingress.io.squash := io.squash
   ingress.io.flush := io.flush
+  ingress.io.instructionFetchBlocked := io.instructionFetchBlocked
   for (lane <- 0 until 2) {
     loadCompletion.io.fault(lane).valid := ingress.io.fault(lane).valid
     loadCompletion.io.fault(lane).bits := ingress.io.fault(lane).record

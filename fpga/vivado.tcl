@@ -19,20 +19,20 @@ if {![file exists [file join $generated_dir ZirconPlatformCore.sv]]} {
 
 file mkdir $run_dir
 create_project -in_memory -part $target_part
-set vivado_threads 4
+set vivado_threads 2
 if {[info exists ::env(FPGA_MAX_THREADS)] &&
     $::env(FPGA_MAX_THREADS) ne ""} {
   set vivado_threads $::env(FPGA_MAX_THREADS)
 }
 # Keep synthesis bounded on development hosts.  Vivado can otherwise spawn
-# several multi-GB workers for this design; values above four are intentionally
+# several multi-GB workers for this design; values above two are intentionally
 # clamped rather than allowing an accidental high-memory run.
 if {![string is integer -strict $vivado_threads] || $vivado_threads < 1} {
-  puts stderr "Invalid FPGA_MAX_THREADS '$vivado_threads'; using 4"
-  set vivado_threads 4
-} elseif {$vivado_threads > 4} {
-  puts "FPGA_MAX_THREADS=$vivado_threads exceeds the 4-worker limit; using 4"
-  set vivado_threads 4
+  puts stderr "Invalid FPGA_MAX_THREADS '$vivado_threads'; using 2"
+  set vivado_threads 2
+} elseif {$vivado_threads > 2} {
+  puts "FPGA_MAX_THREADS=$vivado_threads exceeds the 2-worker limit; using 2"
+  set vivado_threads 2
 }
 set_param general.maxThreads $vivado_threads
 foreach source [glob -nocomplain [file join $generated_dir *.sv]] {

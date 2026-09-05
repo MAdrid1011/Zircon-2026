@@ -14,7 +14,8 @@ import zircon.backend.ROBTagOrder
   * AXI writeback owner drains dirty L2 victims in the following M3 slice.
   */
 class L1DLoadCache(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    deferSingleRequest: Boolean = false
 ) extends Module {
   private val cache = config.l1d
   private val ways = cache.ways
@@ -198,6 +199,14 @@ class L1DLoadCache(
     io.request(1).bits)
   val selectedRequestValid = io.request(0).valid || io.request(1).valid
   val selectedRequestPort = Mux(selectFirstRequest, 0.U, 1.U)
+  val singleRequestCandidate = io.request(0).valid ^ io.request(1).valid
+  val singleRequestCacheable = singleRequestCandidate && selectedRequest.cacheable
+  val singleRequestDeferred = if (deferSingleRequest) {
+    RegInit(0.U(2.W))
+  } else 2.U(2.W)
+  val deferThisCycle = if (deferSingleRequest) {
+    singleRequestCacheable && singleRequestDeferred =/= 2.U
+  } else false.B
 
   val portSet = (0 until config.decodeWidth).map(port =>
     io.request(port).bits.address(lineOffsetWidth + setWidth - 1, lineOffsetWidth))
@@ -480,7 +489,7 @@ class L1DLoadCache(
     storeHasVictimWay && storeVictimValid
   val loadL2Insert = selectedRequestValid && selectedRequest.cacheable &&
     !io.storeRequest.valid && !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked && !immediateRequest &&
-    loadWaiterCredits && newMissNeedsL2Insert
+    loadWaiterCredits && newMissNeedsL2Insert && !deferThisCycle
   val storeL2Insert = io.storeRequest.valid && storeOwnerAvailable &&
     !io.flushLine.valid && !io.fenceDrain && !recoveryBlocked &&
     !anyStoreCacheHit && !anyStoreLineMshr && anyFreeMshr &&
@@ -601,12 +610,19 @@ class L1DLoadCache(
     requestAdmissionOpen && dualDifferentSetMissResources
   val sameLineDualMissReady = sameLineDualMiss && requestAdmissionOpen &&
     sameLineDualMissResources
+
+  // The integrated LSU can present the two independent cold misses several
+  // cycles apart because its LSQ update boundary is registered. In that build,
+  // hold a lone cacheable candidate for a bounded window so the second
+  // candidate can join the dual-MSHR admission window.
+  // The standalone cache keeps its original eager single-request behavior.
   for (port <- 0 until config.decodeWidth) {
     val selected = selectedRequestPort === port.U
     io.request(port).ready := Mux(dualImmediateCompatible, dualImmediateReady,
       Mux(dualHitMissReady, true.B,
         Mux(dualDifferentSetMissReady, true.B,
-          Mux(sameLineDualMissReady, true.B, selected && selectedRequestReady))))
+          Mux(sameLineDualMissReady, true.B,
+            selected && selectedRequestReady && !deferThisCycle))))
   }
   io.storeRequest.ready := !io.fenceDrain && !recoveryBlocked && !io.flushLine.valid && storeOwnerAvailable &&
     !io.storeRequest.bits.isAtomic &&
@@ -627,6 +643,18 @@ class L1DLoadCache(
     l2ProbeActive := true.B
     l2ProbeMshr := unresolvedL2Index
     mshrL2ProbeIssued(unresolvedL2Index) := true.B
+  }
+  if (deferSingleRequest) {
+    when(io.flush || io.squash.valid) {
+      singleRequestDeferred := 0.U
+    }.elsewhen(!singleRequestCacheable || io.request(0).fire ||
+      io.request(1).fire) {
+      singleRequestDeferred := 0.U
+    }.elsewhen(singleRequestCacheable) {
+      when(singleRequestDeferred =/= 2.U) {
+        singleRequestDeferred := singleRequestDeferred + 1.U
+      }
+    }
   }
   when(io.l2Response.valid) {
     assert(io.l2Response.ready,

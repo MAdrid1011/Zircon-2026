@@ -43,6 +43,10 @@ class MemIssueQueue(
   val entryAllowM0 = Reg(Vec(entries, Bool()))
   val entryAllowM1 = Reg(Vec(entries, Bool()))
   val count = RegInit(0.U(countWidth.W))
+  // Give a lone cacheable load two lookahead cycles. If its successor arrives
+  // in that window, both LSU endpoints can launch together; if not, the held
+  // load launches on the third cycle without deadlock.
+  val singleLoadHold = RegInit(0.U(2.W))
 
   private def sourceReady(
       uop: UopRef,
@@ -147,10 +151,20 @@ class MemIssueQueue(
     entryValid(index) && entryUop(index).uopClass === UopClass.Atomic)
   val (oldestAtomicValid, oldestAtomicIndex) = selectOldest(atomicCandidates)
   val oldestAtomicTag = entryUop(oldestAtomicIndex).robTag
+  val singleLoadPresent = (0 until entries).map(index =>
+    entryValid(index) && entryUop(index).uopClass === UopClass.Load).reduce(_ || _)
+  val deferSingleLoad = if (allowIssueRecycle) false.B else
+    singleLoadHold =/= 2.U && count === 1.U && singleLoadPresent
 
   val m1Candidates = (0 until entries).map(index =>
       readyForIssue(index) &&
       entryAllowM1(index) &&
+      !deferSingleLoad &&
+      // Cacheable loads are statically striped by ROB slot. This gives
+      // adjacent loads deterministic M1/M0 ownership even when dispatch
+      // separates them by a cycle, while same-cycle oldest-first dual issue
+      // still selects one candidate for each endpoint.
+      (if (allowIssueRecycle) true.B else !entryUop(index).robTag(0)) &&
       // A cacheable load cannot pass an older store that is still waiting for
       // its operands.  Such a store is not yet visible to the LSQ, so letting
       // M1 issue would make forwarding impossible and can expose stale data.
@@ -162,6 +176,7 @@ class MemIssueQueue(
   val m0Candidates = (0 until entries).map(index =>
       readyForIssue(index) &&
       entryAllowM0(index) &&
+      !deferSingleLoad &&
       // M0 is also a legal endpoint for ordinary loads.  They obey the same
       // unresolved-older-store rule as M1; otherwise M0 fallback can bypass
       // the barrier that protects the cacheable-load path.
@@ -231,13 +246,20 @@ class MemIssueQueue(
     entryValid.foreach(_ := false.B)
     entryFresh.foreach(_ := false.B)
     count := 0.U
+    singleLoadHold := 0.U
   }.elsewhen(io.squash.valid) {
     for (index <- 0 until entries) {
       entryValid(index) := squashSurvivor(index)
       entryFresh(index) := false.B
     }
     count := PopCount(squashSurvivor)
+    singleLoadHold := 0.U
   }.otherwise {
+    when(deferSingleLoad) {
+      singleLoadHold := singleLoadHold + 1.U
+    }.elsewhen(issueCount.orR || count === 0.U) {
+      singleLoadHold := 0.U
+    }
     count := count + enqueueCount - issueCount
     for (index <- 0 until entries) {
       when(entryValid(index)) {

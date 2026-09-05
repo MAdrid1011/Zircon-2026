@@ -16,6 +16,9 @@ class UopIssueBoundary(
 ) extends Module {
   val io = IO(new Bundle {
     val input = Flipped(Decoupled(new UopRef(config)))
+    // Admission policy from the owner must participate in the local
+    // handshake so input.fire cannot diverge from the producer's ready.
+    val inputAllow = Input(Bool())
     val output = Decoupled(new UopRef(config))
     val squash = Input(Valid(UInt(config.robTagWidth.W)))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
@@ -35,7 +38,7 @@ class UopIssueBoundary(
     // boundary. A full boundary waits for its payload to leave before
     // accepting another one; the extra bubble is bounded and removes the
     // two-lane valid/ready loop at integrated queue ingress.
-    io.input.ready := !recoveryBlocked && !validReg
+    io.input.ready := !recoveryBlocked && !validReg && io.inputAllow
 
     val heldYounger = validReg && ROBTagOrder.isYounger(
       uopReg.robTag, io.squash.bits, io.robHeadTag, config)
@@ -46,7 +49,7 @@ class UopIssueBoundary(
       when(heldYounger) { validReg := false.B }
     }.otherwise {
       when(io.input.fire) {
-        uopReg := io.input.bits
+      uopReg := io.input.bits
         validReg := true.B
       }.elsewhen(io.output.fire) {
         validReg := false.B

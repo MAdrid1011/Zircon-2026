@@ -88,7 +88,8 @@ class IntegerDispatchRecoveryBackend(
     val e2Completion = Output(Bool())
   })
 
-  val dispatch = Module(new BackendDispatch(config))
+  val dispatch = Module(new BackendDispatch(config,
+    useDynamicIntegerReady = !registeredWakeup))
   val rename = Module(new IntegerRename(config))
   val execution = Module(new IntegerExecutionBackend(config, registeredWakeup,
     allowIssueRecycle))
@@ -170,7 +171,17 @@ class IntegerDispatchRecoveryBackend(
   dispatch.io.floatingAdmissionBlocked := floatingAdmissionBlocked
   dispatch.io.mstatusFs := io.mstatusFs
   dispatch.io.currentFrm := io.currentFrm
-  dispatch.io.integerReady := execution.io.integerReady
+  // Dispatch source-ready bits are metadata carried into every endpoint
+  // queue. In the production timing configuration, do not let completion
+  // wakeup fan out through rename/frontend payloads and back into an IQ in the
+  // same cycle. Queue-local wakeup handling remains separately registered;
+  // this snapshot keeps the dispatch side of that boundary equally local.
+  val dispatchIntegerReady = if (registeredWakeup) {
+    val readySnapshot = RegInit(1.U(config.intPhysicalRegisters.W))
+    readySnapshot := execution.io.integerReady
+    readySnapshot
+  } else execution.io.integerReady
+  dispatch.io.integerReady := dispatchIntegerReady
   dispatch.io.blocked := io.globalFlush || recovery.io.dispatchBlocked ||
     execution.io.rollbackActive
   io.acceptedCount := dispatch.io.acceptedCount

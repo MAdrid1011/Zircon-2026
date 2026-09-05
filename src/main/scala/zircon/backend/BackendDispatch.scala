@@ -8,7 +8,8 @@ import zircon.frontend.{FetchQueueEntry, FloatingAdmission, FloatingOperation,
 
 /** Stateless two-wide longest-prefix rename/dispatch coordinator. */
 class BackendDispatch(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    useDynamicIntegerReady: Boolean = true
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
   private val freeCountWidth = log2Ceil(config.intPhysicalRegisters + 1)
@@ -224,10 +225,17 @@ class BackendDispatch(
       floatingAdmissions(lane).io.decoded.readsIntegerRs1, decoded(lane).readsRs1)
     val readsIntegerRs2 = Mux(liveFloating(lane),
       floatingAdmissions(lane).io.decoded.readsIntegerRs2, decoded(lane).readsRs2)
-    val source0Ready = Mux(readsIntegerRs1,
+    // The integrated timing build resolves already-ready integer sources in
+    // the destination queue from a local registered snapshot. Keeping this
+    // wide bitmap out of the dispatch payload prevents the ready-table fanout
+    // from traversing rename and every endpoint ingress in one cycle. The
+    // standalone dispatch contract retains the original combinational view.
+    val source0Ready = if (useDynamicIntegerReady) Mux(readsIntegerRs1,
       io.integerReady(response.sourcePhysical1), true.B)
-    val source1Ready = Mux(readsIntegerRs2,
+      else !readsIntegerRs1
+    val source1Ready = if (useDynamicIntegerReady) Mux(readsIntegerRs2,
       io.integerReady(response.sourcePhysical2), true.B)
+      else !readsIntegerRs2
     val lane1DependsOnLane0Source0 = if (lane == 1)
       io.renameResponse(0).allocates && readsIntegerRs1 &&
         response.sourcePhysical1 === io.renameResponse(0).newDestinationPhysical

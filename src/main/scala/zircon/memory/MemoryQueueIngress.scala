@@ -65,7 +65,8 @@ class RegisteredMemoryUpdateBoundary[T <: Data](
   */
 class MemoryQueueIngress(
     config: ZirconCoreConfig = ZirconCoreConfig.default,
-    registeredUpdateBoundary: Boolean = false
+    registeredUpdateBoundary: Boolean = false,
+    allowIntakeReplace: Boolean = false
 ) extends Module {
   private val batchWidth = config.decodeWidth
   require(batchWidth == 2, "the frozen M3 ingress accepts two classified requests")
@@ -95,6 +96,7 @@ class MemoryQueueIngress(
     val deviceLoadInFlight = Output(Bool())
     val burstableDeviceGroup = Decoupled(new OrderedIOGroup(config = config))
     val burstableDeviceGroupAccepted = Input(Valid(new OrderedIOGroup(config = config)))
+    val instructionFetchBlocked = Input(Bool())
     val orderingBarrier = Input(Valid(UInt(config.robTagWidth.W)))
     val orderingReady = Output(Bool())
     val retire = Input(Vec(config.commitWidth,
@@ -127,6 +129,7 @@ class MemoryQueueIngress(
   queues.io.robHeadTag := io.robHeadTag
   queues.io.squash := io.squash
   queues.io.flush := io.flush
+  queues.io.instructionFetchBlocked := io.instructionFetchBlocked
   queues.io.loadComplete.valid := io.loadComplete.valid
   queues.io.loadComplete.bits := io.loadComplete.bits
   io.loadComplete.ready := queues.io.loadComplete.ready
@@ -220,8 +223,26 @@ class MemoryQueueIngress(
     port.valid && !port.bits.address.faultValid))
   val normalCount = PopCount(incomingNormal)
   val intakeEmpty = !intakeValid.asUInt.orR
+  val updateEmpty = !updateValid.asUInt.orR
+  val updateFreeMask = (~updateValid.asUInt).asUInt
+  val updateFreeCount = PopCount(updateFreeMask)
+  val intakeBatchCount = PopCount(intakeValid)
+  val allocationActive = if (allowIntakeReplace) {
+    intakeValid(0) && !recoveryBlocked && updateFreeCount >= intakeBatchCount
+  } else {
+    intakeValid(0) && updateEmpty && !recoveryBlocked
+  }
+  val allocationFire = queues.io.allocate(0).fire
+  val updateSlot0OH = PriorityEncoderOH(updateFreeMask)
+  val updateSlot1OH = updateFreeMask & ~updateSlot0OH
+  val updateSlot0 = OHToUInt(updateSlot0OH)
+  val updateSlot1 = OHToUInt(PriorityEncoderOH(updateSlot1OH))
+  // The current intake batch may be replaced on the same edge on which it is
+  // allocated into the LSQ. This removes an unnecessary bubble between two
+  // adjacent M0/M1 requests while preserving whole-batch allocation.
   val normalIntakeOpen = !recoveryBlocked &&
-    (normalCount === 0.U || intakeEmpty)
+    (normalCount === 0.U || intakeEmpty ||
+      (if (allowIntakeReplace) allocationFire else false.B))
 
   for (lane <- 0 until batchWidth) {
     val faulting = io.input(lane).valid && io.input(lane).bits.address.faultValid
@@ -233,8 +254,6 @@ class MemoryQueueIngress(
       io.faultReady(lane), true.B)
   }
 
-  val updateEmpty = !updateValid.asUInt.orR
-  val allocationActive = intakeValid(0) && updateEmpty && !recoveryBlocked
   for (lane <- 0 until batchWidth) {
     queues.io.allocate(lane).valid := allocationActive && intakeValid(lane)
     queues.io.allocate(lane).bits.robTag := intakeRequest(lane).address.robTag
@@ -257,7 +276,6 @@ class MemoryQueueIngress(
     queues.io.allocate(lane).bits.aq := intakeRequest(lane).address.aq
     queues.io.allocate(lane).bits.rl := intakeRequest(lane).address.rl
   }
-  val allocationFire = queues.io.allocate(0).fire
   when(intakeValid(1)) {
     assert(queues.io.allocate(1).fire === allocationFire,
       "two-wide LSQ allocation must accept the whole ingress batch")
@@ -387,7 +405,8 @@ class MemoryQueueIngress(
       }
     }
   }.otherwise {
-    when(io.input(0).fire || io.input(1).fire) {
+    when((io.input(0).fire || io.input(1).fire) &&
+        (if (allowIntakeReplace) !allocationFire else true.B)) {
       when(normalCount =/= 0.U) {
         val firstNormal = Mux(incomingNormal(0), io.input(0).bits, io.input(1).bits)
         intakeValid(0) := true.B
@@ -399,13 +418,41 @@ class MemoryQueueIngress(
       }
     }
     when(allocationFire) {
+      if (allowIntakeReplace) {
+        when(intakeValid(0)) {
+          updateValid(updateSlot0) := true.B
+          updateRequest(updateSlot0) := intakeRequest(0)
+          loadAddressPending(updateSlot0) := intakeRequest(0).address.isLoad
+          storeAddressPending(updateSlot0) := intakeRequest(0).address.isStore
+          storeDataPending(updateSlot0) := intakeRequest(0).address.isStore
+        }
+        when(intakeValid(1)) {
+          updateValid(updateSlot1) := true.B
+          updateRequest(updateSlot1) := intakeRequest(1)
+          loadAddressPending(updateSlot1) := intakeRequest(1).address.isLoad
+          storeAddressPending(updateSlot1) := intakeRequest(1).address.isStore
+          storeDataPending(updateSlot1) := intakeRequest(1).address.isStore
+        }
+        when(io.input(0).fire || io.input(1).fire) {
+          val firstNormal = Mux(incomingNormal(0), io.input(0).bits, io.input(1).bits)
+          intakeValid(0) := true.B
+          intakeRequest(0) := firstNormal
+          intakeValid(1) := normalCount === 2.U
+          when(normalCount === 2.U) {
+            intakeRequest(1) := io.input(1).bits
+          }
+        }.otherwise {
+          intakeValid.foreach(_ := false.B)
+        }
+      } else {
       for (lane <- 0 until batchWidth) {
-        intakeValid(lane) := false.B
         updateValid(lane) := intakeValid(lane)
         updateRequest(lane) := intakeRequest(lane)
         loadAddressPending(lane) := intakeValid(lane) && intakeRequest(lane).address.isLoad
         storeAddressPending(lane) := intakeValid(lane) && intakeRequest(lane).address.isStore
         storeDataPending(lane) := intakeValid(lane) && intakeRequest(lane).address.isStore
+      }
+      intakeValid.foreach(_ := false.B)
       }
     }.otherwise {
       for (lane <- 0 until batchWidth) {

@@ -12,7 +12,9 @@ import zircon.memory.{CacheLineTransfer, L1InstructionCache, L2DemandRequest, L2
   * contract remain unchanged across the shared-demand boundary.
   */
 class M1Frontend(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    gateLookaheadOnData: Boolean = false,
+    enableLookahead: Boolean = true
 ) extends Module {
   val io = IO(new Bundle {
     val enable = Input(Bool())
@@ -27,6 +29,7 @@ class M1Frontend(
     val l2Insert = Decoupled(new CacheLineTransfer(config))
     val l2InsertHit = Input(Bool())
     val l2InsertData = Input(Vec(config.l2.lineBytes / 4, UInt(32.W)))
+    val dataBusy = if (gateLookaheadOnData) Some(Input(Bool())) else None
     val decode = Vec(config.decodeWidth, Decoupled(new FetchQueueEntry(config)))
 
     val branchTraining = Input(Valid(new BranchTrainingRecord(config)))
@@ -61,6 +64,8 @@ class M1Frontend(
   val unresolvedIndirect = RegInit(false.B)
   val fenceICommit = commitRedirect &&
     io.commitRedirect.bits.reason === CommitRedirectReason.FenceI
+  val dataBusy = if (gateLookaheadOnData) io.dataBusy.get else false.B
+  val lookaheadEnabled = if (enableLookahead) true.B else false.B
 
   fetch.io.invalidate := fenceICommit || io.coherenceInvalidate
 
@@ -179,7 +184,8 @@ class M1Frontend(
   fetch.io.lookaheadEnable := io.enable && predictorsReady &&
     !unresolvedIndirect && !frontendRedirect &&
     !control.io.unresolvedIndirect.valid && !control.io.redirect.valid &&
-    !responseHasFetchFault && !io.coherenceBlock
+    !responseHasFetchFault && !io.coherenceBlock && !dataBusy &&
+    lookaheadEnabled
   io.l2Lookup <> fetch.io.l2Lookup
   fetch.io.l2LookupResponse <> io.l2LookupResponse
   io.l2Request <> fetch.io.l2Request

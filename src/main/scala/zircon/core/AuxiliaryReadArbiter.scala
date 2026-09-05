@@ -60,12 +60,16 @@ class AuxiliaryReadArbiter(
   var grantedMask: UInt = 0.U(candidateCount.W)
   var remainingReads: UInt = readPorts.U(2.W)
   var remainingStarts: UInt = io.startSlots
-  for (_ <- 0 until candidateCount) {
+  for (round <- 0 until candidateCount) {
     val eligible = (0 until candidateCount).map { index =>
       io.candidate(index).valid && !grantedMask(index) &&
         sourceCount(index) <= remainingReads && remainingStarts =/= 0.U &&
         !io.traceReadRequired
     }
+    // Keep one global ROB-age decision for E2 and the two memory endpoints.
+    // E2 is already isolated by its registered launch boundary, so changing
+    // priority here would violate the architectural oldest-first contract
+    // when an older LSU can consume the available PRF ports.
     val (selectedValid, selectedIndex) = selectOldest(eligible)
     val selectedReads = sourceCount(selectedIndex)
     grantedMask = Mux(selectedValid,

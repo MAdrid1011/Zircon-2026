@@ -21,6 +21,10 @@ class IntegerIssueQueue(
   val io = IO(new Bundle {
     val enqueue = Flipped(Vec(2, Decoupled(new UopRef(config))))
     val wakeup = Input(Vec(2, new PhysicalWakeup(config)))
+    // Production integration supplies a registered ready-table snapshot so
+    // a newly enqueued uop can consume a producer that completed earlier
+    // without carrying the global bitmap through BackendDispatch.
+    val integerReady = Input(UInt(config.intPhysicalRegisters.W))
     val issueE0 = Decoupled(new UopRef(config))
     val issueE1 = Decoupled(new UopRef(config))
     val robHeadTag = Input(UInt(config.robTagWidth.W))
@@ -222,8 +226,17 @@ class IntegerIssueQueue(
               wakeup.valid && wakeup.physical ===
                 io.enqueue(lane).bits.sourcePhysical(source)).reduce(_ || _)
           } else false.B
+          val readySnapshot = if (source < 2) {
+            val inRange = io.enqueue(lane).bits.sourcePhysical(source) <
+              config.intPhysicalRegisters.U
+            val safePhysical = Mux(inRange,
+              io.enqueue(lane).bits.sourcePhysical(source), 0.U)
+            io.integerReady(safePhysical) &&
+              io.enqueue(lane).bits.sourceKind(source) ===
+                SourceKind.IntegerRegister
+          } else false.B
           entrySourceReady(allocationIndex(lane))(source) :=
-            io.enqueue(lane).bits.sourceReady(source) || wakes
+            io.enqueue(lane).bits.sourceReady(source) || wakes || readySnapshot
         }
         entryAllowE0(allocationIndex(lane)) :=
           io.enqueue(lane).bits.allowedEndpoints(0)
