@@ -14,7 +14,8 @@ import zircon.frontend.IntOperation
   * release the record. This keeps cache/MMIO actions outside recovery.
   */
 class LoadStoreQueues(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    registeredAgeHead: Boolean = false
 ) extends Module {
   private val lqEntries = config.loadQueueEntries
   private val sqEntries = config.storeQueueEntries
@@ -108,6 +109,12 @@ class LoadStoreQueues(
   val lqMetadataValid = RegInit(VecInit.fill(lqEntries)(false.B))
   val lqMetadata = Reg(Vec(lqEntries, new MemoryRetireMetadata(config)))
 
+  // Keep the age/forwarding selectors local to the LSU physical region. The
+  // exact live head remains available below for head-owned architectural
+  // effects; only modulo-age decisions use this registered cutpoint.
+  val ageHeadTag = if (registeredAgeHead) RegNext(io.robHeadTag)
+    else io.robHeadTag
+
   val sqValid = RegInit(VecInit.fill(sqEntries)(false.B))
   val sqTag = Reg(Vec(sqEntries, UInt(config.robTagWidth.W)))
   val sqAddressValid = RegInit(VecInit.fill(sqEntries)(false.B))
@@ -136,9 +143,9 @@ class LoadStoreQueues(
   // ordering checks.  Materializing it once per queue entry avoids rebuilding
   // the same modulo-age arithmetic in every consumer.
   val lqAge = VecInit(lqTag.map(tag =>
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)))
+    ROBTagOrder.ageFromHead(tag, ageHeadTag, config)))
   val sqAge = VecInit(sqTag.map(tag =>
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)))
+    ROBTagOrder.ageFromHead(tag, ageHeadTag, config)))
 
   val burstableGroupWaitValid = RegInit(false.B)
   val burstableGroupWaitHead = Reg(UInt(config.robTagWidth.W))
@@ -242,7 +249,7 @@ class LoadStoreQueues(
     loadAddressMatch(request) := addressMatch
     loadAddressIndex(request) := addressIndex
     val queryAge = ROBTagOrder.ageFromHead(
-      io.loadAddress(request).bits.robTag, io.robHeadTag, config)
+      io.loadAddress(request).bits.robTag, ageHeadTag, config)
     val queryWordAddress = MemoryByteLanes.wordAddress(io.loadAddress(request).bits.address)
     val olderUnknownAddress = (0 until sqEntries).map(index =>
       sqValid(index) && queryAge > sqAge(index) &&
@@ -500,7 +507,7 @@ class LoadStoreQueues(
       groupMembers(member - 1) && candidate)
 
     val request = group.requests(member)
-    request.order := ROBTagOrder.ageFromHead(expectedTag, io.robHeadTag, config)
+    request.order := ROBTagOrder.ageFromHead(expectedTag, ageHeadTag, config)
     request.robTag := expectedTag
     request.address := memberAddress
     request.write := burstableGroupStore
@@ -584,7 +591,7 @@ class LoadStoreQueues(
     }
   }
 
-  val squashAge = ROBTagOrder.ageFromHead(io.squash.bits, io.robHeadTag, config)
+  val squashAge = ROBTagOrder.ageFromHead(io.squash.bits, ageHeadTag, config)
   val lqSquashSurvivor = VecInit((0 until lqEntries).map(index =>
     lqValid(index) && !(lqAge(index) > squashAge)))
   val sqSquashSurvivor = VecInit((0 until sqEntries).map(index =>
@@ -614,8 +621,8 @@ class LoadStoreQueues(
       sqValid(index) := sqSquashSurvivor(index)
     }
     when(atomicResultValid && ROBTagOrder.ageFromHead(
-        atomicResultBits.robTag, io.robHeadTag, config) >
-        ROBTagOrder.ageFromHead(io.squash.bits, io.robHeadTag, config)) {
+        atomicResultBits.robTag, ageHeadTag, config) >
+      ROBTagOrder.ageFromHead(io.squash.bits, ageHeadTag, config)) {
       atomicResultValid := false.B
     }
     burstableGroupWaitValid := false.B
@@ -861,7 +868,7 @@ class LoadStoreQueues(
   assert(PopCount(lqValid) <= lqEntries.U, "LQ occupancy exceeded its depth")
   assert(PopCount(sqValid) <= sqEntries.U, "SQ occupancy exceeded its depth")
   val orderingBarrierAge = ROBTagOrder.ageFromHead(
-    io.orderingBarrier.bits, io.robHeadTag, config)
+    io.orderingBarrier.bits, ageHeadTag, config)
   val olderLoadPending = VecInit((0 until lqEntries).map(index =>
     lqValid(index) && lqAge(index) < orderingBarrierAge)).asUInt.orR
   val olderStorePending = VecInit((0 until sqEntries).map(index =>

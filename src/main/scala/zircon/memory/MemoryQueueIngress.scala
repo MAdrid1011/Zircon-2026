@@ -15,7 +15,8 @@ import zircon.backend.{FaultCandidate, ROBTagOrder}
   * emitted to the existing FirstFaultTracker boundary instead.
   */
 class MemoryQueueIngress(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    registeredAgeHead: Boolean = false
 ) extends Module {
   private val batchWidth = config.decodeWidth
   require(batchWidth == 2, "the frozen M3 ingress accepts two classified requests")
@@ -64,7 +65,9 @@ class MemoryQueueIngress(
     val storeBarrier = Output(Valid(UInt(config.robTagWidth.W)))
   })
 
-  val queues = Module(new LoadStoreQueues(config))
+  val ageHeadTag = if (registeredAgeHead) RegNext(io.robHeadTag)
+    else io.robHeadTag
+  val queues = Module(new LoadStoreQueues(config, registeredAgeHead))
   queues.io.robHeadTag := io.robHeadTag
   queues.io.squash := io.squash
   queues.io.flush := io.flush
@@ -124,7 +127,7 @@ class MemoryQueueIngress(
     Mux(intakeValid(lane) && intakeRequest(lane).address.isStore,
       intakeRequest(lane).address.robTag, updateRequest(lane).address.robTag))
   val pendingStoreAges = pendingStoreTags.map(tag =>
-    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config))
+    ROBTagOrder.ageFromHead(tag, ageHeadTag, config))
   var pendingBarrierValid: Bool = false.B
   var pendingBarrierTag: UInt = 0.U(config.robTagWidth.W)
   var pendingBarrierAge: UInt = 0.U((config.robIndexWidth + 1).W)
@@ -144,7 +147,7 @@ class MemoryQueueIngress(
     var selectedAge: UInt = 0.U((config.robIndexWidth + 1).W)
     for (lane <- 0 until batchWidth) {
       val age = ROBTagOrder.ageFromHead(
-        updateRequest(lane).address.robTag, io.robHeadTag, config)
+        updateRequest(lane).address.robTag, ageHeadTag, config)
       val take = candidates(lane) && (!selectedValid || age < selectedAge)
       selectedIndex = Mux(take, lane.U, selectedIndex)
       selectedAge = Mux(take, age, selectedAge)
@@ -250,10 +253,10 @@ class MemoryQueueIngress(
 
   val intakeSurvivesSquash = VecInit((0 until batchWidth).map(lane =>
     intakeValid(lane) && !ROBTagOrder.isYounger(
-      intakeRequest(lane).address.robTag, io.squash.bits, io.robHeadTag, config)))
+      intakeRequest(lane).address.robTag, io.squash.bits, ageHeadTag, config)))
   val updateSurvivesSquash = VecInit((0 until batchWidth).map(lane =>
     updateValid(lane) && !ROBTagOrder.isYounger(
-      updateRequest(lane).address.robTag, io.squash.bits, io.robHeadTag, config)))
+      updateRequest(lane).address.robTag, io.squash.bits, ageHeadTag, config)))
 
   when(io.flush) {
     intakeValid.foreach(_ := false.B)

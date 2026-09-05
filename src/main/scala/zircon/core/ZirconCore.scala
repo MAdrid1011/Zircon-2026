@@ -74,7 +74,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // Production timing boundary: keep the independently tested ingress
   // contract unchanged, while registering the wide operand/PMA handoff in
   // the integrated core to break the MemIQ-to-LSQ ready chain.
-  val lsuIngress = Module(new DualLSUIngress(cfg, registeredOperandBoundary = true))
+  val lsuIngress = Module(new DualLSUIngress(cfg,
+    registeredOperandBoundary = true, registeredAgeHead = true))
   val l1dLoadCache = Module(new L1DLoadCache(cfg, registeredAgeHead = true))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))

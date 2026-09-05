@@ -11,10 +11,10 @@ their route delay dominates the logic delay.
 
 ## 决策
 
-Add an opt-in `registeredAgeHead` mode to the production IntIQ, MemIQ, and
-L1D instances. The mode captures the already domain-scoped ROB head tag at the
-consumer boundary and uses that local copy for age selection and selective
-squash decisions. Standalone modules retain the original direct-input mode so
+Add an opt-in `registeredAgeHead` mode to the production IntIQ, MemIQ, LSQ
+ingress, and L1D instances. The mode captures the already domain-scoped ROB
+head tag at the consumer boundary and uses that local copy for age selection
+and selective squash decisions. Standalone modules retain the original direct-input mode so
 their same-cycle unit-test contract is unchanged.
 
 The extra snapshot cycle is safe for the frozen modulo-24 live window: age
