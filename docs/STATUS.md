@@ -553,7 +553,7 @@ flush、clear 和精确 fault metadata 语义。`FirstFaultTrackerSpec` 2/2、
 快照延迟并移除宽 ROB head mux 对 LSU/L1D/MemIQ/auxiliary 域的驱动。固定器件
 实现待运行。
 
-# 2026-09-05 local age cutpoints：在生产 IntIQ、MemIQ、LSQ ingress 和 L1D
-消费端增加可选的 `registeredAgeHead` 局部寄存切点，进一步隔离年龄选择器、
-squash survivor 和写使能网络。默认独立模块仍使用直接输入，IntIQ/MemIQ/L1D 聚焦测试 73/73、
-compile 与 platform RTL 生成通过；固定器件实现正在等待本轮证据。
+# 2026-09-05 local age cutpoints rejected：IntIQ/MemIQ/LSQ ingress/L1D 的额外
+`registeredAgeHead` 实验通过了聚焦仿真，但在 `xc7a200tfbg676-2L` Vivado
+2023.1 synthesis 的 Cross Boundary and Area Optimization 阶段反复无报告终止，
+因此不宣称面积或时序收益并回退到 `c0eeb63` 可测基线；详见 ADR-0037。

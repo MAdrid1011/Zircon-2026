@@ -11,8 +11,7 @@ class PhysicalWakeup(config: ZirconCoreConfig) extends Bundle {
 
 class IntegerIssueQueue(
     config: ZirconCoreConfig,
-    registeredWakeupMatch: Boolean = false,
-    registeredAgeHead: Boolean = false
+    registeredWakeupMatch: Boolean = false
 ) extends Module {
   private val entries = config.intIssueEntries
   private val indexWidth = log2Ceil(entries)
@@ -42,17 +41,11 @@ class IntegerIssueQueue(
   val entryAllowE1 = Reg(Vec(entries, Bool()))
   val count = RegInit(0.U(countWidth.W))
 
-  // In the integrated core the ROB head already crosses a scheduling
-  // boundary. Capture it locally as well so the queue's age comparators do
-  // not fan out directly into recovery and issue-state write enables.
-  val ageHeadTag = if (registeredAgeHead) RegNext(io.robHeadTag)
-    else io.robHeadTag
-
   // Compute each age once.  The selector is used for several endpoint
   // candidate sets; rebuilding the ROB-distance comparator in every call
   // creates a large, high-fanout cone in the integrated core.
   val entryAge = VecInit(entryUop.map(uop =>
-    ROBTagOrder.ageFromHead(uop.robTag, ageHeadTag, config)))
+    ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     // A linear fold makes the oldest-entry decision traverse every slot in
@@ -185,7 +178,7 @@ class IntegerIssueQueue(
     entryValid(index) && !ROBTagOrder.isYounger(
       entryUop(index).robTag,
       io.squash.bits,
-      ageHeadTag,
+      io.robHeadTag,
       config)))
 
   when(io.flush) {

@@ -11,9 +11,8 @@ import zircon.ZirconCoreConfig
   * and the shared ROB/PRF/ready state used by that path.
   */
 class IntegerExecutionBackend(
-    config: ZirconCoreConfig = ZirconCoreConfig.default,
-    registeredWakeup: Boolean = false,
-    registeredAgeHead: Boolean = false
+  config: ZirconCoreConfig = ZirconCoreConfig.default,
+  registeredWakeup: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
   private val robCountWidth = log2Ceil(config.robEntries + 1)
@@ -83,8 +82,7 @@ class IntegerExecutionBackend(
 
   val state = Module(new IntegerBackendState(config))
   val issue = Module(new IntegerIssueQueue(config,
-    registeredWakeupMatch = registeredWakeup,
-    registeredAgeHead = registeredAgeHead))
+    registeredWakeupMatch = registeredWakeup))
   val operandRead = Module(new IntegerOperandRead(config))
   val shortPipes = Module(new IntegerShortPipes(config))
 

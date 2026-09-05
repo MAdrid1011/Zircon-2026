@@ -14,8 +14,7 @@ import zircon.backend.ROBTagOrder
   * AXI writeback owner drains dirty L2 victims in the following M3 slice.
   */
 class L1DLoadCache(
-    config: ZirconCoreConfig = ZirconCoreConfig.default,
-    registeredAgeHead: Boolean = false
+    config: ZirconCoreConfig = ZirconCoreConfig.default
 ) extends Module {
   private val cache = config.l1d
   private val ways = cache.ways
@@ -188,15 +187,10 @@ class L1DLoadCache(
   val l2ProbeMshr = Reg(UInt(mshrWidth.W))
   val recoveryBlocked = io.flush || io.squash.valid
 
-  // The top-level core supplies a delayed head snapshot, but a local capture
-  // keeps all L1D age/squash decisions in the cache's physical region.
-  val ageHeadTag = if (registeredAgeHead) RegNext(io.robHeadTag)
-    else io.robHeadTag
-
   val firstRequestAge = ROBTagOrder.ageFromHead(io.request(0).bits.robTag,
-    ageHeadTag, config)
+    io.robHeadTag, config)
   val secondRequestAge = ROBTagOrder.ageFromHead(io.request(1).bits.robTag,
-    ageHeadTag, config)
+    io.robHeadTag, config)
   val selectFirstRequest = io.request(0).valid &&
     (!io.request(1).valid || firstRequestAge <= secondRequestAge)
   val selectedRequest = Wire(new LoadStoreForward(config))
@@ -299,7 +293,7 @@ class L1DLoadCache(
   var selectedImmediateAge: UInt = 0.U((config.robIndexWidth + 1).W)
   for (slot <- 0 until config.decodeWidth) {
     val age = ROBTagOrder.ageFromHead(immediateResponse(slot).robTag,
-      ageHeadTag, config)
+      io.robHeadTag, config)
     val take = immediateValid(slot) && (!selectedImmediateValid ||
       age < selectedImmediateAge)
     selectedImmediateIndex = Mux(take, slot.U, selectedImmediateIndex)
@@ -668,7 +662,7 @@ class L1DLoadCache(
     waiterValid(index) && mshrValid(waiterMshr(index)) &&
       mshrFilled(waiterMshr(index)))
   val waiterAges = waiterTag.map(tag =>
-    ROBTagOrder.ageFromHead(tag, ageHeadTag, config)).toVector
+    ROBTagOrder.ageFromHead(tag, io.robHeadTag, config)).toVector
   // Completed waiters are retired in ROB order.  A balanced reduction keeps
   // the eight-entry age/mux decision out of one serial critical path while
   // retaining the lowest-index tie-break for equal ages.
@@ -769,17 +763,17 @@ class L1DLoadCache(
   }.elsewhen(io.squash.valid) {
     for (slot <- 0 until config.decodeWidth) {
       when(immediateValid(slot) && ROBTagOrder.isYounger(
-        immediateResponse(slot).robTag, io.squash.bits, ageHeadTag, config)) {
+        immediateResponse(slot).robTag, io.squash.bits, io.robHeadTag, config)) {
         immediateValid(slot) := false.B
       }
       when(hitPending(slot) && ROBTagOrder.isYounger(
-        hitPendingTag(slot), io.squash.bits, ageHeadTag, config)) {
+        hitPendingTag(slot), io.squash.bits, io.robHeadTag, config)) {
         hitPending(slot) := false.B
       }
     }
     for (waiter <- 0 until waiterCount) {
       when(waiterValid(waiter) && ROBTagOrder.isYounger(
-        waiterTag(waiter), io.squash.bits, ageHeadTag, config)) {
+        waiterTag(waiter), io.squash.bits, io.robHeadTag, config)) {
         waiterValid(waiter) := false.B
       }
     }
@@ -787,7 +781,7 @@ class L1DLoadCache(
       val hasSurvivor = (0 until waiterCount).map(waiter =>
         waiterValid(waiter) && waiterMshr(waiter) === mshr.U &&
           !ROBTagOrder.isYounger(waiterTag(waiter), io.squash.bits,
-            ageHeadTag, config)).reduce(_ || _)
+            io.robHeadTag, config)).reduce(_ || _)
       when(!mshrStorePending(mshr) && !mshrIssued(mshr) &&
           !mshrL2ProbeIssued(mshr) && !hasSurvivor) {
         mshrValid(mshr) := false.B
@@ -919,7 +913,7 @@ class L1DLoadCache(
         for (slot <- 0 until config.decodeWidth) {
           when(immediateValid(slot) && ROBTagOrder.isYounger(
               immediateResponse(slot).robTag, io.storeRequest.bits.robTag,
-              ageHeadTag, config)) {
+              io.robHeadTag, config)) {
             immediateValid(slot) := false.B
             hitPending(slot) := false.B
           }

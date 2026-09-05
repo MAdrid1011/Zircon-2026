@@ -14,8 +14,7 @@ import zircon.frontend.FetchQueueEntry
   */
 class IntegerDispatchRecoveryBackend(
   config: ZirconCoreConfig = ZirconCoreConfig.default,
-  registeredWakeup: Boolean = false,
-  registeredAgeHead: Boolean = false
+  registeredWakeup: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
   private val freeCountWidth = log2Ceil(config.intPhysicalRegisters + 1)
@@ -90,8 +89,7 @@ class IntegerDispatchRecoveryBackend(
 
   val dispatch = Module(new BackendDispatch(config))
   val rename = Module(new IntegerRename(config))
-  val execution = Module(new IntegerExecutionBackend(config, registeredWakeup,
-    registeredAgeHead))
+  val execution = Module(new IntegerExecutionBackend(config, registeredWakeup))
   val recovery = Module(new BranchRecoverySubsystem(config))
   val firstFault = Module(new FirstFaultTracker(
     candidateWidth = config.decodeWidth + 1 + 3, config = config))

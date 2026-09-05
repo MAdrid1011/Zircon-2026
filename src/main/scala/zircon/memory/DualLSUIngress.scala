@@ -58,8 +58,7 @@ class MemoryOperandBoundary(config: ZirconCoreConfig) extends Module {
   */
 class DualLSUIngress(
   config: ZirconCoreConfig = ZirconCoreConfig.default,
-  registeredOperandBoundary: Boolean = false,
-  registeredAgeHead: Boolean = false
+  registeredOperandBoundary: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
 
@@ -120,7 +119,7 @@ class DualLSUIngress(
   } else None
   val admission = Module(new DualLSUAdmission(config))
   val m0Arbiter = Module(new M0RequestArbiter(config))
-  val ingress = Module(new MemoryQueueIngress(config, registeredAgeHead))
+  val ingress = Module(new MemoryQueueIngress(config))
   val loadCompletion = Module(new DualMemoryLoadCompletion(config))
 
   operandRead.io.issue(0).valid := io.m0Issue.valid
