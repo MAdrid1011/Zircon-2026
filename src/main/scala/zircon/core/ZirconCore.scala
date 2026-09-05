@@ -14,7 +14,8 @@ import zircon.memory.{AtomicMemoryEngine, AXIDataReadEngine, AXIL2WritebackEngin
   AXIOrderedIOEngine, CacheFenceDrainController, DualLSUIngress,
   ExclusiveL2TransferStore, ExternalCoherenceController, L1DLoadCache,
   HostStoreFlush, L2DemandClient, L2DemandRequest, LoadCompletion,
-  OrderedIOCombiner, OrderedIOGroup, OrderedIOGroupStreamer, StoreWriteResult}
+  LoadForwardBoundary, OrderedIOCombiner, OrderedIOGroup, StoreEffectBoundary,
+  OrderedIOGroupStreamer, StoreWriteResult}
 import zircon.trace.RetireTraceFormatter
 
 /** Executable M3 integration of fetch, integer backend, E2, and LSU ownership.
@@ -69,10 +70,25 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val floatingCommitState = Module(new FloatingCommitState(cfg))
   val floatingLoadArbiter = Module(new Arbiter(new zircon.backend.FloatingResult(cfg), 2))
   val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
+  // Decouple each MemIQ issue payload from auxiliary-read allocation and LSU
+  // admission.  The queue observes only this boundary's free bit; downstream
+  // bank/MSHR backpressure cannot return through the wide UopRef in one cycle.
+  val memIssueBoundaries = if (cfg.enableM2Observation) {
+    Seq.empty[UopIssueBoundary]
+  } else Seq.fill(2)(Module(new UopIssueBoundary(cfg, registered = true)))
   // Production timing boundary: keep the independently tested ingress
   // contract unchanged, while registering the wide operand/PMA handoff in
   // the integrated core to break the MemIQ-to-LSQ ready chain.
-  val lsuIngress = Module(new DualLSUIngress(cfg, registeredOperandBoundary = true))
+  val lsuIngress = Module(new DualLSUIngress(cfg,
+    registeredOperandBoundary = true,
+    registeredUpdateBoundary = true))
+  // Keep L1D bank/MSHR backpressure out of the LSQ forwarding write-enable
+  // cone. Observation builds retain the direct path for cycle-accurate tests.
+  val loadForwardBoundaries = if (cfg.enableM2Observation) {
+    Seq.empty[LoadForwardBoundary]
+  } else Seq.fill(cfg.decodeWidth)(Module(new LoadForwardBoundary(cfg)))
+  val storeEffectBoundary = if (cfg.enableM2Observation) None
+    else Some(Module(new StoreEffectBoundary(cfg)))
   val l1dLoadCache = Module(new L1DLoadCache(cfg))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
@@ -115,7 +131,12 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // feedback path from crossing the queue/operand boundary in one cycle.
   val longIntegerReady = RegNext(backend.io.integerReady)
   val floatingIntegerReady = RegNext(backend.io.integerReady)
-  val memIntegerReady = RegNext(backend.io.integerReady)
+  // Observation configurations are cycle-accurate compatibility builds. Use
+  // the scoreboard's allocation-masked combinational view there so a store
+  // dependent on a just-completed integer does not wait on a stale snapshot;
+  // production timing builds retain the registered fanout boundary.
+  val memIntegerReady = if (cfg.enableM2Observation) backend.io.integerReady
+    else RegNext(backend.io.integerReady)
   dontTouch(longIntegerReady)
   dontTouch(floatingIntegerReady)
   dontTouch(memIntegerReady)
@@ -224,24 +245,21 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   auxiliaryRead.io.robHeadTag := auxiliaryRobHeadTag
   auxiliaryRead.io.readData := backend.io.auxReadData
 
-  // The architectural FPR file has three read ports.  A floating E2 uop can
-  // consume all three ports, while two LSU lanes may independently carry an
-  // FPR store operand.  Keep those uses disjoint for the cycle and map the
-  // LSU lanes to distinct ports below.  This lookahead uses the MemIQ entries
-  // before auxiliary-read grants, avoiding a combinational grant/issue loop.
-  val pendingFloatingStore =
-    (memQueue.io.m0Issue.valid &&
-      memQueue.io.m0Issue.bits.sourceKind(1) === SourceKind.FloatingRegister) ||
-    (memQueue.io.m1Issue.valid &&
-      memQueue.io.m1Issue.bits.sourceKind(1) === SourceKind.FloatingRegister)
-
   val floatingIssueAge = ROBTagOrder.ageFromHead(
     floatingIssueBoundary.io.output.bits.robTag, floatingRobHeadTag, cfg)
   val longIssueAge = ROBTagOrder.ageFromHead(
     longIssueBoundary.io.output.bits.robTag, longRobHeadTag, cfg)
   val floatingOlderThanLong = floatingIssueBoundary.io.output.valid &&
     (!longIssueBoundary.io.output.valid || floatingIssueAge < longIssueAge)
-  val selectFloatingE2 = floatingOlderThanLong && !pendingFloatingStore
+  // FPU selection no longer depends on a wide MemIQ payload.  When the
+  // selected FPU operation actually reads FPR operands, the LSU issue gates
+  // below prevent an FPR store from consuming one of the same three ports in
+  // this cycle.  This keeps the resource exclusion exact while removing the
+  // MemIQ -> FloatingMovePipe timing path.
+  val floatingE2UsesFpr = floatingIssueBoundary.io.output.valid &&
+    floatingIssueBoundary.io.output.bits.sourceKind.map(
+      _ === SourceKind.FloatingRegister).reduce(_ || _)
+  val selectFloatingE2 = floatingOlderThanLong
   val selectLongE2 = longIssueBoundary.io.output.valid && !selectFloatingE2
   val selectedE2Uop = Mux(selectFloatingE2, floatingIssueBoundary.io.output.bits,
     longIssueBoundary.io.output.bits)
@@ -345,37 +363,55 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   memQueue.io.squash := backend.io.squash
   memQueue.io.flush := backend.io.globalFlush
 
+  val m0IssueForCore = if (cfg.enableM2Observation) memQueue.io.m0Issue
+    else memIssueBoundaries(0).io.output
+  val m1IssueForCore = if (cfg.enableM2Observation) memQueue.io.m1Issue
+    else memIssueBoundaries(1).io.output
+  if (!cfg.enableM2Observation) {
+    for (lane <- 0 until 2) {
+      memIssueBoundaries(lane).io.squash := backend.io.squash
+      memIssueBoundaries(lane).io.robHeadTag := memRobHeadTag
+      memIssueBoundaries(lane).io.flush := backend.io.globalFlush
+    }
+    memIssueBoundaries(0).io.input <> memQueue.io.m0Issue
+    memIssueBoundaries(1).io.input <> memQueue.io.m1Issue
+  }
+
   val atomicBarrierAge = ROBTagOrder.ageFromHead(
     lsuIngress.io.atomicAcquireBarrier.bits, lsuRobHeadTag, cfg)
   val m0IssueAge = ROBTagOrder.ageFromHead(
-    memQueue.io.m0Issue.bits.robTag, memRobHeadTag, cfg)
+    m0IssueForCore.bits.robTag, memRobHeadTag, cfg)
   val m1IssueAge = ROBTagOrder.ageFromHead(
-    memQueue.io.m1Issue.bits.robTag, memRobHeadTag, cfg)
+    m1IssueForCore.bits.robTag, memRobHeadTag, cfg)
   val m0BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
     m0IssueAge > atomicBarrierAge
   val m1BlockedByAcquire = lsuIngress.io.atomicAcquireBarrier.valid &&
     m1IssueAge > atomicBarrierAge
   val olderPendingStore = lsuIngress.io.storeBarrier.valid &&
     !ROBTagOrder.isYounger(lsuIngress.io.storeBarrier.bits,
-      memQueue.io.m1Issue.bits.robTag, memRobHeadTag, cfg)
+      m1IssueForCore.bits.robTag, memRobHeadTag, cfg)
   val olderPendingStoreForM0 = lsuIngress.io.storeBarrier.valid &&
     !ROBTagOrder.isYounger(lsuIngress.io.storeBarrier.bits,
-      memQueue.io.m0Issue.bits.robTag, memRobHeadTag, cfg)
+      m0IssueForCore.bits.robTag, memRobHeadTag, cfg)
   // Also cover the edge on which an older store leaves MemIQ for M0.  The
   // registered barrier becomes visible one cycle later, so without this
   // check a younger M1 load could issue in parallel with that first transfer.
-  val olderStoreSelectedSameCycle = memQueue.io.m0Issue.valid &&
-    memQueue.io.m0Issue.bits.uopClass === UopClass.Store &&
-    !ROBTagOrder.isYounger(memQueue.io.m0Issue.bits.robTag,
-      memQueue.io.m1Issue.bits.robTag, memRobHeadTag, cfg)
+  val olderStoreSelectedSameCycle = m0IssueForCore.valid &&
+    m0IssueForCore.bits.uopClass === UopClass.Store &&
+    !ROBTagOrder.isYounger(m0IssueForCore.bits.robTag,
+      m1IssueForCore.bits.robTag, memRobHeadTag, cfg)
   val m0IssueAllowed = !m0BlockedByAcquire &&
-    !(memQueue.io.m0Issue.bits.uopClass === UopClass.Load &&
-      olderPendingStoreForM0)
+    !(m0IssueForCore.bits.uopClass === UopClass.Load &&
+      olderPendingStoreForM0) &&
+    !(selectFloatingE2 && floatingE2UsesFpr &&
+      m0IssueForCore.bits.sourceKind(1) === SourceKind.FloatingRegister)
   val m1IssueAllowed = !m1BlockedByAcquire &&
-    !olderPendingStore && !olderStoreSelectedSameCycle
+    !olderPendingStore && !olderStoreSelectedSameCycle &&
+    !(selectFloatingE2 && floatingE2UsesFpr &&
+      m1IssueForCore.bits.sourceKind(1) === SourceKind.FloatingRegister)
   for ((queueIssue, candidate, allowed) <- Seq(
-      (memQueue.io.m0Issue, 1, m0IssueAllowed),
-      (memQueue.io.m1Issue, 2, m1IssueAllowed))) {
+      (m0IssueForCore, 1, m0IssueAllowed),
+      (m1IssueForCore, 2, m1IssueAllowed))) {
     auxiliaryRead.io.candidate(candidate).valid := queueIssue.valid && allowed
     auxiliaryRead.io.candidate(candidate).bits.robTag := queueIssue.bits.robTag
     for (source <- 0 until 2) {
@@ -386,16 +422,27 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     }
   }
 
-  lsuIngress.io.m0Issue.valid := memQueue.io.m0Issue.valid && m0IssueAllowed &&
+  lsuIngress.io.m0Issue.valid := m0IssueForCore.valid && m0IssueAllowed &&
     auxiliaryRead.io.grant(1)
-  lsuIngress.io.m0Issue.bits := memQueue.io.m0Issue.bits
-  memQueue.io.m0Issue.ready := lsuIngress.io.m0Issue.ready && m0IssueAllowed &&
-    auxiliaryRead.io.grant(1)
-  lsuIngress.io.m1Issue.valid := memQueue.io.m1Issue.valid && m1IssueAllowed &&
+  lsuIngress.io.m0Issue.bits := m0IssueForCore.bits
+  lsuIngress.io.m1Issue.valid := m1IssueForCore.valid && m1IssueAllowed &&
     auxiliaryRead.io.grant(2)
-  lsuIngress.io.m1Issue.bits := memQueue.io.m1Issue.bits
-  memQueue.io.m1Issue.ready := lsuIngress.io.m1Issue.ready && m1IssueAllowed &&
-    auxiliaryRead.io.grant(2)
+  lsuIngress.io.m1Issue.bits := m1IssueForCore.bits
+  if (cfg.enableM2Observation) {
+    memQueue.io.m0Issue.ready := lsuIngress.io.m0Issue.ready && m0IssueAllowed &&
+      auxiliaryRead.io.grant(1)
+    memQueue.io.m1Issue.ready := lsuIngress.io.m1Issue.ready && m1IssueAllowed &&
+      auxiliaryRead.io.grant(2)
+  } else {
+    memIssueBoundaries(0).io.output.ready := lsuIngress.io.m0Issue.ready &&
+      m0IssueAllowed && auxiliaryRead.io.grant(1)
+    memIssueBoundaries(1).io.output.ready := lsuIngress.io.m1Issue.ready &&
+      m1IssueAllowed && auxiliaryRead.io.grant(2)
+    memQueue.io.m0Issue.ready := memIssueBoundaries(0).io.input.ready &&
+      m0IssueAllowed
+    memQueue.io.m1Issue.ready := memIssueBoundaries(1).io.input.ready &&
+      m1IssueAllowed
+  }
   for (source <- 0 until 2) {
     lsuIngress.io.prfReadData(source) := auxiliaryRead.io.candidateData(1)(source)
     lsuIngress.io.prfReadData(source + 2) :=
@@ -418,13 +465,30 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // miss-resource backpressure, so an unaccepted payload remains at its LQ.
   for (lane <- 0 until cfg.decodeWidth) {
     val cacheableLoadForward = lsuIngress.io.loadForward(lane).bits.cacheable
-    l1dLoadCache.io.request(lane).valid :=
-      lsuIngress.io.loadForward(lane).valid && cacheableLoadForward &&
+    if (cfg.enableM2Observation) {
+      l1dLoadCache.io.request(lane).valid :=
+        lsuIngress.io.loadForward(lane).valid && cacheableLoadForward &&
+          !externalCoherence.io.cacheableIngressBlocked
+      l1dLoadCache.io.request(lane).bits := lsuIngress.io.loadForward(lane).bits
+      lsuIngress.io.loadForward(lane).ready := Mux(cacheableLoadForward,
+        l1dLoadCache.io.request(lane).ready &&
+          !externalCoherence.io.cacheableIngressBlocked, true.B)
+    } else {
+      val boundary = loadForwardBoundaries(lane)
+      boundary.io.input.valid :=
+        lsuIngress.io.loadForward(lane).valid && cacheableLoadForward
+      boundary.io.input.bits := lsuIngress.io.loadForward(lane).bits
+      boundary.io.robHeadTag := lsuRobHeadTag
+      boundary.io.squash := backend.io.squash
+      boundary.io.flush := backend.io.globalFlush
+      l1dLoadCache.io.request(lane).valid := boundary.io.output.valid &&
         !externalCoherence.io.cacheableIngressBlocked
-    l1dLoadCache.io.request(lane).bits := lsuIngress.io.loadForward(lane).bits
-    lsuIngress.io.loadForward(lane).ready := Mux(cacheableLoadForward,
-      l1dLoadCache.io.request(lane).ready &&
-        !externalCoherence.io.cacheableIngressBlocked, true.B)
+      l1dLoadCache.io.request(lane).bits := boundary.io.output.bits
+      boundary.io.output.ready := l1dLoadCache.io.request(lane).ready &&
+        !externalCoherence.io.cacheableIngressBlocked
+      lsuIngress.io.loadForward(lane).ready := Mux(cacheableLoadForward,
+        boundary.io.input.ready, true.B)
+    }
   }
   l2DemandArbiter.io.in(0) <> l1dLoadCache.io.dataRequest
   l2DemandArbiter.io.in(1) <> frontend.io.l2Request
@@ -495,10 +559,18 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
     atomicEngine.io.result.bits.storePerformed
   l1dLoadCache.io.atomicInvalidate.bits := atomicEngine.io.result.bits.faultAddress
 
-  val cacheStoreEffect = lsuIngress.io.storeEffect.valid &&
-    lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.Memory.code.U
-  val deviceStoreEffect = lsuIngress.io.storeEffect.valid &&
-    lsuIngress.io.storeEffect.bits.pmaKind === PMARegionKind.DeviceStrong.code.U
+  if (!cfg.enableM2Observation) {
+    storeEffectBoundary.get.io.input <> lsuIngress.io.storeEffect
+    storeEffectBoundary.get.io.robHeadTag := lsuRobHeadTag
+    storeEffectBoundary.get.io.squash := backend.io.squash
+    storeEffectBoundary.get.io.flush := backend.io.globalFlush
+  }
+  val storeEffectForCore = if (cfg.enableM2Observation) lsuIngress.io.storeEffect
+    else storeEffectBoundary.get.io.output
+  val cacheStoreEffect = storeEffectForCore.valid &&
+    storeEffectForCore.bits.pmaKind === PMARegionKind.Memory.code.U
+  val deviceStoreEffect = storeEffectForCore.valid &&
+    storeEffectForCore.bits.pmaKind === PMARegionKind.DeviceStrong.code.U
   val deviceLoadEffect = lsuIngress.io.deviceLoadEffect
   val deviceLoadAtLiveHead = deviceLoadEffect.valid && backend.io.robHead.valid &&
     backend.io.robHeadControl(0).isLoad
@@ -511,22 +583,22 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   singleDeviceGroup.count := 1.U
   val deviceRequest = singleDeviceGroup.requests(0)
   val selectedDeviceTag = Mux(singleDeviceGroupFromLoad,
-    deviceLoadEffect.bits.robTag, lsuIngress.io.storeEffect.bits.robTag)
+    deviceLoadEffect.bits.robTag, storeEffectForCore.bits.robTag)
   val selectedDeviceAddress = Mux(singleDeviceGroupFromLoad,
-    deviceLoadEffect.bits.address, lsuIngress.io.storeEffect.bits.address)
+    deviceLoadEffect.bits.address, storeEffectForCore.bits.address)
   val selectedDeviceSize = Mux(singleDeviceGroupFromLoad,
-    deviceLoadEffect.bits.accessSize, lsuIngress.io.storeEffect.bits.accessSize)
+    deviceLoadEffect.bits.accessSize, storeEffectForCore.bits.accessSize)
   val selectedDevicePma = Mux(singleDeviceGroupFromLoad,
-    deviceLoadEffect.bits.pmaKind, lsuIngress.io.storeEffect.bits.pmaKind)
+    deviceLoadEffect.bits.pmaKind, storeEffectForCore.bits.pmaKind)
   deviceRequest.order := selectedDeviceTag
   deviceRequest.robTag := selectedDeviceTag
   deviceRequest.address := selectedDeviceAddress
   deviceRequest.write := singleDeviceGroupFromStore
   deviceRequest.size := selectedDeviceSize
   deviceRequest.writeData := Mux(singleDeviceGroupFromStore,
-    lsuIngress.io.storeEffect.bits.writeData, 0.U)
+    storeEffectForCore.bits.writeData, 0.U)
   deviceRequest.writeMask := Mux(singleDeviceGroupFromStore,
-    lsuIngress.io.storeEffect.bits.writeMask, 0.U)
+    storeEffectForCore.bits.writeMask, 0.U)
   deviceRequest.burstable := false.B
   deviceRequest.regionTag := selectedDevicePma
 
@@ -553,14 +625,19 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
 
   l1dLoadCache.io.storeRequest.valid := cacheStoreEffect && !orderedIOEngine.io.busy &&
     !externalCoherence.io.cacheableIngressBlocked
-  l1dLoadCache.io.storeRequest.bits := lsuIngress.io.storeEffect.bits
-  lsuIngress.io.storeEffect.ready := Mux(cacheStoreEffect,
+  l1dLoadCache.io.storeRequest.bits := storeEffectForCore.bits
+  val storeEffectReady = Mux(cacheStoreEffect,
     l1dLoadCache.io.storeRequest.ready && !orderedIOEngine.io.busy &&
       !externalCoherence.io.cacheableIngressBlocked,
     Mux(deviceStoreEffect,
       !singleDeviceGroupFromLoad && orderedGroupArbiter.io.in(0).ready &&
         !l1dLoadCache.io.storeBusy,
       false.B))
+  if (cfg.enableM2Observation) {
+    lsuIngress.io.storeEffect.ready := storeEffectReady
+  } else {
+    storeEffectBoundary.get.io.output.ready := storeEffectReady
+  }
   // Cacheable stores already own their exclusive L1D line. Only an external
   // atomic invalidates a clean L2 copy before its AXI read/modify/write.
   l2TransferStore.io.invalidate.valid := atomicEngine.io.effect.fire &&

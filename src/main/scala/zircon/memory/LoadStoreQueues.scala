@@ -158,6 +158,61 @@ class LoadStoreQueues(
     (matches.asUInt.orR, PriorityEncoder(matches.asUInt)(indexWidth - 1, 0))
   }
 
+  /** Reduce a small control vector without building a serial OR chain. */
+  private def balancedOr(values: Seq[Bool]): Bool = {
+    require(values.nonEmpty)
+    var tree = values.toVector
+    while (tree.length > 1) {
+      val next = Vector.newBuilder[Bool]
+      var pair = 0
+      while (pair < tree.length) {
+        if (pair + 1 == tree.length) next += tree(pair)
+        else next += tree(pair) || tree(pair + 1)
+        pair += 2
+      }
+      tree = next.result()
+    }
+    tree.head
+  }
+
+  /** Select the youngest matching store with logarithmic mux depth. */
+  private def selectYoungestByte(
+      candidates: Seq[Bool],
+      ages: Seq[UInt],
+      data: Seq[UInt]
+  ): (Bool, UInt) = {
+    require(candidates.nonEmpty && candidates.length == ages.length &&
+      candidates.length == data.length)
+    var valid = candidates.toVector
+    var ageTree = ages.toVector
+    var dataTree = data.toVector
+    while (valid.length > 1) {
+      val nextValid = Vector.newBuilder[Bool]
+      val nextAge = Vector.newBuilder[UInt]
+      val nextData = Vector.newBuilder[UInt]
+      var pair = 0
+      while (pair < valid.length) {
+        if (pair + 1 == valid.length) {
+          nextValid += valid(pair)
+          nextAge += ageTree(pair)
+          nextData += dataTree(pair)
+        } else {
+          // Strictly greater age preserves the original low-index tie break.
+          val rightWins = valid(pair + 1) &&
+            (!valid(pair) || ageTree(pair + 1) > ageTree(pair))
+          nextValid += valid(pair) || valid(pair + 1)
+          nextAge += Mux(rightWins, ageTree(pair + 1), ageTree(pair))
+          nextData += Mux(rightWins, dataTree(pair + 1), dataTree(pair))
+        }
+        pair += 2
+      }
+      valid = nextValid.result()
+      ageTree = nextAge.result()
+      dataTree = nextData.result()
+    }
+    (valid.head, dataTree.head)
+  }
+
   /** Select the lowest ROB-age candidate with a balanced reduction tree. */
   private def selectOldest(
       candidates: Seq[Bool],
@@ -244,34 +299,28 @@ class LoadStoreQueues(
     val queryAge = ROBTagOrder.ageFromHead(
       io.loadAddress(request).bits.robTag, io.robHeadTag, config)
     val queryWordAddress = MemoryByteLanes.wordAddress(io.loadAddress(request).bits.address)
-    val olderUnknownAddress = (0 until sqEntries).map(index =>
+    val olderUnknownAddress = balancedOr((0 until sqEntries).map(index =>
       sqValid(index) && queryAge > sqAge(index) &&
-        !sqAddressValid(index)).reduce(_ || _)
-    val olderUnknownData = (0 until sqEntries).map(index =>
+        !sqAddressValid(index)))
+    val olderUnknownData = balancedOr((0 until sqEntries).map(index =>
       sqValid(index) && sqAddressValid(index) &&
         queryAge > sqAge(index) &&
         MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
         (sqWriteMask(index) & io.loadAddress(request).bits.readMask).orR &&
-        !sqDataValid(index)).reduce(_ || _)
+        !sqDataValid(index)))
 
     val forwardMaskBits = Wire(Vec(4, Bool()))
     val forwardBytes = Wire(Vec(4, UInt(8.W)))
     for (byte <- 0 until 4) {
-      var chosenValid: Bool = false.B
-      var chosenTag: UInt = 0.U(config.robTagWidth.W)
-      var chosenAge: UInt = 0.U((config.robIndexWidth + 1).W)
-      var chosenData: UInt = 0.U(8.W)
-      for (index <- 0 until sqEntries) {
-        val candidate = sqValid(index) && sqAddressValid(index) && sqDataValid(index) &&
+      val candidates = (0 until sqEntries).map(index =>
+        sqValid(index) && sqAddressValid(index) && sqDataValid(index) &&
           queryAge > sqAge(index) &&
           MemoryByteLanes.wordAddress(sqAddress(index)) === queryWordAddress &&
-          sqWriteMask(index)(byte)
-        val take = candidate && (!chosenValid || sqAge(index) > chosenAge)
-        chosenTag = Mux(take, sqTag(index), chosenTag)
-        chosenAge = Mux(take, sqAge(index), chosenAge)
-        chosenData = Mux(take, sqWriteData(index)(8 * byte + 7, 8 * byte), chosenData)
-        chosenValid = chosenValid || candidate
-      }
+          sqWriteMask(index)(byte))
+      val byteData = (0 until sqEntries).map(index =>
+        sqWriteData(index)(8 * byte + 7, 8 * byte))
+      val (chosenValid, chosenData) = selectYoungestByte(candidates,
+        sqAge.toSeq, byteData)
       forwardMaskBits(byte) := chosenValid
       forwardBytes(byte) := chosenData
     }

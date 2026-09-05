@@ -5,6 +5,55 @@ import chisel3.util._
 import zircon.ZirconCoreConfig
 import zircon.backend.{FaultCandidate, ROBTagOrder}
 
+/** One-entry non-fall-through boundary for an LSQ address/data update. */
+class RegisteredMemoryUpdateBoundary[T <: Data](
+    gen: T,
+    config: ZirconCoreConfig
+) extends Module {
+  val io = IO(new Bundle {
+    val input = Flipped(Decoupled(gen.cloneType))
+    val inputTag = Input(UInt(config.robTagWidth.W))
+    val output = Decoupled(gen.cloneType)
+    val robHeadTag = Input(UInt(config.robTagWidth.W))
+    val squash = Input(Valid(UInt(config.robTagWidth.W)))
+    val flush = Input(Bool())
+  })
+
+  val occupied = RegInit(false.B)
+  val payload = Reg(gen.cloneType)
+  val payloadTag = Reg(UInt(config.robTagWidth.W))
+  val blocked = io.flush || io.squash.valid
+  val killed = occupied && io.squash.valid && ROBTagOrder.isYounger(
+    payloadTag, io.squash.bits, io.robHeadTag, config)
+
+  io.input.ready := !occupied && !blocked
+  io.output.valid := occupied && !io.flush && !killed
+  io.output.bits := payload
+
+  when(io.flush) {
+    occupied := false.B
+  }.elsewhen(io.squash.valid) {
+    when(killed) { occupied := false.B }
+  }.otherwise {
+    when(io.input.fire) {
+      payload := io.input.bits
+      payloadTag := io.inputTag
+      occupied := true.B
+    }.elsewhen(io.output.fire) {
+      occupied := false.B
+    }
+  }
+
+  when(io.input.fire) {
+    assert(io.inputTag(config.robIndexWidth - 1, 0) < config.robEntries.U,
+      "memory update boundary received an out-of-range ROB tag")
+  }
+  when(io.squash.valid) {
+    assert(!io.input.fire && !io.output.fire,
+      "memory update boundary transferred work during selective squash")
+  }
+}
+
 /** Moves classified M0/M1 work into the LQ/SQ without making it executable.
   *
   * A request first occupies the intake batch, then reserves its LQ/SQ owner,
@@ -15,7 +64,8 @@ import zircon.backend.{FaultCandidate, ROBTagOrder}
   * emitted to the existing FirstFaultTracker boundary instead.
   */
 class MemoryQueueIngress(
-    config: ZirconCoreConfig = ZirconCoreConfig.default
+    config: ZirconCoreConfig = ZirconCoreConfig.default,
+    registeredUpdateBoundary: Boolean = false
 ) extends Module {
   private val batchWidth = config.decodeWidth
   require(batchWidth == 2, "the frozen M3 ingress accepts two classified requests")
@@ -65,6 +115,15 @@ class MemoryQueueIngress(
   })
 
   val queues = Module(new LoadStoreQueues(config))
+  val loadAddressBoundaries = if (registeredUpdateBoundary) Some(
+    Seq.fill(batchWidth)(Module(new RegisteredMemoryUpdateBoundary(
+      new LoadAddressQuery(config), config)))) else None
+  val storeAddressBoundary = if (registeredUpdateBoundary) Some(
+    Module(new RegisteredMemoryUpdateBoundary(new StoreAddressUpdate(config), config)))
+    else None
+  val storeDataBoundary = if (registeredUpdateBoundary) Some(
+    Module(new RegisteredMemoryUpdateBoundary(new StoreDataUpdate(config), config)))
+    else None
   queues.io.robHeadTag := io.robHeadTag
   queues.io.squash := io.squash
   queues.io.flush := io.flush
@@ -113,6 +172,9 @@ class MemoryQueueIngress(
   val loadAddressPending = RegInit(VecInit.fill(batchWidth)(false.B))
   val storeAddressPending = RegInit(VecInit.fill(batchWidth)(false.B))
   val storeDataPending = RegInit(VecInit.fill(batchWidth)(false.B))
+  val loadAddressAccepted = Wire(Vec(batchWidth, Bool()))
+  val storeAddressAccepted = Wire(Bool())
+  val storeDataAccepted = Wire(Bool())
 
   // Intake/update are registered ahead of LSQ allocation.  Their stores must
   // participate in load ordering even though LoadStoreQueues cannot see them
@@ -210,39 +272,86 @@ class MemoryQueueIngress(
   val loadSelectedValid = Seq(firstLoadSelectedValid, secondLoadSelectedValid)
   val loadSelectedIndex = Seq(firstLoadSelectedIndex, secondLoadSelectedIndex)
   for (port <- 0 until batchWidth) {
-    queues.io.loadAddress(port).valid := loadSelectedValid(port) && !recoveryBlocked
-    queues.io.loadAddress(port).bits.robTag :=
-      updateRequest(loadSelectedIndex(port)).address.robTag
-    queues.io.loadAddress(port).bits.address :=
-      updateRequest(loadSelectedIndex(port)).address.address
-    queues.io.loadAddress(port).bits.readMask :=
-      updateRequest(loadSelectedIndex(port)).address.readMask
+    if (registeredUpdateBoundary) {
+      val boundary = loadAddressBoundaries.get(port)
+      boundary.io.input.valid := loadSelectedValid(port) && !recoveryBlocked
+      boundary.io.input.bits.robTag :=
+        updateRequest(loadSelectedIndex(port)).address.robTag
+      boundary.io.input.bits.address :=
+        updateRequest(loadSelectedIndex(port)).address.address
+      boundary.io.input.bits.readMask :=
+        updateRequest(loadSelectedIndex(port)).address.readMask
+      boundary.io.inputTag := boundary.io.input.bits.robTag
+      boundary.io.robHeadTag := io.robHeadTag
+      boundary.io.squash := io.squash
+      boundary.io.flush := io.flush
+      queues.io.loadAddress(port) <> boundary.io.output
+      loadAddressAccepted(port) := boundary.io.input.fire
+    } else {
+      queues.io.loadAddress(port).valid := loadSelectedValid(port) && !recoveryBlocked
+      queues.io.loadAddress(port).bits.robTag :=
+        updateRequest(loadSelectedIndex(port)).address.robTag
+      queues.io.loadAddress(port).bits.address :=
+        updateRequest(loadSelectedIndex(port)).address.address
+      queues.io.loadAddress(port).bits.readMask :=
+        updateRequest(loadSelectedIndex(port)).address.readMask
+      loadAddressAccepted(port) := queues.io.loadAddress(port).fire
+    }
   }
 
   val (storeAddressSelectedValid, storeAddressSelectedIndex) = selectOldest(
     (0 until batchWidth).map(lane => updateValid(lane) && storeAddressPending(lane)))
-  queues.io.storeAddress.valid := storeAddressSelectedValid && !recoveryBlocked
-  queues.io.storeAddress.bits.robTag := updateRequest(storeAddressSelectedIndex).address.robTag
-  queues.io.storeAddress.bits.address := updateRequest(storeAddressSelectedIndex).address.address
-  queues.io.storeAddress.bits.writeMask := updateRequest(storeAddressSelectedIndex).address.writeMask
+  if (registeredUpdateBoundary) {
+    val boundary = storeAddressBoundary.get
+    boundary.io.input.valid := storeAddressSelectedValid && !recoveryBlocked
+    boundary.io.input.bits.robTag := updateRequest(storeAddressSelectedIndex).address.robTag
+    boundary.io.input.bits.address := updateRequest(storeAddressSelectedIndex).address.address
+    boundary.io.input.bits.writeMask := updateRequest(storeAddressSelectedIndex).address.writeMask
+    boundary.io.inputTag := boundary.io.input.bits.robTag
+    boundary.io.robHeadTag := io.robHeadTag
+    boundary.io.squash := io.squash
+    boundary.io.flush := io.flush
+    queues.io.storeAddress <> boundary.io.output
+    storeAddressAccepted := boundary.io.input.fire
+  } else {
+    queues.io.storeAddress.valid := storeAddressSelectedValid && !recoveryBlocked
+    queues.io.storeAddress.bits.robTag := updateRequest(storeAddressSelectedIndex).address.robTag
+    queues.io.storeAddress.bits.address := updateRequest(storeAddressSelectedIndex).address.address
+    queues.io.storeAddress.bits.writeMask := updateRequest(storeAddressSelectedIndex).address.writeMask
+    storeAddressAccepted := queues.io.storeAddress.fire
+  }
 
   val (storeDataSelectedValid, storeDataSelectedIndex) = selectOldest(
     (0 until batchWidth).map(lane => updateValid(lane) && storeDataPending(lane)))
-  queues.io.storeData.valid := storeDataSelectedValid && !recoveryBlocked
-  queues.io.storeData.bits.robTag := updateRequest(storeDataSelectedIndex).address.robTag
-  queues.io.storeData.bits.writeData := updateRequest(storeDataSelectedIndex).address.writeData
+  if (registeredUpdateBoundary) {
+    val boundary = storeDataBoundary.get
+    boundary.io.input.valid := storeDataSelectedValid && !recoveryBlocked
+    boundary.io.input.bits.robTag := updateRequest(storeDataSelectedIndex).address.robTag
+    boundary.io.input.bits.writeData := updateRequest(storeDataSelectedIndex).address.writeData
+    boundary.io.inputTag := boundary.io.input.bits.robTag
+    boundary.io.robHeadTag := io.robHeadTag
+    boundary.io.squash := io.squash
+    boundary.io.flush := io.flush
+    queues.io.storeData <> boundary.io.output
+    storeDataAccepted := boundary.io.input.fire
+  } else {
+    queues.io.storeData.valid := storeDataSelectedValid && !recoveryBlocked
+    queues.io.storeData.bits.robTag := updateRequest(storeDataSelectedIndex).address.robTag
+    queues.io.storeData.bits.writeData := updateRequest(storeDataSelectedIndex).address.writeData
+    storeDataAccepted := queues.io.storeData.fire
+  }
 
   val loadAddressPendingAfter = Wire(Vec(batchWidth, Bool()))
   val storeAddressPendingAfter = Wire(Vec(batchWidth, Bool()))
   val storeDataPendingAfter = Wire(Vec(batchWidth, Bool()))
   for (lane <- 0 until batchWidth) {
     val selectedLoadFired = (0 until batchWidth).map(port =>
-      queues.io.loadAddress(port).fire && loadSelectedIndex(port) === lane.U).reduce(_ || _)
+      loadAddressAccepted(port) && loadSelectedIndex(port) === lane.U).reduce(_ || _)
     loadAddressPendingAfter(lane) := loadAddressPending(lane) && !selectedLoadFired
     storeAddressPendingAfter(lane) := storeAddressPending(lane) &&
-      !(queues.io.storeAddress.fire && storeAddressSelectedIndex === lane.U)
+      !(storeAddressAccepted && storeAddressSelectedIndex === lane.U)
     storeDataPendingAfter(lane) := storeDataPending(lane) &&
-      !(queues.io.storeData.fire && storeDataSelectedIndex === lane.U)
+      !(storeDataAccepted && storeDataSelectedIndex === lane.U)
   }
   val updateRemains = (0 until batchWidth).map(lane => updateValid(lane) &&
     (loadAddressPendingAfter(lane) || storeAddressPendingAfter(lane) ||
@@ -324,8 +433,8 @@ class MemoryQueueIngress(
     }
   }
   when(io.squash.valid) {
-    assert(!queues.io.allocate.exists(_.fire) && !queues.io.loadAddress.exists(_.fire) &&
-      !queues.io.storeAddress.fire && !queues.io.storeData.fire,
+    assert(!queues.io.allocate.exists(_.fire) && !loadAddressAccepted.exists(identity) &&
+      !storeAddressAccepted && !storeDataAccepted,
       "memory ingress transferred work during selective squash")
   }
   assert(!intakeValid(1) || intakeValid(0),

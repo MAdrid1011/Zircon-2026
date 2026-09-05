@@ -28,7 +28,10 @@ class MemoryOperandBoundary(config: ZirconCoreConfig) extends Module {
   val blocked = io.flush || io.squash.valid
   io.output.valid := occupied && !io.flush && !killed
   io.output.bits := payload
-  io.input.ready := !blocked && (!occupied || io.output.ready)
+  // Keep the boundary genuinely non-fall-through.  Allowing output.ready to
+  // reopen input.ready recreates the downstream admission -> MemIQ feedback
+  // path that this register is intended to isolate.
+  io.input.ready := !blocked && !occupied
 
   when(io.flush) {
     occupied := false.B
@@ -58,7 +61,8 @@ class MemoryOperandBoundary(config: ZirconCoreConfig) extends Module {
   */
 class DualLSUIngress(
   config: ZirconCoreConfig = ZirconCoreConfig.default,
-  registeredOperandBoundary: Boolean = false
+  registeredOperandBoundary: Boolean = false,
+  registeredUpdateBoundary: Boolean = false
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
 
@@ -119,7 +123,8 @@ class DualLSUIngress(
   } else None
   val admission = Module(new DualLSUAdmission(config))
   val m0Arbiter = Module(new M0RequestArbiter(config))
-  val ingress = Module(new MemoryQueueIngress(config))
+  val ingress = Module(new MemoryQueueIngress(config,
+    registeredUpdateBoundary = registeredUpdateBoundary))
   val loadCompletion = Module(new DualMemoryLoadCompletion(config))
 
   operandRead.io.issue(0).valid := io.m0Issue.valid

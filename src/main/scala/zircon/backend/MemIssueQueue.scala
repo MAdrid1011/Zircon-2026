@@ -33,19 +33,29 @@ class MemIssueQueue(
 
   val entryValid = RegInit(VecInit.fill(entries)(false.B))
   val entryUop = Reg(Vec(entries, new UopRef(config)))
+  // A newly allocated entry already carries the dispatch-time source-ready
+  // bits.  Do not consult the one-cycle integer-ready snapshot until the
+  // entry has spent one full cycle in the queue; otherwise a recycled
+  // physical register can be mistaken for a completed producer.
+  val entryFresh = RegInit(VecInit.fill(entries)(false.B))
   // These eligibility bits are immutable while a uop is resident.  Local
   // copies keep the endpoint candidate trees off the wide UopRef registers.
   val entryAllowM0 = Reg(Vec(entries, Bool()))
   val entryAllowM1 = Reg(Vec(entries, Bool()))
   val count = RegInit(0.U(countWidth.W))
 
-  private def sourceReady(uop: UopRef, source: Int): Bool = {
+  private def sourceReady(
+      uop: UopRef,
+      source: Int,
+      useIntegerReadySnapshot: Bool = true.B
+  ): Bool = {
     if (source >= 2) uop.sourceReady(source)
     else {
       val inRange = uop.sourcePhysical(source) < config.intPhysicalRegisters.U
       val safePhysical = Mux(inRange, uop.sourcePhysical(source), 0.U)
+      val snapshotReady = uop.sourceReady(source) || io.integerReady(safePhysical)
       Mux(uop.sourceKind(source) === SourceKind.IntegerRegister,
-        uop.sourceReady(source) || io.integerReady(safePhysical),
+        Mux(useIntegerReadySnapshot, snapshotReady, uop.sourceReady(source)),
         uop.sourceReady(source))
     }
   }
@@ -59,7 +69,7 @@ class MemIssueQueue(
   }
 
   private def allSourcesReady(uop: UopRef): Bool =
-    (0 until 3).map(sourceReady(uop, _)).reduce(_ && _)
+    (0 until 3).map(source => uop.sourceReady(source)).reduce(_ && _)
 
   // The same age ordering feeds atomic, M1, and M0 selection.  Materialize
   // it once per entry instead of rebuilding the ROB-distance comparator for
@@ -104,7 +114,12 @@ class MemIssueQueue(
   // update, avoiding duplicate integer-ready comparator banks.
   val readyEntries = Wire(Vec(entries, new UopRef(config)))
   for (index <- 0 until entries) {
-    readyEntries(index) := withReady(entryUop(index))
+    readyEntries(index) := entryUop(index)
+    for (source <- 0 until 3) {
+      readyEntries(index).sourceReady(source) :=
+        sourceReady(entryUop(index), source,
+          if (allowIssueRecycle) true.B else !entryFresh(index))
+    }
   }
 
   private def readyForIssue(index: Int): Bool =
@@ -214,10 +229,12 @@ class MemIssueQueue(
 
   when(io.flush) {
     entryValid.foreach(_ := false.B)
+    entryFresh.foreach(_ := false.B)
     count := 0.U
   }.elsewhen(io.squash.valid) {
     for (index <- 0 until entries) {
       entryValid(index) := squashSurvivor(index)
+      entryFresh(index) := false.B
     }
     count := PopCount(squashSurvivor)
   }.otherwise {
@@ -225,6 +242,7 @@ class MemIssueQueue(
     for (index <- 0 until entries) {
       when(entryValid(index)) {
         entryUop(index) := readyEntries(index)
+        entryFresh(index) := false.B
       }
     }
     when(io.m0Issue.fire) { entryValid(m0SelectedIndex) := false.B }
@@ -232,7 +250,8 @@ class MemIssueQueue(
     for (lane <- 0 until config.decodeWidth) {
       when(io.enqueue(lane).fire) {
         entryValid(allocationIndex(lane)) := true.B
-        entryUop(allocationIndex(lane)) := withReady(io.enqueue(lane).bits)
+        entryUop(allocationIndex(lane)) := io.enqueue(lane).bits
+        entryFresh(allocationIndex(lane)) := true.B
         entryAllowM0(allocationIndex(lane)) :=
           io.enqueue(lane).bits.allowedEndpoints(ExecutionEndpoint.M0General.asUInt)
         entryAllowM1(allocationIndex(lane)) :=

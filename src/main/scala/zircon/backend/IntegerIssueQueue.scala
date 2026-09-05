@@ -105,8 +105,10 @@ class IntegerIssueQueue(
     for (source <- 0 until 3) {
       awakenedSourceReady(index)(source) :=
         entrySourceReady(index)(source) || wakeupMatch(index)(source)
-      awakenedEntries(index).sourceReady(source) := awakenedSourceReady(index)(source)
     }
+  }
+  for (index <- 0 until entries; source <- 0 until 3) {
+    awakenedEntries(index).sourceReady(source) := awakenedSourceReady(index)(source)
   }
   val ready = awakenedSourceReady.map(_.asUInt.andR)
   val e0ExclusiveCandidates = (0 until entries).map(index =>
