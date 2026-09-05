@@ -552,3 +552,8 @@ flush、clear 和精确 fault metadata 语义。`FirstFaultTrackerSpec` 2/2、
 `backend.io.robHeadTag`，不再从完整 `robHead.bits` payload 切 tag，保持原有一拍
 快照延迟并移除宽 ROB head mux 对 LSU/L1D/MemIQ/auxiliary 域的驱动。固定器件
 实现待运行。
+
+# 2026-09-05 local age cutpoints：在生产 IntIQ、MemIQ 和 L1D 消费端增加可选的
+`registeredAgeHead` 局部寄存切点，进一步隔离年龄选择器、squash survivor 和
+写使能网络。默认独立模块仍使用直接输入，IntIQ/MemIQ/L1D 聚焦测试 73/73、
+compile 与 platform RTL 生成通过；固定器件实现正在等待本轮证据。

@@ -13,7 +13,8 @@ import zircon.ZirconCoreConfig
   */
 class MemIssueQueue(
     config: ZirconCoreConfig = ZirconCoreConfig.default,
-    allowIssueRecycle: Boolean = true
+    allowIssueRecycle: Boolean = true,
+    registeredAgeHead: Boolean = false
 ) extends Module {
   private val entries = config.memIssueEntries
   private val indexWidth = log2Ceil(entries)
@@ -38,6 +39,11 @@ class MemIssueQueue(
   val entryAllowM0 = Reg(Vec(entries, Bool()))
   val entryAllowM1 = Reg(Vec(entries, Bool()))
   val count = RegInit(0.U(countWidth.W))
+
+  // Keep the ROB age source local to the queue in the production core. This
+  // removes the head-index route from the wide selector/write-enable cone.
+  val ageHeadTag = if (registeredAgeHead) RegNext(io.robHeadTag)
+    else io.robHeadTag
 
   private def sourceReady(uop: UopRef, source: Int): Bool = {
     if (source >= 2) uop.sourceReady(source)
@@ -65,7 +71,7 @@ class MemIssueQueue(
   // it once per entry instead of rebuilding the ROB-distance comparator for
   // every candidate set.
   val entryAge = VecInit(entryUop.map(uop =>
-    ROBTagOrder.ageFromHead(uop.robTag, io.robHeadTag, config)))
+    ROBTagOrder.ageFromHead(uop.robTag, ageHeadTag, config)))
 
   private def selectOldest(candidates: Seq[Bool]): (Bool, UInt) = {
     // Balance the oldest-candidate reduction.  The previous serial fold put
@@ -120,7 +126,7 @@ class MemIssueQueue(
   val oldestStoreTag = entryUop(oldestStoreIndex).robTag
   private def olderStoreInQueue(index: Int): Bool =
     oldestStoreValid && !ROBTagOrder.isYounger(oldestStoreTag,
-      entryUop(index).robTag, io.robHeadTag, config)
+      entryUop(index).robTag, ageHeadTag, config)
 
   // aq/rl remains authoritative in the ROB execution context. Before an
   // atomic reaches that context, however, its compact MemIQ record must stop
@@ -141,7 +147,7 @@ class MemIssueQueue(
       // M1 issue would make forwarding impossible and can expose stale data.
       !olderStoreInQueue(index) &&
       (!oldestAtomicValid || !ROBTagOrder.isYounger(
-        entryUop(index).robTag, oldestAtomicTag, io.robHeadTag, config)))
+        entryUop(index).robTag, oldestAtomicTag, ageHeadTag, config)))
   val (m1SelectedValid, m1SelectedIndex) = selectOldest(m1Candidates)
 
   val m0Candidates = (0 until entries).map(index =>
@@ -153,7 +159,7 @@ class MemIssueQueue(
       !(entryUop(index).uopClass === UopClass.Load &&
         olderStoreInQueue(index)) &&
       (!oldestAtomicValid || !ROBTagOrder.isYounger(
-        entryUop(index).robTag, oldestAtomicTag, io.robHeadTag, config)) &&
+        entryUop(index).robTag, oldestAtomicTag, ageHeadTag, config)) &&
       !(m1SelectedValid && m1SelectedIndex === index.U))
   val (m0SelectedValid, m0SelectedIndex) = selectOldest(m0Candidates)
 
@@ -210,7 +216,7 @@ class MemIssueQueue(
 
   val squashSurvivor = VecInit((0 until entries).map(index =>
     entryValid(index) && !ROBTagOrder.isYounger(
-      entryUop(index).robTag, io.squash.bits, io.robHeadTag, config)))
+      entryUop(index).robTag, io.squash.bits, ageHeadTag, config)))
 
   when(io.flush) {
     entryValid.foreach(_ := false.B)

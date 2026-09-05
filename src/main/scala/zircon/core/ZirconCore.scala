@@ -34,7 +34,8 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val frontend = Module(new M1Frontend(cfg))
   // Production timing build keeps completion wakeup out of IntIQ's same-cycle
   // candidate cone. Standalone M1/backend tests retain the transparent mode.
-  val backend = Module(new M1BackendSubsystem(cfg, registeredWakeup = true))
+  val backend = Module(new M1BackendSubsystem(cfg, registeredWakeup = true,
+    registeredAgeHead = true))
   // Dispatch-to-queue ingress is registered per lane in production. Besides
   // breaking the large ROB/rename/queue timing cone, each boundary owns
   // squash/flush so a recovered uop can never leak into a later issue queue.
@@ -68,12 +69,13 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   val floatingResultBridge = Module(new RegisteredFloatingResultBridge(cfg))
   val floatingCommitState = Module(new FloatingCommitState(cfg))
   val floatingLoadArbiter = Module(new Arbiter(new zircon.backend.FloatingResult(cfg), 2))
-  val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false))
+  val memQueue = Module(new MemIssueQueue(cfg, allowIssueRecycle = false,
+    registeredAgeHead = true))
   // Production timing boundary: keep the independently tested ingress
   // contract unchanged, while registering the wide operand/PMA handoff in
   // the integrated core to break the MemIQ-to-LSQ ready chain.
   val lsuIngress = Module(new DualLSUIngress(cfg, registeredOperandBoundary = true))
-  val l1dLoadCache = Module(new L1DLoadCache(cfg))
+  val l1dLoadCache = Module(new L1DLoadCache(cfg, registeredAgeHead = true))
   val l2TransferStore = Module(new ExclusiveL2TransferStore(cfg))
   val l2WritebackEngine = Module(new AXIL2WritebackEngine(cfg))
   val cacheFenceDrain = Module(new CacheFenceDrainController)
