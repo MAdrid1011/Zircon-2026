@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Content-addressed wrapper used by the Zircon test runner. ChiselSim gives
+# every ScalaTest case its own workspace even when the generated RTL is
+# identical, so reusing a completed Verilator build removes redundant work.
+real_verilator=${ZIRCON_REAL_VERILATOR:-/usr/local/bin/verilator}
+cache_root=${ZIRCON_VERILATOR_CACHE:-}
+
+if [[ -z "$cache_root" || ! -f sourceFiles.F || ! -d . ]]; then
+  exec "$real_verilator" "$@"
+fi
+
+key_file=$(mktemp "${ZIRCON_TMPDIR:-/tmp}/zircon-verilator-key.XXXXXX")
+trap 'find "$(dirname "$key_file")" -maxdepth 1 -name "$(basename "$key_file")" -delete' EXIT
+
+{
+  printf 'verilator-cache-v1\n'
+  for arg in "$@"; do
+    # Paths also occur inside +incdir and -CFLAGS arguments, so normalize
+    # embedded workspace names rather than only standalone path arguments.
+    printf '%s\n' "$arg" |
+      sed -E 's#/home/[^ ]*/build/chiselsim/[^ ]*#<build>#g; s#/tmp/[^ ]*#<tmp>#g'
+  done
+  while IFS= read -r source; do
+    [[ -f "$source" ]] && printf '%s ' "$(basename "$source")" && sha256sum "$source" | awk '{print $1}'
+  done < <(awk 'NF {print $NF}' sourceFiles.F) | sort
+  find . -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.h' -o -name '*.hpp' \) -print0 |
+    sort -z | xargs -0 -r sha256sum
+} > "$key_file"
+key=$(sha256sum "$key_file" | awk '{print $1}')
+entry="$cache_root/$key"
+lock="$cache_root/.${key}.lock"
+mkdir -p "$cache_root"
+if [[ "${ZIRCON_VERILATOR_DEBUG:-0}" == "1" ]]; then
+  printf 'zircon verilator cache key=%s\n' "$key" >&2
+fi
+
+# Serialize only the first build for a key. Other workers wait for the
+# completed entry and then copy it without invoking Verilator again.
+while ! mkdir "$lock" 2>/dev/null; do
+  if [[ -x "$entry/simulation" && -d "$entry/verilated-sources" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ -x "$entry/simulation" && -d "$entry/verilated-sources" ]]; then
+  cp -a "$entry/verilated-sources" ./verilated-sources
+  cp -a "$entry/simulation" ./simulation
+  [[ -d "$lock" ]] && rmdir "$lock" 2>/dev/null || true
+  exit 0
+fi
+
+set +e
+"$real_verilator" "$@"
+status=$?
+set -e
+if [[ "$status" -eq 0 ]]; then
+  staging="$cache_root/.${key}.tmp.$$"
+  mkdir "$staging"
+  cp -a verilated-sources "$staging/verilated-sources"
+  cp -a simulation "$staging/simulation"
+  mv "$staging" "$entry"
+fi
+rmdir "$lock" 2>/dev/null || true
+exit "$status"

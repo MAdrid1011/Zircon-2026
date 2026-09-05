@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+zircon_tmpdir=${ZIRCON_TMPDIR:-"$repo_root/target/tmp"}
+zircon_verilator_cache=${ZIRCON_VERILATOR_CACHE:-"$repo_root/target/verilator-cache"}
+mkdir -p "$zircon_tmpdir"
+mkdir -p "$zircon_verilator_cache"
+export ZIRCON_TMPDIR="$zircon_tmpdir"
+export ZIRCON_VERILATOR_CACHE="$zircon_verilator_cache"
+export ZIRCON_REAL_VERILATOR="${ZIRCON_REAL_VERILATOR:-/usr/local/bin/verilator}"
+export PATH="$repo_root/scripts:$PATH"
+
+# The shared /tmp can exhaust its inode quota while several Verilator
+# harnesses compile in parallel. Keep SBT's transient compiler archives in
+# the repository's ignored target tree instead.
+case " ${SBT_OPTS:-} " in
+  *" -Djava.io.tmpdir="*) ;;
+  *) export SBT_OPTS="${SBT_OPTS:-} -Djava.io.tmpdir=$zircon_tmpdir" ;;
+esac
+
 if [[ "$(uname -s)" == "Darwin" ]]; then
   zircon_java_home="$(/usr/libexec/java_home -v 21)"
   export JAVA_HOME="${zircon_java_home}"

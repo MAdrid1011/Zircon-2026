@@ -22,6 +22,11 @@ lazy val root = (project in file("."))
     addCompilerPlugin(
       "org.chipsalliance" % "chisel-plugin" % chiselVersion cross CrossVersion.full
     ),
-    Test / parallelExecution := false,
+    // The top-level AXI scenarios each compile an isolated Verilator harness.
+    // Run suites concurrently, while keeping the ScalaTest distributor bounded
+    // so the host is not oversubscribed by nested Verilator builds.
+    Test / parallelExecution := true,
+    Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-P4"),
+    Test / javaOptions += "-XX:ActiveProcessorCount=8",
     Test / fork := true
   )

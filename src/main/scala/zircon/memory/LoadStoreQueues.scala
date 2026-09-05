@@ -23,11 +23,13 @@ class LoadStoreQueues(
   private val lqCountWidth = log2Ceil(lqEntries + 1)
   private val sqCountWidth = log2Ceil(sqEntries + 1)
   // Covers the two-batch M0/M1 replay path before a head device group is sealed.
-  // Registered LSQ update boundaries can make the final address/data beat
-  // visible a cycle or two after the head owner. Keep enough collection
-  // slack for a four-beat group; fetch-pressure still seals load groups
-  // immediately through the separate pressure path.
-  private val burstableGroupCollectionCycles = 7
+  // Keep the frozen six-cycle collection window. Fetch pressure can still
+  // seal a load group early through the separate pressure path below.
+  private val burstableGroupCollectionCycles = 6
+  // Store data travels through the registered operand/update boundary in the
+  // executable top level. Give that path two extra cycles without changing
+  // the six-cycle load preview contract used by the standalone LSQ.
+  private val burstableStoreCollectionCycles = burstableGroupCollectionCycles + 2
 
   require(lqEntries == 8 && sqEntries == 8,
     "the frozen M3 contract requires eight LQ and SQ entries")
@@ -150,7 +152,7 @@ class LoadStoreQueues(
 
   val burstableGroupWaitValid = RegInit(false.B)
   val burstableGroupWaitHead = Reg(UInt(config.robTagWidth.W))
-  val burstableGroupWaitCycles = RegInit(0.U(3.W))
+  val burstableGroupWaitCycles = RegInit(0.U(4.W))
   val burstableGroupPressureSeen = RegInit(false.B)
   val atomicResultValid = RegInit(false.B)
   val atomicResultBits = Reg(new AtomicMemoryResult(config))
@@ -520,7 +522,8 @@ class LoadStoreQueues(
     burstableGroupPressureSeen
   val burstableGroupWaitMature = burstableGroupWaitValid &&
     burstableGroupWaitHead === io.robHeadTag &&
-      (burstableGroupWaitCycles === burstableGroupCollectionCycles.U ||
+      (burstableGroupWaitCycles === Mux(burstableGroupStore,
+        burstableStoreCollectionCycles.U, burstableGroupCollectionCycles.U) ||
         (burstableGroupPressure && burstableGroupLoad))
   val groupAddress = Mux(burstableGroupLoad,
     lqAddress(headLoadIndex), sqAddress(headStoreIndex))
@@ -906,7 +909,8 @@ class LoadStoreQueues(
       burstableGroupWaitValid := true.B
       burstableGroupWaitHead := io.robHeadTag
       burstableGroupWaitCycles := 0.U
-    }.elsewhen(burstableGroupWaitCycles =/= burstableGroupCollectionCycles.U) {
+    }.elsewhen(burstableGroupWaitCycles =/= Mux(burstableGroupStore,
+      burstableStoreCollectionCycles.U, burstableGroupCollectionCycles.U)) {
       burstableGroupWaitCycles := burstableGroupWaitCycles + 1.U
     }
   }

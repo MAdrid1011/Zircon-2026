@@ -2,11 +2,12 @@ package zircon
 
 import chisel3.simulator.scalatest.ChiselSim
 import java.nio.file.{Files, Paths}
+import org.scalatest.ParallelTestExecution
 import org.scalatest.funspec.AnyFunSpec
 import scala.util.Random
 import zircon.core.ZirconCore
 
-class CoreShellSpec extends AnyFunSpec with ChiselSim {
+class CoreShellSpec extends AnyFunSpec with ChiselSim with ParallelTestExecution {
   private val ResetVector = BigInt("80000000", 16)
   private val Nop = BigInt("00000013", 16)
   private val M2RecoveryBackpressureSeeds = Seq(0x5eedL, 0x5eed1001L,
