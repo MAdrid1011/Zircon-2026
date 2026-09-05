@@ -79,6 +79,7 @@ class M1BackendSubsystem(
     val renameFreeCount = Output(UInt(
       log2Ceil(config.intPhysicalRegisters + 1).W))
     val robHead = Output(Valid(new ROBCommit(config)))
+    val robHeadTag = Output(UInt(config.robTagWidth.W))
     val robHeadControl = Output(Vec(2, new ROBControlInfo))
     val robCount = Output(UInt(log2Ceil(config.robEntries + 1).W))
     val intCount = Output(UInt(log2Ceil(config.intIssueEntries + 1).W))
@@ -164,6 +165,7 @@ class M1BackendSubsystem(
   io.acceptedCount := backend.io.acceptedCount
   io.renameFreeCount := backend.io.renameFreeCount
   io.robHead := backend.io.robHead
+  io.robHeadTag := backend.io.robHeadTag
   io.robHeadControl := backend.io.robHeadControl
   io.robCount := backend.io.robCount
   io.intCount := backend.io.intCount

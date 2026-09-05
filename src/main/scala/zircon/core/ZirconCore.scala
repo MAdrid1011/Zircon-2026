@@ -93,12 +93,15 @@ class ZirconCore(cfg: ZirconCoreConfig = ZirconCoreConfig.default) extends Modul
   // deliberately sourced from the ROB head in parallel (rather than chained)
   // so the existing one-cycle scheduling contract is unchanged while Vivado
   // can place each fanout cluster locally.
-  val longRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
-  val floatingRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
-  val memRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
-  val lsuRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
-  val cacheRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
-  val auxiliaryRobHeadTag = RegNext(backend.io.robHead.bits.robTag)
+  // Drive age snapshots from the ROB's narrow tag output.  Taking the tag
+  // from the complete head payload first forces the wide ROB entry mux onto
+  // every scheduling domain even though no other head metadata is needed.
+  val longRobHeadTag = RegNext(backend.io.robHeadTag)
+  val floatingRobHeadTag = RegNext(backend.io.robHeadTag)
+  val memRobHeadTag = RegNext(backend.io.robHeadTag)
+  val lsuRobHeadTag = RegNext(backend.io.robHeadTag)
+  val cacheRobHeadTag = RegNext(backend.io.robHeadTag)
+  val auxiliaryRobHeadTag = RegNext(backend.io.robHeadTag)
   dontTouch(longRobHeadTag)
   dontTouch(floatingRobHeadTag)
   dontTouch(memRobHeadTag)

@@ -548,3 +548,7 @@ CoreShell 的 RV32I cacheable/inaccessible smoke 2/2、IntIQ/backend/recovery
 candidate 线性 payload/age Mux 改为平衡 pairwise tree，保留同龄左优先、squash、
 flush、clear 和精确 fault metadata 语义。`FirstFaultTrackerSpec` 2/2、
 `IntegerDispatchRecoveryBackendSpec` 3/3 通过；固定器件实现待运行。
+# 2026-09-05 narrow ROB head-tag source：六个生产 age snapshot 改为直接读取
+`backend.io.robHeadTag`，不再从完整 `robHead.bits` payload 切 tag，保持原有一拍
+快照延迟并移除宽 ROB head mux 对 LSU/L1D/MemIQ/auxiliary 域的驱动。固定器件
+实现待运行。
