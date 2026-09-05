@@ -1,5 +1,12 @@
 # Zircon-2026 实施状态
 
+2026-09-05 回归时间复测：在提交 `d2d47eb` 的优化不变、`target/verilator-cache`
+热缓存已填充、固定器件 `xc7a200tfbg676-2L` 的 Vivado 实现并发运行期间，重新执行
+`/usr/bin/time ./scripts/sbtw test`，实测 75 suites、532 tests 全部通过；ScalaTest
+报告为 7 分 29 秒，墙钟为 7 分 31.75 秒（exit 0）。这次运行未使用筛选器、未跳过或
+删除任何测试，因此当前完整本地回归稳定低于 10 分钟门槛；Vivado 并发只会使该测量
+更保守。失败时应保留 `target/` 中的 seed/trace bundle，不能以精简测试替代完整回归。
+
 2026-09-05 Verilator 全量回归加速：提交 `7912633` 将 ScalaTest 套件并行度固定为
 `-P4`，把每个 ChiselSim harness 的 Verilator 编译切换到 `OptimizeForCompilationSpeed`
 并以内容寻址缓存复用相同 RTL 构建；缓存和临时目录均位于忽略的 `target/`。生产顶层
