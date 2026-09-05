@@ -15,7 +15,8 @@ import zircon.frontend.FetchQueueEntry
   */
 class M1BackendSubsystem(
     config: ZirconCoreConfig = ZirconCoreConfig.default,
-    registeredWakeup: Boolean = false
+    registeredWakeup: Boolean = false,
+    allowIssueRecycle: Boolean = true
 ) extends Module {
   private val physicalWidth = log2Ceil(config.intPhysicalRegisters)
 
@@ -92,7 +93,8 @@ class M1BackendSubsystem(
     val e2Completion = Output(Bool())
   })
 
-  val backend = Module(new IntegerDispatchRecoveryBackend(config, registeredWakeup))
+  val backend = Module(new IntegerDispatchRecoveryBackend(config, registeredWakeup,
+    allowIssueRecycle))
   val commit = Module(new CommitCSRSubsystem(config))
 
   for (lane <- 0 until config.decodeWidth) {

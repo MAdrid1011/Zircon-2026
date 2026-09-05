@@ -11,7 +11,8 @@ class PhysicalWakeup(config: ZirconCoreConfig) extends Bundle {
 
 class IntegerIssueQueue(
     config: ZirconCoreConfig,
-    registeredWakeupMatch: Boolean = false
+    registeredWakeupMatch: Boolean = false,
+    allowIssueRecycle: Boolean = true
 ) extends Module {
   private val entries = config.intIssueEntries
   private val indexWidth = log2Ceil(entries)
@@ -157,7 +158,16 @@ class IntegerIssueQueue(
 
   val issuedMask = Mux(io.issueE0.fire, UIntToOH(selectedE0Index, entries), 0.U) |
     Mux(io.issueE1.fire, UIntToOH(selectedE1Index, entries), 0.U)
-  val reusableMask = (~entryValid.asUInt).asUInt | issuedMask
+  // Production integration can deliberately consume only registered free
+  // slots.  Including same-cycle issue results here feeds downstream ready
+  // back into dispatch through the wide queue state and creates a global
+  // combinational loop; standalone queue users retain the original recycle
+  // contract by default.
+  val reusableMask = if (allowIssueRecycle) {
+    (~entryValid.asUInt).asUInt | issuedMask
+  } else {
+    (~entryValid.asUInt).asUInt
+  }
   val immediateReusable = PopCount(reusableMask)
   io.enqueueCapacity := Mux(recoveryBlocked, 0.U,
     Mux(immediateReusable >= 2.U, 2.U, immediateReusable(1, 0)))
