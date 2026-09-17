@@ -12,6 +12,7 @@ case class FrontendParams(
     historyLengths: Seq[Int] = Seq(4, 8, 16, 32, 64, 128),
     tageTagBits: Int = 9,
     tcSets: Int = 64,
+    indirectTargetSets: Int = 16,
     rasDepth: Int = 16,
     ftqDepth: Int = 16,
     fqDepth: Int = 8,
@@ -20,8 +21,10 @@ case class FrontendParams(
     observe: Boolean = false,
 ) {
     require(fetchWidth >= 1 && fetchWidth <= 8 && isPow2(fetchWidth))
-    require(Seq(fastBtbSets, btbSets, phtSets, tageSets, tcSets, rasDepth, ftqDepth, fqDepth)
-        .forall(n => n >= 2 && isPow2(n)))
+    require(
+        Seq(fastBtbSets, btbSets, phtSets, tageSets, tcSets, indirectTargetSets, rasDepth, ftqDepth, fqDepth)
+            .forall(n => n >= 2 && isPow2(n))
+    )
     require(btbWays == 1 || btbWays == 2)
     require(historyLengths.nonEmpty && historyLengths == historyLengths.sorted.distinct)
     require(historyLengths.forall(_ > 0) && tageTagBits >= 4 && tageTagBits <= 16)
