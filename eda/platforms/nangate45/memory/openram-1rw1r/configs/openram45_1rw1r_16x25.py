@@ -1,0 +1,23 @@
+word_size = 25
+num_words = 16
+write_size = 25
+words_per_row = 1
+num_rw_ports = 1
+num_r_ports = 1
+num_w_ports = 0
+tech_name = "freepdk45"
+process_corners = ["TT"]
+supply_voltages = [1.1]
+temperatures = [25]
+analytical_delay = True
+netlist_only = False
+check_lvsdrc = False
+route_supplies = False
+use_pex = False
+use_nix = False
+output_name = "openram45_1rw1r_16x25"
+output_path = "build/openram-generated/openram45_1rw1r_16x25"
+
+use_specified_corners = [("TT", 1.1, 25)]
+load_scales = [1, 4, 16, 64]
+slew_scales = [0.25, 1, 10, 20]

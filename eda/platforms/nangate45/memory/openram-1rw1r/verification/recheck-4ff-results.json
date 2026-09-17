@@ -1,0 +1,35 @@
+{
+    "verified_at_utc": "2026-09-11T09:46:53.299891+00:00",
+    "model_manifest_sha256": "c1609d43a6114b1a076beb359baf544b28169cc4064b3d1ecbd39e602c02490e",
+    "nangate45_sha256": "8d540a4d4cf6d09d27c87ad067857a9c0c2eeb023ab7a56e058cd3113db4e9b1",
+    "tools": {
+        "yosys": "Yosys 0.45 (git sha1 9ed031ddd, ccache clang 14.0.0-1ubuntu1.1 -O3 -flto -flto)",
+        "iverilog": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "opensta": "3.1.0"
+    },
+    "scope": "Standalone macro behavioral simulation and Nangate45/OpenSTA linking; full DCache evaluated separately",
+    "output_load_ff": 4,
+    "script_sha256": "e0c49915b88cae2f1ad63865cf698bac7cf791ca5ddbf04ee7e4b2f822611ad0",
+    "simulation": "PASS cycles=1552 reads=1535 writes=520 dual_reads=394 mixed=371\n/Users/madrid/Code/Zircon-2026/build/openram-1rw1r-probe/tb.sv:89: $finish called at 31040000 (1ps)",
+    "cell_counts": {
+        "XOR2_X1": 114,
+        "DFF_X1": 114,
+        "openram45_1rw1r_16x32": 1,
+        "openram45_1rw1r_16x25": 1
+    },
+    "macro_areas_um2": {
+        "openram45_1rw1r_16x25": 6999.189375,
+        "openram45_1rw1r_16x32": 9569.3470125
+    },
+    "timing_arcs": "Both read ports of both macros launch from the falling edge and reach rising-edge output registers",
+    "limitations": [
+        "Analytical delay model, no SPICE characterization",
+        "No DRC/LVS/PEX or power routing",
+        "No full DCache verification"
+    ],
+    "log_sha256": {
+        "timing.log": "d8c1bc65995f73622369be5bc19c528698fba2abb5a66e714609ed2eb496af29",
+        "mapping.log": "8d420afe9616db9c1fddf8e285b05cbaf9e4df2e246d1263c777f4174e80673b",
+        "simulation.log": "92429b9f2f908d185f826b4629b2779422f917f2c599065070cbdedb62d16921"
+    }
+}
