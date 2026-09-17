@@ -24,6 +24,20 @@ class StoreQueueEntry(bp: BackendParams) extends Bundle {
     val size = UInt(2.W)
     val exception = UInt(4.W)
     val uncache = Bool()
+    val atomic = Bool()
+    val atomicOp = UInt(5.W)
+    val prd = UInt(bp.tagWidth.W)
+}
+
+class PendingAtomic(bp: BackendParams) extends Bundle {
+    val robIdx = UInt(bp.robWidth.W)
+    val prd = UInt(bp.tagWidth.W)
+    val vaddr = UInt(32.W)
+    val paddr = UInt(34.W)
+    val data = UInt(32.W)
+    val op = UInt(5.W)
+    val uncache = Bool()
+    val exception = UInt(4.W)
 }
 
 class StoreQueueIO(
@@ -45,12 +59,17 @@ class StoreQueueIO(
     val completion = Output(Vec(2, Valid(new ROBCompletion(bp))))
     val commit = Input(Vec(cp.width, Valid(UInt(bp.sqWidth.W))))
     val drain = Decoupled(new CommittedStore)
+    val atomic = new Bundle {
+        val sqIdx = Input(Valid(UInt(bp.sqWidth.W)))
+        val request = Output(Valid(new PendingAtomic(bp)))
+    }
     val query = Vec(2, new Bundle {
         val request = Flipped(Valid(new LoadSQQuery(load)))
         val response = Valid(new DForwardResult(DCacheParams(load.entries)))
     })
     val flush = Input(Bool())
     val empty = Output(Bool())
+    val committedEmpty = Output(Bool())
 }
 
 /** Speculative Store queue with a committed boundary that survives recovery. */
@@ -110,7 +129,8 @@ class StoreQueue(
     for (lane <- 0 until dispatchWidth) {
         val incoming = io.enqueue.entries(lane)
         val isStore = incoming.context.instruction.fu === DecodeUnit.Store.U
-        acceptedStores(lane) := io.enqueue.valid(lane) && isStore && !io.flush
+        val isAtomic = incoming.context.instruction.fu === DecodeUnit.Atomic.U
+        acceptedStores(lane) := io.enqueue.valid(lane) && (isStore || isAtomic) && !io.flush
         val index = slot(enqueuePointer)
         when(acceptedStores(lane)) {
             storage(index).valid := true.B
@@ -120,6 +140,9 @@ class StoreQueue(
             storage(index).addressValid := false.B
             storage(index).dataValid := false.B
             storage(index).exception := 0.U
+            storage(index).atomic := isAtomic
+            storage(index).atomicOp := incoming.context.instruction.op
+            storage(index).prd := incoming.destination.prd
         }
         enqueuePointer = Mux(acceptedStores(lane), next(enqueuePointer), enqueuePointer)
     }
@@ -163,7 +186,7 @@ class StoreQueue(
 
     val addressGetsData = dataEntry.valid && io.data.fire && io.address.fire &&
         io.data.bits.sqIdx === io.address.bits.sqIdx
-    io.completion(0).valid := io.address.fire &&
+    io.completion(0).valid := io.address.fire && !addressEntry.atomic &&
         (io.address.bits.exception.orR || addressEntry.dataValid || addressGetsData)
     io.completion(0).bits.robIdx := io.address.bits.robIdx
     io.completion(0).bits.data := 0.U
@@ -172,7 +195,7 @@ class StoreQueue(
     io.completion(0).bits.exception.tval := io.address.bits.vaddr
     io.completion(0).bits.fflags := 0.U
     io.completion(0).bits.fpFlagsValid := false.B
-    io.completion(1).valid := io.data.fire && dataEntry.addressValid &&
+    io.completion(1).valid := io.data.fire && !dataEntry.atomic && dataEntry.addressValid &&
         !dataEntry.exception.orR && !(io.address.fire && io.address.bits.sqIdx === io.data.bits.sqIdx)
     io.completion(1).bits.robIdx := io.data.bits.robIdx
     io.completion(1).bits.data := 0.U
@@ -199,7 +222,19 @@ class StoreQueue(
     }
 
     val headEntry = storage(slot(head))
-    io.drain.valid := headEntry.valid && headEntry.committed && headEntry.addressValid && headEntry.dataValid &&
+    val requestedAtomic = io.atomic.sqIdx.valid && headEntry.valid && headEntry.atomic &&
+        headEntry.identity === io.atomic.sqIdx.bits
+    io.atomic.request.valid := requestedAtomic && headEntry.addressValid && headEntry.dataValid
+    io.atomic.request.bits.robIdx := headEntry.robIdx
+    io.atomic.request.bits.prd := headEntry.prd
+    io.atomic.request.bits.vaddr := headEntry.vaddr
+    io.atomic.request.bits.paddr := headEntry.paddr
+    io.atomic.request.bits.data := headEntry.data
+    io.atomic.request.bits.op := headEntry.atomicOp
+    io.atomic.request.bits.uncache := headEntry.uncache
+    io.atomic.request.bits.exception := headEntry.exception
+    io.drain.valid := headEntry.valid && !headEntry.atomic && headEntry.committed &&
+        headEntry.addressValid && headEntry.dataValid &&
         !headEntry.exception.orR
     io.drain.bits.paddr := headEntry.paddr
     io.drain.bits.data := headEntry.data
@@ -211,22 +246,33 @@ class StoreQueue(
         headEntry.committed := false.B
     }
 
-    val drainCount = io.drain.fire.asUInt
-    val committedAfterEvents = committed + commitCount - drainCount
+    val atomicRetire = VecInit(io.commit.map { event =>
+        val entry = storage(slot(narrow(event.bits)))
+        event.valid && entry.valid && entry.atomic && entry.identity === event.bits
+    }).asUInt.orR
+    when(atomicRetire) {
+        assert(headEntry.valid && headEntry.atomic)
+        headEntry.valid := false.B
+        headEntry.committed := false.B
+    }
+    val removeHead = io.drain.fire || atomicRetire
+    val removeCount = removeHead.asUInt
+    val committedAfterEvents = committed + commitCount - removeCount
     when(io.flush) {
         for (entry <- storage) {
             when(entry.valid && !entry.committed) { entry.valid := false.B }
         }
         tail := commitTail
-        allocated := committed - drainCount
+        allocated := committed - removeCount
     }.otherwise {
         tail := advance(tail, enqueueCount, dispatchWidth)
-        allocated := allocated + enqueueCount - drainCount
+        allocated := allocated + enqueueCount - removeCount
     }
     commitTail := advance(commitTail, commitCount, cp.width)
-    when(io.drain.fire) { head := next(head) }
+    when(removeHead) { head := next(head) }
     committed := committedAfterEvents
     io.empty := allocated === 0.U
+    io.committedEmpty := committed === 0.U
 
     for (port <- 0 until 2) {
         val query = io.query(port).request

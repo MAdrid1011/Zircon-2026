@@ -532,8 +532,23 @@ class DCache(
             translation.io.lookup(1).bits.vaddr := io.storeTranslation.get.request.bits.vaddr
             val hit = translation.io.response(1).hit && !asidChanged && !manage.flush
             val miss = io.storeTranslation.get.request.bits.exception === 0.U && !direct && !hit
-            val permissionFault = hit && !MMUPermission.data(translation.io.response(1), manage.control, true.B)
+            val readPermitted = MMUPermission.data(translation.io.response(1), manage.control, false.B)
+            val writePermitted = MMUPermission.data(translation.io.response(1), manage.control, true.B)
+            val permissionFault = hit && Mux(
+                io.storeTranslation.get.request.bits.atomic,
+                !readPermitted || (!io.storeTranslation.get.request.bits.lr && !writePermitted),
+                !writePermitted,
+            )
             val accessFault = hit && translation.io.response(1).pma === PMAAttribute.invalid
+            val directAccessFault = Mux(
+                io.storeTranslation.get.request.bits.atomic,
+                !PMA.readable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) ||
+                    (!io.storeTranslation.get.request.bits.lr &&
+                        !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr))),
+                !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)),
+            )
+            val faultCause = Mux(io.storeTranslation.get.request.bits.lr, 5.U, 7.U)
+            val pageFaultCause = Mux(io.storeTranslation.get.request.bits.lr, 13.U, 15.U)
             io.storeTranslation.get.response.paddr := Mux(
                 direct,
                 Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr),
@@ -549,9 +564,9 @@ class DCache(
                 io.storeTranslation.get.request.bits.exception =/= 0.U,
                 io.storeTranslation.get.request.bits.exception,
                 Mux(
-                    direct && !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)),
-                    7.U,
-                    Mux(permissionFault, 15.U, Mux(accessFault, 7.U, 0.U)),
+                    direct && directAccessFault,
+                    faultCause,
+                    Mux(permissionFault, pageFaultCause, Mux(accessFault, faultCause, 0.U)),
                 )
             )
             io.storeTranslation.get.response.miss := miss

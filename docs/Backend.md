@@ -1,8 +1,8 @@
 # Backend
 
 `Backend` 包含六个压缩式发射队列、两条整数/分支流水线、一条共享乘除浮点流水线、两条访存
-流水线、整数与浮点物理寄存器堆、旁路网络、唤醒网络和 DCache。ROB、SQ 与 Store Buffer
-由 `Commit` 持有，通过专用接口连接。
+流水线、原子执行单元、整数与浮点物理寄存器堆、旁路网络、唤醒网络和 DCache。ROB、SQ 与
+Store Buffer 由 `Commit` 持有，通过专用接口连接。
 
 ## 发射队列
 
@@ -21,6 +21,11 @@ Store Data 队列 6 项。队列按物理顺序保存年龄，支持每拍接收
 LS0 只执行 Load。LS1 执行 Load 和 Store Address，并从独立 Store Data 队列读取写数据。两条
 Load 通路都查询 SQ 与 Store Buffer，按字节合并比 Cache 更新的 Store 数据。
 
+`AtomicUnit` 执行 `LR.W`、`SC.W` 和九条 `AMO.W`。地址与写数据仍经 LS1 的地址和数据任务写入
+SQ；指令到达 ROB 头且更早的存储访问排空后，原子单元复用 DCache 的 LS1 Load 端口与 Store
+端口完成操作。Reservation 以物理字地址记录，普通 Store、成功或失败的 `SC.W` 以及其他 AMO
+会按相应规则清除它。
+
 ## PRF、旁路与唤醒
 
 整数 PRF 为 72 x 32 bit、9 读 5 写；浮点 PRF 为 48 x 32 bit、4 读 3 写。读端口在执行单元
@@ -34,4 +39,4 @@ Load 通路都查询 SQ 与 Store Buffer，按字节合并比 Cache 更新的 St
 
 提交恢复清空所有发射队列和执行流水有效位。执行结果通过专用完成端口送入 ROB；分支流水线
 同时返回实际方向、目标和误预测状态。Load 完成还携带虚拟地址与访存异常，Store 地址和数据
-分别写入 SQ。
+分别写入 SQ。原子结果通过独立完成端口写回 ROB 和整数 PRF。

@@ -13,6 +13,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val destination = new MiddleendCommitDestination(bp)
     val sqIdx = UInt(bp.sqWidth.W)
     val isStore = Bool()
+    val isAtomic = Bool()
     val isSystem = Bool()
     val systemOp = UInt(5.W)
     val instruction = UInt(32.W)
@@ -34,6 +35,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
         destination := incoming.destination
         sqIdx := incoming.sqIdx
         isStore := incoming.isStore
+        isAtomic := incoming.isAtomic
         isSystem := incoming.isSystem
         systemOp := incoming.systemOp
         instruction := incoming.instruction
@@ -122,6 +124,7 @@ class ReorderBuffer(
         entry.destination := incoming.destination
         entry.sqIdx := incoming.allocation.sqIdx
         entry.isStore := incoming.context.instruction.fu === DecodeUnit.Store.U
+        entry.isAtomic := incoming.context.instruction.fu === DecodeUnit.Atomic.U
         entry.isSystem := incoming.context.instruction.fu === DecodeUnit.System.U
         entry.systemOp := incoming.context.instruction.op
         entry.instruction := incoming.context.instruction.inst

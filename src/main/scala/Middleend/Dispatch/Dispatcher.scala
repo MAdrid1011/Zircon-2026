@@ -45,6 +45,7 @@ class Dispatcher(
     val fpMisc = VecInit(io.in.entries.map(_.fu === DecodeUnit.FpMisc.U))
     val load = VecInit(io.in.entries.map(_.fu === DecodeUnit.Load.U))
     val store = VecInit(io.in.entries.map(_.fu === DecodeUnit.Store.U))
+    val atomic = VecInit(io.in.entries.map(_.fu === DecodeUnit.Atomic.U))
     val csr = VecInit(io.in.entries.map(item =>
         item.fu === DecodeUnit.System.U && item.op >= SystemOp.CSRRW.U && item.op <= SystemOp.CSRRCI.U
     ))
@@ -59,7 +60,8 @@ class Dispatcher(
         io.in.entries(lane).exception.valid || commitSystem(lane)
     })
     val recognized = VecInit((0 until width).map { lane =>
-        alu(lane) || branch(lane) || nativeMix(lane) || load(lane) || store(lane) || csr(lane) || noIssue(lane)
+        alu(lane) || branch(lane) || nativeMix(lane) || load(lane) || store(lane) || atomic(lane) || csr(lane) ||
+            noIssue(lane)
     })
 
     private def arithQueue(index: UInt): UInt =
@@ -84,7 +86,8 @@ class Dispatcher(
             val fixed = MuxCase(0.U(queueCount.W), Seq(
                 csr(lane) -> queue(IssueQueueIndex.MixArith),
                 nativeMix(lane) -> queue(IssueQueueIndex.MixArith),
-                store(lane) -> (queue(IssueQueueIndex.LoadStoreAddress) | queue(IssueQueueIndex.StoreData)),
+                (store(lane) || atomic(lane)) ->
+                    (queue(IssueQueueIndex.LoadStoreAddress) | queue(IssueQueueIndex.StoreData)),
                 noIssue(lane) -> 0.U(queueCount.W),
             ))
             choiceValid(lane)(0) := recognized(lane)
@@ -168,7 +171,8 @@ class Dispatcher(
                             noIssue(lane) -> 0.U(queueCount.W),
                             shortArith(lane) -> arithQueue(arithIndex),
                             (csr(lane) || nativeMix(lane)) -> queue(IssueQueueIndex.MixArith),
-                            store(lane) -> (queue(IssueQueueIndex.LoadStoreAddress) | queue(IssueQueueIndex.StoreData)),
+                            (store(lane) || atomic(lane)) ->
+                                (queue(IssueQueueIndex.LoadStoreAddress) | queue(IssueQueueIndex.StoreData)),
                             load(lane) -> Mux(
                                 loadToAddress,
                                 queue(IssueQueueIndex.LoadStoreAddress),

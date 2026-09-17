@@ -9,7 +9,7 @@ final case class CommitParams(width: Int = 3) {
     val robEntries = 48
     val sqEntries = 12
     val storeBufferEntries = 4
-    val completionPorts = 7
+    val completionPorts = 8
     val robReadPorts = 5
 }
 

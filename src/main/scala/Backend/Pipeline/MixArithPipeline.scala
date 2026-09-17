@@ -77,6 +77,15 @@ class MixArithPipeline extends Module {
     val selectFpLogic = packageEX1.fu === DecodeUnit.FpMisc.U && packageEX1.op <= FpMiscOp.FMV_W_X.U
     val selectFpConvert = packageEX1.fu === DecodeUnit.FpMisc.U &&
         packageEX1.op >= FpMiscOp.FCVT_W_S.U && packageEX1.op <= FpMiscOp.FCVT_S_WU.U
+    val dynamicRounding = packageEX1.roundingMode === 7.U
+    val badRounding = dynamicRounding && io.csr.frm > 4.U
+    val roundingMode = Mux(dynamicRounding, Mux(badRounding, 0.U, io.csr.frm), packageEX1.roundingMode)
+    val executionPackage = WireDefault(packageEX1)
+    when(badRounding) {
+        executionPackage.exception.valid := true.B
+        executionPackage.exception.cause := 2.U
+        executionPackage.exception.tval := packageEX1.inst
+    }
 
     // Cover the cycle in which a new Divide moves from its private EX1 register into EX2.
     val divideEnteringEX2 = RegInit(false.B)
@@ -196,8 +205,8 @@ class MixArithPipeline extends Module {
     multiply.io.in.bits.src2 := sourceValue(1)
     multiply.io.in.bits.src3 := sourceValue(2)
     multiply.io.in.bits.op := packageEX1.op(3, 0)
-    multiply.io.in.bits.roundingMode := packageEX1.roundingMode
-    multiply.io.in.bits.tag := packageEX1.asUInt
+    multiply.io.in.bits.roundingMode := roundingMode
+    multiply.io.in.bits.tag := executionPackage.asUInt
     multiply.io.flush := flush
     multiply.io.out.ready := true.B
 
@@ -206,8 +215,8 @@ class MixArithPipeline extends Module {
     divide.io.in.bits.src1 := sourceValue(0)
     divide.io.in.bits.src2 := sourceValue(1)
     divide.io.in.bits.op := packageEX1.op(2, 0)
-    divide.io.in.bits.roundingMode := packageEX1.roundingMode
-    divide.io.in.bits.tag := packageEX1.asUInt
+    divide.io.in.bits.roundingMode := roundingMode
+    divide.io.in.bits.tag := executionPackage.asUInt
     divide.io.flush := flush
     divide.io.out.ready := true.B
 
@@ -223,7 +232,7 @@ class MixArithPipeline extends Module {
     fpLogic.io.in.bits.src1 := sourceValue(0)
     fpLogic.io.in.bits.src2 := sourceValue(1)
     fpLogic.io.in.bits.op := packageEX1.op(3, 0)
-    fpLogic.io.in.bits.tag := packageEX1.asUInt
+    fpLogic.io.in.bits.tag := executionPackage.asUInt
     fpLogic.io.flush := flush
 
     val packageFpLogic_EX3 = Reg(new BackendPackage) // EX2/EX3 boundary
@@ -251,8 +260,8 @@ class MixArithPipeline extends Module {
     fpConvert.io.in.valid := launchEX1 && selectFpConvert
     fpConvert.io.in.bits.src1 := sourceValue(0)
     fpConvert.io.in.bits.op := packageEX1.op(3, 0)
-    fpConvert.io.in.bits.roundingMode := packageEX1.roundingMode
-    fpConvert.io.in.bits.tag := packageEX1.asUInt
+    fpConvert.io.in.bits.roundingMode := roundingMode
+    fpConvert.io.in.bits.tag := executionPackage.asUInt
     fpConvert.io.flush := flush
 
     val packageFpConvert_EX4 = Reg(new BackendPackage) // EX3/EX4 boundary

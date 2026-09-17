@@ -100,6 +100,7 @@ object DecodeSupport {
             DecodeUnit.FpMisc,
             DecodeUnit.Load,
             DecodeUnit.Store,
+            DecodeUnit.Atomic,
             DecodeUnit.System
         ),
         floatingState = true,
