@@ -201,7 +201,10 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     lruTab.waddr(0) := index(c1s3.vaddr)
     lruTab.wdata(0) := fsm.io.cc.lruUpd
     val arrayAddress = Mux1H(fsm.io.cc.addrOH, Seq(index(c1s1.vaddr), index(c1s2.vaddr), index(c1s3.vaddr)))
-    val arrayEnable = Mux1H(fsm.io.cc.addrOH, Seq(c1s1.rreq, c1s2.rreq, c1s3.rreq && !io.flush))
+    val arrayEnable = Mux1H(
+        fsm.io.cc.addrOH,
+        Seq(c1s1.rreq, c1s2.rreq, (c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR)
+    )
     for (way <- 0 until c.ways) {
         tagTab(way).clock := clock
         tagTab(way).address := arrayAddress
