@@ -251,10 +251,16 @@ class Commit(
     val fenceI = headSystem && headSystemOp === SystemOp.FENCE_I.U
     val sfence = headSystem && headSystemOp === SystemOp.SFENCE_VMA.U
     val memoryDrained = sq.io.empty && sb.io.empty && io.environment.memoryIdle
-    io.environment.maintenance.request := fenceI && memoryDrained && !delayedRecovery
+    val maintenanceStarted = RegInit(false.B)
+    when(!fenceI || delayedRecovery) {
+        maintenanceStarted := false.B
+    }.elsewhen(memoryDrained) {
+        maintenanceStarted := true.B
+    }
+    io.environment.maintenance.request := fenceI && maintenanceStarted && !delayedRecovery
     val systemReady = !headSystem || Mux(
         fenceI,
-        memoryDrained && io.environment.maintenance.done,
+        maintenanceStarted && io.environment.maintenance.done,
         Mux(fence || sfence, memoryDrained, true.B),
     )
     val headMatchesFtq = VecInit((0 until cp.width).map { lane =>
