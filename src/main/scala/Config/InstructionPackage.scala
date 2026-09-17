@@ -116,10 +116,11 @@ object BackendPackage {
         result.exception.valid := instruction.exception.valid
         result.exception.cause := instruction.exception.cause
         result.exception.tval := instruction.exception.tval
-        result.store := instruction.fu === ZirconConfig.DecodeUnit.Store.U
+        val atomic = instruction.fu === ZirconConfig.DecodeUnit.Atomic.U
+        result.store := instruction.fu === ZirconConfig.DecodeUnit.Store.U || atomic
         val memory = instruction.fu === ZirconConfig.DecodeUnit.Load.U || result.store
-        result.mtype := Mux(memory, instruction.op(2, 0), 0.U)
-        result.size := Mux(result.store, instruction.op(1, 0), 0.U)
+        result.mtype := Mux(atomic, 2.U, Mux(memory, instruction.op(2, 0), 0.U))
+        result.size := Mux(atomic, 2.U, Mux(result.store, instruction.op(1, 0), 0.U))
 
         result.pc := instruction.pc
         result.predictedTaken := instruction.predictedTaken

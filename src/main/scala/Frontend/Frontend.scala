@@ -38,7 +38,7 @@ class Frontend(
     val pdFire = Wire(Bool())
     val pdFlush = Wire(Bool())
     val cmtFlush = io.commit.rob.redirect.valid
-    val flushYounger = cmtFlush || pdFlush
+    val flushYounger = cmtFlush || pdFlush || io.maintenance.request
     ic.io.flush := flushYounger
     io.mmu <> ic.io.mmu
     if (tlbEnabled) {
@@ -110,7 +110,7 @@ class Frontend(
             "Fetch response must provide every requested slot, using fault bits for exceptions"
         )
     }
-    when(pdFire || cmtFlush) { validPD := false.B; pdRepairApplied := false.B }
+    when(pdFire || cmtFlush || io.maintenance.request) { validPD := false.B; pdRepairApplied := false.B }
     when(if2Fire) { instPkgPD := instPkgPDIn; validPD := true.B; pdRepairApplied := false.B }
 
     /* Previous Decode Stage */
@@ -122,7 +122,7 @@ class Frontend(
     pr.io.pd.valid := pdFlush
     pr.io.pd.bits := pd.io.repair
     when(pdFlush && !pdFire) { pdRepairApplied := true.B }
-    fq.io.enq.valid := validPD && !cmtFlush
+    fq.io.enq.valid := validPD && !cmtFlush && !io.maintenance.request
     fq.io.enq.bits := instPkgFQIn
     fq.io.flush := cmtFlush
     pdFire := fq.io.enq.fire

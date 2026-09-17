@@ -64,6 +64,7 @@ class BackendIO(
         val req = Flipped(Decoupled(new DStoreRequest))
         val rsp = Decoupled(new DStoreResponse)
     }
+    val atomic = new AtomicBackendIO(p)
     val l2 = new DCacheL2IO
     val dtlb = if (tlbEnabled) Some(new TLBManagementIO) else None
     val dtlbMiss = if (tlbEnabled) Some(Output(Vec(2, Valid(new DTLBMissRequest)))) else None
@@ -119,6 +120,7 @@ class Backend(
     val ls0 = Module(new LoadPipeline(loadParams))
     val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled))
     val dcache = Module(new DCache(ramBackend, dcacheParams, tlbEnabled, observe))
+    val atomic = Module(new AtomicUnit(p, dcacheParams))
 
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
@@ -172,6 +174,8 @@ class Backend(
     ls0.io.iq.instPkg <> loadIQ.io.issue
     ls1.io.iq.instPkg <> loadStoreAddressIQ.io.issue
     ls1.io.iq.std.get <> storeDataIQ.io.issue
+    ls0.io.blockIssue := io.atomic.blockMemoryIssue
+    ls1.io.blockIssue := io.atomic.blockMemoryIssue
 
     arithPipes.foreach(_.io.speculation := loadSpeculation.io.resolution)
     wakeupRouter.io.arith0Issue := arith0.io.wakeup.wakeIssue
@@ -265,12 +269,16 @@ class Backend(
         ls0.io.rf.wr.bits.prd(p.physWidth - 1, 0),
         ls0.io.rf.wr.bits.data,
     )
+    val atomicIntWrite = atomic.io.response.fire && !atomic.io.response.bits.exception.orR &&
+        atomic.io.response.bits.prd =/= 0.U
+    val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)
     intWrite(
         4,
-        ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1),
-        ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0),
-        ls1.io.rf.wr.bits.data,
+        atomicIntWrite || ls1IntWrite,
+        Mux(atomicIntWrite, atomic.io.response.bits.prd, ls1.io.rf.wr.bits.prd)(p.physWidth - 1, 0),
+        Mux(atomicIntWrite, atomic.io.response.bits.data, ls1.io.rf.wr.bits.data),
     )
+    assert(!(atomicIntWrite && ls1IntWrite), "Atomic completion and LS1 must not share a write cycle")
     fpRf.io.write(0).we := mixArith.io.rf.fpWrite.valid
     fpRf.io.write(0).addr := mixArith.io.rf.fpWrite.bits.addr
     fpRf.io.write(0).data := mixArith.io.rf.fpWrite.bits.data
@@ -314,7 +322,37 @@ class Backend(
     io.ls1.storeData.get <> ls1.io.cmt.sq.data.get
 
     ls0.connectCache(dcache.io)
-    ls1.connectCache(dcache.io)
+    dcache.io.load(1).req.valid := Mux(atomic.io.busy, atomic.io.load.request.valid, ls1.io.cache.req.valid)
+    dcache.io.load(1).req.bits := Mux(atomic.io.busy, atomic.io.load.request.bits, ls1.io.cache.req.bits)
+    atomic.io.load.request.ready := atomic.io.busy && dcache.io.load(1).req.ready
+    ls1.io.cache.req.ready := !atomic.io.busy && dcache.io.load(1).req.ready
+    atomic.io.load.wbSelect.valid := atomic.io.busy && dcache.io.load(1).wbSelect.valid
+    atomic.io.load.wbSelect.bits := dcache.io.load(1).wbSelect.bits
+    ls1.io.cache.wbSelect.valid := !atomic.io.busy && dcache.io.load(1).wbSelect.valid
+    ls1.io.cache.wbSelect.bits := dcache.io.load(1).wbSelect.bits
+    atomic.io.load.response.valid := atomic.io.busy && dcache.io.load(1).rsp.valid
+    atomic.io.load.response.bits := dcache.io.load(1).rsp.bits
+    ls1.io.cache.rsp.valid := !atomic.io.busy && dcache.io.load(1).rsp.valid
+    ls1.io.cache.rsp.bits := dcache.io.load(1).rsp.bits
+    ls1.io.cache.fixedLatency := !atomic.io.busy && dcache.io.load(1).fixedLatency
+    atomic.io.load.forwardQuery.valid := atomic.io.busy && dcache.io.forward(1).query.valid
+    atomic.io.load.forwardQuery.bits := dcache.io.forward(1).query.bits
+    ls1.io.cache.forward.query.valid := !atomic.io.busy && dcache.io.forward(1).query.valid
+    ls1.io.cache.forward.query.bits := dcache.io.forward(1).query.bits
+    dcache.io.forward(1).result.valid := Mux(
+        atomic.io.busy,
+        atomic.io.load.forwardResult.valid,
+        ls1.io.cache.forward.result.valid,
+    )
+    dcache.io.forward(1).result.bits := Mux(
+        atomic.io.busy,
+        atomic.io.load.forwardResult.bits,
+        ls1.io.cache.forward.result.bits,
+    )
+    if (tlbEnabled) {
+        dcache.io.storeTranslation.get.request := ls1.io.cache.storeTranslation.get.request
+        ls1.io.cache.storeTranslation.get.response := dcache.io.storeTranslation.get.response
+    }
     dcache.io.flush := io.flush
     if (tlbEnabled) {
         dcache.io.tlb.get.control := io.dtlb.get.control
@@ -322,9 +360,20 @@ class Backend(
         dcache.io.tlb.get.flush := io.dtlb.get.flush
         io.dtlbMiss.get := dcache.io.tlbMiss.get
     }
-    dcache.io.store <> io.store
+    dcache.io.store.req.valid := Mux(atomic.io.store.request.valid, true.B, io.store.req.valid)
+    dcache.io.store.req.bits := Mux(atomic.io.store.request.valid, atomic.io.store.request.bits, io.store.req.bits)
+    atomic.io.store.request.ready := dcache.io.store.req.ready
+    io.store.req.ready := !atomic.io.store.request.valid && dcache.io.store.req.ready
+    atomic.io.store.response.valid := atomic.io.busy && dcache.io.store.rsp.valid
+    atomic.io.store.response.bits := dcache.io.store.rsp.bits
+    io.store.rsp.valid := !atomic.io.busy && dcache.io.store.rsp.valid
+    io.store.rsp.bits := dcache.io.store.rsp.bits
+    dcache.io.store.rsp.ready := Mux(atomic.io.busy, atomic.io.store.response.ready, io.store.rsp.ready)
+    atomic.io.clearReservation := io.store.req.fire
+    atomic.io.request <> io.atomic.request
+    io.atomic.response <> atomic.io.response
     io.l2 <> dcache.io.l2
-    io.dcacheIdle := dcache.io.idle
+    io.dcacheIdle := dcache.io.idle && !atomic.io.busy
     if (observe) {
         val issueQueueFullCycles = RegInit(VecInit.fill(IssueQueueIndex.Count)(0.U(64.W)))
         val pipelineIssueCycles = RegInit(VecInit.fill(6)(0.U(64.W)))

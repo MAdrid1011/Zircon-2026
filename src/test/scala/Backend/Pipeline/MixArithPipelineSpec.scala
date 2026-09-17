@@ -40,6 +40,7 @@ class MixArithPipelineTestTop extends Module {
     pipeline.io.iq <> io.issue
     pipeline.io.cmt.rob.pc := io.pc
     pipeline.io.cmt.flush := io.flush
+    pipeline.io.csr.frm := 0.U
 
     for (source <- 0 until 2) {
         intRF.io.read(source).addr := pipeline.io.rf.intRead(source).addr

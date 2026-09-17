@@ -22,6 +22,7 @@ class BackendCommitIO(bp: BackendParams, load: LoadPipelineParams) extends Bundl
         val req = Flipped(Decoupled(new DStoreRequest))
         val rsp = Decoupled(new DStoreResponse)
     }
+    val atomic = new AtomicBackendIO(bp)
 }
 
 class CommitEnvironmentIO extends Bundle {
@@ -218,6 +219,17 @@ class Commit(
     }
     rob.io.completion(5) := sq.io.completion(0)
     rob.io.completion(6) := sq.io.completion(1)
+    val atomicException = WireDefault(0.U.asTypeOf(new BackendException))
+    atomicException.valid := io.backend.atomic.response.bits.exception.orR
+    atomicException.cause := io.backend.atomic.response.bits.exception
+    atomicException.tval := io.backend.atomic.response.bits.vaddr
+    rob.io.completion(7) := completion(
+        io.backend.atomic.response.fire,
+        io.backend.atomic.response.bits.robIdx,
+        io.backend.atomic.response.bits.data,
+        atomicException,
+    )
+    io.backend.atomic.response.ready := true.B
 
     sq.io.address <> io.backend.ls1.storeAddress.get
     sq.io.data <> io.backend.ls1.storeData.get
@@ -246,11 +258,25 @@ class Commit(
     io.frontend.ftq.train.bits := trainQueue.io.deq(0).bits
     val trainingSpace = trainQueue.io.enq(0).ready && !pendingRecoveryTrainValid
     val headSystem = rob.io.head(0).valid && rob.io.head(0).bits.isSystem
+    val headAtomic = rob.io.head(0).valid && rob.io.head(0).bits.isAtomic
     val headSystemOp = rob.io.head(0).bits.systemOp
     val fence = headSystem && headSystemOp === SystemOp.FENCE.U
     val fenceI = headSystem && headSystemOp === SystemOp.FENCE_I.U
     val sfence = headSystem && headSystemOp === SystemOp.SFENCE_VMA.U
-    val memoryDrained = sq.io.empty && sb.io.empty && io.environment.memoryIdle
+    val memoryDrained = sq.io.committedEmpty && sb.io.empty && io.environment.memoryIdle
+    sq.io.atomic.sqIdx.valid := headAtomic && !delayedRecovery
+    sq.io.atomic.sqIdx.bits := rob.io.head(0).bits.sqIdx
+    io.backend.atomic.request.valid := headAtomic && !rob.io.head(0).bits.complete &&
+        sq.io.atomic.request.valid && sb.io.empty && io.environment.memoryIdle && !delayedRecovery
+    io.backend.atomic.request.bits.robIdx := sq.io.atomic.request.bits.robIdx
+    io.backend.atomic.request.bits.prd := sq.io.atomic.request.bits.prd
+    io.backend.atomic.request.bits.vaddr := sq.io.atomic.request.bits.vaddr
+    io.backend.atomic.request.bits.paddr := sq.io.atomic.request.bits.paddr
+    io.backend.atomic.request.bits.data := sq.io.atomic.request.bits.data
+    io.backend.atomic.request.bits.op := sq.io.atomic.request.bits.op
+    io.backend.atomic.request.bits.uncache := sq.io.atomic.request.bits.uncache
+    io.backend.atomic.request.bits.exception := sq.io.atomic.request.bits.exception
+    io.backend.atomic.blockMemoryIssue := headAtomic && sq.io.atomic.request.valid && !delayedRecovery
     val maintenanceStarted = RegInit(false.B)
     when(!fenceI || delayedRecovery) {
         maintenanceStarted := false.B
@@ -291,15 +317,16 @@ class Commit(
         val sretIllegal = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
         val systemException = ecall || ebreak || mretIllegal || sretIllegal
-        val recoveryCandidate = entry.exception.valid || mispredicted || commitSystem || systemException
+        val recoveryCandidate = entry.exception.valid || mispredicted || commitSystem || entry.isAtomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate
         val completed = rob.io.head(lane).valid && entry.complete && headMatchesFtq(lane).asUInt.orR &&
-            (if (lane == 0) systemReady else !headSystem) && (!needsFeedback || trainingSpace)
+            (if (lane == 0) systemReady else !headSystem && !entry.isSystem) &&
+            (!needsFeedback || trainingSpace)
         val recover = completed && recoveryCandidate
         packetEnd(lane) := completed && entry.packetEnd
         recovery(lane) := continue && recover
         retire(lane) := continue && completed && !entry.exception.valid && !systemException
-        continue = continue && completed && !recover && !entry.isSystem
+        continue = continue && completed && !recover && !entry.isSystem && !entry.isAtomic
     }
     val retireFire = VecInit(retire.map(_ && !delayedRecovery))
     val retiredBranch = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
@@ -550,7 +577,8 @@ class Commit(
         retireDestinations(lane).valid := retireFire(lane) && rob.io.head(lane).bits.destination.prd.orR
         when(retireFire(lane)) { retireDestinations(lane).bits := rob.io.head(lane).bits.destination }
         io.middleend.retire(lane) := retireDestinations(lane)
-        sq.io.commit(lane).valid := retireFire(lane) && rob.io.head(lane).bits.isStore
+        sq.io.commit(lane).valid := retireFire(lane) &&
+            (rob.io.head(lane).bits.isStore || rob.io.head(lane).bits.isAtomic)
         sq.io.commit(lane).bits := rob.io.head(lane).bits.sqIdx
     }
 
@@ -568,6 +596,7 @@ class Commit(
     io.backend.csrGrant.valid := csrGrantValid && !delayedRecovery
     io.backend.csrGrant.bits.robIdx := csrGrantIndex
     io.backend.mixCSR.rsp := csr.io.rsp
+    io.backend.mixCSR.frm := csr.io.state.frm
     csr.io.req := io.backend.mixCSR.req
     csr.io.commit := io.backend.mixCSR.commit
     csr.io.privilege := privilege

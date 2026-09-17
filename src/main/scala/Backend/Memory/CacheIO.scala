@@ -19,6 +19,8 @@ class DStoreTranslationRequest extends Bundle {
     val vaddr = UInt(32.W)
     val uncache = Bool()
     val exception = UInt(4.W)
+    val atomic = Bool()
+    val lr = Bool()
 }
 
 class DStoreTranslationResponse extends Bundle {

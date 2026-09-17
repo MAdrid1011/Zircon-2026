@@ -41,9 +41,13 @@ object CSRAddress {
     val cycle = 0xc00
     val time = 0xc01
     val instret = 0xc02
+    val hpmcounter3 = 0xc03
+    val hpmcounter31 = 0xc1f
     val cycleh = 0xc80
     val timeh = 0xc81
     val instreth = 0xc82
+    val hpmcounter3h = 0xc83
+    val hpmcounter31h = 0xc9f
     val mvendorid = 0xf11
     val marchid = 0xf12
     val mimpid = 0xf13

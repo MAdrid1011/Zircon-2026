@@ -171,6 +171,27 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "an Atomic creates address and integer data tasks" in {
+        simulate(new Dispatcher) { dut =>
+            initialize(dut)
+            dut.io.in.valid.poke(1)
+            instruction(dut, 0, 41, DecodeUnit.Atomic, op = 0)
+            dut.io.memoryEntries(0).prs(0).poke(6)
+            dut.io.memoryEntries(0).prs(1).poke(9)
+            dut.io.memoryEntries(0).sourceValid(0).poke(true)
+            dut.io.memoryEntries(0).sourceValid(1).poke(true)
+            dut.io.memoryEntries(0).sourceReady(0).poke(true)
+            dut.io.memoryEntries(0).sourceReady(1).poke(true)
+
+            dut.io.accepted.expect(1)
+            dut.io.loadStoreAddress.valid.expect(1)
+            dut.io.loadStoreAddress.entries(0).prs(0).expect(6)
+            dut.io.storeData.valid.expect(1)
+            dut.io.storeData.entries(0).prs(0).expect(9)
+            dut.io.storeData.entries(0).fu.expect(DecodeUnit.Atomic)
+        }
+    }
+
     "MixArith accepts at most one overflow ALU and preserves two native slots" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)

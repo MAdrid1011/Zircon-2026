@@ -23,6 +23,8 @@ class ZirconDebugIO extends Bundle {
     val robHeadValid = Output(Bool())
     val robHeadComplete = Output(Bool())
     val robHeadPc = Output(UInt(32.W))
+    val privilege = Output(UInt(2.W))
+    val csr = Output(new CSRState)
     val performance = Output(new ZirconPerformanceCounters)
 }
 
@@ -108,6 +110,7 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
     backend.io.ls0 <> commit.io.backend.ls0
     backend.io.ls1 <> commit.io.backend.ls1
     backend.io.store <> commit.io.backend.store
+    backend.io.atomic <> commit.io.backend.atomic
     backend.io.flush := commit.io.backend.flush
     backend.io.csrGrant <> commit.io.backend.csrGrant
     if (simulationDebug) {
@@ -117,6 +120,8 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
         io.debug.get.robHeadValid := commit.io.debug.robHeadValid
         io.debug.get.robHeadComplete := commit.io.debug.robHeadComplete
         io.debug.get.robHeadPc := commit.io.debug.robHeadPc
+        io.debug.get.privilege := commit.io.environment.currentPrivilege
+        io.debug.get.csr := commit.io.environment.csr
         io.debug.get.performance.icacheVisit := frontend.io.observe.get.icache.visit
         io.debug.get.performance.icacheHit := frontend.io.observe.get.icache.hit
         io.debug.get.performance.icacheMissCycles := frontend.io.observe.get.icache.missCycle
@@ -171,7 +176,9 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
     l2.io.memory <> bridge.io.memory
     bridge.io.axi <> io.axi
 
-    commit.io.environment.time := 0.U
+    val time = RegInit(0.U(64.W))
+    time := time + 1.U
+    commit.io.environment.time := time
     commit.io.environment.privilege := 3.U
     commit.io.environment.interrupt.software := io.interrupts.msip
     commit.io.environment.interrupt.timer := io.interrupts.mtip

@@ -181,7 +181,8 @@ class Middleend(
 
     io.commit.request.valid := Mux(io.commit.flush, 0.U, renameValid)
     io.commit.request.store := VecInit(renameStageEntries.map(
-        _.context.instruction.fu === DecodeUnit.Store.U
+        entry => entry.context.instruction.fu === DecodeUnit.Store.U ||
+            entry.context.instruction.fu === DecodeUnit.Atomic.U
     )).asUInt
     FIFOUtil.assertPrefix(io.commit.resourcePrefix.asBools, "Commit resource permission must be a prefix")
 
@@ -234,16 +235,11 @@ class Middleend(
         val decoded = WireDefault(decoderOut)
         val usesFp = decoderOut.rinfo.dest.valid && decoderOut.rinfo.dest.isFp ||
             decoderOut.rinfo.src.map(source => source.valid && source.isFp).reduce(_ || _)
-        val dynamicRounding = decoderOut.rm === 7.U
-        val badRounding = dynamicRounding && io.csr.frm > 4.U
-        when(!decoderOut.exception.valid && usesFp && (io.csr.mstatus(14, 13) === 0.U || badRounding)) {
+        when(!decoderOut.exception.valid && usesFp && io.csr.mstatus(14, 13) === 0.U) {
             decoded.fu := DecodeUnit.None.U
             decoded.exception.valid := true.B
             decoded.exception.cause := DecodeException.IllegalInstruction.U
             decoded.exception.tval := decoded.inst
-        }
-        when(dynamicRounding && !badRounding) {
-            decoded.rm := io.csr.frm
         }
         renameIncoming(lane).context.instruction := decoded
         for (source <- 0 until 3) {

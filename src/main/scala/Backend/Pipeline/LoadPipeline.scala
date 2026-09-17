@@ -81,6 +81,7 @@ class LoadPipelineIO(p: LoadPipelineParams, withStore: Boolean = false, tlbEnabl
     val cache = new LoadCacheIO(p, withStore, tlbEnabled)
     val wk = new LoadWakeupIO(p)
     val bypass = new BypassProducerPort(p.backend)
+    val blockIssue = Input(Bool())
 }
 
 /** RF/AGU share a cycle; the external DCache owns the D1, D2 and WB registers. */
@@ -130,7 +131,7 @@ class LoadPipeline(
         !valid(i) || killed(pending(i)) || (io.cache.rsp.valid && io.cache.rsp.bits.slot === i.U)
     )).asUInt
     val indexIS = PriorityEncoder(free)
-    io.iq.instPkg.ready := (storeIS || free.orR) && (!validRF || killed(instPkgRF) || addressFire) &&
+    io.iq.instPkg.ready := !io.blockIssue && (storeIS || free.orR) && (!validRF || killed(instPkgRF) || addressFire) &&
         !killed(io.iq.instPkg.bits)
 
     io.rf.rd.prj := instPkgRF.prj
@@ -234,7 +235,10 @@ class LoadPipeline(
         }
         assert(io.iq.instPkg.bits.prj < p.numIntPhys.U)
         when(storeIS) {
-            assert(io.iq.instPkg.bits.mtype <= 2.U && !io.iq.instPkg.bits.rdVld)
+            assert(io.iq.instPkg.bits.mtype <= 2.U)
+            when(io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Store.U) {
+                assert(!io.iq.instPkg.bits.rdVld)
+            }
         }.otherwise {
             assert(VecInit(Seq(0, 1, 2, 4, 5).map(_.U === io.iq.instPkg.bits.mtype)).asUInt.orR)
         }
@@ -251,6 +255,8 @@ class LoadPipeline(
     if (withStore) {
         /* STA uses the same RF/AGU stage as LD and terminates at the external SQ. */
         val addr = io.cmt.sq.addr.get
+        val atomicRF = instPkgRF.fu === ZirconConfig.DecodeUnit.Atomic.U
+        val lrRF = atomicRF && instPkgRF.op === 2.U
         val misaligned = (instPkgRF.mtype === 1.U && agu.io.res(0)) ||
             (instPkgRF.mtype === 2.U && agu.io.res(1, 0).orR)
         val translationReady = WireDefault(true.B)
@@ -264,6 +270,8 @@ class LoadPipeline(
             translation.request.bits.uncache := instPkgRF.uncache
             translation.request.bits.exception :=
                 Mux(instPkgRF.exception.valid, instPkgRF.exception.cause(3, 0), 0.U)
+            translation.request.bits.atomic := atomicRF
+            translation.request.bits.lr := lrRF
             translationReady := !translation.response.miss
             translatedPaddr := translation.response.paddr
             translatedUncache := translation.response.uncache
@@ -282,7 +290,7 @@ class LoadPipeline(
         addr.bits.exception := Mux(
             instPkgRF.exception.valid,
             instPkgRF.exception.cause(3, 0),
-            Mux(misaligned, 6.U, translatedException)
+            Mux(misaligned, Mux(lrRF, 4.U, 6.U), translatedException)
         )
         addr.bits.uncache := translatedUncache
 
@@ -294,7 +302,7 @@ class LoadPipeline(
         val std = io.iq.std.get
         val rf = io.rf.std.get
         val data = io.cmt.sq.data.get
-        std.ready := (!validDataRF || killedDataRF || data.fire) && !io.cmt.flush
+        std.ready := !io.blockIssue && (!validDataRF || killedDataRF || data.fire) && !io.cmt.flush
         rf.intAddr := Mux(instDataRF.prs(0)(p.physWidth), 0.U, instDataRF.prs(0)(p.physWidth - 1, 0))
         rf.fpAddr := Mux(instDataRF.prs(0)(p.physWidth), instDataRF.prs(0)(p.physWidth - 1, 0), 0.U)
         rf.hold := heldDataRF

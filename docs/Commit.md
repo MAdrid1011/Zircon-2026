@@ -7,8 +7,8 @@ Store 排空和系统维护控制。
 ## ROB 与退休
 
 ROB 默认 48 项。派发时，ROB 与 SQ 共同返回可接受的有序前缀及分配编号。后端的两条 Arith、
-MixArith、两条 Load 和两条 Store 结果分别写入完成端口。退休只从 ROB 头部连续选择已完成且
-无阻塞的指令。
+MixArith、两条 Load、两条 Store 和原子操作结果分别写入完成端口。退休只从 ROB 头部连续选择
+已完成且无阻塞的指令。
 
 异常、分支误预测、特权返回和需要串行化的系统指令从 ROB 头窗口选择恢复点。恢复信息寄存一拍
 后广播，使 ROB 头判定不直接进入前端、中端和后端的清空扇出路径。
@@ -20,9 +20,10 @@ FTQ 默认 16 项，在中端接收新取指块时分配。表项保存取指 PC
 
 ## SQ 与 Store Buffer
 
-SQ 默认 12 项，在 Store 派发时分配。Store Address 与 Store Data 可以独立到达，SQ 保存两者
-并为年轻 Load 提供逐字节前递。Store 退休后按程序顺序进入 4 项 Store Buffer；Store Buffer
-继续向 DCache 发送请求，因此提交不需要等待每笔 Cache 写完成。
+SQ 默认 12 项，在 Store 或原子指令派发时分配。Store Address 与 Store Data 可以独立到达，
+SQ 保存两者并为年轻 Load 提供逐字节前递。Store 退休后按程序顺序进入 4 项 Store Buffer；
+Store Buffer 继续向 DCache 发送请求，因此提交不需要等待每笔 Cache 写完成。原子指令不会进入
+Store Buffer，而是在 ROB 头等待更早的已提交 Store 排空，再授权后端原子单元执行。
 
 ## CSR 与系统指令
 

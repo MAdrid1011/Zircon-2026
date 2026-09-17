@@ -35,8 +35,12 @@ class CSRState extends Bundle {
     val mideleg = UInt(32.W)
     val mtvec = UInt(32.W)
     val mepc = UInt(32.W)
+    val mcause = UInt(32.W)
+    val mtval = UInt(32.W)
     val stvec = UInt(32.W)
     val sepc = UInt(32.W)
+    val scause = UInt(32.W)
+    val stval = UInt(32.W)
     val satp = UInt(32.W)
     val frm = UInt(3.W)
     val fflags = UInt(5.W)
@@ -189,6 +193,8 @@ class CSR extends Module {
     csr(CSRAddress.instreth, instretHigh)(_ => ())
     csr(CSRAddress.time, io.time(31, 0))(_ => ())
     csr(CSRAddress.timeh, io.time(63, 32))(_ => ())
+    constantRange(CSRAddress.hpmcounter3, CSRAddress.hpmcounter31, 0)
+    constantRange(CSRAddress.hpmcounter3h, CSRAddress.hpmcounter31h, 0)
     constant(CSRAddress.mvendorid, 0)
     constant(CSRAddress.marchid, 0)
     constant(CSRAddress.mimpid, 0)
@@ -307,8 +313,12 @@ class CSR extends Module {
     io.state.mideleg := mideleg
     io.state.mtvec := mtvec
     io.state.mepc := mepc
+    io.state.mcause := mcause
+    io.state.mtval := mtval
     io.state.stvec := stvec
     io.state.sepc := sepc
+    io.state.scause := scause
+    io.state.stval := stval
     io.state.satp := satp
     io.state.frm := rounding
     io.state.fflags := flags

@@ -4,7 +4,7 @@
 
 **面向密集控制流程序的 RV32 乱序处理器**
 
-[![ISA](https://img.shields.io/badge/ISA-RV32IMAF__Zicsr__Zifencei-243447?style=for-the-badge)](https://riscv.org/technical/specifications/)
+[![ISA](https://img.shields.io/badge/ISA-RV32IMAF__Zicsr__Zifencei__Zaamo__Zalrsc-243447?style=for-the-badge)](https://riscv.org/technical/specifications/)
 [![Chisel](https://img.shields.io/badge/Chisel-7.15.0-D32F2F?style=for-the-badge)](https://www.chisel-lang.org/)
 [![Difftest](https://img.shields.io/badge/Difftest-Spike-2E7D32?style=for-the-badge)](https://github.com/riscv-software-src/riscv-isa-sim)
 [![License](https://img.shields.io/badge/License-MPL--2.0-1565C0?style=for-the-badge)](LICENSE)
@@ -95,7 +95,7 @@ flowchart LR
 
 | 项目 | 当前配置 |
 | --- | --- |
-| ISA | `RV32IMAF_Zicsr_Zifencei` |
+| ISA | `RV32IMAF_Zicsr_Zifencei_Zaamo_Zalrsc` |
 | 取指 / 译码与派发 / 退休宽度 | 4 / 2 / 3 |
 | 整数 / 浮点物理寄存器 | 72 / 48 |
 | ROB / SQ / Store Buffer | 48 / 12 / 4 项 |
@@ -114,6 +114,8 @@ flowchart LR
   获得 ROB 头授权后执行。
 - **双 Load 能力**：LS0 与 LS1 可以同时执行 Load；Store Address 与 Store Data 分离调度，
   SQ 和 Store Buffer 提供逐字节前递。
+- **RV32 原子操作**：支持 `LR.W`、`SC.W` 和九条 `AMO.W` 指令；原子操作在 ROB 头获得授权，
+  复用 LS1 与 DCache Store 端口完成不可分割的读改写。
 - **三级 L1 命中流水**：ICache 与 DCache 将 miss 状态寄存后交给末级状态机，避免 miss 控制
   直接回到前级关键路径。
 - **偏非包含式 L2**：L2 主要接收 L1 victim；L1/L2 同时 miss 时，外部填充直接返回 L1，
@@ -167,12 +169,11 @@ cmake --build build/cmake --target functest-add --parallel
 ### 运行 RISC-V 架构测试
 
 ```sh
-make -C RV-Software/arch-test run-smoke
 make -C RV-Software/arch-test run
 ```
 
-当前 ACT4 配置使用 Clang 构建六项 Zicsr 测试，并通过 ZirconSim 与进程内 Spike 逐提交对拍。
-首次运行所需的固定工具环境见 `RV-Software/arch-test/README.md`。
+当前精简测试集使用 Clang 构建 149 项正式 RISC-V Architecture Test，并通过 ZirconSim 与
+进程内 Spike 逐提交对拍。覆盖范围和工具要求见 `RV-Software/arch-test/README.md`。
 
 ### 生成 RTL
 
@@ -200,7 +201,7 @@ sbt "runMain Elaborate --simulation generated"
 | 验证层级 | 当前状态 |
 | --- | --- |
 | CoreMark + Spike 提交级差分 | 通过 |
-| ACT4 Zicsr 六项 + Spike 提交级差分 | 通过 |
+| RISC-V Architecture Test 149 项 + Spike 提交级差分 | 通过 |
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |

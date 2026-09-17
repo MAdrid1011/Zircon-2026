@@ -40,13 +40,13 @@ object IssueQueueProfile {
     case object LoadStoreAddress extends IssueQueueProfile {
         val label = "LoadStoreAddress"
         val sourceMask = 0x1
-        val allowedUnits = Set(DecodeUnit.Load, DecodeUnit.Store)
+        val allowedUnits = Set(DecodeUnit.Load, DecodeUnit.Store, DecodeUnit.Atomic)
     }
 
     case object StoreData extends IssueQueueProfile {
         val label = "StoreData"
         val sourceMask = 0x1
-        val allowedUnits = Set(DecodeUnit.Store)
+        val allowedUnits = Set(DecodeUnit.Store, DecodeUnit.Atomic)
     }
 }
 

@@ -14,6 +14,9 @@ DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；S
 再合并字节 mask。DCache 使用单项 miss 单元，支持无冲突命中的 hit-under-miss；同一资源冲突
 的 Load 返回 retry，由原发射队列表项重发。
 
+原子操作只允许对可缓存、自然对齐的 32 位字执行。原子执行单元在提交授权后独占 LS1 Load
+端口和 DCache Store 端口，以先读后写方式完成 AMO；不满足 PMA 或对齐要求的请求产生访存异常。
+
 ## 地址翻译
 
 ITLB 有一个查询口，DTLB 有两个查询口。每个 TLB 的 4 KiB 页表项采用 4 set x 4 way 组织，

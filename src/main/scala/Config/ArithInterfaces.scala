@@ -57,6 +57,7 @@ class ArithWakeupIO extends Bundle {
 class CSRExecutionPort extends Bundle {
     val req = Output(Valid(new CSRRequest))
     val rsp = Input(Valid(new CSRResponse))
+    val frm = Input(UInt(3.W))
     // The IQ has already proved this instruction is the oldest authorized CSR.
     val commit = Output(Bool())
 }

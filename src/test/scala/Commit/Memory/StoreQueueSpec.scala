@@ -13,6 +13,8 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
             port.bits.poke(0)
         }
         dut.io.drain.ready.poke(false)
+        dut.io.atomic.sqIdx.valid.poke(false)
+        dut.io.atomic.sqIdx.bits.poke(0)
         dut.io.query.foreach { port =>
             port.request.valid.poke(false)
             port.request.bits.paddr.poke(0)
@@ -153,6 +155,51 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.query(0).response.bits.blocked.expect(false)
             dut.io.query(0).response.bits.mask.expect(8)
             dut.io.query(0).response.bits.data.expect(0x5a000000L)
+        }
+    }
+
+    "an Atomic waits for Commit and bypasses the ordinary store drain" in {
+        simulate(new StoreQueue(dispatchWidth = 2)) { dut =>
+            initialize(dut)
+            dut.io.request.valid.poke(1)
+            dut.io.request.store.poke(1)
+            val sqIdx = dut.io.allocation(0).index.peek().litValue
+            dut.io.enqueue.valid.poke(1)
+            dut.io.enqueue.entries(0).context.instruction.fu.poke(ZirconConfig.DecodeUnit.Atomic)
+            dut.io.enqueue.entries(0).context.instruction.op.poke(4)
+            dut.io.enqueue.entries(0).destination.prd.poke(11)
+            dut.io.enqueue.entries(0).allocation.robIdx.poke(13)
+            dut.io.enqueue.entries(0).allocation.sqIdx.poke(sqIdx)
+            dut.clock.step()
+            dut.io.request.valid.poke(0)
+            dut.io.enqueue.valid.poke(0)
+
+            address(dut, sqIdx, robIdx = 13, paddr = 0x3000, mask = 15)
+            dut.io.address.bits.size.poke(2)
+            data(dut, sqIdx, robIdx = 13, value = 0x55aa55aa)
+            dut.io.data.bits.size.poke(2)
+            dut.io.completion.foreach(_.valid.expect(false))
+            dut.clock.step()
+            dut.io.address.valid.poke(false)
+            dut.io.data.valid.poke(false)
+
+            dut.io.atomic.sqIdx.valid.poke(true)
+            dut.io.atomic.sqIdx.bits.poke(sqIdx)
+            dut.io.atomic.request.valid.expect(true)
+            dut.io.atomic.request.bits.robIdx.expect(13)
+            dut.io.atomic.request.bits.prd.expect(11)
+            dut.io.atomic.request.bits.paddr.expect(0x3000)
+            dut.io.atomic.request.bits.data.expect(0x55aa55aa)
+            dut.io.atomic.request.bits.op.expect(4)
+            dut.io.drain.valid.expect(false)
+
+            dut.io.commit(0).valid.poke(true)
+            dut.io.commit(0).bits.poke(sqIdx)
+            dut.clock.step()
+            dut.io.commit(0).valid.poke(false)
+            dut.io.atomic.sqIdx.valid.poke(false)
+            dut.io.empty.expect(true)
+            dut.io.drain.valid.expect(false)
         }
     }
 }
