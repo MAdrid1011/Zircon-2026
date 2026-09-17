@@ -1,33 +1,36 @@
-name: Architecture change
-description: Propose a processor contract or implementation change
-title: "[arch] "
-labels: [architecture]
+name: 架构改进
+description: 提议新的处理器行为、接口或微架构优化
+title: "[架构] "
+labels:
+  - architecture
 body:
-  - type: textarea
-    id: contract
+  - type: markdown
     attributes:
-      label: Current contract
-      description: State the existing interface, invariant, or accepted ADR.
-    validations:
-      required: true
+      value: 请描述可以验证的问题和预期行为。实现细节可以在讨论中继续收敛。
   - type: textarea
     id: problem
     attributes:
-      label: Measured problem
-      description: Include trace, IPC, static-area, coverage, or failure evidence.
+      label: 问题
+      description: 当前行为有什么限制？请提供程序、统计或波形证据。
+      placeholder: 说明触发条件、当前结果以及它为何值得修改。
     validations:
       required: true
   - type: textarea
-    id: change
+    id: proposal
     attributes:
-      label: Proposed change
-      description: Name affected modules, state, flush/replay, and verification impact.
+      label: 建议方案
+      description: 说明期望行为、涉及模块以及对流水、恢复或存储一致性的影响。
     validations:
       required: true
   - type: textarea
-    id: gate
+    id: acceptance
     attributes:
-      label: Acceptance gate
-      description: Give exact functional and quantitative sign-off criteria.
+      label: 验收条件
+      description: 列出功能、性能、面积或时序方面可以复现的通过条件。
     validations:
       required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 其他方案
+      description: 可选。记录已经考虑过的实现及其取舍。
