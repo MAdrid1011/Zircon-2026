@@ -1,0 +1,41 @@
+import chisel3._
+import chisel3.util._
+import ZirconConfig.BackendParams
+
+/** Physical-register result carried by every WB bypass producer. */
+class BypassResult(val p: BackendParams = BackendParams()) extends Bundle {
+    val prd = UInt(p.tagWidth.W)
+    val data = UInt(32.W)
+}
+
+/** One RF-stage operand lookup against all results promised for the next WB cycle. */
+class BypassQuery(val p: BackendParams = BackendParams()) extends Bundle {
+    val prs = UInt(p.tagWidth.W)
+}
+
+/** Consumer half of a scheduled WB-to-EX/EX1 bypass port. */
+class BypassConsumerPort(val numSources: Int, val p: BackendParams = BackendParams()) extends Bundle {
+    require(numSources > 0)
+
+    val query = Output(Vec(numSources, new BypassQuery(p)))
+    val advance = Output(Bool())
+    val value = Input(Vec(numSources, Valid(UInt(32.W))))
+}
+
+/** A producer announces the tag that will accompany its registered result next cycle. */
+class BypassProducerPort(val p: BackendParams = BackendParams()) extends Bundle {
+    val nextWb = Output(Valid(UInt(p.tagWidth.W)))
+    val result = Output(Valid(new BypassResult(p)))
+}
+
+/** The registered WB value paired with its one-cycle-ahead tag announcement. */
+class BypassSource(val p: BackendParams = BackendParams()) extends Bundle {
+    val nextWb = Valid(UInt(p.tagWidth.W))
+    val result = Valid(new BypassResult(p))
+}
+
+/** A compute pipeline consumes operands in EX/EX1 and produces one result in WB. */
+class PipelineBypassPort(val numSources: Int, val p: BackendParams = BackendParams()) extends Bundle {
+    val consumer = new BypassConsumerPort(numSources, p)
+    val producer = new BypassProducerPort(p)
+}

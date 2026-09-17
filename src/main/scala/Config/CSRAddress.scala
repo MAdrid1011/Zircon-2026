@@ -1,0 +1,46 @@
+package ZirconConfig
+
+object CSRAddress {
+    val fflags = 0x001
+    val frm = 0x002
+    val fcsr = 0x003
+    val sstatus = 0x100
+    val sie = 0x104
+    val stvec = 0x105
+    val scounteren = 0x106
+    val sscratch = 0x140
+    val sepc = 0x141
+    val scause = 0x142
+    val stval = 0x143
+    val sip = 0x144
+    val satp = 0x180
+    val mstatus = 0x300
+    val misa = 0x301
+    val medeleg = 0x302
+    val mideleg = 0x303
+    val mie = 0x304
+    val mtvec = 0x305
+    val mcounteren = 0x306
+    val mstatush = 0x310
+    val mcountinhibit = 0x320
+    val mscratch = 0x340
+    val mepc = 0x341
+    val mcause = 0x342
+    val mtval = 0x343
+    val mip = 0x344
+    val mcycle = 0xb00
+    val minstret = 0xb02
+    val mcycleh = 0xb80
+    val minstreth = 0xb82
+    val cycle = 0xc00
+    val time = 0xc01
+    val instret = 0xc02
+    val cycleh = 0xc80
+    val timeh = 0xc81
+    val instreth = 0xc82
+    val mvendorid = 0xf11
+    val marchid = 0xf12
+    val mimpid = 0xf13
+    val mhartid = 0xf14
+    val mconfigptr = 0xf15
+}
