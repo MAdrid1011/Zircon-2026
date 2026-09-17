@@ -95,6 +95,7 @@ class MorslDirection(p: FrontendParams) extends Module {
     /* Prediction Metadata */
     // Retain the lookup keys until commit; training must not use a newer speculative history.
     io.directions := directions.asUInt
+    io.meta := 0.U.asTypeOf(new FrontendDirectionMeta(p))
     io.meta.phtIndex := phtIndex
     io.meta.tageIndices := aheadTageIndices
     io.meta.tageTags := tageTags

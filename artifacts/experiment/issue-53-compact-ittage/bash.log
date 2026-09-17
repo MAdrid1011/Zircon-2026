@@ -1,0 +1,8 @@
+# Command summary; raw terminal output is intentionally not represented as a verbatim log.
+[PASS] sbt focused frontend suites: 11 tests across 5 suites
+[PASS] cmake --build build/cmake --target coremark --parallel
+[PASS] CoreMark seed=1 + Spike: cycles=325946 instructions=374266 ipc=1.148245
+[PASS] cmake --build build/wave --target zircon-sim --parallel
+[PASS] bounded VCD: start=120000 cycles=2000 bytes=51003402
+[PARTIAL] sbt --batch test: 142 passed, 62 unrelated failures, 204 total
+[PASS] git diff --check

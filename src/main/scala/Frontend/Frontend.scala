@@ -87,6 +87,7 @@ class Frontend(
     instPkgPDIn.predict.main := pr.io.lookup.prediction
     instPkgPDIn.predict.directions := pr.io.lookup.directions
     instPkgPDIn.predict.biasDirections := pr.io.lookup.biasDirections
+    instPkgPDIn.predict.meta := pr.io.lookup.meta
     instPkgPDIn.predict.returned := ic.io.pp.response.bits.mask
     instPkgPDIn.instructions.zipWithIndex.foreach { case (inst, i) =>
         inst.pc := FrontendMath.slotPc(instPkgIF2.startPc, i, p)

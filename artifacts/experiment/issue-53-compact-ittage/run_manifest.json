@@ -1,0 +1,49 @@
+{
+  "run_id": "issue-53-compact-ittage",
+  "issue": "https://github.com/MAdrid1011/Zircon-2026/issues/53",
+  "branch": "codex/issue-53-branch-predictor-correction",
+  "baseline_commit": "4cee6f541aa088d9439c14d07e43144449161736",
+  "status": "success",
+  "started_at": "2026-09-17T16:41:43+08:00",
+  "ended_at": "2026-09-17T16:59:18+08:00",
+  "workload": {
+    "name": "CoreMark",
+    "elf": "RV-Software/coremark/build/coremark-rv32imaf_zicsr_zifencei-ilp32f.elf",
+    "elf_sha256": "017c309672ad252aa5e52aa1b39061d09af3971fb5638b82f262f967021622f9",
+    "seed": 1,
+    "isa": "rv32imaf_zicsr_zifencei",
+    "abi": "ilp32f"
+  },
+  "configuration": {
+    "tables": 4,
+    "sets_per_table": 128,
+    "history_lengths": [4, 8, 16, 32],
+    "tag_bits": 9,
+    "confidence_bits": 2,
+    "useful_bits": 1,
+    "target_bits": 30
+  },
+  "commands": [
+    "cmake --build build/cmake --target coremark --parallel",
+    "cmake --build build/wave --target zircon-sim --parallel",
+    "build/wave/bin/zircon-sim --elf RV-Software/coremark/build/coremark-rv32imaf_zicsr_zifencei-ilp32f.elf --seed 1 --max-cycles 5000000 --stall-cycles 10000 --wave --wave-start 120000 --wave-cycles 2000 --no-progress --json",
+    "sbt --batch test"
+  ],
+  "environment": {
+    "java_shell": "OpenJDK 21.0.12.1",
+    "sbt_runtime": "1.12.10 (Homebrew Java 26.0.2.1)",
+    "sbt_script": "2.0.8",
+    "cmake": "4.4.3",
+    "verilator": "5.052",
+    "spike": "1.1.1-dev",
+    "rv_software_commit": "a290c88d6abce87ac30976c74bfea9f44ad50ca7",
+    "zircon_sim_commit": "dee0bed493467f9bc40db2b2d5ac2928c142c226"
+  },
+  "outputs": {
+    "report": "reports/report-coremark-rv32imaf_zicsr_zifencei-ilp32f.md",
+    "report_sha256": "835853606ede03d6b126441a17e4d76af7b7c3ed4d3a173124683dff169b8531",
+    "waveform": "build/zircon.vcd",
+    "waveform_sha256": "eb63e1f31f3de7dc0b38081f3f346d93f4df37fde5e71124e847b0d6c8882d81",
+    "waveform_bytes": 51003402
+  }
+}

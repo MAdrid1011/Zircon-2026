@@ -1,0 +1,20 @@
+{
+  "run_id": "issue-53-compact-ittage",
+  "artifacts": [
+    "PLAN.md",
+    "CHECKLIST.md",
+    "run_manifest.json",
+    "metrics.json",
+    "metrics.md",
+    "summary.md",
+    "runlog.summary.md",
+    "claim_validation.md",
+    "waveform.md",
+    "literature.md",
+    "bash.log"
+  ],
+  "external_outputs": [
+    "reports/report-coremark-rv32imaf_zicsr_zifencei-ilp32f.md",
+    "build/zircon.vcd"
+  ]
+}

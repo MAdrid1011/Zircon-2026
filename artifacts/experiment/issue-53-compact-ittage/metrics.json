@@ -1,0 +1,34 @@
+{
+  "baseline": {
+    "cycles": 371523,
+    "instructions": 374266,
+    "ipc": 1.007383,
+    "conditional": {"correct": 69375, "total": 72143, "accuracy_percent": 96.163},
+    "direct_jump": {"correct": 6233, "total": 6233, "accuracy_percent": 100.0},
+    "call": {"correct": 2741, "total": 2759, "accuracy_percent": 99.348},
+    "return": {"correct": 2758, "total": 2758, "accuracy_percent": 100.0},
+    "indirect": {"correct": 1863, "total": 4592, "accuracy_percent": 40.571},
+    "hotspot_0x80000820": {"correct": 17, "total": 55, "accuracy_percent": 30.909}
+  },
+  "compact_ittage": {
+    "cycles": 325946,
+    "instructions": 374266,
+    "ipc": 1.148245,
+    "conditional": {"correct": 69264, "total": 72143, "accuracy_percent": 96.009},
+    "direct_jump": {"correct": 6233, "total": 6233, "accuracy_percent": 100.0},
+    "call": {"correct": 2741, "total": 2759, "accuracy_percent": 99.348},
+    "return": {"correct": 2758, "total": 2758, "accuracy_percent": 100.0},
+    "indirect": {"correct": 4552, "total": 4592, "accuracy_percent": 99.129},
+    "hotspot_0x80000820": {"correct": 93, "total": 94, "accuracy_percent": 98.936}
+  },
+  "delta": {
+    "cycles": -45577,
+    "cycles_percent": -12.268,
+    "ipc": 0.140862,
+    "ipc_percent": 13.983,
+    "conditional_accuracy_percentage_points": -0.154,
+    "indirect_accuracy_percentage_points": 58.558,
+    "indirect_failures": -2689,
+    "hotspot_accuracy_percentage_points": 68.027
+  }
+}
