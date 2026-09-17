@@ -175,8 +175,10 @@ class Backend(
 
     arithPipes.foreach(_.io.speculation := loadSpeculation.io.resolution)
     wakeupRouter.io.arith0Issue := arith0.io.wakeup.wakeIssue
+    wakeupRouter.io.arith0RF := arith0.io.wakeup.wakeRF
     wakeupRouter.io.arith0WB := arith0.io.wakeup.wakeWB
     wakeupRouter.io.arith1Issue := arith1.io.wakeup.wakeIssue
+    wakeupRouter.io.arith1RF := arith1.io.wakeup.wakeRF
     wakeupRouter.io.arith1WB := arith1.io.wakeup.wakeWB
     def certainWake(valid: Bool, prd: UInt): BackendWakeup = {
         val wakeup = Wire(new BackendWakeup(p))
