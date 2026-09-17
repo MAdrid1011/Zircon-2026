@@ -8,7 +8,7 @@
 
 ## 验证
 
-- [ ] `sbt test`
+- [ ] `sbt --batch "Test / compile"`
 - [ ] `sbt "runMain Elaborate --simulation generated"`
 - [ ] 硬件或仿真器改动已运行 `cmake --build build/cmake --target coremark --parallel`
 - [ ] CoreMark 已通过 Spike 提交级差分
