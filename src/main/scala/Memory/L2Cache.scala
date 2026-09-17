@@ -440,10 +440,20 @@ class L2Cache(
                 plruWay,
                 PriorityEncoderOH(instructionCandidates)
             )
+            val dataCandidates = ~engineInstructionWays & engineValidWays & allowedWays
+            val dataWay = Mux(
+                (plruWay & dataCandidates).orR,
+                plruWay,
+                PriorityEncoderOH(dataCandidates)
+            )
             val replacementWay = Mux(
                 engineSourceI && instructionLimit && instructionCandidates.orR,
                 instructionWay,
-                Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), fallbackWay)
+                Mux(
+                    !engineSourceI && !invalidWays.orR && dataCandidates.orR,
+                    dataWay,
+                    Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), fallbackWay)
+                )
             )
             val selectedVictimWay = Mux(engineLookupHit.orR, engineLookupHit, replacementWay)
             val preserveDirtyCopy = engineLookupHit.orR && Mux1H(engineLookupHit, engineDirtyWays.asBools) &&
