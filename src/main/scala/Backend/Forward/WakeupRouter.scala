@@ -4,8 +4,10 @@ import ZirconConfig.BackendParams
 
 class WakeupRouterIO(p: BackendParams) extends Bundle {
     val arith0Issue = Input(new BackendWakeup(p))
+    val arith0RF = Input(new BackendWakeup(p))
     val arith0WB = Input(new BackendWakeup(p))
     val arith1Issue = Input(new BackendWakeup(p))
+    val arith1RF = Input(new BackendWakeup(p))
     val arith1WB = Input(new BackendWakeup(p))
     val mixEX2 = Input(new BackendWakeup(p))
     val mixEX3 = Input(new BackendWakeup(p))
@@ -33,8 +35,8 @@ class WakeupRouter(val p: BackendParams = BackendParams()) extends Module {
         io.load1WB,
     ))
     io.memory := VecInit(Seq(
-        io.arith0WB,
-        io.arith1WB,
+        io.arith0RF,
+        io.arith1RF,
         io.mixEX3,
         io.mixWB,
         io.load0D1,
@@ -45,8 +47,10 @@ class WakeupRouter(val p: BackendParams = BackendParams()) extends Module {
 
     for (event <- Seq(
         io.arith0Issue,
+        io.arith0RF,
         io.arith0WB,
         io.arith1Issue,
+        io.arith1RF,
         io.arith1WB,
         io.mixEX2,
         io.mixEX3,
