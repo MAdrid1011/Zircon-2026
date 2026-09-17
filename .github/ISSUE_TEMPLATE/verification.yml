@@ -1,27 +1,32 @@
-name: Verification gap
-description: Record a missing coverpoint, assertion, test, or unexplained failure
-title: "[verify] "
-labels: [verification]
+name: 验证问题
+description: 报告功能错误、差分失败或缺失的验证覆盖
+title: "[验证] "
+labels:
+  - verification
 body:
   - type: textarea
-    id: feature
+    id: symptom
     attributes:
-      label: Feature and contract
+      label: 现象
+      description: 描述错误结果、Spike 差分位置或尚未覆盖的行为。
     validations:
       required: true
   - type: textarea
-    id: gap
+    id: reproduce
     attributes:
-      label: Missing evidence or observed failure
+      label: 复现方法
+      description: 给出命令、程序、seed、提交号和必要的环境信息。
+      render: shell
     validations:
       required: true
-  - type: input
-    id: seed
-    attributes:
-      label: Reproduction seed or test name
   - type: textarea
-    id: closure
+    id: evidence
     attributes:
-      label: Closure condition
+      label: 相关证据
+      description: 附上最短日志、报告路径或受限波形区间；请勿上传完整长程序波形。
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
     validations:
       required: true
