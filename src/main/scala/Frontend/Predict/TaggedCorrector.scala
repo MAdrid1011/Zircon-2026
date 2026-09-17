@@ -15,11 +15,18 @@ class TcHistoryRow(p: FrontendParams) extends Bundle {
     val confidence = UInt(4.W)
 }
 
+class IndirectTargetRow extends Bundle {
+    val tag = UInt(8.W)
+    val target = UInt(30.W)
+}
+
 class FrontendCorrectorRead(p: FrontendParams) extends Bundle {
     val biasValid = Bool()
     val biasRow = new TcBiasRow(p)
     val historyValid = Vec(2, Bool())
     val historyRows = Vec(2, new TcHistoryRow(p))
+    val indirectValid = Bool()
+    val indirectRow = new IndirectTargetRow
 }
 
 /** Select confident corrections for each conditional-branch rank in IF2. */

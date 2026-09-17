@@ -98,6 +98,9 @@ class Predict(p: FrontendParams) extends Module {
     mainSelect.io.backward := VecInit((0 until p.fetchWidth).map(i =>
         Mux(mainLookup.io.line.valid(i), mainLookup.io.line.backward(i), io.lookup.in.predict.early.backward(i))
     )).asUInt
+    val indirectTargetHit = io.lookup.in.predict.tcRead.indirectValid &&
+        io.lookup.in.predict.tcRead.indirectRow.tag === io.lookup.in.predict.meta.tcHistoryTag
+    val indirectTarget = Cat(io.lookup.in.predict.tcRead.indirectRow.target, 0.U(2.W))
     for (i <- 0 until p.fetchWidth) {
         // A missing main-BTB slot keeps its fast prediction.
         val mainHit = mainLookup.io.line.valid(i)
@@ -108,7 +111,11 @@ class Predict(p: FrontendParams) extends Module {
         mainSelect.io.targets(i) := Mux(
             FrontendCfi.pop(kind) && io.lookup.in.predict.before.count =/= 0.U,
             FrontendMath.rasTop(io.lookup.in.predict.before),
-            Mux(mainHit, Cat(mainLookup.io.line.targets(i), 0.U(2.W)), io.lookup.in.predict.early.targets(i))
+            Mux(
+                FrontendCfi.indirect(kind) && !FrontendCfi.pop(kind) && indirectTargetHit,
+                indirectTarget,
+                Mux(mainHit, Cat(mainLookup.io.line.targets(i), 0.U(2.W)), io.lookup.in.predict.early.targets(i))
+            )
         )
     }
 
