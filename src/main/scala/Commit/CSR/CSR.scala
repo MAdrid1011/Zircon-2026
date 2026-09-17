@@ -129,6 +129,10 @@ class CSR extends Module {
         when(writeFire && hit) { update(writeData) }
     }
     def constant(address: Int, value: BigInt): Unit = csr(address, value.U(32.W))(_ => ())
+    def constantRange(first: Int, last: Int, value: BigInt): Unit = {
+        val hit = io.req.bits.addr >= first.U && io.req.bits.addr <= last.U
+        selected += ((hit, value.U(32.W), value.U(32.W)))
+    }
     def vector(w: UInt): UInt = Cat(w(31, 2), 0.U(1.W), w(1, 0) === 1.U)
 
     /* Counters use the old inhibit state. An explicit write overrides this cycle's increment. */
@@ -160,6 +164,7 @@ class CSR extends Module {
     csr(CSRAddress.mtval, mtval)(w => mtval := w)
     csr(CSRAddress.mcounteren, mcounteren)(w => mcounteren := w(2, 0))
     csr(CSRAddress.mcountinhibit, inhibit)(w => inhibit := w(2, 0) & 5.U)
+    constantRange(CSRAddress.mhpmevent3, CSRAddress.mhpmevent31, 0)
     csr(CSRAddress.mcycle, cycleLow) { w =>
         cycleWrite := true.B
         cycleLow := w
@@ -176,6 +181,8 @@ class CSR extends Module {
         instretWrite := true.B
         instretHigh := w
     }
+    constantRange(CSRAddress.mhpmcounter3, CSRAddress.mhpmcounter31, 0)
+    constantRange(CSRAddress.mhpmcounter3h, CSRAddress.mhpmcounter31h, 0)
     csr(CSRAddress.cycle, cycleLow)(_ => ())
     csr(CSRAddress.cycleh, cycleHigh)(_ => ())
     csr(CSRAddress.instret, instretLow)(_ => ())

@@ -23,6 +23,8 @@ object CSRAddress {
     val mcounteren = 0x306
     val mstatush = 0x310
     val mcountinhibit = 0x320
+    val mhpmevent3 = 0x323
+    val mhpmevent31 = 0x33f
     val mscratch = 0x340
     val mepc = 0x341
     val mcause = 0x342
@@ -30,8 +32,12 @@ object CSRAddress {
     val mip = 0x344
     val mcycle = 0xb00
     val minstret = 0xb02
+    val mhpmcounter3 = 0xb03
+    val mhpmcounter31 = 0xb1f
     val mcycleh = 0xb80
     val minstreth = 0xb82
+    val mhpmcounter3h = 0xb83
+    val mhpmcounter31h = 0xb9f
     val cycle = 0xc00
     val time = 0xc01
     val instret = 0xc02

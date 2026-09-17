@@ -155,13 +155,20 @@ class CSRSpec extends AnyFreeSpec with ChiselSim {
                 0x320, 0x340, 0x341, 0x342, 0x343, 0x344, 0xb00, 0xb02, 0xb80, 0xb82,
                 0xc00, 0xc01, 0xc02, 0xc80, 0xc81, 0xc82, 0xf11, 0xf12, 0xf13, 0xf14, 0xf15
             )
-            for (addr <- 0 until 4096) d.request(addr, illegal = !present(addr))
+            def hpm(addr: Int): Boolean =
+                (addr >= 0x323 && addr <= 0x33f) || (addr >= 0xb03 && addr <= 0xb1f) ||
+                    (addr >= 0xb83 && addr <= 0xb9f)
+            for (addr <- 0 until 4096) d.request(addr, illegal = !present(addr) && !hpm(addr))
             d.expect(0xf11, 0)
             d.expect(0xf12, 0)
             d.expect(0xf13, 0)
             d.expect(0xf14, 0)
             d.expect(0xf15, 0)
             d.expect(0x301, BigInt("40141121", 16))
+            for (addr <- Seq(0x323, 0x33f, 0xb03, 0xb1f, 0xb83, 0xb9f)) {
+                d.write(addr, word)
+                d.expect(addr, 0)
+            }
             d.write(0x301, 0)
             d.expect(0x301, BigInt("40141121", 16))
             for (addr <- Seq(0xf11, 0xc00, 0xc01, 0xc02)) {

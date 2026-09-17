@@ -129,6 +129,7 @@ flowchart LR
 - JDK 与 sbt
 - Verilator
 - Spike（`riscv-isa-sim`）
+- Spike 开发库及 `riscv-riscv.pc`
 - 支持 RV32 裸机目标的 GCC 工具链
 
 ### 获取与构建
@@ -163,6 +164,16 @@ cmake --build build/cmake --target functest-add --parallel
 
 将 `add` 替换为 `RV-Software/functest/src/` 中对应的源文件名即可选择其他功能测试。
 
+### 运行 RISC-V 架构测试
+
+```sh
+make -C RV-Software/arch-test run-smoke
+make -C RV-Software/arch-test run
+```
+
+当前 ACT4 配置使用 Clang 构建六项 Zicsr 测试，并通过 ZirconSim 与进程内 Spike 逐提交对拍。
+首次运行所需的固定工具环境见 `RV-Software/arch-test/README.md`。
+
 ### 生成 RTL
 
 ```sh
@@ -189,6 +200,7 @@ sbt "runMain Elaborate --simulation generated"
 | 验证层级 | 当前状态 |
 | --- | --- |
 | CoreMark + Spike 提交级差分 | 通过 |
+| ACT4 Zicsr 六项 + Spike 提交级差分 | 通过 |
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
