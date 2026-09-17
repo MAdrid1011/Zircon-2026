@@ -1,0 +1,69 @@
+{
+    "source_commit": "31e744df6a12ae09760820dc977d2b2488c9b0fe",
+    "kind": "architectural SRAM estimates, not manufacturing macros",
+    "files": [
+        {
+            "file": "fakeram45_32x32.lib",
+            "depth": 32,
+            "width": 32,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_32x32.lib",
+            "sha256": "8b66a6d8205714e968c16f53267fbb368ec212669d05fd61a1663ed5444d6a01"
+        },
+        {
+            "file": "fakeram45_32x64.lib",
+            "depth": 32,
+            "width": 64,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_32x64.lib",
+            "sha256": "78749bfc16598494fb7c10491d96f5e6dbcb155afc8844687bd5c18109d79652"
+        },
+        {
+            "file": "fakeram45_64x32.lib",
+            "depth": 64,
+            "width": 32,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_64x32.lib",
+            "sha256": "bcf9eb40daf072b0fdeb1d98f13b0b9cfebc07e446f3c6dadc5702eaa3e9e8a7"
+        },
+        {
+            "file": "fakeram45_64x64.lib",
+            "depth": 64,
+            "width": 64,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_64x64.lib",
+            "sha256": "8d1b523a1deb90f7790aac4aae3b62a75bd0f3f2fcb3a1ef1fcf70830f76a4a2"
+        },
+        {
+            "file": "fakeram45_128x32.lib",
+            "depth": 128,
+            "width": 32,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_128x32.lib",
+            "sha256": "3a15fb9b8e8b29a4308f0ef0cde52d7ef8e1027ffbdcce998ad47610c5c765de"
+        },
+        {
+            "file": "fakeram45_128x64.lib",
+            "depth": 128,
+            "width": 64,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_128x64.lib",
+            "sha256": "82ea5c0c24309cb9b175185fbe335f4622060d41937b4055a8cfc0887e51654d"
+        },
+        {
+            "file": "fakeram45_256x32.lib",
+            "depth": 256,
+            "width": 32,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_256x32.lib",
+            "sha256": "69f18164c84e37486480eaff0461538bd0e32eb7da31588ac5de8fcee516f0ef"
+        },
+        {
+            "file": "fakeram45_512x64.lib",
+            "depth": 512,
+            "width": 64,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_512x64.lib",
+            "sha256": "52bec9c35e3ed922459e336aa0e3f9a9e90c1caff6a6d9fff1743902e00e5dce"
+        },
+        {
+            "file": "fakeram45_1024x32.lib",
+            "depth": 1024,
+            "width": 32,
+            "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/fakeram45_1024x32.lib",
+            "sha256": "713385b60a8e3b0268525b6f5b8ebfcf546f7ff4da2270c13c8b26feb9eb3418"
+        }
+    ]
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "nangate45-typical",
+  "library": {
+    "file": "lib/NangateOpenCellLibrary_typical.lib",
+    "url": "https://raw.githubusercontent.com/The-OpenROAD-Project/OpenROAD-flow-scripts/31e744df6a12ae09760820dc977d2b2488c9b0fe/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib",
+    "commit": "31e744df6a12ae09760820dc977d2b2488c9b0fe",
+    "sha256": "8d540a4d4cf6d09d27c87ad067857a9c0c2eeb023ab7a56e058cd3113db4e9b1",
+    "corner": "typical",
+    "voltage_v": 1.1,
+    "temperature_c": 25
+  },
+  "constraints": {
+    "driving_cell": "BUF_X1",
+    "loads_ff": [
+      1,
+      4,
+      16
+    ],
+    "input_arrival": "all zero",
+    "wire_load": "none",
+    "delay_target": "ABC default; no explicit -D"
+  },
+  "reference_tools": {
+    "yosys_version": "Yosys 0.43 (git sha1 ead4718e5, ccache clang 14.0.0-1ubuntu1.1 -Os -flto -flto)"
+  }
+}

@@ -1,0 +1,77 @@
+{
+    "kind": "FreePDK45 SRAM analytical models; standalone tool compatibility verified; DCache integration pending",
+    "source": "https://github.com/VLSIDA/OpenRAM",
+    "source_commit": "b2b069ce119d1488cbe6883b2240bceb5c7ce29a",
+    "openram_version": "1.2.49",
+    "corner": {
+        "process": "TT",
+        "voltage_V": 1.1,
+        "temperature_C": 25
+    },
+    "analytical_delay": true,
+    "spice_characterization": false,
+    "drc_lvs_pex": false,
+    "route_supplies": false,
+    "perimeter_pins": true,
+    "load_scales": [
+        1,
+        4,
+        16,
+        64
+    ],
+    "slew_scales": [
+        0.25,
+        1,
+        10,
+        20
+    ],
+    "models": [
+        {
+            "name": "openram45_1rw1r_16x25",
+            "depth": 16,
+            "width": 25,
+            "write_size": 25,
+            "rw_ports": 1,
+            "r_ports": 1,
+            "area_um2": 6999.189375,
+            "lef_size_um": [
+                97.925,
+                71.475
+            ],
+            "liberty": "openram45_1rw1r_16x25_TT_1p1V_25C.lib"
+        },
+        {
+            "name": "openram45_1rw1r_16x32",
+            "depth": 16,
+            "width": 32,
+            "write_size": 8,
+            "rw_ports": 1,
+            "r_ports": 1,
+            "area_um2": 9569.3470125,
+            "lef_size_um": [
+                127.045,
+                75.3225
+            ],
+            "liberty": "openram45_1rw1r_16x32_TT_1p1V_25C.lib"
+        }
+    ],
+    "notes": [
+        "OpenRAM source is unmodified.",
+        "use_specified_corners avoids an upstream UnboundLocalError in only_use_config_corners.",
+        "16x256 full-layout generation exceeded the 180 second probe timeout; no valid model was produced for that attempt.",
+        "The Verilog DELAY and T_HOLD values are arbitrary functional model parameters; use Liberty for STA."
+    ],
+    "files": {
+        "LICENSE.FreePDK45": "59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b",
+        "LICENSE.OpenRAM": "c69f58c01ba06780d2f90ada5d199b61482724723f1ee2f036e19fc14db1f3f9",
+        "configs/openram45_1rw1r_16x25.py": "d5bf7b8852ab78447dbb291f4f02122efce082a0240e30b08614873e8a2211a4",
+        "configs/openram45_1rw1r_16x32.py": "cde59fe832c14a1eaae3abe8683361d91919b1c873ca42d96337fec92cbcac40",
+        "openram45_1rw1r_16x25.lef": "97dc19d5d07bdb0648d55b46cb28ce5f1ab2d6aeccac32a6649b74dfdecf06b4",
+        "openram45_1rw1r_16x25.v": "22993369f25c17fd5ed2f383cec19de7c9e2d28559437f9b0d74cae71862023d",
+        "openram45_1rw1r_16x25_TT_1p1V_25C.lib": "fc8c3adc5a11cf22e999cb50ad7231fdbeab091431a371339edb847090308228",
+        "openram45_1rw1r_16x32.lef": "538afaae5429e9b89a15ae9e577c9a82d79a8b76ac6132d89c0afc678cd65ed7",
+        "openram45_1rw1r_16x32.v": "bb410d4c7e619ffe3c5e4c2e1547d335a54dd1de0122b0f163919e6c145e51f6",
+        "openram45_1rw1r_16x32_TT_1p1V_25C.lib": "3fded24016c47f6c54b81db0afb274c8d68b5f8936fe3afca92b2c876e7d97e1"
+    },
+    "nangate45_sha256": "8d540a4d4cf6d09d27c87ad067857a9c0c2eeb023ab7a56e058cd3113db4e9b1"
+}
