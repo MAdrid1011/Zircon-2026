@@ -2,6 +2,19 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
+class FrontendIndirectMeta(p: FrontendParams) extends Bundle {
+    val indices = Vec(p.ittageCount, UInt(p.ittageIndexBits.W))
+    val tags = Vec(p.ittageCount, UInt(p.ittageTagBits.W))
+    // Zero selects the Main BTB; values 1..ittageCount identify tagged providers.
+    val providers = Vec(p.fetchWidth, UInt(p.ittageProviderBits.W))
+    val providerTargets = Vec(p.fetchWidth, UInt(32.W))
+    val providerConfidence = Vec(p.fetchWidth, UInt(2.W))
+    val alternateValid = UInt(p.fetchWidth.W)
+    val alternateTargets = Vec(p.fetchWidth, UInt(32.W))
+    val predictedTargets = Vec(p.fetchWidth, UInt(32.W))
+    val aheadValid = Bool()
+}
+
 class FrontendDirectionMeta(p: FrontendParams) extends Bundle {
     // Lookup-time keys are retained for delayed commit training.
     val phtIndex = UInt(p.phtIndexBits.W)
@@ -15,6 +28,7 @@ class FrontendDirectionMeta(p: FrontendParams) extends Bundle {
     val tcBiasTag = UInt(10.W)
     val tcHistoryIndex = UInt(p.tcIndexBits.W)
     val tcHistoryTag = UInt(8.W)
+    val ittage = new FrontendIndirectMeta(p)
 }
 
 class FrontendTrainingMeta(p: FrontendParams) extends Bundle {
@@ -25,6 +39,7 @@ class FrontendTrainingMeta(p: FrontendParams) extends Bundle {
     val aheadValid = Bool()
     val tcHistoryIndex = UInt(p.tcIndexBits.W)
     val tcHistoryTag = UInt(8.W)
+    val ittage = new FrontendIndirectMeta(p)
 }
 
 class FrontendTrainingRecord(p: FrontendParams) extends Bundle {

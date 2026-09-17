@@ -12,6 +12,7 @@ class PredictIO(p: FrontendParams) extends Bundle {
         val prediction = Output(new FrontendPrediction(p))
         val directions = Output(UInt(p.fetchWidth.W))
         val biasDirections = Output(UInt(p.fetchWidth.W))
+        val meta = Output(new FrontendDirectionMeta(p))
     }
     val pd = Flipped(Valid(new FrontendStateRepair(p)))
     val cmt = new Bundle {
@@ -41,6 +42,7 @@ class Predict(p: FrontendParams) extends Module {
     /* Modules */
     val state = Module(new SpeculativeState(p))
     val direction = Module(new MorslDirection(p))
+    val indirect = Module(new IndirectTargetPredictor(p))
     val fastBtb = Module(new BlockBTB(p, p.fastBtbSets, 1))
     val mainBtb = Module(new MainBTB(p))
     val fastLookup = Module(new BlockBTBLookup(p, p.fastBtbSets, 1))
@@ -60,6 +62,8 @@ class Predict(p: FrontendParams) extends Module {
     direction.io.query.pc := currentPc
     direction.io.query.folds := state.io.folds
     direction.io.query.loop := state.io.snapshot.loop
+    indirect.io.query.pc := currentPc
+    indirect.io.query.folds := state.io.folds
     earlySelect.io.pc := currentPc
     earlySelect.io.range := FrontendMath.range(currentPc, p)
     earlySelect.io.directions := direction.io.directions
@@ -82,6 +86,7 @@ class Predict(p: FrontendParams) extends Module {
     io.fc.out.predict.early := earlySelect.io.prediction
     io.fc.out.predict.earlyDirections := direction.io.directions
     io.fc.out.predict.meta := direction.io.meta
+    io.fc.out.predict.meta.ittage := indirect.io.meta
     io.fc.out.predict.tcRead := direction.io.tcRead
     io.fc.out.predict.before := state.io.snapshot
 
@@ -98,9 +103,7 @@ class Predict(p: FrontendParams) extends Module {
     mainSelect.io.backward := VecInit((0 until p.fetchWidth).map(i =>
         Mux(mainLookup.io.line.valid(i), mainLookup.io.line.backward(i), io.lookup.in.predict.early.backward(i))
     )).asUInt
-    val indirectTargetHit = io.lookup.in.predict.tcRead.indirectValid &&
-        io.lookup.in.predict.tcRead.indirectRow.tag === io.lookup.in.predict.meta.tcHistoryTag
-    val indirectTarget = Cat(io.lookup.in.predict.tcRead.indirectRow.target, 0.U(2.W))
+    val lookupMeta = WireDefault(io.lookup.in.predict.meta)
     for (i <- 0 until p.fetchWidth) {
         // A missing main-BTB slot keeps its fast prediction.
         val mainHit = mainLookup.io.line.valid(i)
@@ -108,25 +111,32 @@ class Predict(p: FrontendParams) extends Module {
         mainSelect.io.kinds(i) := kind
         mainSelect.io.control(i) := kind =/= 0.U
         mainSelect.io.conditional(i) := FrontendCfi.conditional(kind)
+        val baseTarget = Mux(mainHit, Cat(mainLookup.io.line.targets(i), 0.U(2.W)), io.lookup.in.predict.early.targets(i))
+        val ittage = io.lookup.in.predict.meta.ittage
+        val providerValid = ittage.aheadValid && ittage.providers(i) =/= 0.U
+        val alternateTarget = Mux(ittage.alternateValid(i), ittage.alternateTargets(i), baseTarget)
+        val ittageTarget = Mux(ittage.providerConfidence(i) =/= 0.U, ittage.providerTargets(i), alternateTarget)
+        val useIttage = kind === FrontendCfi.Indirect.U && providerValid
         mainSelect.io.targets(i) := Mux(
             FrontendCfi.pop(kind) && io.lookup.in.predict.before.count =/= 0.U,
             FrontendMath.rasTop(io.lookup.in.predict.before),
-            Mux(
-                FrontendCfi.indirect(kind) && !FrontendCfi.pop(kind) && indirectTargetHit,
-                indirectTarget,
-                Mux(mainHit, Cat(mainLookup.io.line.targets(i), 0.U(2.W)), io.lookup.in.predict.early.targets(i))
-            )
+            Mux(useIttage, ittageTarget, baseTarget)
         )
+        lookupMeta.ittage.alternateTargets(i) := alternateTarget
+        lookupMeta.ittage.predictedTargets(i) := Mux(useIttage, ittageTarget, baseTarget)
     }
 
     io.lookup.prediction := mainSelect.io.prediction
     io.lookup.directions := corrector.io.directions
     io.lookup.biasDirections := corrector.io.biasDirections
+    io.lookup.meta := lookupMeta
 
     /* Speculative Update and Recovery */
     // Advance once per accepted block; a flush invalidates the ahead context.
     direction.io.query.fire := io.fte.accept
     direction.io.query.invalidate := io.fte.flush
+    indirect.io.query.fire := io.fte.accept
+    indirect.io.query.invalidate := io.fte.flush
     state.io.early.valid := io.fte.accept
     state.io.early.bits.pc := io.fc.instPkg.startPc
     state.io.early.bits.prediction := earlySelect.io.prediction
@@ -136,6 +146,7 @@ class Predict(p: FrontendParams) extends Module {
 
     /* Commit Training */
     direction.io.train <> io.cmt.train
+    indirect.io.train <> io.cmt.train
     fastBtb.io.train <> io.cmt.train
     mainBtb.io.train <> io.cmt.train
 
