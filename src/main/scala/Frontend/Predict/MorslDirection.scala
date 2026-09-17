@@ -13,8 +13,6 @@ class TageRow(p: FrontendParams) extends Bundle {
   * Learning rules are project-specific; this is not the original CBP submission.
   */
 class MorslDirection(p: FrontendParams) extends Module {
-    private val indirectTargetIndexBits = log2Ceil(p.indirectTargetSets)
-
     val io = IO(new Bundle {
         val query = new Bundle {
             val pc = Input(UInt(32.W))
@@ -42,8 +40,6 @@ class MorslDirection(p: FrontendParams) extends Module {
     val tcHistoryTables = Seq.fill(2)(Mem(p.tcSets, new TcHistoryRow(p)))
     val tcHistoryValid = Seq.fill(2)(RegInit(VecInit.fill(p.tcSets)(false.B)))
     val tcHistoryReplace = RegInit(VecInit.fill(p.tcSets)(false.B))
-    val indirectTargetTable = Mem(p.indirectTargetSets, new IndirectTargetRow)
-    val indirectTargetValid = RegInit(VecInit.fill(p.indirectTargetSets)(false.B))
 
     /* Ahead Registers */
     // Predecessor-read rows for the next block. Saved valid bits are not tag-match results.
@@ -53,8 +49,6 @@ class MorslDirection(p: FrontendParams) extends Module {
     val aheadTcHistoryRows = Reg(Vec(2, new TcHistoryRow(p)))
     val aheadTcHistoryValid = Reg(Vec(2, Bool()))
     val aheadTcHistoryIndex = Reg(UInt(p.tcIndexBits.W))
-    val aheadIndirectTarget = Reg(new IndirectTargetRow)
-    val aheadIndirectValid = Reg(Bool())
     val aheadValid = RegInit(false.B)
 
     /* Query Indices and Tags */
@@ -101,6 +95,7 @@ class MorslDirection(p: FrontendParams) extends Module {
     /* Prediction Metadata */
     // Retain the lookup keys until commit; training must not use a newer speculative history.
     io.directions := directions.asUInt
+    io.meta := 0.U.asTypeOf(new FrontendDirectionMeta(p))
     io.meta.phtIndex := phtIndex
     io.meta.tageIndices := aheadTageIndices
     io.meta.tageTags := tageTags
@@ -115,8 +110,6 @@ class MorslDirection(p: FrontendParams) extends Module {
     io.tcRead.biasValid := tcBiasValid(tcBiasIndex)
     io.tcRead.historyRows := aheadTcHistoryRows
     io.tcRead.historyValid := VecInit(aheadTcHistoryValid.map(_ && aheadValid))
-    io.tcRead.indirectRow := aheadIndirectTarget
-    io.tcRead.indirectValid := aheadIndirectValid && aheadValid
 
     /* Ahead Read */
     // Stalls hold all ahead rows and indices; recovery wins over a same-cycle read.
@@ -132,8 +125,6 @@ class MorslDirection(p: FrontendParams) extends Module {
             aheadTcHistoryRows(way) := tcHistoryTables(way).read(tcHistoryIndex)
             aheadTcHistoryValid(way) := tcHistoryValid(way)(tcHistoryIndex)
         }
-        aheadIndirectTarget := indirectTargetTable.read(tcHistoryIndex(indirectTargetIndexBits - 1, 0))
-        aheadIndirectValid := indirectTargetValid(tcHistoryIndex(indirectTargetIndexBits - 1, 0))
         aheadTcHistoryIndex := tcHistoryIndex
     }
     when(io.query.invalidate) { aheadValid := false.B }
@@ -285,20 +276,5 @@ class MorslDirection(p: FrontendParams) extends Module {
             tcHistoryValid(way)(train.meta.tcHistoryIndex) := true.B
             tcHistoryReplace(train.meta.tcHistoryIndex) := !historyWay(0)
         }
-    }
-
-    /* Correlated Indirect Target Training */
-    val indirectSlots = VecInit((0 until p.fetchWidth).map { slot =>
-        val kind = train.kinds(slot)
-        train.mask(slot) && train.taken(slot) && FrontendCfi.indirect(kind) && !FrontendCfi.pop(kind)
-    })
-    val indirectNext = Wire(new IndirectTargetRow)
-    indirectNext.tag := train.meta.tcHistoryTag
-    indirectNext.target := Mux1H(indirectSlots, train.targets)(31, 2)
-    when(io.train.valid && train.meta.aheadValid && indirectSlots.asUInt.orR) {
-        val indirectIndex = train.meta.tcHistoryIndex(indirectTargetIndexBits - 1, 0)
-        indirectTargetTable.write(indirectIndex, indirectNext)
-        indirectTargetValid(indirectIndex) := true.B
-        assert(PopCount(indirectSlots) === 1.U)
     }
 }

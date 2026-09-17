@@ -124,6 +124,7 @@ class PreDecoders(p: FrontendParams) extends Module {
     io.record.train.meta.aheadValid := predInfo.meta.aheadValid
     io.record.train.meta.tcHistoryIndex := predInfo.meta.tcHistoryIndex
     io.record.train.meta.tcHistoryTag := predInfo.meta.tcHistoryTag
+    io.record.train.meta.ittage := predInfo.meta.ittage
     io.record.train.earlyDirections := predInfo.earlyDirections
     io.record.train.biasDirections := predInfo.biasDirections
     instPkgOut.record := io.record
