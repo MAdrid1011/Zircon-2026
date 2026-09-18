@@ -1,0 +1,6 @@
+diff --git a/sim/build.sbt b/sim/build.sbt
+--- a/sim/build.sbt
++++ b/sim/build.sbt
+@@ -3 +3 @@
+-val chiselVersion = "3.5-SNAPSHOT"
++val chiselVersion = "3.5.1"

@@ -1,0 +1,6 @@
+diff --git a/src/main/resources/testchipip/csrc/SimSerial.cc b/src/main/resources/testchipip/csrc/SimSerial.cc
+--- a/src/main/resources/testchipip/csrc/SimSerial.cc
++++ b/src/main/resources/testchipip/csrc/SimSerial.cc
+@@ -35 +35 @@
+-    *in_bits = tsi->in_bits();
++    *in_bits = *in_valid ? tsi->in_bits() : 0;

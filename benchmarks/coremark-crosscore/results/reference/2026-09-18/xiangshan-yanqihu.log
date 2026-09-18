@@ -1,0 +1,19 @@
+emu compiled at Sep 18 2026, 08:36:46
+Using seed = 1
+Using simulated 32768B flash
+Using simulated 8386560MB RAM
+The image is ../coremark-rv64/build/coremark-i30-rv64.bin
+2K validation run parameters for coremark.
+CoreMark Size    : 666
+Timed cycles     : 3855514
+CoreMark/MHz     : 7.781
+Iterations       : 30
+Compiler version : Clang 23.1.1
+Compiler flags   : -O2 -static -march=rv64gc_zicsr_zifencei -mabi=lp64d
+Memory location  : Code and data in simulated RAM; L1 cache at core clock
+seedcrc          : 0x18f2
+[0]crclist       : 0xe3c1
+[0]crcmatrix     : 0x0747
+[0]crcstate      : 0x8d84
+[0]crcfinal      : 0xcda7
+Correct operation validated. See readme.txt for run and reporting rules.

@@ -1,0 +1,8 @@
+diff --git a/build.sbt b/build.sbt
+--- a/build.sbt
++++ b/build.sbt
+@@ -4,2 +4,2 @@
+-  "chisel3" -> "3.5-SNAPSHOT",
+-  "chisel-iotesters" -> "2.5-SNAPSHOT"
++  "chisel3" -> "3.5.1",
++  "chisel-iotesters" -> "2.5.1"
