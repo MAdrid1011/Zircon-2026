@@ -330,7 +330,7 @@ class DCache(
     val storeResolveAllowsLoadMiss = storeState === storeResolve &&
         (storeException =/= 0.U || (storeResolveHit && !storeWriteVictimConflict))
     val canAllocateMiss = !missUnit.io.busy &&
-        (storeState === storeIdle || storeResolveAllowsLoadMiss) && !io.flush
+        (storeState === storeIdle || storeResolveAllowsLoadMiss) && !storeDirectLookup && !io.flush
     val offerMiss = needsMiss.asUInt.orR && canAllocateMiss
 
     missUnit.io.allocate.valid := offerMiss
@@ -855,6 +855,13 @@ class DCache(
         val loadHits = RegInit(VecInit.fill(2)(0.U(64.W)))
         val loadMisses = RegInit(VecInit.fill(2)(0.U(64.W)))
         val loadRetries = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryTranslation = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryForwardBlocked = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryUncachedOrder = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryStaleLookup = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryMissBusy = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryStoreConflict = RegInit(VecInit.fill(2)(0.U(64.W)))
+        val loadRetryLaneConflict = RegInit(VecInit.fill(2)(0.U(64.W)))
         val storeVisits = RegInit(0.U(64.W))
         val storeHits = RegInit(0.U(64.W))
         val storeMisses = RegInit(0.U(64.W))
@@ -872,6 +879,21 @@ class DCache(
             }
             when(localResponseFire(lane) && localResponse(lane).retry) {
                 loadRetries(lane) := loadRetries(lane) + 1.U
+                when(execute(lane).translationMiss) {
+                    loadRetryTranslation(lane) := loadRetryTranslation(lane) + 1.U
+                }.elsewhen(effectiveForwardBlocked(lane)) {
+                    loadRetryForwardBlocked(lane) := loadRetryForwardBlocked(lane) + 1.U
+                }.elsewhen(execute(lane).uncache && !execute(lane).ioAuthorized) {
+                    loadRetryUncachedOrder(lane) := loadRetryUncachedOrder(lane) + 1.U
+                }.elsewhen(staleLookup(lane)) {
+                    loadRetryStaleLookup(lane) := loadRetryStaleLookup(lane) + 1.U
+                }.elsewhen(missUnit.io.busy) {
+                    loadRetryMissBusy(lane) := loadRetryMissBusy(lane) + 1.U
+                }.elsewhen(storeState =/= storeIdle && !storeResolveAllowsLoadMiss) {
+                    loadRetryStoreConflict(lane) := loadRetryStoreConflict(lane) + 1.U
+                }.otherwise {
+                    loadRetryLaneConflict(lane) := loadRetryLaneConflict(lane) + 1.U
+                }
             }
         }
         val cachedStoreLookup = storeState === storeLookup && storeException === 0.U && !storeRequest.uncache
@@ -887,6 +909,13 @@ class DCache(
         io.performance.get.loadHits := loadHits
         io.performance.get.loadMisses := loadMisses
         io.performance.get.loadRetries := loadRetries
+        io.performance.get.loadRetryTranslation := loadRetryTranslation
+        io.performance.get.loadRetryForwardBlocked := loadRetryForwardBlocked
+        io.performance.get.loadRetryUncachedOrder := loadRetryUncachedOrder
+        io.performance.get.loadRetryStaleLookup := loadRetryStaleLookup
+        io.performance.get.loadRetryMissBusy := loadRetryMissBusy
+        io.performance.get.loadRetryStoreConflict := loadRetryStoreConflict
+        io.performance.get.loadRetryLaneConflict := loadRetryLaneConflict
         io.performance.get.storeVisits := storeVisits
         io.performance.get.storeHits := storeHits
         io.performance.get.storeMisses := storeMisses
