@@ -22,12 +22,18 @@ class FrontendDirectionMeta(p: FrontendParams) extends Bundle {
     val tageTags = Vec(p.tageCount, UInt(p.tageTagBits.W))
     // Zero selects PHT; values 1..tageCount select a tagged table.
     val tageProviders = Vec(p.fetchWidth, UInt(p.providerBits.W))
+    val tageConfidence = Vec(p.fetchWidth, UInt(2.W))
+    val tageDirections = UInt(p.fetchWidth.W)
     val alternateDirections = UInt(p.fetchWidth.W)
     val aheadValid = Bool()
-    val tcBiasIndex = UInt(p.tcIndexBits.W)
-    val tcBiasTag = UInt(10.W)
-    val tcHistoryIndex = UInt(p.tcIndexBits.W)
-    val tcHistoryTag = UInt(8.W)
+    val scBiasTag = UInt(10.W)
+    val scIndices = Vec(p.scCount, UInt(p.scIndexBits.W))
+    val scThresholdIndex = UInt(p.scThresholdIndexBits.W)
+    val scPredictions = UInt(p.fetchWidth.W)
+    val scLowMargin = UInt(p.fetchWidth.W)
+    val loopIndex = UInt(p.loopIndexBits.W)
+    val loopValid = UInt(p.fetchWidth.W)
+    val loopPredictions = UInt(p.fetchWidth.W)
     val ittage = new FrontendIndirectMeta(p)
 }
 
@@ -37,8 +43,13 @@ class FrontendTrainingMeta(p: FrontendParams) extends Bundle {
     val tageProviders = Vec(p.fetchWidth, UInt(p.providerBits.W))
     val alternateDirections = UInt(p.fetchWidth.W)
     val aheadValid = Bool()
-    val tcHistoryIndex = UInt(p.tcIndexBits.W)
-    val tcHistoryTag = UInt(8.W)
+    val scIndices = Vec(p.scCount, UInt(p.scIndexBits.W))
+    val scThresholdIndex = UInt(p.scThresholdIndexBits.W)
+    val scPredictions = UInt(p.fetchWidth.W)
+    val scLowMargin = UInt(p.fetchWidth.W)
+    val loopIndex = UInt(p.loopIndexBits.W)
+    val loopValid = UInt(p.fetchWidth.W)
+    val loopPredictions = UInt(p.fetchWidth.W)
     val ittage = new FrontendIndirectMeta(p)
 }
 
@@ -49,7 +60,6 @@ class FrontendTrainingRecord(p: FrontendParams) extends Bundle {
     val taken = UInt(p.fetchWidth.W)
     val meta = new FrontendTrainingMeta(p)
     val earlyDirections = UInt(p.fetchWidth.W)
-    val biasDirections = UInt(p.fetchWidth.W)
 }
 
 class FrontendTraining(p: FrontendParams) extends FrontendTrainingRecord(p) {

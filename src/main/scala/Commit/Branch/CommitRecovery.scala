@@ -39,7 +39,6 @@ class CommitRecovery(p: FrontendParams) extends Module {
     io.train.bits.targets := retirement.targets
     io.train.bits.meta := record.train.meta
     io.train.bits.earlyDirections := record.train.earlyDirections
-    io.train.bits.biasDirections := record.train.biasDirections
     when(io.valid) {
         assert(headMatches, "Retirement must reference the oldest FTQ index and fetch token")
         assert(!mismatch || io.redirect, "Backend must redirect when the retired prediction disagrees")
