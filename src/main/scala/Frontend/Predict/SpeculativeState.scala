@@ -4,7 +4,6 @@ import ZirconConfig.FrontendParams
 
 class FrontendStateSnapshot(p: FrontendParams) extends Bundle {
     val history = UInt(p.historyBits.W)
-    val loop = UInt(8.W)
     val folds = Vec(p.tageCount, UInt(p.hashBits.W))
     val ras = Vec(p.rasDepth, UInt(30.W))
     val top = UInt(30.W)
@@ -85,13 +84,6 @@ class SpeculativeState(p: FrontendParams) extends Module {
             next.folds(i) := rotate(before.folds(i), p.historyStep) ^
                 rotate(FrontendMath.fold(outgoing, p.hashBits), length) ^ FrontendMath.fold(signature, p.hashBits)
         }
-
-        // Consecutive taken backward branches form the loop context.
-        next.loop := Mux(
-            (prediction.taken & prediction.backward).orR,
-            FrontendMath.sat(before.loop, true.B),
-            0.U
-        )
         next
     }
 

@@ -122,10 +122,14 @@ class PreDecoders(p: FrontendParams) extends Module {
     io.record.train.meta.tageProviders := predInfo.meta.tageProviders
     io.record.train.meta.alternateDirections := predInfo.meta.alternateDirections
     io.record.train.meta.aheadValid := predInfo.meta.aheadValid
-    io.record.train.meta.tcHistoryIndex := predInfo.meta.tcHistoryIndex
-    io.record.train.meta.tcHistoryTag := predInfo.meta.tcHistoryTag
+    io.record.train.meta.scIndices := predInfo.meta.scIndices
+    io.record.train.meta.scThresholdIndex := predInfo.meta.scThresholdIndex
+    io.record.train.meta.scPredictions := predInfo.meta.scPredictions
+    io.record.train.meta.scLowMargin := predInfo.meta.scLowMargin
+    io.record.train.meta.loopIndex := predInfo.meta.loopIndex
+    io.record.train.meta.loopValid := predInfo.meta.loopValid
+    io.record.train.meta.loopPredictions := predInfo.meta.loopPredictions
     io.record.train.meta.ittage := predInfo.meta.ittage
-    io.record.train.earlyDirections := predInfo.earlyDirections
-    io.record.train.biasDirections := predInfo.biasDirections
+    io.record.train.earlyDirections := predInfo.meta.tageDirections
     instPkgOut.record := io.record
 }

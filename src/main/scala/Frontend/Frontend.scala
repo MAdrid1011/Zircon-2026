@@ -86,7 +86,6 @@ class Frontend(
     fields.zip(ic.io.pp.response.bits.inst).foreach { case (decoder, inst) => decoder.io.inst := inst }
     instPkgPDIn.predict.main := pr.io.lookup.prediction
     instPkgPDIn.predict.directions := pr.io.lookup.directions
-    instPkgPDIn.predict.biasDirections := pr.io.lookup.biasDirections
     instPkgPDIn.predict.meta := pr.io.lookup.meta
     instPkgPDIn.predict.returned := ic.io.pp.response.bits.mask
     instPkgPDIn.instructions.zipWithIndex.foreach { case (inst, i) =>
@@ -166,7 +165,6 @@ class Frontend(
         observe.repair.bits.prediction := pd.io.prediction
         observe.repair.bits.directions := instPkgPD.predict.directions
         observe.history := pr.io.dbg.get.history
-        observe.loop := pr.io.dbg.get.loop
         observe.rasTop := pr.io.dbg.get.rasTop
         observe.rasCount := pr.io.dbg.get.rasCount
         observe.aheadValid := pr.io.dbg.get.aheadValid
@@ -175,6 +173,9 @@ class Frontend(
         observe.ftqBlocked := false.B
         observe.btbReadSkipped := pr.io.dbg.get.btbReadSkipped
         observe.training := io.commit.ftq.train.valid
+        observe.loopTraining := pr.io.dbg.get.loopTraining
+        observe.loopProvider := pr.io.dbg.get.loopProvider
+        observe.loopCorrect := pr.io.dbg.get.loopCorrect
 
         val fqBlockedCycles = RegInit(0.U(64.W))
         val fqEmptyCycles = RegInit(0.U(64.W))

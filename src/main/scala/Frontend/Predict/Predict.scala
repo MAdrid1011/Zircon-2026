@@ -11,7 +11,6 @@ class PredictIO(p: FrontendParams) extends Bundle {
         val in = Input(new FrontendPackage(p))
         val prediction = Output(new FrontendPrediction(p))
         val directions = Output(UInt(p.fetchWidth.W))
-        val biasDirections = Output(UInt(p.fetchWidth.W))
         val meta = Output(new FrontendDirectionMeta(p))
     }
     val pd = Flipped(Valid(new FrontendStateRepair(p)))
@@ -27,10 +26,12 @@ class PredictIO(p: FrontendParams) extends Bundle {
     val dbg = if (p.observe) Some(new Bundle {
         val aheadValid = Output(Bool())
         val history = Output(UInt(32.W))
-        val loop = Output(UInt(8.W))
         val rasTop = Output(UInt(32.W))
         val rasCount = Output(UInt((p.rasBits + 1).W))
         val btbReadSkipped = Output(Bool())
+        val loopTraining = Output(UInt(64.W))
+        val loopProvider = Output(UInt(64.W))
+        val loopCorrect = Output(UInt(64.W))
     })
     else None
 }
@@ -48,7 +49,7 @@ class Predict(p: FrontendParams) extends Module {
     val fastLookup = Module(new BlockBTBLookup(p, p.fastBtbSets, 1))
     val earlySelect = Module(new FrontendPredictionSelect(p))
     val mainLookup = Module(new BlockBTBLookup(p, p.btbSets, p.btbWays))
-    val corrector = Module(new TaggedCorrector(p))
+    val corrector = Module(new StatisticalCorrector(p))
     val mainSelect = Module(new FrontendPredictionSelect(p))
 
     /* IF1: Fast Prediction */
@@ -61,7 +62,6 @@ class Predict(p: FrontendParams) extends Module {
     fastLookup.io.raw := fastBtb.io.raw
     direction.io.query.pc := currentPc
     direction.io.query.folds := state.io.folds
-    direction.io.query.loop := state.io.snapshot.loop
     indirect.io.query.pc := currentPc
     indirect.io.query.folds := state.io.folds
     earlySelect.io.pc := currentPc
@@ -79,6 +79,18 @@ class Predict(p: FrontendParams) extends Module {
             Cat(fastLookup.io.line.targets(i), 0.U(2.W))
         )
     }
+    val fastConditionals = VecInit((0 until p.fetchWidth).map(i =>
+        fastLookup.io.line.valid(i) && FrontendCfi.conditional(fastLookup.io.line.kinds(i))
+    ))
+    val loopAdvance = Wire(Vec(p.fetchWidth, Bool()))
+    for (rank <- 0 until p.fetchWidth) {
+        val active = (0 until p.fetchWidth).map { slot =>
+            val rankBefore = if (slot == 0) 0.U else PopCount(fastConditionals.take(slot))
+            fastConditionals(slot) && earlySelect.io.prediction.mask(slot) && rankBefore === rank.U
+        }
+        loopAdvance(rank) := active.reduce(_ || _)
+    }
+    direction.io.query.advance := loopAdvance.asUInt
 
     // Keep one common package; fill only the prediction fields produced here.
     io.fc.out := io.fc.instPkg
@@ -87,14 +99,14 @@ class Predict(p: FrontendParams) extends Module {
     io.fc.out.predict.earlyDirections := direction.io.directions
     io.fc.out.predict.meta := direction.io.meta
     io.fc.out.predict.meta.ittage := indirect.io.meta
-    io.fc.out.predict.tcRead := direction.io.tcRead
+    io.fc.out.predict.scRead := direction.io.scRead
     io.fc.out.predict.before := state.io.snapshot
 
     /* IF2: Main Prediction */
     // These inputs cross the explicit IF1/IF2 register in Frontend.
     corrector.io.earlyDirections := io.lookup.in.predict.earlyDirections
     corrector.io.meta := io.lookup.in.predict.meta
-    corrector.io.read := io.lookup.in.predict.tcRead
+    corrector.io.read := io.lookup.in.predict.scRead
     mainLookup.io.pc := io.lookup.in.startPc
     mainLookup.io.raw := mainBtb.io.raw
     mainSelect.io.pc := io.lookup.in.startPc
@@ -104,6 +116,8 @@ class Predict(p: FrontendParams) extends Module {
         Mux(mainLookup.io.line.valid(i), mainLookup.io.line.backward(i), io.lookup.in.predict.early.backward(i))
     )).asUInt
     val lookupMeta = WireDefault(io.lookup.in.predict.meta)
+    lookupMeta.scPredictions := corrector.io.scPredictions
+    lookupMeta.scLowMargin := corrector.io.scLowMargin
     for (i <- 0 until p.fetchWidth) {
         // A missing main-BTB slot keeps its fast prediction.
         val mainHit = mainLookup.io.line.valid(i)
@@ -128,7 +142,6 @@ class Predict(p: FrontendParams) extends Module {
 
     io.lookup.prediction := mainSelect.io.prediction
     io.lookup.directions := corrector.io.directions
-    io.lookup.biasDirections := corrector.io.biasDirections
     io.lookup.meta := lookupMeta
 
     /* Speculative Update and Recovery */
@@ -154,9 +167,11 @@ class Predict(p: FrontendParams) extends Module {
     if (p.observe) {
         io.dbg.get.aheadValid := direction.io.meta.aheadValid
         io.dbg.get.history := FrontendMath.fold(state.io.snapshot.history, 32)
-        io.dbg.get.loop := state.io.snapshot.loop
         io.dbg.get.rasTop := Mux(state.io.snapshot.count =/= 0.U, FrontendMath.rasTop(state.io.snapshot), 0.U)
         io.dbg.get.rasCount := state.io.snapshot.count
         io.dbg.get.btbReadSkipped := mainBtb.io.readSkipped.get
+        io.dbg.get.loopTraining := direction.io.dbg.get.loopTraining
+        io.dbg.get.loopProvider := direction.io.dbg.get.loopProvider
+        io.dbg.get.loopCorrect := direction.io.dbg.get.loopCorrect
     }
 }
