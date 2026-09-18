@@ -1,0 +1,26 @@
+diff --git a/build.sbt b/build.sbt
+--- a/build.sbt
++++ b/build.sbt
+@@ -63 +63 @@
+-val chiselVersion = "3.5-SNAPSHOT"
++val chiselVersion = "3.5.1"
+@@ -69 +69 @@
+-val firrtlVersion = "1.5-SNAPSHOT"
++val firrtlVersion = "1.5.1"
+@@ -73 +73 @@
+-val chiselTestVersion = "2.5-SNAPSHOT"
++val chiselTestVersion = "2.5.1"
+diff --git a/sims/common-sim-flags.mk b/sims/common-sim-flags.mk
+--- a/sims/common-sim-flags.mk
++++ b/sims/common-sim-flags.mk
+@@ -9 +9 @@
+-	-std=c++11 \
++	-std=c++17 \
+diff --git a/sims/verilator/Makefile b/sims/verilator/Makefile
+--- a/sims/verilator/Makefile
++++ b/sims/verilator/Makefile
+@@ -146 +146 @@
+-	if grep -qiP "module\s+(CVA6|NVDLA)" $(build_dir)/*.*v; \
++	if grep -qiE "module[[:space:]]+(CVA6|NVDLA)" $(build_dir)/*.*v; \
+@@ -168,0 +169 @@
++	--no-timing \

@@ -1,0 +1,5 @@
+target,coremark_per_mhz,timed_cycles,iterations,relative_to_zircon,validation
+zircon,3.799,not retained,30,+0.0%,user-confirmed baseline
+xiangshan-yanqihu,7.781,3855514,30,+104.8%,CRC valid
+boom-small,3.140,9551518,30,-17.3%,CRC valid
+boom-medium,5.322,5636123,30,+40.1%,CRC valid

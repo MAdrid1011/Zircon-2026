@@ -1,0 +1,8 @@
+# Upstream revisions used by the verified 2026-09-18 reference run.
+XIANGSHAN_URL=https://github.com/OpenXiangShan/XiangShan.git
+XIANGSHAN_REV=f633dc23114ade05a22afe9cfff151e413b15bed
+CHIPYARD_URL=https://github.com/ucb-bar/chipyard.git
+CHIPYARD_REV=4180463d52bc0a6b4c004530601ccdabebf0ab7d
+BOOM_REV=1ad28828673f2fce7a18f7255facd4705f04a58a
+MILL_LAUNCHER_URL=https://raw.githubusercontent.com/com-lihaoyi/mill/0.12.15/mill
+MILL_LAUNCHER_SHA256=099ac9370160c0348044708731c969c5b5c6d30f0b9460c50c2f47178f20a2af

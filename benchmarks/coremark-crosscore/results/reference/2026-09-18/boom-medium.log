@@ -1,0 +1,18 @@
+This emulator compiled with JTAG Remote Bitbang client. To enable, use +jtag_rbb_enable=1.
+Listening on port 60489
+2K validation run parameters for coremark.
+CoreMark Size    : 666
+Timed cycles     : 5636123
+CoreMark/MHz     : 5.322
+Iterations       : 30
+Compiler version : Clang 23.1.1
+Compiler flags   : -O2 -static -march=rv64gc_zicsr_zifencei -mabi=lp64d
+Memory location  : Code and data in simulated RAM; L1 cache at core clock
+seedcrc          : 0x18f2
+[0]crclist       : 0xe3c1
+[0]crcmatrix     : 0x0747
+[0]crcstate      : 0x8d84
+[0]crcfinal      : 0xcda7
+Correct operation validated. See readme.txt for run and reporting rules.
+*** PASSED *** Completed after 5805074 cycles
+[UART] UART0 is here (stdin/stdout).
