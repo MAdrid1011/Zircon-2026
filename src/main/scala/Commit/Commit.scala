@@ -49,6 +49,7 @@ class CommitRetireTrace(bp: BackendParams) extends Bundle {
     val valid = Bool()
     val pc = UInt(32.W)
     val instruction = UInt(32.W)
+    val mispredicted = Bool()
     val rd = UInt(5.W)
     val isFp = Bool()
     val writeValid = Bool()
@@ -376,6 +377,7 @@ class Commit(
         io.debug.retire(lane).valid := retireFire(lane)
         io.debug.retire(lane).pc := entry.pc
         io.debug.retire(lane).instruction := entry.instruction
+        io.debug.retire(lane).mispredicted := retiredPredictionFail(lane)
         io.debug.retire(lane).rd := entry.destination.rd
         io.debug.retire(lane).isFp := entry.destination.isFp
         io.debug.retire(lane).writeValid := entry.destination.prd.orR || entry.destination.isFp
