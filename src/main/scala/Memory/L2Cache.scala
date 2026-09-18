@@ -101,6 +101,15 @@ class L2Cache(
     val engineResponseData = Reg(UInt(p.lineBits.W))
     val engineResponseDirty = RegInit(false.B)
     val engineResponseError = RegInit(false.B)
+    val engineBackground = RegInit(false.B)
+
+    // A clean ICache target can return before its displaced line is installed.
+    // The existing engine drains this buffer with the normal quota and writeback policy.
+    val instructionVictimValid = RegInit(false.B)
+    val instructionVictimPaddr = Reg(UInt(34.W))
+    val instructionVictimData = Reg(UInt(p.lineBits.W))
+    val instructionVictimPop = Wire(Bool())
+    val instructionVictimAvailable = !instructionVictimValid || instructionVictimPop
 
     val engineVictimPort = engineState === engineVictimRead || engineState === engineVictimLookup
     val engineArrayWrite = engineState === engineVictimInstall
@@ -290,7 +299,8 @@ class L2Cache(
     val dHit = VecInit((0 until p.ways).map(way => dValidWays(way) && dTags(way) === tag(dS2.paddr))).asUInt
     val iHitDirty = iHit.orR && Mux1H(iHit, iDirtyWays.asBools)
     val dHitDirty = dHit.orR && Mux1H(dHit, dDirtyWays.asBools)
-    val iFast = !iS2.uncache && iHit.orR && (iS2.ptw || !iS2.victimValid)
+    val iFast = !iS2.uncache && iHit.orR &&
+        (iS2.ptw || !iS2.victimValid || instructionVictimAvailable)
     val dFast = !dS2.victimOnly && !dS2.uncache && dHit.orR && (dS2.ptw || !dS2.victimValid)
     val iFastConsume = iS2Advance && iFast && !iS2.ptw && !iHitDirty
     val dFastConsume = dS2Advance && dFast && !dS2.ptw
@@ -332,29 +342,52 @@ class L2Cache(
     val dWaiting = dS3Valid && !dS3Done && !dS3Started
     val selectI = iWaiting && (!dWaiting || enginePreferI)
     val selectD = dWaiting && !selectI
-    val selectedPtw = Mux(selectI, iS3.ptw, dS3.ptw)
-    val selectedPaddr = Mux(selectI, iS3.paddr, dS3.paddr)
-    val selectedWrite = !selectI && dS3.write
-    val selectedUncache = Mux(selectI, iS3.uncache, dS3.uncache)
-    val selectedSize = Mux(selectI, 2.U, dS3.size)
-    val selectedData = Mux(selectI, 0.U, dS3.data)
-    val selectedMask = Mux(selectI, 0.U, dS3.mask)
-    val selectedVictimValid = Mux(selectI, iS3.victimValid && !iS3.ptw, dS3.victimValid)
-    val selectedVictimPaddr = Mux(selectI, iS3.victimPaddr, dS3.victimPaddr)
-    val selectedVictimData = Mux(selectI, iS3.victimData, dS3.victimData)
-    val selectedVictimDirty = !selectI && dS3.victimDirty
-    val selectedVictimOnly = !selectI && dS3.victimOnly
-    val selectedHit = Mux(selectI, iS3Hit, dS3Hit)
-    val selectedWay = Mux(selectI, iS3Way, dS3Way)
-    val selectedHitData = Mux(selectI, iS3SelectedData, dS3SelectedData)
+    val selectInstructionVictim = !iWaiting && !dWaiting && instructionVictimValid
+    instructionVictimPop := engineState === engineIdle && selectInstructionVictim
+    val selectedPtw = Mux(selectInstructionVictim, false.B, Mux(selectI, iS3.ptw, dS3.ptw))
+    val selectedPaddr = Mux(
+        selectInstructionVictim,
+        instructionVictimPaddr,
+        Mux(selectI, iS3.paddr, dS3.paddr)
+    )
+    val selectedWrite = !selectInstructionVictim && !selectI && dS3.write
+    val selectedUncache = !selectInstructionVictim && Mux(selectI, iS3.uncache, dS3.uncache)
+    val selectedSize = Mux(selectInstructionVictim || selectI, 2.U, dS3.size)
+    val selectedData = Mux(selectInstructionVictim || selectI, 0.U, dS3.data)
+    val selectedMask = Mux(selectInstructionVictim || selectI, 0.U, dS3.mask)
+    val selectedVictimValid = Mux(
+        selectInstructionVictim,
+        true.B,
+        Mux(selectI, iS3.victimValid && !iS3.ptw, dS3.victimValid)
+    )
+    val selectedVictimPaddr = Mux(
+        selectInstructionVictim,
+        instructionVictimPaddr,
+        Mux(selectI, iS3.victimPaddr, dS3.victimPaddr)
+    )
+    val selectedVictimData = Mux(
+        selectInstructionVictim,
+        instructionVictimData,
+        Mux(selectI, iS3.victimData, dS3.victimData)
+    )
+    val selectedVictimDirty = !selectInstructionVictim && !selectI && dS3.victimDirty
+    val selectedVictimOnly = selectInstructionVictim || (!selectI && dS3.victimOnly)
+    val selectedHit = !selectInstructionVictim && Mux(selectI, iS3Hit, dS3Hit)
+    val selectedWay = Mux(selectInstructionVictim, 0.U, Mux(selectI, iS3Way, dS3Way))
+    val selectedHitData = Mux(
+        selectInstructionVictim,
+        0.U,
+        Mux(selectI, iS3SelectedData, dS3SelectedData)
+    )
     val selectedHitDirty = Mux(
-        selectI,
-        iS3Hit && Mux1H(iS3Way, iS3DirtyWays.asBools),
-        dS3SelectedDirty
+        selectInstructionVictim,
+        false.B,
+        Mux(selectI, iS3Hit && Mux1H(iS3Way, iS3DirtyWays.asBools), dS3SelectedDirty)
     )
 
-    when(engineState === engineIdle && (selectI || selectD)) {
-        engineSourceI := selectI
+    when(engineState === engineIdle && (selectI || selectD || selectInstructionVictim)) {
+        engineSourceI := selectI || selectInstructionVictim
+        engineBackground := selectInstructionVictim
         enginePtw := selectedPtw
         enginePaddr := selectedPaddr
         engineWrite := selectedWrite
@@ -379,10 +412,12 @@ class L2Cache(
             engineMemorySend
         )
         enginePreferI := !selectI
-        when(selectI) {
-            iS3Started := true.B
-        }.otherwise {
-            dS3Started := true.B
+        when(!selectInstructionVictim) {
+            when(selectI) {
+                iS3Started := true.B
+            }.otherwise {
+                dS3Started := true.B
+            }
         }
     }
 
@@ -522,16 +557,27 @@ class L2Cache(
     }
 
     when(engineComplete) {
-        when(engineSourceI) {
-            iS3Done := true.B
-            iS3Result := engineCompleteData
-            iS3Error := engineCompleteError
-        }.otherwise {
-            dS3Done := true.B
-            dS3Result := engineCompleteData
-            dS3ResultDirty := engineCompleteDirty
-            dS3Error := engineCompleteError
+        when(!engineBackground) {
+            when(engineSourceI) {
+                iS3Done := true.B
+                iS3Result := engineCompleteData
+                iS3Error := engineCompleteError
+            }.otherwise {
+                dS3Done := true.B
+                dS3Result := engineCompleteData
+                dS3ResultDirty := engineCompleteDirty
+                dS3Error := engineCompleteError
+            }
         }
+    }
+
+    when(instructionVictimPop) {
+        instructionVictimValid := false.B
+    }
+    when(iS2Advance && iFast && !iS2.ptw && iS2.victimValid) {
+        instructionVictimValid := true.B
+        instructionVictimPaddr := iS2.victimPaddr
+        instructionVictimData := iS2.victimData
     }
 
     // ==================== Array ports and metadata updates ====================
@@ -604,7 +650,7 @@ class L2Cache(
     plruTab.wdata(0) := plruUpdate(enginePlru, engineVictimWay)
 
     io.idle := !iS1Valid && !iS2Valid && !iS3Valid &&
-        !dS1Valid && !dS2Valid && !dS3Valid && engineState === engineIdle
+        !dS1Valid && !dS2Valid && !dS3Valid && !instructionVictimValid && engineState === engineIdle
 
     if (observe) {
         val instructionVisits = RegInit(0.U(64.W))
