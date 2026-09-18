@@ -65,8 +65,8 @@ final case class IssueQueueParams(
 final case class IssueParams(
     dispatchWidth: Int = 2,
     wakeupPorts: Int = 8,
-    arith0Entries: Int = 6,
-    arith1Entries: Int = 6,
+    arith0Entries: Int = 7,
+    arith1Entries: Int = 7,
     mixArithEntries: Int = 8,
     loadEntries: Int = 6,
     loadStoreAddressEntries: Int = 8,
