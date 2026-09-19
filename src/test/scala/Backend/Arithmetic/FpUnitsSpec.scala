@@ -30,7 +30,6 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
         outReady: Bool,
         result: UInt,
         flags: UInt,
-        dstIsFp: Bool,
         outTag: UInt,
         depth: Int,
         tagWidth: Int
@@ -63,7 +62,6 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
                 result.expect(expected.result, clue)
                 flags.expect(expected.flags, clue)
                 outTag.expect(expectedTag, clue)
-                dstIsFp.expect((expected.op <= 4 || expected.op == 10 || expected.op >= 13).B, clue)
             }
             val fire = active && firstReady && input.nonEmpty
             if (!active) {
@@ -129,7 +127,6 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.out.ready,
                 dut.io.out.bits.res,
                 dut.io.out.bits.fflags,
-                dut.io.out.bits.dstIsFp,
                 dut.io.out.bits.tag,
                 depth = 1,
                 tagWidth = 1
@@ -154,7 +151,6 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.out.ready,
                 dut.io.out.bits.res,
                 dut.io.out.bits.fflags,
-                dut.io.out.bits.dstIsFp,
                 dut.io.out.bits.tag,
                 depth = 2,
                 tagWidth = 7

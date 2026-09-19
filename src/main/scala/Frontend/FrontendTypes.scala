@@ -68,7 +68,7 @@ class FrontendPredictInfo(p: FrontendParams) extends Bundle {
     val range = UInt(p.fetchWidth.W)
     val returned = UInt(p.fetchWidth.W)
     val early = new FrontendPrediction(p)
-    val main = new FrontendPrediction(p)
+    val main = new FrontendTargetPrediction(p)
     val earlyDirections = UInt(p.fetchWidth.W)
     val directions = UInt(p.fetchWidth.W)
     val meta = new FrontendDirectionMeta(p)
@@ -85,6 +85,15 @@ class FrontendPackage(p: FrontendParams) extends Bundle {
     val nextPc = UInt(32.W)
     val instructions = Vec(p.fetchWidth, new FrontendInstruction(p))
     val predict = new FrontendPredictInfo(p)
+    val record = new FrontendFtqRecord(p)
+}
+
+class FetchQueueEntry(p: FrontendParams) extends Bundle {
+    val fetchToken = UInt(32.W)
+    val slot = UInt(p.slotBits.W)
+    val packetStart = Bool()
+    val packetEnd = Bool()
+    val instruction = new FrontendInstruction(p)
     val record = new FrontendFtqRecord(p)
 }
 
@@ -105,8 +114,8 @@ class FrontendFetchIO(p: FrontendParams) extends Bundle {
     val response = Flipped(Decoupled(new FrontendFetchResponse(p)))
 }
 
-class FrontendMiddleIO(p: FrontendParams) extends Bundle {
-    val out = Decoupled(new FrontendPackage(p))
+class FrontendMiddleIO(p: FrontendParams, width: Int) extends Bundle {
+    val out = Vec(width, Decoupled(new FetchQueueEntry(p)))
 }
 
 /** One in-order retired fetch packet; masks describe only actually executed slots. */
@@ -147,45 +156,10 @@ class FrontendPrediction(p: FrontendParams) extends Bundle {
     val backward = UInt(p.fetchWidth.W)
 }
 
-class FrontendPredictionEvent(p: FrontendParams) extends Bundle {
-    val token = UInt(32.W)
-    val pc = UInt(32.W)
-    val prediction = new FrontendPrediction(p)
-    val directions = UInt(p.fetchWidth.W)
-}
-
-class FrontendCancel(p: FrontendParams) extends Bundle {
-    val global = Bool()
-    val boundaryToken = UInt(32.W)
-    val target = UInt(32.W)
-}
-
-class FrontendObserveIO(p: FrontendParams) extends Bundle {
-    // Read-only taps: synthesis removes these with the other optional statistics.
-    val fetchRequest = Output(Valid(new FrontendFetchRequest(p)))
-    val fetchRequestReady = Output(Bool())
-    val fetchResponse = Output(Valid(new FrontendFetchResponse(p)))
-    val fetchResponseReady = Output(Bool())
-    val icache = Output(new ICacheDBG)
-    val icacheMiss = Output(Bool())
-    val stages = Output(Vec(3, Valid(new FrontendPredictionEvent(p))))
-    val repair = Output(Valid(new FrontendPredictionEvent(p)))
-    val cancel = Output(Valid(new FrontendCancel(p)))
-    val history = Output(UInt(32.W))
-    val rasTop = Output(UInt(32.W))
-    val rasCount = Output(UInt((p.rasBits + 1).W))
-    val aheadValid = Output(Bool())
-    val ftqUsed = Output(UInt(log2Ceil(p.ftqDepth + 1).W))
-    val ftqEnqIdx = Output(UInt(p.ftqBits.W))
-    val ftqBlocked = Output(Bool())
-    val btbReadSkipped = Output(Bool())
-    val training = Output(Bool())
-    val loopTraining = Output(UInt(64.W))
-    val loopProvider = Output(UInt(64.W))
-    val loopCorrect = Output(UInt(64.W))
-    val fqBlockedCycles = Output(UInt(64.W))
-    val fqEmptyCycles = Output(UInt(64.W))
-    val ftqBlockedCycles = Output(UInt(64.W))
+/** Main-BTB fields consumed by predecode after the IF2 register. */
+class FrontendTargetPrediction(p: FrontendParams) extends Bundle {
+    val kinds = Vec(p.fetchWidth, UInt(3.W))
+    val targets = Vec(p.fetchWidth, UInt(32.W))
 }
 
 object FrontendMath {
@@ -235,4 +209,14 @@ object FrontendMath {
         if (p.historyBits == p.historyStep) signature
         else Cat(history(p.historyBits - p.historyStep - 1, 0), signature)
     }
+}
+
+class FrontendObserveIO extends Bundle {
+    // Only counters consumed by the simulation shell cross the Frontend boundary.
+    val icache = Output(new ICacheDBG)
+    val loopTraining = Output(UInt(64.W))
+    val loopProvider = Output(UInt(64.W))
+    val loopCorrect = Output(UInt(64.W))
+    val fqBlockedCycles = Output(UInt(64.W))
+    val fqEmptyCycles = Output(UInt(64.W))
 }

@@ -6,8 +6,8 @@ import chisel3.util.log2Ceil
 case class BackendParams(
     numIntPhys: Int = 72,
     numFpPhys: Int = 48,
-    robWidth: Int = 8,
-    sqWidth: Int = 8,
+    robWidth: Int = 6,
+    sqWidth: Int = 5,
     specWidth: Int = 8,
 ) {
     require(numIntPhys >= 2 && numFpPhys >= 2)

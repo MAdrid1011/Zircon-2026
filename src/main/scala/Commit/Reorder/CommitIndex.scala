@@ -9,15 +9,25 @@ import chisel3.util._
   * bank count.
   */
 object CommitIndex {
+    def addressWidth(entries: Int): Int = log2Ceil(entries)
+
     def compactWidth(entries: Int, banks: Int): Int = {
         require(entries % banks == 0)
-        1 + log2Ceil(entries / banks) + log2Ceil(banks)
+        addressWidth(entries)
     }
 
     def encode(index: ClusterEntry, entries: Int, banks: Int, width: Int): UInt = {
         val rows = entries / banks
         require(width >= compactWidth(entries, banks))
-        Cat(index.high, OHToUInt(index.offset), OHToUInt(index.qidx)).pad(width)
+        def oneHotIndex(value: UInt, count: Int): UInt = {
+            val encoded = Mux1H(value.asBools.zipWithIndex.map { case (selected, position) =>
+                selected -> position.U(log2Ceil(count).W)
+            })
+            Mux(value(0), 0.U, encoded)
+        }
+        val bank = oneHotIndex(index.qidx, banks)
+        val row = oneHotIndex(index.offset, rows)
+        Cat(row, bank).pad(width)
     }
 
     def decode(value: UInt, entries: Int, banks: Int): ClusterEntry = {
@@ -25,9 +35,26 @@ object CommitIndex {
         val bankWidth = log2Ceil(banks)
         val rowWidth = log2Ceil(rows)
         val result = Wire(new ClusterEntry(rows, banks))
-        result.qidx := UIntToOH(value(bankWidth - 1, 0), banks)
-        result.offset := UIntToOH(value(bankWidth + rowWidth - 1, bankWidth), rows)
+        result.qidx := VecInit.tabulate(banks)(bank => value(bankWidth - 1, 0) === bank.U).asUInt
+        result.offset := VecInit.tabulate(rows)(row =>
+            value(bankWidth + rowWidth - 1, bankWidth) === row.U
+        ).asUInt
         result.high := value(bankWidth + rowWidth)
+        result
+    }
+
+    /** Decode a physical ROB slot. The generation bit is irrelevant to SRAM access. */
+    def decodeAddress(value: UInt, entries: Int, banks: Int): ClusterEntry = {
+        val rows = entries / banks
+        val bankWidth = log2Ceil(banks)
+        val rowWidth = log2Ceil(rows)
+        require(value.getWidth == addressWidth(entries))
+        val result = Wire(new ClusterEntry(rows, banks))
+        result.qidx := VecInit.tabulate(banks)(bank => value(bankWidth - 1, 0) === bank.U).asUInt
+        result.offset := VecInit.tabulate(rows)(row =>
+            value(bankWidth + rowWidth - 1, bankWidth) === row.U
+        ).asUInt
+        result.high := false.B
         result
     }
 }

@@ -14,12 +14,14 @@ class FrontendPredecodeFields extends Bundle {
     val immediate = UInt(32.W)
 }
 
+class PredecodeFieldsIO extends Bundle {
+    val inst = Input(UInt(32.W))
+    val fields = Output(new FrontendPredecodeFields)
+}
+
 /** IF2 performs shallow classification and immediate wiring before the PD register. */
-class PredecodeFields extends Module {
-    val io = IO(new Bundle {
-        val inst = Input(UInt(32.W))
-        val fields = Output(new FrontendPredecodeFields)
-    })
+class PredecodeFields extends RawModule {
+    val io = IO(new PredecodeFieldsIO)
     val inst = io.inst
 
     /* Control-Flow Classification */

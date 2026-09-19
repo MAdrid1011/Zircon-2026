@@ -19,13 +19,16 @@ class MultiplyRequest(val tagWidth: Int) extends Bundle {
 class MultiplyResponse(val tagWidth: Int) extends Bundle {
     val res = UInt(32.W)
     val fflags = UInt(5.W)
-    val dstIsFp = Bool()
     val tag = UInt(tagWidth.W)
+}
+class MultiplyWbInput extends Bundle {
+    val res = UInt(32.W)
+    val tag = new MixArithWakeTag
 }
 class MultiplyIO(tagWidth: Int) extends Bundle {
     val in = Flipped(Decoupled(new MultiplyRequest(tagWidth)))
     val out = Decoupled(new MultiplyResponse(tagWidth))
-    val wbInput = Output(Valid(new MultiplyResponse(tagWidth)))
+    val wbInput = Output(Valid(new MultiplyWbInput))
     val present = Output(Bool())
     val flush = Input(Bool())
 }
@@ -126,6 +129,16 @@ object SharedMultiplyLogic {
         if (amount.getWidth > log2Ceil(width))
             Mux(amount(amount.getWidth - 1, log2Ceil(width)).orR, x.orR.asUInt, value)
         else value
+    }
+    def leftTruncate(x: UInt, amount: UInt, width: Int): UInt = {
+        require(x.getWidth == width)
+        var value = x
+        for (i <- 0 until amount.getWidth) {
+            val distance = 1 << i
+            val shifted = if (distance < width) Cat(value(width - distance - 1, 0), 0.U(distance.W)) else 0.U(width.W)
+            value = Mux(amount(i), shifted, value)
+        }
+        value
     }
     def shiftControl(delta: SInt): (UInt, Bool) = {
         require(delta.getWidth > 7)
@@ -242,7 +255,7 @@ object SharedMultiplyLogic {
 
     /** Shared FP EX4: normalize, extract GRS, round once and pack. Integer results bypass this. */
     def finish(x: MulStage3): (UInt, UInt) = {
-        val mag = Mux(x.right, rightJam(x.mag, x.shift, 80), (x.mag << x.shift)(79, 0))
+        val mag = Mux(x.right, rightJam(x.mag, x.shift, 80), leftTruncate(x.mag, x.shift, 80))
         val window = mag(26, 0)
         val q = window(26, 3)
         val guard = window(2); val sticky = window(1, 0).orR
@@ -422,7 +435,7 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     // 1. Parallel work: reduce the product to two rows and align other to the 80-bit window.
     val productRows = compress(r1.pp.toSeq)
     val other = Cat(0.U(56.W), r1.other)
-    val aligned = Mux(r1.right, rightJam(other, r1.shift, 80), (other << r1.shift)(79, 0))
+    val aligned = Mux(r1.right, rightJam(other, r1.shift, 80), leftTruncate(other, r1.shift, 80))
 
     // 2. All paths meet here. useMul=false replaces the product rows with primary.
     //    D = main + (subtract ? -aligned : aligned); subtraction uses inversion plus one.
@@ -473,9 +486,10 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val s4 = Wire(new MultiplyResponse(tagWidth))
     s4.res := Mux(r3.meta.fp, floatBits, r3.integer)
     s4.fflags := Mux(r3.meta.fp, floatFlags, 0.U)
-    s4.dstIsFp := r3.meta.fp; s4.tag := r3.meta.tag
+    s4.tag := r3.meta.tag
     io.wbInput.valid := advance && v3 && active
-    io.wbInput.bits := s4
+    io.wbInput.bits.res := s4.res
+    io.wbInput.bits.tag := MixArithWakeTag.fromUInt(s4.tag)
     // Data contents are don't-care after flush; keep flush out of every wide register D path.
     when(advance) { r1 := s1; r2 := s2; r3 := s3; r4 := s4 }
 }

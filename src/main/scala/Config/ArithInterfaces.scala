@@ -1,6 +1,6 @@
 import chisel3._
 import chisel3.util._
-import ZirconConfig.BackendParams
+import ZirconConfig.{BackendParams, CommitParams}
 
 object ArithConstants {
     private val backend = BackendParams()
@@ -8,6 +8,7 @@ object ArithConstants {
     val physWidth = backend.intWidth
     val tagWidth = physWidth + 1
     val robWidth = backend.robWidth
+    val robAddressWidth = log2Ceil(CommitParams().robEntries)
 }
 
 class IntegerResult extends Bundle {
@@ -16,13 +17,13 @@ class IntegerResult extends Bundle {
 }
 
 class ArithCompletion extends Bundle {
-    val robIdx = UInt(ArithConstants.robWidth.W)
+    val robIdx = UInt(ArithConstants.robAddressWidth.W)
     val data = UInt(32.W)
     val exception = new BackendException
 }
 
 class ArithBranchUpdate extends Bundle {
-    val robIdx = UInt(ArithConstants.robWidth.W)
+    val robIdx = UInt(ArithConstants.robAddressWidth.W)
     val taken = Bool()
     val target = UInt(32.W)
     val predFail = Bool()
@@ -39,7 +40,7 @@ class ArithRegfileIO extends Bundle {
 }
 
 class ArithRobIO extends Bundle {
-    val readIdx = Output(UInt(ArithConstants.robWidth.W))
+    val readIdx = Output(UInt(ArithConstants.robAddressWidth.W))
     val pc = Input(UInt(32.W))
     val complete = Output(Valid(new ArithCompletion))
 }

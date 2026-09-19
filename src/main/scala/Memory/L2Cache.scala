@@ -8,7 +8,7 @@ class L2InstructionStageRequest(c: ICacheParams) extends Bundle {
     val paddr = UInt(34.W)
     val uncache = Bool()
     val victimValid = Bool()
-    val victimPaddr = UInt(34.W)
+    val victimLine = UInt((34 - c.offsetBits).W)
     val victimData = UInt(c.lineBits.W)
 }
 
@@ -19,9 +19,9 @@ class L2DataStageRequest(p: L2CacheParams) extends Bundle {
     val uncache = Bool()
     val size = UInt(2.W)
     val data = UInt(p.lineBits.W)
-    val mask = UInt(p.lineBytes.W)
+    val mask = UInt(4.W)
     val victimValid = Bool()
-    val victimPaddr = UInt(34.W)
+    val victimLine = UInt((34 - p.offsetBits).W)
     val victimData = UInt(p.lineBits.W)
     val victimDirty = Bool()
     val victimOnly = Bool()
@@ -86,9 +86,10 @@ class L2Cache(
     val engineUncache = Reg(Bool())
     val engineSize = Reg(UInt(2.W))
     val engineData = Reg(UInt(p.lineBits.W))
-    val engineMask = Reg(UInt(p.lineBytes.W))
+    val engineMask = Reg(UInt(4.W))
     val engineVictimValid = Reg(Bool())
-    val engineVictimPaddr = Reg(UInt(34.W))
+    val engineVictimLine = Reg(UInt((34 - p.offsetBits).W))
+    val engineVictimAddress = Cat(engineVictimLine, 0.U(p.offsetBits.W))
     val engineVictimData = Reg(UInt(p.lineBits.W))
     val engineVictimDirty = Reg(Bool())
     val engineTargetHit = Reg(Bool())
@@ -106,7 +107,8 @@ class L2Cache(
     // A clean ICache target can return before its displaced line is installed.
     // The existing engine drains this buffer with the normal quota and writeback policy.
     val instructionVictimValid = RegInit(false.B)
-    val instructionVictimPaddr = Reg(UInt(34.W))
+    val instructionVictimLine = Reg(UInt((34 - p.offsetBits).W))
+    val instructionVictimAddress = Cat(instructionVictimLine, 0.U(p.offsetBits.W))
     val instructionVictimData = Reg(UInt(p.lineBits.W))
     val instructionVictimPop = Wire(Bool())
     val instructionVictimAvailable = !instructionVictimValid || instructionVictimPop
@@ -152,21 +154,31 @@ class L2Cache(
     io.icache.response.valid := iS3Valid && iS3Done && !iS3.ptw
     io.icache.response.bits.token := iS3.token
     val iS3SelectedData = Mux1H(iS3Way, iS3Lines)
-    val iS3SelectedWord = (iS3SelectedData >> (iS3.paddr(p.offsetBits - 1, 0) << 3))(31, 0)
+    def selectPteBits(line: UInt, address: UInt): UInt = Mux1H(
+        VecInit.tabulate(p.lineBytes / 4)(word => address(p.offsetBits - 1, 2) === word.U),
+        line.asTypeOf(Vec(p.lineBytes / 4, UInt(32.W))).map(word => Cat(word(31, 10), word(7, 0))),
+    )
     val dS3SelectedData = Mux1H(dS3Way, dS3Lines)
     val dS3SelectedDirty = dS3Hit && Mux1H(dS3Way, dS3DirtyWays.asBools)
-    val dS3SelectedWord = (dS3SelectedData >> (dS3.paddr(p.offsetBits - 1, 0) << 3))(31, 0)
     io.icache.response.bits.data := Mux(iS3Started, iS3Result, iS3SelectedData)
     io.icache.response.bits.error := iS3Error
     io.iptw.rsp.valid := iS3Valid && iS3Done && iS3.ptw
-    io.iptw.rsp.bits.data := Mux(iS3Started, iS3Result(31, 0), iS3SelectedWord)
+    io.iptw.rsp.bits.pte := Mux(
+        iS3Started,
+        Cat(iS3Result(31, 10), iS3Result(7, 0)),
+        selectPteBits(iS3SelectedData, iS3.paddr)
+    ).asTypeOf(new Sv32Pte)
     io.iptw.rsp.bits.error := iS3Error
     io.dcache.rsp.valid := dS3Valid && dS3Done && !dS3.ptw
     io.dcache.rsp.bits.data := Mux(dS3Started, dS3Result, dS3SelectedData)
     io.dcache.rsp.bits.dirty := Mux(dS3Started, dS3ResultDirty, dS3SelectedDirty)
     io.dcache.rsp.bits.error := dS3Error
     io.dptw.rsp.valid := dS3Valid && dS3Done && dS3.ptw
-    io.dptw.rsp.bits.data := Mux(dS3Started, dS3Result(31, 0), dS3SelectedWord)
+    io.dptw.rsp.bits.pte := Mux(
+        dS3Started,
+        Cat(dS3Result(31, 10), dS3Result(7, 0)),
+        selectPteBits(dS3SelectedData, dS3.paddr)
+    ).asTypeOf(new Sv32Pte)
     io.dptw.rsp.bits.error := dS3Error
 
     val iS3ResponseFire = io.icache.response.fire || io.iptw.rsp.fire
@@ -210,7 +222,7 @@ class L2Cache(
         iInput.paddr := io.icache.request.bits.paddr
         iInput.uncache := io.icache.request.bits.uncache
         iInput.victimValid := io.icache.request.bits.victimValid
-        iInput.victimPaddr := io.icache.request.bits.victimPaddr
+        iInput.victimLine := io.icache.request.bits.victimLine
         iInput.victimData := io.icache.request.bits.victimData
     }.elsewhen(io.iptw.req.fire) {
         iInput.ptw := true.B
@@ -227,7 +239,7 @@ class L2Cache(
         dInput.data := io.dcache.req.bits.data
         dInput.mask := io.dcache.req.bits.mask
         dInput.victimValid := io.dcache.req.bits.victimValid
-        dInput.victimPaddr := io.dcache.req.bits.victimPaddr
+        dInput.victimLine := io.dcache.req.bits.victimLine
         dInput.victimData := io.dcache.req.bits.victimData
         dInput.victimDirty := io.dcache.req.bits.victimDirty
         dInput.victimOnly := io.dcache.req.bits.victimOnly
@@ -282,8 +294,8 @@ class L2Cache(
     val dReadAddress = Mux(dS2Valid && !dS2Advance, dS2.paddr, dS1.paddr)
     val iReadEnable = (iS2Valid && !iS2Advance) || iS1Advance
     val dReadEnable = (dS2Valid && !dS2Advance) || dS1Advance
-    val iMetaAddress = Mux(engineVictimPort && engineSourceI, engineVictimPaddr, iS2.paddr)
-    val dMetaAddress = Mux(engineVictimPort && !engineSourceI, engineVictimPaddr, dS2.paddr)
+    val iMetaAddress = Mux(engineVictimPort && engineSourceI, engineVictimAddress, iS2.paddr)
+    val dMetaAddress = Mux(engineVictimPort && !engineSourceI, engineVictimAddress, dS2.paddr)
 
     val iTags = VecInit(tagTab.map(_.douta))
     val iLines = VecInit(dataTab.map(_.douta))
@@ -347,14 +359,14 @@ class L2Cache(
     val selectedPtw = Mux(selectInstructionVictim, false.B, Mux(selectI, iS3.ptw, dS3.ptw))
     val selectedPaddr = Mux(
         selectInstructionVictim,
-        instructionVictimPaddr,
+        instructionVictimAddress,
         Mux(selectI, iS3.paddr, dS3.paddr)
     )
     val selectedWrite = !selectInstructionVictim && !selectI && dS3.write
     val selectedUncache = !selectInstructionVictim && Mux(selectI, iS3.uncache, dS3.uncache)
     val selectedSize = Mux(selectInstructionVictim || selectI, 2.U, dS3.size)
     val selectedData = Mux(selectInstructionVictim || selectI, 0.U, dS3.data)
-    val selectedMask = Mux(selectInstructionVictim || selectI, 0.U, dS3.mask)
+    val selectedMask = Mux(selectInstructionVictim || selectI, 0.U, dS3.mask(3, 0))
     val selectedVictimValid = Mux(
         selectInstructionVictim,
         true.B,
@@ -362,8 +374,12 @@ class L2Cache(
     )
     val selectedVictimPaddr = Mux(
         selectInstructionVictim,
-        instructionVictimPaddr,
-        Mux(selectI, iS3.victimPaddr, dS3.victimPaddr)
+        instructionVictimAddress,
+        Mux(
+            selectI,
+            Cat(iS3.victimLine, 0.U(p.offsetBits.W)),
+            Cat(dS3.victimLine, 0.U(p.offsetBits.W)),
+        )
     )
     val selectedVictimData = Mux(
         selectInstructionVictim,
@@ -396,7 +412,7 @@ class L2Cache(
         engineData := selectedData
         engineMask := selectedMask
         engineVictimValid := selectedVictimValid
-        engineVictimPaddr := selectedVictimPaddr
+        engineVictimLine := selectedVictimPaddr(33, p.offsetBits)
         engineVictimData := selectedVictimData
         engineVictimDirty := selectedVictimDirty
         engineTargetHit := selectedHit && !selectedVictimOnly
@@ -427,7 +443,7 @@ class L2Cache(
     val engineTags = Mux(engineSourceI, iTags, dTags)
     val engineLines = Mux(engineSourceI, iLines, dLines)
     val engineLookupHit = VecInit((0 until p.ways).map { way =>
-        engineValidWays(way) && engineTags(way) === tag(engineVictimPaddr)
+        engineValidWays(way) && engineTags(way) === tag(engineVictimAddress)
     }).asUInt
     val enginePlru = Mux(engineSourceI, plruTab.rdata(0), plruTab.rdata(1))
     val engineConsumeTarget = engineTargetHit && (!engineSourceI || !engineTargetDirty)
@@ -450,7 +466,7 @@ class L2Cache(
     io.memory.req.bits.data := Mux(engineState === engineWritebackSend, engineWritebackData, engineData)
     io.memory.req.bits.mask := Mux(
         engineState === engineWritebackSend,
-        Fill(p.lineBytes, 1.U(1.W)),
+        15.U,
         engineMask
     )
     io.memory.rsp.ready := engineState === engineMemoryWait || engineState === engineWritebackWait
@@ -461,7 +477,7 @@ class L2Cache(
         }
         is(engineVictimLookup) {
             assert(PopCount(engineLookupHit) <= 1.U, "L2Cache: multiple victim hits")
-            val sameSet = index(engineVictimPaddr) === index(enginePaddr)
+            val sameSet = index(engineVictimAddress) === index(enginePaddr)
             val protectedWay = Mux(engineTargetHit && sameSet, engineTargetWay, 0.U)
             val allWays = ((BigInt(1) << p.ways) - 1).U(p.ways.W)
             val allowedWays = allWays & ~protectedWay
@@ -469,7 +485,9 @@ class L2Cache(
             val plruWay = plruVictim(enginePlru)
             val fallbackWay = Mux((plruWay & allowedWays).orR, plruWay, PriorityEncoderOH(allowedWays))
             val instructionCandidates = engineInstructionWays & engineValidWays & allowedWays
-            val instructionLimit = PopCount(engineInstructionWays & engineValidWays) >= p.maxInstructionWays.U
+            val instructionOccupancy = (engineInstructionWays & engineValidWays).asBools
+            val instructionLimit = instructionOccupancy.combinations(p.maxInstructionWays)
+                .map(_.reduce(_ && _)).reduce(_ || _)
             val instructionWay = Mux(
                 (plruWay & instructionCandidates).orR,
                 plruWay,
@@ -506,7 +524,7 @@ class L2Cache(
             when(replaceDirty) {
                 engineWritebackPaddr := Cat(
                     Mux1H(replacementWay, engineTags),
-                    index(engineVictimPaddr),
+                    index(engineVictimAddress),
                     0.U(p.offsetBits.W)
                 )
                 engineWritebackData := Mux1H(replacementWay, engineLines)
@@ -576,7 +594,7 @@ class L2Cache(
     }
     when(iS2Advance && iFast && !iS2.ptw && iS2.victimValid) {
         instructionVictimValid := true.B
-        instructionVictimPaddr := iS2.victimPaddr
+        instructionVictimLine := iS2.victimLine
         instructionVictimData := iS2.victimData
     }
 
@@ -587,13 +605,13 @@ class L2Cache(
         val consumeEngineTarget = engineInstall && engineConsumeTarget && engineTargetWay(way)
 
         tagTab(way).clka := clock
-        tagTab(way).addra := Mux(engineVictimPort && engineSourceI, index(engineVictimPaddr), index(iReadAddress))
+        tagTab(way).addra := Mux(engineVictimPort && engineSourceI, index(engineVictimAddress), index(iReadAddress))
         tagTab(way).ena := Mux(engineVictimPort && engineSourceI, true.B, iReadEnable && !engineArrayWrite)
         tagTab(way).wea := 0.U
         tagTab(way).dina := 0.U
         tagTab(way).addrb := Mux(
             engineVictimPort && !engineSourceI || engineInstall,
-            index(engineVictimPaddr),
+            index(engineVictimAddress),
             index(dReadAddress)
         )
         tagTab(way).enb := Mux(
@@ -602,16 +620,16 @@ class L2Cache(
             Mux(engineVictimPort && !engineSourceI, true.B, dReadEnable)
         )
         tagTab(way).web := installWay.asUInt
-        tagTab(way).dinb := tag(engineVictimPaddr)
+        tagTab(way).dinb := tag(engineVictimAddress)
 
         dataTab(way).clka := clock
-        dataTab(way).addra := Mux(engineVictimPort && engineSourceI, index(engineVictimPaddr), index(iReadAddress))
+        dataTab(way).addra := Mux(engineVictimPort && engineSourceI, index(engineVictimAddress), index(iReadAddress))
         dataTab(way).ena := Mux(engineVictimPort && engineSourceI, true.B, iReadEnable && !engineArrayWrite)
         dataTab(way).wea := 0.U
         dataTab(way).dina := 0.U
         dataTab(way).addrb := Mux(
             engineVictimPort && !engineSourceI || engineInstall,
-            index(engineVictimPaddr),
+            index(engineVictimAddress),
             index(dReadAddress)
         )
         dataTab(way).enb := Mux(
@@ -625,7 +643,7 @@ class L2Cache(
         validTab(way).raddr(0) := index(iMetaAddress)
         validTab(way).raddr(1) := index(dMetaAddress)
         validTab(way).wen(0) := Mux(engineInstall, installWay, iFastConsume && iHit(way))
-        validTab(way).waddr(0) := Mux(engineInstall, index(engineVictimPaddr), index(iS2.paddr))
+        validTab(way).waddr(0) := Mux(engineInstall, index(engineVictimAddress), index(iS2.paddr))
         validTab(way).wdata(0) := engineInstall
         validTab(way).wen(1) := Mux(engineInstall, consumeEngineTarget, dFastConsume && dHit(way))
         validTab(way).waddr(1) := Mux(engineInstall, index(enginePaddr), index(dS2.paddr))
@@ -634,24 +652,38 @@ class L2Cache(
         dirtyTab(way).raddr(0) := index(iMetaAddress)
         dirtyTab(way).raddr(1) := index(dMetaAddress)
         dirtyTab(way).wen(0) := installWay
-        dirtyTab(way).waddr(0) := index(engineVictimPaddr)
+        dirtyTab(way).waddr(0) := index(engineVictimAddress)
         dirtyTab(way).wdata(0) := engineVictimDirty
 
         instructionTab(way).raddr(0) := index(iMetaAddress)
         instructionTab(way).raddr(1) := index(dMetaAddress)
         instructionTab(way).wen(0) := installWay
-        instructionTab(way).waddr(0) := index(engineVictimPaddr)
+        instructionTab(way).waddr(0) := index(engineVictimAddress)
         instructionTab(way).wdata(0) := engineSourceI
     }
     plruTab.raddr(0) := index(iMetaAddress)
     plruTab.raddr(1) := index(dMetaAddress)
     plruTab.wen(0) := engineInstall
-    plruTab.waddr(0) := index(engineVictimPaddr)
+    plruTab.waddr(0) := index(engineVictimAddress)
     plruTab.wdata(0) := plruUpdate(enginePlru, engineVictimWay)
 
     io.idle := !iS1Valid && !iS2Valid && !iS3Valid &&
         !dS1Valid && !dS2Valid && !dS3Valid && !instructionVictimValid && engineState === engineIdle
 
+    when(iS2Advance) {
+        assert(PopCount(iHit) <= 1.U, "L2Cache: multiple ICache hits")
+    }
+    when(dS2Advance) {
+        assert(PopCount(dHit) <= 1.U, "L2Cache: multiple DCache/PTW hits")
+    }
+    when(io.dcache.req.fire && !io.dcache.req.bits.uncache) {
+        assert(!io.dcache.req.bits.write, "L2Cache: cached DCache acquisition cannot be a direct write")
+    }
+    when(io.icache.request.fire) {
+        assert(!io.icache.request.bits.victimValid || !io.icache.request.bits.uncache)
+    }
+
+    /* Simulation-only counters stay after the cache datapath and invariants. */
     if (observe) {
         val instructionVisits = RegInit(0.U(64.W))
         val instructionHits = RegInit(0.U(64.W))
@@ -698,18 +730,5 @@ class L2Cache(
         io.performance.get.lowerMemoryReads := lowerMemoryReads
         io.performance.get.lowerMemoryWrites := lowerMemoryWrites
         io.performance.get.engineBusyCycles := engineBusyCycles
-    }
-
-    when(iS2Advance) {
-        assert(PopCount(iHit) <= 1.U, "L2Cache: multiple ICache hits")
-    }
-    when(dS2Advance) {
-        assert(PopCount(dHit) <= 1.U, "L2Cache: multiple DCache/PTW hits")
-    }
-    when(io.dcache.req.fire && !io.dcache.req.bits.uncache) {
-        assert(!io.dcache.req.bits.write, "L2Cache: cached DCache acquisition cannot be a direct write")
-    }
-    when(io.icache.request.fire) {
-        assert(!io.icache.request.bits.victimValid || !io.icache.request.bits.uncache)
     }
 }

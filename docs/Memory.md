@@ -45,6 +45,13 @@ Cache RAM 通过统一封装选择寄存器、Vivado 双口 BRAM 或 OpenRAM `1R
 配置保留两个可读写物理端口；ASIC 分析配置将 I 侧绑定到只读端口，将 D 侧和安装写绑定到
 读写端口。
 
+日常 Chisel 与 Verilator 回归默认使用与 OpenRAM 接口同周期的 Chisel 模型，因此不依赖宏文件，
+也不会把第三方生成模型的 warning 混入项目 RTL。设置 `ZIRCON_USE_EXTERNAL_OPENRAM=true` 后，
+elaboration 改为生成外部宏壳。此时 EDA 流程必须同时提供
+`src/main/resources/OpenRam1RW1R_25.sv`、`src/main/resources/OpenRam1RW1R_32.sv`，以及
+`eda/platforms/nangate45/memory/openram-1rw1r/` 下对应的两个 Verilog 宏模型、Liberty 和 LEF。
+Vivado 后端仍使用原有外部 Verilog BRAM 模板，不经过该 OpenRAM 选择路径。
+
 PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
 属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和 uncached 请求绕过
 Cache line 分配，以 32 位事务送入下级接口。

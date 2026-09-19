@@ -26,7 +26,7 @@ class CSRSpec extends AnyFreeSpec with ChiselSim {
         dut.io.fp.bits.dirty.poke(false)
         dut.io.trap.valid.poke(false)
         dut.io.trap.bits.supervisor.poke(false)
-        dut.io.trap.bits.pc.poke(0)
+        dut.io.trap.bits.pcWord.poke(0)
         dut.io.trap.bits.cause.poke(0)
         dut.io.trap.bits.tval.poke(0)
         dut.io.xret.valid.poke(false)
@@ -157,7 +157,8 @@ class CSRSpec extends AnyFreeSpec with ChiselSim {
             )
             def hpm(addr: Int): Boolean =
                 (addr >= 0x323 && addr <= 0x33f) || (addr >= 0xb03 && addr <= 0xb1f) ||
-                    (addr >= 0xb83 && addr <= 0xb9f)
+                    (addr >= 0xb83 && addr <= 0xb9f) || (addr >= 0xc03 && addr <= 0xc1f) ||
+                    (addr >= 0xc83 && addr <= 0xc9f)
             for (addr <- 0 until 4096) d.request(addr, illegal = !present(addr) && !hpm(addr))
             d.expect(0xf11, 0)
             d.expect(0xf12, 0)
@@ -357,7 +358,7 @@ class CSRSpec extends AnyFreeSpec with ChiselSim {
             d.write(0x300, 0x20008)
             dut.io.privilege.poke(0)
             dut.io.trap.valid.poke(true)
-            dut.io.trap.bits.pc.poke(0x1234567b)
+            dut.io.trap.bits.pcWord.poke(0x1234567b >> 2)
             dut.io.trap.bits.cause.poke(8)
             dut.io.trap.bits.tval.poke(0xdeadbeefL)
             dut.clock.step()
@@ -379,7 +380,7 @@ class CSRSpec extends AnyFreeSpec with ChiselSim {
             dut.io.privilege.poke(1)
             dut.io.trap.valid.poke(true)
             dut.io.trap.bits.supervisor.poke(true)
-            dut.io.trap.bits.pc.poke(0x80000103L)
+            dut.io.trap.bits.pcWord.poke(0x80000103L >> 2)
             dut.io.trap.bits.cause.poke(0x80000009L)
             dut.io.trap.bits.tval.poke(0x1234)
             dut.clock.step()

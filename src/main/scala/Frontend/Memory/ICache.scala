@@ -9,14 +9,17 @@ class IStage1Signal extends Bundle {
     val token = UInt(32.W)
 }
 
-class IStage2Signal(p: FrontendParams, c: ICacheParams) extends IStage1Signal {
+class IStage2Signal(p: FrontendParams, c: ICacheParams) extends Bundle {
+    val rreq = Bool()
+    val vaddrWord = UInt((c.indexBits + c.offsetBits - 2).W)
+    val token = UInt(32.W)
     val rdata = Vec(c.ways, UInt((32 * p.fetchWidth).W))
     val victimWay = UInt(c.ways.W)
     val victimData = UInt(c.lineBits.W)
     val victimTag = UInt(c.tagBits.W)
     val victimValid = Bool()
     val hit = UInt(c.ways.W)
-    val paddr = UInt(34.W)
+    val paddrBlock = UInt((34 - p.blockBits).W)
     val uncache = Bool()
     val fault = Bool()
 }
@@ -36,16 +39,24 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     def tag(addr: UInt): UInt = addr(33, c.indexBits + c.offsetBits)
     def fetchOffset(addr: UInt): UInt = addr(c.offsetBits - 1, 0) &
         (~(p.fetchWidth * 4 - 1).U(c.offsetBits.W)).asUInt
-    def fragment(line: UInt, addr: UInt): UInt = (line >> (fetchOffset(addr) << 3))(32 * p.fetchWidth - 1, 0)
+    def fragment(line: UInt, addr: UInt): UInt = {
+        val words = line.asTypeOf(Vec(c.lineBytes / 4, UInt(32.W)))
+        if (c.lineBytes == 4) {
+            words(0)
+        } else {
+            val first = fetchOffset(addr)(c.offsetBits - 1, 2)
+            VecInit.tabulate(p.fetchWidth)(slot => words(first + slot.U)).asUInt
+        }
+    }
 
     /* Control and Return Buffers */
     val fsm = Module(new ICacheFSM)
-    val itlb = Module(new InstructionTLB)
+    val itlb = Module(new InstructionTLB(paddrLowBits = p.blockBits))
     val missC1 = RegInit(false.B)
-    val rbuf = Reg(UInt(c.lineBits.W))
-    val dbuf = Reg(Vec(p.fetchWidth, UInt(32.W)))
-    val dbufFault = Reg(UInt(p.fetchWidth.W))
-    val readSlot = Reg(UInt(p.slotBits.W))
+    val rbuf = RegInit(0.U(c.lineBits.W))
+    val dbuf = RegInit(VecInit.fill(p.fetchWidth)(0.U(32.W)))
+    val dbufFault = RegInit(0.U(p.fetchWidth.W))
+    val readSlot = RegInit(0.U(p.slotBits.W))
     io.miss := missC1
     val invalidateActive = RegInit(false.B)
     val invalidateDone = RegInit(false.B)
@@ -83,12 +94,12 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val responseMatches = c1s2.rreq && io.mmu.response.bits.token === c1s2.token
     val localTranslation = WireDefault(false.B)
     val translationValid = WireDefault(io.mmu.response.valid && responseMatches)
-    val translatedPaddr = WireDefault(io.mmu.response.bits.paddr)
+    val translatedBlock = WireDefault(io.mmu.response.bits.paddr(33, p.blockBits))
     val translatedUncache = WireDefault(io.mmu.response.bits.uncache)
     val translatedFault = WireDefault(io.mmu.response.bits.fault)
 
     itlb.io.lookup(0).valid := false.B
-    itlb.io.lookup(0).bits.vaddr := c1s2.vaddr
+    itlb.io.lookup(0).bits.vaddr := c1s2.vaddr(31, p.blockBits)
     itlb.io.scopeUpdate.valid := false.B
     itlb.io.scopeUpdate.bits.asid := 0.U
     itlb.io.refill.valid := false.B
@@ -110,10 +121,14 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         }
         localTranslation := direct || tlbHit
         translationValid := localTranslation || (io.mmu.response.valid && responseMatches)
-        translatedPaddr := Mux(
+        translatedBlock := Mux(
             direct,
-            Cat(0.U(2.W), c1s2.vaddr),
-            Mux(tlbHit, itlb.io.response(0).paddr, io.mmu.response.bits.paddr)
+            Cat(0.U(2.W), c1s2.vaddr)(33, p.blockBits),
+            Mux(
+                tlbHit,
+                itlb.io.response(0).paddr,
+                io.mmu.response.bits.paddr(33, p.blockBits),
+            )
         )
         translatedUncache := Mux(
             direct,
@@ -142,13 +157,13 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     io.mmu.response.ready := !responseMatches || c1s2Go || io.flush
     val faultC1s2 = translatedFault || c1s2.vaddr(1, 0).orR
     val hitC1s2 = VecInit(tagTab.zip(vldTab).map { case (t, v) =>
-        t.dataOut === tag(translatedPaddr) && v.rdata(0)
+        t.dataOut === tag(Cat(translatedBlock, 0.U(p.blockBits.W))) && v.rdata(0)
     }).asUInt
     val c1s3In = Wire(new IStage2Signal(p, c))
     c1s3In.rreq := c1s2.rreq
-    c1s3In.vaddr := c1s2.vaddr
+    c1s3In.vaddrWord := c1s2.vaddr(c.indexBits + c.offsetBits - 1, 2)
     c1s3In.token := c1s2.token
-    c1s3In.paddr := translatedPaddr
+    c1s3In.paddrBlock := translatedBlock
     c1s3In.uncache := translatedUncache
     c1s3In.fault := faultC1s2
     c1s3In.hit := hitC1s2
@@ -163,10 +178,16 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     when(io.flush && fsm.io.cc.ready) { missC1 := false.B }
 
     /* Stage 3: Way/Return Selection and Miss Service / IF2 */
+    val c1s3Vaddr = Cat(0.U((32 - c.indexBits - c.offsetBits).W), c1s3.vaddrWord, 0.U(2.W))
+    val c1s3Paddr = if (p.blockBits == 2) {
+        Cat(c1s3.paddrBlock, 0.U(2.W))
+    } else {
+        Cat(c1s3.paddrBlock, c1s3Vaddr(p.blockBits - 1, 2), 0.U(2.W))
+    }
     val rline = Mux1H(fsm.io.cc.r1H, Seq(Mux1H(c1s3.hit, c1s3.rdata), dbuf.asUInt))
     io.pp.response.valid := c1s3.rreq && !missC1 && !io.flush
     io.pp.response.bits.token := c1s3.token
-    io.pp.response.bits.mask := FrontendMath.range(c1s3.vaddr, p)
+    io.pp.response.bits.mask := FrontendMath.range(c1s3Vaddr, p)
     io.pp.response.bits.inst := rline.asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
     io.pp.response.bits.fault := Mux(
         c1s3.fault,
@@ -198,9 +219,9 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     /* LRU and Array Ports */
     lruTab.raddr(0) := index(c1s2.vaddr)
     lruTab.wen(0) := fsm.io.cc.lruUpd.orR
-    lruTab.waddr(0) := index(c1s3.vaddr)
+    lruTab.waddr(0) := index(c1s3Vaddr)
     lruTab.wdata(0) := fsm.io.cc.lruUpd
-    val arrayAddress = Mux1H(fsm.io.cc.addrOH, Seq(index(c1s1.vaddr), index(c1s2.vaddr), index(c1s3.vaddr)))
+    val arrayAddress = Mux1H(fsm.io.cc.addrOH, Seq(index(c1s1.vaddr), index(c1s2.vaddr), index(c1s3Vaddr)))
     val arrayEnable = Mux1H(
         fsm.io.cc.addrOH,
         Seq(c1s1.rreq, c1s2.rreq, (c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR)
@@ -209,21 +230,18 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         tagTab(way).clock := clock
         tagTab(way).address := arrayAddress
         tagTab(way).enable := arrayEnable
-        tagTab(way).dataIn := tag(c1s3.paddr)
+        tagTab(way).dataIn := tag(c1s3Paddr)
         tagTab(way).write := fsm.io.cc.tagvWe(way)
         tagTab(way).mask := 1.U
-        // Preserve the constant mask port at the SRAM replacement boundary.
-        dontTouch(tagTab(way).mask)
         dataTab(way).clock := clock
         dataTab(way).address := arrayAddress
         dataTab(way).enable := arrayEnable
         dataTab(way).dataIn := rbuf
         dataTab(way).write := fsm.io.cc.memWe(way)
         dataTab(way).mask := 1.U
-        dontTouch(dataTab(way).mask)
         vldTab(way).raddr(0) := index(c1s2.vaddr)
         vldTab(way).wen(0) := invalidateActive || fsm.io.cc.tagvWe(way)
-        vldTab(way).waddr(0) := Mux(invalidateActive, invalidateSet, index(c1s3.vaddr))
+        vldTab(way).waddr(0) := Mux(invalidateActive, invalidateSet, index(c1s3Vaddr))
         vldTab(way).wdata(0) := !invalidateActive
     }
 
@@ -232,34 +250,33 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     io.l2.request.bits.token := c1s3.token
     io.l2.request.bits.uncache := c1s3.uncache
     io.l2.request.bits.victimValid := !c1s3.uncache && c1s3.victimValid
-    io.l2.request.bits.victimPaddr := Cat(
+    io.l2.request.bits.victimLine := Cat(
         c1s3.victimTag,
-        index(c1s3.paddr),
-        0.U(c.offsetBits.W)
+        index(c1s3Paddr),
     )
     io.l2.request.bits.victimData := c1s3.victimData
     io.l2.request.bits.paddr := Mux(
         c1s3.uncache,
-        Cat(c1s3.paddr(33, p.blockBits), 0.U(p.blockBits.W)) | (readSlot << 2),
-        Cat(c1s3.paddr(33, c.offsetBits), 0.U(c.offsetBits.W))
+        Cat(c1s3Paddr(33, p.blockBits), 0.U(p.blockBits.W)) | (readSlot << 2),
+        Cat(c1s3Paddr(33, c.offsetBits), 0.U(c.offsetBits.W))
     )
     io.l2.response.ready := fsm.io.l2.pending
     when(fsm.io.cc.start) {
-        readSlot := (if (p.fetchWidth == 1) 0.U else c1s3.vaddr(p.blockBits - 1, 2))
+        readSlot := (if (p.fetchWidth == 1) 0.U else c1s3Vaddr(p.blockBits - 1, 2))
         dbuf := VecInit.fill(p.fetchWidth)(0.U(32.W))
         dbufFault := 0.U
     }
     when(io.l2.response.fire) {
-        assert(io.l2.response.bits.token === c1s3.token, "ICache: lower response token mismatch")
+        val responseError = io.l2.response.bits.error || io.l2.response.bits.token =/= c1s3.token
         when(c1s3.uncache) {
             if (p.fetchWidth == 1) dbuf(0) := io.l2.response.bits.data(31, 0)
             else dbuf(readSlot) := io.l2.response.bits.data(31, 0)
-            dbufFault := dbufFault | (io.l2.response.bits.error.asUInt << readSlot)
+            dbufFault := dbufFault | Mux(responseError, UIntToOH(readSlot, p.fetchWidth), 0.U)
             readSlot := readSlot + 1.U
         }.otherwise {
             rbuf := io.l2.response.bits.data
-            dbuf := fragment(io.l2.response.bits.data, c1s3.vaddr).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
-            dbufFault := Fill(p.fetchWidth, io.l2.response.bits.error)
+            dbuf := fragment(io.l2.response.bits.data, c1s3Vaddr).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+            dbufFault := Fill(p.fetchWidth, responseError)
         }
     }
 
@@ -267,7 +284,7 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     when(c1s2Go && !faultC1s2) {
         assert(PopCount(hitC1s2) <= 1.U, "ICache: multiple hits")
         assert(
-            translatedPaddr(c.offsetBits + c.indexBits - 1, 0) ===
+            Cat(translatedBlock, c1s2.vaddr(p.blockBits - 1, 0))(c.offsetBits + c.indexBits - 1, 0) ===
                 c1s2.vaddr(c.offsetBits + c.indexBits - 1, 0),
             "ICache: translation changed page-offset index bits"
         )

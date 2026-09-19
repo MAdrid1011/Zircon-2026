@@ -9,7 +9,7 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         dut.io.store.response.bits.exception.poke(0)
         dut.io.query.foreach { port =>
             port.request.valid.poke(false)
-            port.request.bits.paddr.poke(0)
+            port.request.bits.wordAddress.poke(0)
             port.request.bits.slot.poke(0)
             port.request.bits.mask.poke(0)
         }
@@ -38,8 +38,11 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
 
             val query = dut.io.query(0).request
             query.valid.poke(true)
-            query.bits.paddr.poke(0x1000)
+            query.bits.wordAddress.poke(0x1000 >> 2)
             query.bits.mask.poke(15)
+            dut.io.query(0).response.valid.expect(false)
+            dut.clock.step()
+            dut.io.query(0).response.valid.expect(true)
             dut.io.query(0).response.bits.mask.expect(2)
             dut.io.query(0).response.bits.data.expect(0x00002200)
 
@@ -50,13 +53,13 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.store.request.valid.expect(false)
             dut.io.store.response.valid.poke(true)
             dut.io.store.response.ready.expect(true)
+            dut.io.store.request.valid.expect(true)
+            dut.io.store.request.bits.data.expect(0x00002200)
             dut.clock.step()
             dut.io.store.response.valid.poke(false)
             dut.io.query(0).response.bits.data.expect(0x00002200)
             dut.io.query(0).response.bits.mask.expect(2)
 
-            dut.io.store.request.valid.expect(true)
-            dut.clock.step()
             dut.io.store.response.valid.poke(true)
             dut.io.store.response.bits.exception.poke(7)
             dut.io.responseError.valid.expect(true)
@@ -64,6 +67,7 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.store.response.valid.poke(false)
             dut.io.empty.expect(true)
+            dut.clock.step()
             dut.io.query(0).response.bits.mask.expect(0)
         }
     }

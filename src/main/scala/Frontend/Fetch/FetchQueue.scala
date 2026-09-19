@@ -2,19 +2,28 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
-/** The middle end accepts complete masked packets; global recovery suppresses old output. */
-class FetchQueue(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val enq = Flipped(Decoupled(new FrontendPackage(p)))
-        val out = Decoupled(new FrontendPackage(p))
-        val flush = Input(Bool())
-    })
-    val queue = Module(new ClusterIndexFIFO(new FrontendPackage(p), p.fqDepth, 1, 1, 0, 0))
+class FetchQueueIO(p: FrontendParams, dequeueWidth: Int) extends Bundle {
+    val enq = Vec(p.fetchWidth, Flipped(Decoupled(new FetchQueueEntry(p))))
+    val out = Vec(dequeueWidth, Decoupled(new FetchQueueEntry(p)))
+    val flush = Input(Bool())
+}
+
+/** Four-wide instruction input and ordered multi-instruction output. */
+class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
+    require(dequeueWidth > 0 && dequeueWidth <= p.fetchWidth)
+
+    val io = IO(new FetchQueueIO(p, dequeueWidth))
+
+    val queue = Module(new ClusterIndexFIFO(
+        new FetchQueueEntry(p),
+        p.fqDepth,
+        p.fetchWidth,
+        dequeueWidth,
+        0,
+        0,
+        compactEnq = true,
+    ))
+    queue.io.enq <> io.enq
+    io.out <> queue.io.deq
     queue.io.flush := io.flush
-    queue.io.enq(0).bits := io.enq.bits
-    queue.io.enq(0).valid := io.enq.valid && !io.flush
-    io.enq.ready := queue.io.enq(0).ready && !io.flush
-    io.out.valid := queue.io.deq(0).valid && !io.flush
-    io.out.bits := queue.io.deq(0).bits
-    queue.io.deq(0).ready := io.out.ready && !io.flush
 }

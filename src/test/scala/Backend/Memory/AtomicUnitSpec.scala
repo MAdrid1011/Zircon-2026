@@ -8,7 +8,6 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
         dut.io.response.ready.poke(true)
         dut.io.clearReservation.poke(false)
         dut.io.load.request.ready.poke(false)
-        dut.io.load.wbSelect.valid.poke(false)
         dut.io.load.response.valid.poke(false)
         dut.io.load.forwardQuery.valid.poke(false)
         dut.io.store.request.ready.poke(false)
@@ -40,10 +39,8 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
         dut.clock.step()
         dut.io.load.request.ready.poke(false)
         dut.io.load.response.valid.poke(true)
-        dut.io.load.response.bits.slot.poke(0)
         dut.io.load.response.bits.data.poke(value)
         dut.io.load.response.bits.exception.poke(0)
-        dut.io.load.response.bits.retry.poke(false)
         dut.clock.step()
         dut.io.load.response.valid.poke(false)
     }

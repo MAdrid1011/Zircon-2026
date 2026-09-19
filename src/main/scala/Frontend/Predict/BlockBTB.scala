@@ -14,13 +14,22 @@ class FrontendBtbRaw(p: FrontendParams, sets: Int, ways: Int) extends Bundle {
     val lines = Vec(ways, new FrontendBtbLine(p))
 }
 
+class BtbTraining(p: FrontendParams) extends Bundle {
+    val pcBlock = UInt((32 - p.blockBits).W)
+    val mask = UInt(p.fetchWidth.W)
+    val kinds = Vec(p.fetchWidth, UInt(3.W))
+    val targetWords = Vec(p.fetchWidth, UInt(30.W))
+}
+
+class BlockBTBIO(p: FrontendParams, sets: Int, ways: Int) extends Bundle {
+    val index = Input(UInt(log2Ceil(sets).W))
+    val raw = Output(new FrontendBtbRaw(p, sets, ways))
+    val train = Flipped(Valid(new BtbTraining(p)))
+}
+
 /** A block shares a tag; training preserves unexecuted slots in a matching row. */
 class BlockBTB(p: FrontendParams, sets: Int, ways: Int) extends Module {
-    val io = IO(new Bundle {
-        val pc = Input(UInt(32.W))
-        val raw = Output(new FrontendBtbRaw(p, sets, ways))
-        val train = Flipped(Valid(new FrontendTraining(p)))
-    })
+    val io = IO(new BlockBTBIO(p, sets, ways))
 
     /* Storage */
     // All slots in a row share one block tag. Valid bits reset independently of data.
@@ -35,17 +44,18 @@ class BlockBTB(p: FrontendParams, sets: Int, ways: Int) extends Module {
 
     /* Prediction Read */
     for (way <- 0 until ways) {
-        io.raw.tags(way) := FrontendMath.read(tags(way).toSeq, index(io.pc))
-        io.raw.lines(way) := FrontendMath.read(payload(way).toSeq, index(io.pc))
-        io.raw.lines(way).valid := FrontendMath.read(valid(way).toSeq, index(io.pc))
+        io.raw.tags(way) := FrontendMath.read(tags(way).toSeq, io.index)
+        io.raw.lines(way) := FrontendMath.read(payload(way).toSeq, io.index)
+        io.raw.lines(way).valid := FrontendMath.read(valid(way).toSeq, io.index)
     }
 
     /* Training Lookup and Way Selection */
     val train = io.train.bits
-    val writeIndex = index(train.pc)
+    val trainPc = Cat(train.pcBlock, 0.U(p.blockBits.W))
+    val writeIndex = index(trainPc)
     val writeHits = VecInit((0 until ways).map(w =>
         FrontendMath.read(valid(w).toSeq, writeIndex).orR &&
-            FrontendMath.read(tags(w).toSeq, writeIndex) === tag(train.pc)
+            FrontendMath.read(tags(w).toSeq, writeIndex) === tag(trainPc)
     ))
     val writeOccupied = VecInit((0 until ways).map(w => FrontendMath.read(valid(w).toSeq, writeIndex).orR))
     // Reuse a matching way, then an empty way, then the replacement way.
@@ -64,14 +74,17 @@ class BlockBTB(p: FrontendParams, sets: Int, ways: Int) extends Module {
     // A matching row keeps the unexecuted suffix; ordinary instructions clear stale CFI bits.
     for (row <- 0 until sets; way <- 0 until ways) {
         when(io.train.valid && writeIndex === row.U && writeWay === way.U && (writeCfi.orR || writeHits.asUInt.orR)) {
-            tags(way)(row) := tag(train.pc)
+            tags(way)(row) := tag(trainPc)
             valid(way)(row) := (Mux(writeHits(way), valid(way)(row), 0.U) & ~train.mask) | writeCfi
             for (slot <- 0 until p.fetchWidth) {
                 when(train.mask(slot)) {
                     payload(way)(row).kinds(slot) := train.kinds(slot)
-                    payload(way)(row).targets(slot) := train.targets(slot)(31, 2)
+                    payload(way)(row).targets(slot) := train.targetWords(slot)
                     payload(way)(row).backward(slot) := FrontendCfi.conditional(train.kinds(slot)) &&
-                        FrontendMath.backwardBranch(FrontendMath.slotPc(train.pc, slot, p), train.targets(slot))
+                        FrontendMath.backwardBranch(
+                            FrontendMath.slotPc(trainPc, slot, p),
+                            Cat(train.targetWords(slot), 0.U(2.W)),
+                        )
                 }
             }
             replacement(row) := !writeWay(0)
@@ -79,15 +92,17 @@ class BlockBTB(p: FrontendParams, sets: Int, ways: Int) extends Module {
     }
 }
 
+class BlockBTBLookupIO(p: FrontendParams, sets: Int, ways: Int) extends Bundle {
+    val tag = Input(UInt((32 - p.blockBits - log2Ceil(sets)).W))
+    val raw = Input(new FrontendBtbRaw(p, sets, ways))
+    val line = Output(new FrontendBtbLine(p))
+}
+
 /** Resolve tags after the table read; IF2 can register raw ways before this lookup. */
-class BlockBTBLookup(p: FrontendParams, sets: Int, ways: Int) extends Module {
-    val io = IO(new Bundle {
-        val pc = Input(UInt(32.W))
-        val raw = Input(new FrontendBtbRaw(p, sets, ways))
-        val line = Output(new FrontendBtbLine(p))
-    })
+class BlockBTBLookup(p: FrontendParams, sets: Int, ways: Int) extends RawModule {
+    val io = IO(new BlockBTBLookupIO(p, sets, ways))
     val hits = io.raw.tags.zip(io.raw.lines).map { case (tag, line) =>
-        line.valid.orR && tag === io.pc(31, p.blockBits + log2Ceil(sets))
+        line.valid.orR && tag === io.tag
     }
     io.line := Mux1H(hits, io.raw.lines)
     // Mux1H with one input passes the payload through, even when its select is false.

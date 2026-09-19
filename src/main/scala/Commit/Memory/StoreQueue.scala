@@ -13,7 +13,7 @@ class CommittedStore extends Bundle {
 class StoreQueueEntry(bp: BackendParams) extends Bundle {
     val valid = Bool()
     val identity = UInt(bp.sqWidth.W)
-    val robIdx = UInt(bp.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
     val committed = Bool()
     val addressValid = Bool()
     val dataValid = Bool()
@@ -30,7 +30,7 @@ class StoreQueueEntry(bp: BackendParams) extends Bundle {
 }
 
 class PendingAtomic(bp: BackendParams) extends Bundle {
-    val robIdx = UInt(bp.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
     val prd = UInt(bp.tagWidth.W)
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
@@ -38,6 +38,21 @@ class PendingAtomic(bp: BackendParams) extends Bundle {
     val op = UInt(5.W)
     val uncache = Bool()
     val exception = UInt(4.W)
+}
+
+class StoreQueueAllocation(bp: BackendParams) extends Bundle {
+    val tail = UInt(bp.sqWidth.W)
+    val index = UInt(bp.sqWidth.W)
+}
+
+class StoreQueueAtomicIO(bp: BackendParams) extends Bundle {
+    val sqIdx = Input(Valid(UInt(bp.sqWidth.W)))
+    val request = Output(Valid(new PendingAtomic(bp)))
+}
+
+class StoreQueueQueryIO(load: LoadPipelineParams) extends Bundle {
+    val request = Flipped(Valid(new LoadSQQuery(load)))
+    val response = Valid(new DForwardResult(DCacheParams(load.entries)))
 }
 
 class StoreQueueIO(
@@ -49,24 +64,15 @@ class StoreQueueIO(
 ) extends Bundle {
     val request = Input(new MiddleendCommitRequest(fp, dispatchWidth))
     val availablePrefix = Output(UInt(dispatchWidth.W))
-    val allocation = Output(Vec(dispatchWidth, new Bundle {
-        val tail = UInt(bp.sqWidth.W)
-        val index = UInt(bp.sqWidth.W)
-    }))
+    val allocation = Output(Vec(dispatchWidth, new StoreQueueAllocation(bp)))
     val enqueue = Input(new MiddleendCommitEnqueue(fp, bp, dispatchWidth))
     val address = Flipped(Decoupled(new StoreAddressResult(load)))
     val data = Flipped(Decoupled(new StoreDataResult(load)))
-    val completion = Output(Vec(2, Valid(new ROBCompletion(bp))))
+    val completion = Output(Vec(2, Valid(new ROBWrite(CommitIndex.addressWidth(cp.robEntries)))))
     val commit = Input(Vec(cp.width, Valid(UInt(bp.sqWidth.W))))
     val drain = Decoupled(new CommittedStore)
-    val atomic = new Bundle {
-        val sqIdx = Input(Valid(UInt(bp.sqWidth.W)))
-        val request = Output(Valid(new PendingAtomic(bp)))
-    }
-    val query = Vec(2, new Bundle {
-        val request = Flipped(Valid(new LoadSQQuery(load)))
-        val response = Valid(new DForwardResult(DCacheParams(load.entries)))
-    })
+    val atomic = new StoreQueueAtomicIO(bp)
+    val query = Vec(2, new StoreQueueQueryIO(load))
     val flush = Input(Bool())
     val empty = Output(Bool())
     val committedEmpty = Output(Bool())
@@ -109,6 +115,11 @@ class StoreQueue(
     }
     private def retreat(pointer: UInt, amount: Int): UInt =
         Mux(pointer >= amount.U, pointer - amount.U, pointer + (ringEntries - amount).U)(pointerWidth - 1, 0)
+    private def alignStoreData(data: UInt, byteOffset: UInt): UInt = MuxLookup(byteOffset, data)(Seq(
+        1.U -> Cat(data(23, 0), 0.U(8.W)),
+        2.U -> Cat(data(15, 0), 0.U(16.W)),
+        3.U -> Cat(data(7, 0), 0.U(24.W)),
+    ))
 
     val requestStores = Wire(Vec(dispatchWidth, Bool()))
     val available = Wire(Vec(dispatchWidth, Bool()))
@@ -156,6 +167,7 @@ class StoreQueue(
     val dataIndex = slot(dataPointer)
     val addressEntry = storage(addressIndex)
     val dataEntry = storage(dataIndex)
+    val dataByteOffset = VecInit(storage.map(_.paddr(1, 0)))(dataIndex)
     when(io.address.fire) {
         assert(addressEntry.valid && addressEntry.identity === io.address.bits.sqIdx)
         assert(addressEntry.robIdx === io.address.bits.robIdx)
@@ -167,7 +179,7 @@ class StoreQueue(
         addressEntry.exception := io.address.bits.exception
         addressEntry.uncache := io.address.bits.uncache
         when(addressEntry.dataValid) {
-            addressEntry.data := (addressEntry.data << (io.address.bits.paddr(1, 0) << 3.U))(31, 0)
+            addressEntry.data := alignStoreData(addressEntry.data, io.address.bits.paddr(1, 0))
         }
     }
     when(io.data.fire) {
@@ -175,10 +187,10 @@ class StoreQueue(
         assert(dataEntry.robIdx === io.data.bits.robIdx)
         dataEntry.dataValid := true.B
         val sameCycleAddress = io.address.fire && io.address.bits.sqIdx === io.data.bits.sqIdx
-        val alignmentAddress = Mux(sameCycleAddress, io.address.bits.paddr, dataEntry.paddr)
+        val alignmentOffset = Mux(sameCycleAddress, io.address.bits.paddr(1, 0), dataByteOffset)
         dataEntry.data := Mux(
             dataEntry.addressValid || sameCycleAddress,
-            (io.data.bits.data << (alignmentAddress(1, 0) << 3.U))(31, 0),
+            alignStoreData(io.data.bits.data, alignmentOffset),
             io.data.bits.data,
         )
         dataEntry.size := io.data.bits.size
@@ -188,7 +200,7 @@ class StoreQueue(
         io.data.bits.sqIdx === io.address.bits.sqIdx
     io.completion(0).valid := io.address.fire && !addressEntry.atomic &&
         (io.address.bits.exception.orR || addressEntry.dataValid || addressGetsData)
-    io.completion(0).bits.robIdx := io.address.bits.robIdx
+    io.completion(0).bits.address := io.address.bits.robIdx
     io.completion(0).bits.data := 0.U
     io.completion(0).bits.exception.valid := io.address.bits.exception.orR
     io.completion(0).bits.exception.cause := io.address.bits.exception
@@ -197,7 +209,7 @@ class StoreQueue(
     io.completion(0).bits.fpFlagsValid := false.B
     io.completion(1).valid := io.data.fire && !dataEntry.atomic && dataEntry.addressValid &&
         !dataEntry.exception.orR && !(io.address.fire && io.address.bits.sqIdx === io.data.bits.sqIdx)
-    io.completion(1).bits.robIdx := io.data.bits.robIdx
+    io.completion(1).bits.address := io.data.bits.robIdx
     io.completion(1).bits.data := 0.U
     io.completion(1).bits.exception := 0.U.asTypeOf(new BackendException)
     io.completion(1).bits.fflags := 0.U
@@ -293,17 +305,16 @@ class StoreQueue(
                 candidates(position).exception := io.address.bits.exception
                 candidates(position).uncache := io.address.bits.uncache
                 when(entry.dataValid) {
-                    candidates(position).data :=
-                        (entry.data << (io.address.bits.paddr(1, 0) << 3.U))(31, 0)
+                    candidates(position).data := alignStoreData(entry.data, io.address.bits.paddr(1, 0))
                 }
             }
             when(io.data.fire && entry.valid && entry.identity === io.data.bits.sqIdx) {
                 val sameCycleAddress = io.address.fire && io.address.bits.sqIdx === io.data.bits.sqIdx
-                val alignmentAddress = Mux(sameCycleAddress, io.address.bits.paddr, entry.paddr)
+                val alignmentOffset = Mux(sameCycleAddress, io.address.bits.paddr(1, 0), entry.paddr(1, 0))
                 candidates(position).dataValid := true.B
                 candidates(position).data := Mux(
                     entry.addressValid || sameCycleAddress,
-                    (io.data.bits.data << (alignmentAddress(1, 0) << 3.U))(31, 0),
+                    alignStoreData(io.data.bits.data, alignmentOffset),
                     io.data.bits.data,
                 )
                 candidates(position).size := io.data.bits.size
@@ -311,7 +322,7 @@ class StoreQueue(
             active(position) := entry.valid && entry.identity === extended(identity)
             for (byte <- 0 until 4) {
                 hits(byte)(position) := active(position) && candidates(position).addressValid &&
-                    candidates(position).paddr(33, 2) === query.bits.paddr(33, 2) &&
+                    candidates(position).paddr(33, 2) === query.bits.wordAddress &&
                     candidates(position).mask(byte) && query.bits.mask(byte)
             }
         }

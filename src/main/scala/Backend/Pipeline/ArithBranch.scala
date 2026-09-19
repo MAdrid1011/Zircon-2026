@@ -129,14 +129,11 @@ class ArithBranch extends Module {
     /* WB stage ------------------------------------------------------------------- */
     val packageWB = RegInit(0.U.asTypeOf(new BackendPackage)) // EX/WB boundary
     val validWB = RegInit(false.B)
-    val bypassValidWB = RegInit(false.B)
-    val bypassWB = Reg(new BypassResult)
+    val bypassDataWB = Reg(UInt(32.W))
     val liveWB = validWB && !killed(packageWB)
 
     validWB := liveEX
-    bypassValidWB := liveEX && packageAfterEX.rdValid && !packageAfterEX.exception.valid
-    bypassWB.prd := packageAfterEX.prd
-    bypassWB.data := packageAfterEX.result
+    bypassDataWB := packageAfterEX.result
     when(liveEX) {
         packageWB := packageAfterEX
         for (source <- 0 until 3) {
@@ -150,13 +147,13 @@ class ArithBranch extends Module {
         }
     }
 
-    val successfulWrite = liveWB && packageWB.rdValid && !packageWB.exception.valid
+    val successfulWrite = liveWB && packageWB.rdValid && !packageWB.prd(ArithConstants.tagWidth - 1) &&
+        !packageWB.exception.valid
     io.rf.write.valid := successfulWrite
     io.rf.write.bits.prd := packageWB.prd(ArithConstants.physWidth - 1, 0)
     io.rf.write.bits.data := packageWB.result
     // Every Bypass field is a direct WB register output. Eligibility is computed in EX.
-    io.bypass.producer.result.valid := bypassValidWB
-    io.bypass.producer.result.bits := bypassWB
+    io.bypass.producer.result := bypassDataWB
     io.bypass.producer.nextWb.valid := liveEX && packageAfterEX.rdValid && !packageAfterEX.exception.valid
     io.bypass.producer.nextWb.bits := packageAfterEX.prd
     io.wakeup.wakeWB.prd := Mux(successfulWrite, packageWB.prd, 0.U)

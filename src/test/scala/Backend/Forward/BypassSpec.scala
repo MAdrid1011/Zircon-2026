@@ -7,9 +7,7 @@ class BypassSpec extends AnyFreeSpec with ChiselSim {
         for (producer <- dut.io.producer) {
             producer.nextWb.valid.poke(false)
             producer.nextWb.bits.poke(1)
-            producer.result.valid.poke(false)
-            producer.result.bits.prd.poke(1)
-            producer.result.bits.data.poke(0)
+            producer.result.poke(0)
         }
         for (consumer <- dut.p.consumerSources.indices;
              source <- 0 until dut.p.consumerSources(consumer)) {
@@ -39,12 +37,8 @@ class BypassSpec extends AnyFreeSpec with ChiselSim {
             dut.io.consumer(1).advance.poke(false)
             dut.io.producer(0).nextWb.valid.poke(false)
             dut.io.producer(4).nextWb.valid.poke(false)
-            dut.io.producer(0).result.valid.poke(true)
-            dut.io.producer(0).result.bits.prd.poke(7)
-            dut.io.producer(0).result.bits.data.poke(BigInt("12345678", 16))
-            dut.io.producer(4).result.valid.poke(true)
-            dut.io.producer(4).result.bits.prd.poke(fp7 + 1)
-            dut.io.producer(4).result.bits.data.poke(BigInt("87654321", 16))
+            dut.io.producer(0).result.poke(BigInt("12345678", 16))
+            dut.io.producer(4).result.poke(BigInt("87654321", 16))
             dut.io.consumer(0).value(0).valid.expect(true)
             dut.io.consumer(0).value(0).bits.expect(BigInt("12345678", 16))
             dut.io.consumer(1).value(1).valid.expect(true)

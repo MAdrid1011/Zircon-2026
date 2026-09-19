@@ -59,14 +59,16 @@ class FtqCommitIO(p: FrontendParams, width: Int) extends Bundle {
     val headIdx = Output(Vec(width, UInt(p.ftqBits.W)))
 }
 
-/** Packet metadata allocated after FQ and retained until architectural retirement. */
-class FetchTargetQueue(p: FrontendParams, width: Int = 3) extends Module {
-    val io = IO(new Bundle {
-        val allocate = Flipped(Decoupled(new FrontendFtqAllocation(p)))
-        val allocateIdx = Output(UInt(p.ftqBits.W))
-        val commit = new FtqCommitIO(p, width)
-        val used = Output(UInt(log2Ceil(p.ftqDepth + 1).W))
-    })
+class FetchTargetQueueIO(p: FrontendParams, allocateWidth: Int, commitWidth: Int) extends Bundle {
+    val allocate = Flipped(Vec(allocateWidth, Valid(new FrontendFtqAllocation(p))))
+    val allocateIdx = Output(Vec(allocateWidth, UInt(p.ftqBits.W)))
+    val commit = new FtqCommitIO(p, commitWidth)
+    val used = Output(UInt(log2Ceil(p.ftqDepth + 1).W))
+}
+
+/** Packet metadata allocated at Dispatch and retained until architectural retirement. */
+class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: Int = 3) extends Module {
+    val io = IO(new FetchTargetQueueIO(p, allocateWidth, commitWidth))
 
     val entries = RegInit(VecInit.fill(p.ftqDepth)(0.U.asTypeOf(new FrontendFtqEntry(p))))
     val head = RegInit(0.U(p.ftqBits.W))
@@ -74,17 +76,23 @@ class FetchTargetQueue(p: FrontendParams, width: Int = 3) extends Module {
     val used = RegInit(0.U(log2Ceil(p.ftqDepth + 1).W))
     val flush = io.commit.flush
     val popCount = PopCount(io.commit.pop)
-    val push = io.allocate.fire
+    val pushCount = PopCount(io.allocate.map(_.valid))
 
-    io.allocate.ready := used =/= p.ftqDepth.U && !flush
-    io.allocateIdx := tail
     io.used := used
 
-    val allocation = WireDefault(0.U.asTypeOf(new FrontendFtqEntry(p)))
-    allocation.fetchToken := io.allocate.bits.fetchToken
-    allocation.record := io.allocate.bits.record
+    for (lane <- 0 until allocateWidth) {
+        val rank = if (lane == 0) 0.U else PopCount(io.allocate.take(lane).map(_.valid))
+        val index = (tail + rank)(p.ftqBits - 1, 0)
+        val allocation = WireDefault(0.U.asTypeOf(new FrontendFtqEntry(p)))
+        allocation.fetchToken := io.allocate(lane).bits.fetchToken
+        allocation.record := io.allocate(lane).bits.record
+        io.allocateIdx(lane) := index
+        when(io.allocate(lane).valid && !flush) {
+            entries(index) := allocation
+        }
+    }
 
-    for (port <- 0 until width) {
+    for (port <- 0 until commitWidth) {
         val index = (head + port.U)(p.ftqBits - 1, 0)
         io.commit.head(port).valid := used > port.U
         io.commit.head(port).bits := entries(index)
@@ -96,15 +104,14 @@ class FetchTargetQueue(p: FrontendParams, width: Int = 3) extends Module {
         tail := 0.U
         used := 0.U
     }.otherwise {
-        when(push) {
-            entries(tail) := allocation
-            tail := tail + 1.U
+        when(pushCount.orR) {
+            tail := tail + pushCount
         }
         when(popCount.orR) {
             head := head + popCount
         }
-        when(push || popCount.orR) {
-            used := used + push.asUInt - popCount
+        when(pushCount.orR || popCount.orR) {
+            used := used + pushCount - popCount
         }
     }
 
@@ -135,6 +142,7 @@ class FetchTargetQueue(p: FrontendParams, width: Int = 3) extends Module {
     FIFOUtil.assertPrefix(io.commit.pop.asBools, "FTQ releases must be an ordered prefix")
     when(!flush) {
         assert(popCount <= used, "FTQ cannot release more packets than it contains")
+        assert(used + pushCount <= p.ftqDepth.U, "FTQ allocation exceeded available capacity")
     }
     for (left <- 0 until 2; right <- left + 1 until 2) {
         when(io.commit.branch(left).valid && io.commit.branch(right).valid && !flush) {
@@ -149,7 +157,12 @@ class FetchTargetQueue(p: FrontendParams, width: Int = 3) extends Module {
     for (port <- 0 until 2) {
         when(io.commit.branch(port).valid && !flush) {
             assert(io.commit.branch(port).bits.slot < p.fetchWidth.U)
-            assert(!(push && io.commit.branch(port).bits.ftqIdx === tail), "FTQ allocation and branch write collided")
+            for (lane <- 0 until allocateWidth) {
+                assert(
+                    !(io.allocate(lane).valid && io.commit.branch(port).bits.ftqIdx === io.allocateIdx(lane)),
+                    "FTQ allocation and branch write collided",
+                )
+            }
         }
     }
 }

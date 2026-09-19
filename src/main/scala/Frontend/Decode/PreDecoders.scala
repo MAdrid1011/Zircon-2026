@@ -2,25 +2,29 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
-class PreDecoders(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val in = Input(new FrontendPackage(p))
-        val out = Output(new FrontendPackage(p))
-        val prediction = Output(new FrontendPrediction(p))
-        val changed = Output(Bool())
-        val repair = Output(new FrontendStateRepair(p))
-        val record = Output(new FrontendFtqRecord(p))
-    })
+class PreDecodersIO(p: FrontendParams) extends Bundle {
+    val in = Input(new FrontendPackage(p))
+    val out = Output(new FrontendPackage(p))
+    val prediction = Output(new FrontendPrediction(p))
+    val changed = Output(Bool())
+    val repair = Output(new FrontendStateRepair(p))
+    val record = Output(new FrontendFtqRecord(p))
+}
+
+class PreDecoders(p: FrontendParams) extends RawModule {
+    val io = IO(new PreDecodersIO(p))
     /* Modules */
     val finalSelect = Module(new FrontendPredictionSelect(p))
     val decoders = Seq.fill(p.fetchWidth)(Module(new RegisterInfoDecoder))
+
+    private def addWithoutCarry(a: UInt, b: UInt): UInt = BLevelPAdder32.sum(a, b, 0.U)
 
     /* Registered Prediction Context */
     val predInfo = io.in.predict
     val instPkgOut = WireDefault(io.in)
     // FTQ owns training context after PD; the common FQ package carries zeros here.
     instPkgOut.predict := 0.U.asTypeOf(new FrontendPredictInfo(p))
-    finalSelect.io.pc := io.in.startPc
+    finalSelect.io.pcBlock := io.in.startPc(31, p.blockBits)
     finalSelect.io.range := predInfo.range & predInfo.returned
     finalSelect.io.directions := predInfo.directions
     finalSelect.io.backward := VecInit(predInfo.fields.map(f => f.immediate(31) || !f.immediate.orR)).asUInt
@@ -28,7 +32,7 @@ class PreDecoders(p: FrontendParams) extends Module {
     val earlyNextPc = predInfo.early.nextPc
     // Check the increment in parallel instead of waiting for a full carry chain and a comparator.
     val sequentialMismatch = !FrontendMath.sumMatches(
-        FrontendMath.blockBase(io.in.startPc, p),
+        io.in.startPc,
         (p.fetchWidth * 4).U(32.W),
         earlyNextPc
     )
@@ -45,11 +49,13 @@ class PreDecoders(p: FrontendParams) extends Module {
         val kind = Mux(io.in.instructions(i).fault, 0.U, decoder.io.kind)
 
         // Direct targets use PC; returns use the saved RAS top plus the JALR offset.
-        val directTarget = BLevelPAdder32(pc, fields.immediate, 0.U(1.W)).io.res
+        val directTarget = addWithoutCarry(pc, fields.immediate)
         val returnOffset =
             Cat(Fill(20, fields.immediate(11)), fields.immediate(11, 0))
-        val returnTarget = BLevelPAdder32(FrontendMath.rasTop(predInfo.before), returnOffset, 0.U(1.W)).io.res &
-            "hfffffffe".U
+        val returnTarget = Cat(
+            FrontendMath.rasTop(predInfo.before)(31, 1) + returnOffset(31, 1),
+            0.U(1.W),
+        )
         val sameKind = predInfo.main.kinds(i) === kind
         val isDirect = fields.cfiClass === FrontendCfiClass.Branch.U || fields.cfiClass === FrontendCfiClass.Jal.U
         val useRas = FrontendCfi.pop(kind) && predInfo.before.count =/= 0.U
@@ -87,7 +93,7 @@ class PreDecoders(p: FrontendParams) extends Module {
         instPkgOut.instructions(i).predictedTaken := finalSelect.io.prediction.taken(i)
         instPkgOut.instructions(i).predictedValue := Mux(
             FrontendCfi.indirect(kind),
-            finalSelect.io.targets(i),
+            finalSelect.io.prediction.targets(i),
             Mux(finalSelect.io.prediction.taken(i), fields.immediate, 4.U)
         )
     }
@@ -108,12 +114,12 @@ class PreDecoders(p: FrontendParams) extends Module {
 
     // Recovery replays this block from its prediction-time snapshot.
     io.repair.before := predInfo.before
-    io.repair.event.pc := io.in.startPc
+    io.repair.event.pcWord := io.in.startPc(31, 2)
     io.repair.event.prediction := finalSelect.io.prediction
 
     /* Commit Training Record */
     io.record.nextPc := instPkgOut.nextPc
-    io.record.train.pc := io.in.startPc
+    io.record.train.pcWord := io.in.startPc(31, 2)
     io.record.train.mask := instPkgOut.mask
     io.record.train.kinds := finalSelect.io.kinds
     io.record.train.taken := finalSelect.io.prediction.taken

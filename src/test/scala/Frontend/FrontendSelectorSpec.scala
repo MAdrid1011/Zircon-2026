@@ -3,11 +3,25 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.FrontendParams
 
+class FrontendPredictionSelectTestTop(p: FrontendParams) extends Module {
+    val io = IO(new FrontendPredictionSelectIO(p))
+    val select = Module(new FrontendPredictionSelect(p))
+    select.io.pcBlock := io.pcBlock
+    select.io.range := io.range
+    select.io.kinds := io.kinds
+    select.io.control := io.control
+    select.io.conditional := io.conditional
+    select.io.backward := io.backward
+    select.io.targets := io.targets
+    select.io.directions := io.directions
+    io.prediction := select.io.prediction
+}
+
 class FrontendSelectorSpec extends AnyFreeSpec with ChiselSim {
     for (width <- Seq(1, 4, 8)) {
         s"select the earliest taken instruction by conditional rank at width $width" in {
             val p = FrontendParams(fetchWidth = width)
-            simulate(new FrontendPredictionSelect(p)) { d =>
+            simulate(new FrontendPredictionSelectTestTop(p)) { d =>
                 val rng = new scala.util.Random(20260910 + width)
                 for (caseIndex <- 0 until 400) {
                     val start = rng.nextInt(width)
@@ -18,7 +32,7 @@ class FrontendSelectorSpec extends AnyFreeSpec with ChiselSim {
                     val backwards = targets.zipWithIndex.map { case (target, i) => target <= 0x80000000L + i * 4 }
                     val backwardMask = backwards.zipWithIndex.filter(_._1).map(x => 1 << x._2).sum
                     val range = ((1 << width) - 1) ^ ((1 << start) - 1)
-                    d.io.pc.poke(pc); d.io.range.poke(range); d.io.directions.poke(directions)
+                    d.io.pcBlock.poke(pc >> p.blockBits); d.io.range.poke(range); d.io.directions.poke(directions)
                     d.io.backward.poke(backwardMask)
                     d.io.control.zip(kinds).foreach { case (port, value) => port.poke(value != 0) }
                     d.io.conditional.zip(kinds).foreach { case (port, value) => port.poke(value == 1) }

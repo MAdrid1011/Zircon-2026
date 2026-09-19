@@ -8,15 +8,7 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         dut.io.in.entries.foreach(BackendPackageTestUtils.clear)
         dut.io.memoryEntries.foreach(BackendPackageTestUtils.clear)
         dut.io.resourcePrefix.poke((BigInt(1) << dut.issue.dispatchWidth) - 1)
-        val capacities = Seq(
-            dut.issue.arith0Entries,
-            dut.issue.arith1Entries,
-            dut.issue.mixArithEntries,
-            dut.issue.loadEntries,
-            dut.issue.loadStoreAddressEntries,
-            dut.issue.storeDataEntries,
-        )
-        dut.io.freeCount.zip(capacities).foreach { case (count, capacity) => count.poke(capacity) }
+        dut.io.freeCount.zip(dut.issue.queueParams).foreach { case (count, queue) => count.poke(queue.entries) }
         dut.io.flush.poke(false)
         dut.reset.poke(true)
         dut.clock.step(2)
@@ -44,11 +36,11 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 1, 11, DecodeUnit.ALU)
 
             dut.io.accepted.expect(3)
-            dut.io.arith0.valid.expect(1)
-            dut.io.arith0.entries(0).robIdx.expect(10)
-            dut.io.arith1.valid.expect(1)
-            dut.io.arith1.entries(0).robIdx.expect(11)
-            dut.io.mixArith.valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith0).entries(0).robIdx.expect(10)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith1).entries(0).robIdx.expect(11)
+            dut.io.enqueue(IssueQueueIndex.MixArith).valid.expect(0)
         }
     }
 
@@ -62,12 +54,15 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 2, 14, DecodeUnit.Load)
 
             dut.io.accepted.expect(7)
-            dut.io.arith1.valid.expect(1)
-            dut.io.arith1.entries(0).robIdx.expect(13)
-            dut.io.load.valid.expect(1)
-            dut.io.load.entries(0).robIdx.expect(12)
-            dut.io.loadStoreAddress.valid.expect(1)
-            dut.io.loadStoreAddress.entries(0).robIdx.expect(14)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith0).entries(0).robIdx.expect(13)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
+            val loads = Seq(
+                dut.io.enqueue(IssueQueueIndex.Load).entries(0).robIdx.peek().litValue,
+                dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).entries(0).robIdx.peek().litValue,
+            ).sorted
+            assert(loads == Seq(BigInt(12), BigInt(14)))
         }
     }
 
@@ -83,13 +78,40 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 2, 17, DecodeUnit.Load)
 
             dut.io.accepted.expect(3)
-            dut.io.load.valid.expect(1)
-            dut.io.loadStoreAddress.valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
             val dispatched = Seq(
-                dut.io.load.entries(0).robIdx.peek().litValue,
-                dut.io.loadStoreAddress.entries(0).robIdx.peek().litValue,
+                dut.io.enqueue(IssueQueueIndex.Load).entries(0).robIdx.peek().litValue,
+                dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).entries(0).robIdx.peek().litValue,
             ).sorted
             assert(dispatched == Seq(BigInt(15), BigInt(16)))
+        }
+    }
+
+    "three-wide dispatch balances single arithmetic and Load operations" in {
+        simulate(new Dispatcher(issue = IssueParams(dispatchWidth = 3))) { dut =>
+            initialize(dut)
+            dut.io.in.valid.poke(1)
+            instruction(dut, 0, 18, DecodeUnit.ALU)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(0)
+            dut.clock.step()
+
+            instruction(dut, 0, 19, DecodeUnit.ALU)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(1)
+            dut.clock.step()
+
+            dut.io.freeCount(IssueQueueIndex.Load).poke(6)
+            dut.io.freeCount(IssueQueueIndex.LoadStoreAddress).poke(6)
+            instruction(dut, 0, 20, DecodeUnit.Load)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
+            dut.clock.step()
+
+            instruction(dut, 0, 21, DecodeUnit.Load)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
         }
     }
 
@@ -102,11 +124,11 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 1, 13, DecodeUnit.ALU)
 
             dut.io.accepted.expect(1)
-            val outputCount = dut.io.arith0.valid.peek().litValue +
-                dut.io.arith1.valid.peek().litValue +
-                dut.io.mixArith.valid.peek().litValue
+            val outputCount = dut.io.enqueue(IssueQueueIndex.Arith0).valid.peek().litValue +
+                dut.io.enqueue(IssueQueueIndex.Arith1).valid.peek().litValue +
+                dut.io.enqueue(IssueQueueIndex.MixArith).valid.peek().litValue
             assert(outputCount == 1)
-            val selected = Seq(dut.io.arith0, dut.io.arith1, dut.io.mixArith)
+            val selected = Seq(dut.io.enqueue(IssueQueueIndex.Arith0), dut.io.enqueue(IssueQueueIndex.Arith1), dut.io.enqueue(IssueQueueIndex.MixArith))
                 .find(_.valid.peek().litValue == 1).get
             selected.entries(0).robIdx.expect(12)
         }
@@ -120,11 +142,11 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 1, 21, DecodeUnit.ALU)
 
             dut.io.accepted.expect(3)
-            dut.io.arith1.valid.expect(1)
-            dut.io.arith1.entries(0).robIdx.expect(21)
-            dut.io.arith0.valid.expect(1)
-            dut.io.arith0.entries(0).robIdx.expect(20)
-            dut.io.mixArith.valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith1).entries(0).robIdx.expect(21)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith0).entries(0).robIdx.expect(20)
+            dut.io.enqueue(IssueQueueIndex.MixArith).valid.expect(0)
         }
     }
 
@@ -136,10 +158,13 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 1, 31, DecodeUnit.Load)
 
             dut.io.accepted.expect(3)
-            dut.io.load.valid.expect(1)
-            dut.io.load.entries(0).robIdx.expect(30)
-            dut.io.loadStoreAddress.valid.expect(1)
-            dut.io.loadStoreAddress.entries(0).robIdx.expect(31)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
+            val loads = Seq(
+                dut.io.enqueue(IssueQueueIndex.Load).entries(0).robIdx.peek().litValue,
+                dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).entries(0).robIdx.peek().litValue,
+            ).sorted
+            assert(loads == Seq(BigInt(30), BigInt(31)))
         }
     }
 
@@ -160,14 +185,14 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             dut.io.memoryEntries(0).sourceSpecMask(1).poke(0)
 
             dut.io.accepted.expect(1)
-            dut.io.loadStoreAddress.valid.expect(1)
-            dut.io.loadStoreAddress.entries(0).prs(0).expect(5)
-            dut.io.storeData.valid.expect(1)
-            dut.io.storeData.entries(0).prs(0).expect(70)
-            dut.io.storeData.entries(0).sourceValid(0).expect(true)
-            dut.io.storeData.entries(0).sourceReady(0).expect(false)
-            dut.io.storeData.entries(0).sourceSpecMask(0).expect(0)
-            dut.io.storeData.entries(0).sourceValid(1).expect(false)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).entries(0).prs(0).expect(5)
+            dut.io.enqueue(IssueQueueIndex.StoreData).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).prs(0).expect(70)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).sourceValid(0).expect(true)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).sourceReady(0).expect(false)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).sourceSpecMask(0).expect(0)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).sourceValid(1).expect(false)
         }
     }
 
@@ -184,46 +209,39 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             dut.io.memoryEntries(0).sourceReady(1).poke(true)
 
             dut.io.accepted.expect(1)
-            dut.io.loadStoreAddress.valid.expect(1)
-            dut.io.loadStoreAddress.entries(0).prs(0).expect(6)
-            dut.io.storeData.valid.expect(1)
-            dut.io.storeData.entries(0).prs(0).expect(9)
-            dut.io.storeData.entries(0).fu.expect(DecodeUnit.Atomic)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).entries(0).prs(0).expect(6)
+            dut.io.enqueue(IssueQueueIndex.StoreData).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).prs(0).expect(9)
+            dut.io.enqueue(IssueQueueIndex.StoreData).entries(0).fu.expect(DecodeUnit.Atomic)
         }
     }
 
-    "MixArith accepts at most one overflow ALU and preserves two native slots" in {
+    "an ALU cannot overflow into MixArith" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
             dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
             dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
             dut.io.freeCount(IssueQueueIndex.MixArith).poke(3)
-            dut.io.in.valid.poke(3)
+            dut.io.in.valid.poke(1)
             instruction(dut, 0, 50, DecodeUnit.ALU)
-            instruction(dut, 1, 51, DecodeUnit.ALU)
 
-            dut.io.accepted.expect(1)
-            dut.io.mixArith.valid.expect(1)
-            dut.io.mixArith.entries(0).robIdx.expect(50)
-
-            dut.io.freeCount(IssueQueueIndex.MixArith).poke(2)
             dut.io.accepted.expect(0)
+            dut.io.enqueue(IssueQueueIndex.MixArith).valid.expect(0)
         }
     }
 
-    "short-queue pressure proactively sends an ALU to MixArith" in {
+    "a native Mix operation uses MixArith independently of the ALU queues" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(dut.issue.arith0Entries / 2)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(dut.issue.arith1Entries / 2)
+            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
+            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
             dut.io.in.valid.poke(1)
-            instruction(dut, 0, 55, DecodeUnit.ALU)
+            instruction(dut, 0, 55, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
 
             dut.io.accepted.expect(1)
-            dut.io.mixArith.valid.expect(1)
-            dut.io.mixArith.entries(0).robIdx.expect(55)
-            dut.io.arith0.valid.expect(0)
-            dut.io.arith1.valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.MixArith).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.MixArith).entries(0).robIdx.expect(55)
         }
     }
 
@@ -237,55 +255,7 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 1, 61, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
 
             dut.io.accepted.expect(0)
-            dut.io.mixArith.valid.expect(0)
-        }
-    }
-
-    "a native-Mix burst protects the queue until a flush resets the performance state" in {
-        simulate(new Dispatcher) { dut =>
-            initialize(dut)
-            dut.io.in.valid.poke(1)
-            for (rob <- 70 until 74) {
-                instruction(dut, 0, rob, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
-                dut.io.accepted.expect(1)
-                dut.clock.step()
-            }
-            dut.io.in.valid.poke(0)
-            dut.clock.step()
-
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
-            dut.io.in.valid.poke(1)
-            instruction(dut, 0, 74, DecodeUnit.ALU)
-            dut.io.accepted.expect(0)
-
-            dut.io.flush.poke(true)
-            dut.clock.step()
-            dut.io.flush.poke(false)
-            dut.io.accepted.expect(1)
-            dut.io.mixArith.valid.expect(1)
-        }
-    }
-
-    "Mix protection decays while Dispatch is blocked and cannot become permanent" in {
-        simulate(new Dispatcher) { dut =>
-            initialize(dut)
-            dut.io.in.valid.poke(1)
-            for (rob <- 75 until 79) {
-                instruction(dut, 0, rob, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
-                dut.clock.step()
-            }
-            dut.io.in.valid.poke(0)
-            dut.clock.step()
-
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
-            dut.io.in.valid.poke(1)
-            instruction(dut, 0, 79, DecodeUnit.ALU)
-            dut.io.accepted.expect(0)
-            dut.clock.step(20)
-            dut.io.accepted.expect(1)
-            dut.io.mixArith.valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.MixArith).valid.expect(0)
         }
     }
 
@@ -299,8 +269,8 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 1, 81, DecodeUnit.Load)
 
             dut.io.accepted.expect(0)
-            dut.io.load.valid.expect(0)
-            dut.io.loadStoreAddress.valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
         }
     }
 
@@ -313,12 +283,12 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             dut.io.in.entries(0).exception.valid.poke(true)
 
             dut.io.accepted.expect(1)
-            dut.io.arith0.valid.expect(0)
-            dut.io.arith1.valid.expect(0)
-            dut.io.mixArith.valid.expect(0)
-            dut.io.load.valid.expect(0)
-            dut.io.loadStoreAddress.valid.expect(0)
-            dut.io.storeData.valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.MixArith).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.StoreData).valid.expect(0)
         }
     }
 }

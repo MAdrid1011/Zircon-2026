@@ -2,14 +2,16 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
+class MainBTBIO(p: FrontendParams) extends Bundle {
+    val query = Flipped(Valid(UInt(log2Ceil(p.btbSets).W)))
+    val raw = Output(new FrontendBtbRaw(p, p.btbSets, p.btbWays))
+    val train = Flipped(Valid(new BtbTraining(p)))
+    val readSkipped = if (p.observe) Some(Output(Bool())) else None
+}
+
 /** Synchronous main BTB. Metadata stays in flops; two interleaved RAM banks hold masked slot payloads. */
 class MainBTB(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val query = Flipped(Valid(UInt(32.W)))
-        val raw = Output(new FrontendBtbRaw(p, p.btbSets, p.btbWays))
-        val train = Flipped(Valid(new FrontendTraining(p)))
-        val readSkipped = if (p.observe) Some(Output(Bool())) else None
-    })
+    val io = IO(new MainBTBIO(p))
 
     /* Tag and Valid Storage */
     val indexBits = log2Ceil(p.btbSets)
@@ -24,10 +26,11 @@ class MainBTB(p: FrontendParams) extends Module {
     /* Training Lookup */
     // Metadata updates immediately, so consecutive partial updates see the newest allocation.
     val train = io.train.bits
-    val trainIndex = index(train.pc)
+    val trainPc = Cat(train.pcBlock, 0.U(p.blockBits.W))
+    val trainIndex = index(trainPc)
     val hits = VecInit((0 until p.btbWays).map(w =>
         FrontendMath.read(valid(w).toSeq, trainIndex).orR &&
-            FrontendMath.read(tags(w).toSeq, trainIndex) === tag(train.pc)
+            FrontendMath.read(tags(w).toSeq, trainIndex) === tag(trainPc)
     ))
     val occupied = VecInit((0 until p.btbWays).map(w => FrontendMath.read(valid(w).toSeq, trainIndex).orR))
     val way = if (p.btbWays == 1) 0.U
@@ -41,7 +44,7 @@ class MainBTB(p: FrontendParams) extends Module {
     when(io.train.valid) { assert(PopCount(hits) <= 1.U, "Main BTB tags must have at most one matching way") }
     for (r <- 0 until p.btbSets; w <- 0 until p.btbWays) {
         when(write && trainIndex === r.U && way === w.U) {
-            tags(w)(r) := tag(train.pc)
+            tags(w)(r) := tag(trainPc)
             valid(w)(r) := (Mux(hits(w), valid(w)(r), 0.U) & ~train.mask) | cfi
             replacement(r) := !way(0)
         }
@@ -60,24 +63,18 @@ class MainBTB(p: FrontendParams) extends Module {
     val writeData = RegEnable(
         VecInit((0 until p.btbWays).flatMap(_ =>
             (0 until p.fetchWidth).map(i =>
-                Cat(
-                    FrontendCfi.conditional(train.kinds(i)) &&
-                        FrontendMath.backwardBranch(FrontendMath.slotPc(train.pc, i, p), train.targets(i)),
-                    train.kinds(i),
-                    train.targets(i)(31, 2)
-                )
+                Cat(train.kinds(i), train.targetWords(i))
             )
         )).asUInt,
         write
     )
 
     /* IF1 RAM Request */
-    val queryIndex = index(io.query.bits)
+    val queryIndex = io.query.bits
     // A conflicting main lookup becomes a miss; IF1 keeps running with the fast BTB prediction.
     val conflict = writeValid && queryIndex(0) === writeIndex(0)
     val read = io.query.valid && !conflict
-    if (p.observe) { io.readSkipped.get := io.query.valid && conflict }
-    val banks = Seq.fill(2)(Module(new SinglePortMaskedRam(p.btbSets / 2, p.btbWays * p.fetchWidth, 34)))
+    val banks = Seq.fill(2)(Module(new SinglePortMaskedRam(p.btbSets / 2, p.btbWays * p.fetchWidth, 33)))
     for (b <- 0 until 2) {
         val writing = writeValid && writeIndex(0) === b.U
         banks(b).io.clock := clock
@@ -104,10 +101,12 @@ class MainBTB(p: FrontendParams) extends Module {
             io.query.valid
         )
         for (i <- 0 until p.fetchWidth) {
-            val slot = data((w * p.fetchWidth + i + 1) * 34 - 1, (w * p.fetchWidth + i) * 34)
+            val slot = data((w * p.fetchWidth + i + 1) * 33 - 1, (w * p.fetchWidth + i) * 33)
             io.raw.lines(w).targets(i) := slot(29, 0)
             io.raw.lines(w).kinds(i) := slot(32, 30)
-            io.raw.lines(w).backward(i) := slot(33)
+            io.raw.lines(w).backward(i) := false.B
         }
     }
+
+    if (p.observe) { io.readSkipped.get := io.query.valid && conflict }
 }

@@ -45,7 +45,14 @@ class DualPortMaskedRam(
     require(depth >= 2 && isPow2(depth) && lanes > 0 && laneBits > 0)
     val io = IO(new DualPortMaskedRamIO(depth, lanes, laneBits))
 
-    backend match {
+    val effectiveBackend = if (backend == DualPortRamBackend.Vivado &&
+        !sys.env.get("ZIRCON_USE_EXTERNAL_VIVADO_RAM").contains("true")) {
+        DualPortRamBackend.Registers
+    } else {
+        backend
+    }
+
+    effectiveBackend match {
         case DualPortRamBackend.OpenRAM =>
             require(depth == 16 && (lanes == 1 && laneBits == 25 || lanes == 32 && laneBits == 8))
             require(readWritePort == 0 || readWritePort == 1)
@@ -54,19 +61,24 @@ class DualPortMaskedRam(
             val mask = Seq(io.wea, io.web)
             val data = Seq(io.dina, io.dinb)
             val width = if (lanes == 1) 25 else 32
-            val ram = Seq.fill(lanes * laneBits / width)(Module(new OpenRam1RW1R(width)))
-            for ((r, i) <- ram.zipWithIndex) {
-                r.io.clock := io.clka
-                r.io.csb0 := !enable(readWritePort)
-                r.io.csb1 := !enable(1 - readWritePort)
-                r.io.web0 := !mask(readWritePort).orR
-                r.io.addr0 := address(readWritePort)
-                r.io.addr1 := address(1 - readWritePort)
-                r.io.din0 := data(readWritePort)((i + 1) * width - 1, i * width)
-                r.io.wmask0 := (if (lanes == 1) mask(readWritePort) else mask(readWritePort)(i * 4 + 3, i * 4))
+            val useMacro = sys.env.get("ZIRCON_USE_EXTERNAL_OPENRAM").contains("true")
+            val ram = Seq.fill(lanes * laneBits / width) {
+                if (useMacro) Module(new OpenRam1RW1RMacro(width)).io else Module(new OpenRam1RW1R(width)).io
             }
-            io.douta := Cat(ram.reverse.map(r => if (readWritePort == 0) r.io.dout0 else r.io.dout1))
-            io.doutb := Cat(ram.reverse.map(r => if (readWritePort == 1) r.io.dout0 else r.io.dout1))
+            for ((r, i) <- ram.zipWithIndex) {
+                r.clock := io.clka
+                r.csb0 := !enable(readWritePort)
+                r.csb1 := !enable(1 - readWritePort)
+                r.web0 := !mask(readWritePort).orR
+                r.addr0 := address(readWritePort)
+                r.addr1 := address(1 - readWritePort)
+                r.din0 := data(readWritePort)((i + 1) * width - 1, i * width)
+                if (width == 32) {
+                    r.wmask0.get := mask(readWritePort)(i * 4 + 3, i * 4)
+                }
+            }
+            io.douta := Cat(ram.reverse.map(r => if (readWritePort == 0) r.dout0 else r.dout1))
+            io.doutb := Cat(ram.reverse.map(r => if (readWritePort == 1) r.dout0 else r.dout1))
             withClockAndReset(io.clka, false.B) {
                 assert(!enable(1 - readWritePort) || !mask(1 - readWritePort).orR, "OpenRAM: write on read-only port")
             }

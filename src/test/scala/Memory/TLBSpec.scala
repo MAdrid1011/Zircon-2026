@@ -10,7 +10,7 @@ class TLBDriver(val dut: TLB) extends chisel3.simulator.PeekPokeAPI {
             query.bits.vaddr.poke(0)
         }
         dut.io.refill.valid.poke(false)
-        dut.io.refill.bits.vaddr.poke(0)
+        dut.io.refill.bits.vpn.poke(0)
         dut.io.refill.bits.ppn.poke(0)
         dut.io.refill.bits.asid.poke(0)
         dut.io.refill.bits.global.poke(false)
@@ -51,7 +51,7 @@ class TLBDriver(val dut: TLB) extends chisel3.simulator.PeekPokeAPI {
         accessed: Boolean = true,
         dirty: Boolean = false,
     ): Unit = {
-        dut.io.refill.bits.vaddr.poke(vaddr)
+        dut.io.refill.bits.vpn.poke(vaddr >> 12)
         dut.io.refill.bits.ppn.poke(ppn)
         dut.io.refill.bits.asid.poke(asid)
         dut.io.refill.bits.global.poke(global)
@@ -76,10 +76,10 @@ class TLBDriver(val dut: TLB) extends chisel3.simulator.PeekPokeAPI {
         pma: Int = 0,
         superpage: Boolean = false,
     ): Unit = {
-        dut.io.lookup(port).bits.vaddr.poke(vaddr)
+        dut.io.lookup(port).bits.vaddr.poke(vaddr >> dut.paddrLowBits)
         dut.io.lookup(port).valid.poke(true)
         dut.io.response(port).hit.expect(hit)
-        dut.io.response(port).paddr.expect(if (hit) paddr else BigInt(0))
+        dut.io.response(port).paddr.expect(if (hit) paddr >> dut.paddrLowBits else BigInt(0))
         dut.io.response(port).pma.expect(if (hit) pma else 0)
         dut.io.response(port).superpage.expect(hit && superpage)
     }
@@ -206,7 +206,7 @@ class TLBSpec extends AnyFreeSpec with ChiselSim {
             dut.io.scopeUpdate.valid.poke(true)
             dut.io.scopeUpdate.bits.asid.poke(9)
             dut.io.refill.valid.poke(true)
-            dut.io.refill.bits.vaddr.poke(va)
+            dut.io.refill.bits.vpn.poke(va >> 12)
             dut.io.refill.bits.ppn.poke(ppn)
             dut.io.refill.bits.asid.poke(9)
             dut.io.refill.bits.global.poke(false)

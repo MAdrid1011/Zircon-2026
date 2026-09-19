@@ -30,7 +30,7 @@ class AdderSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.src2.poke(b)
                     dut.io.cin.poke(cin)
                     dut.io.res.expect(sum & mask, context)
-                    dut.io.cout.expect(sum >> width, context)
+                    dut.io.cout.get.expect(sum >> width, context)
                     checked += 1
                 }
 

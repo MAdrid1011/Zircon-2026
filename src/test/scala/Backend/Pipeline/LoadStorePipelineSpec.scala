@@ -21,8 +21,8 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
         var dataDone: Boolean = false,
         var sent: Boolean = false
     ) {
-        val sq: Int = seq & 255
-        val rob: Int = (seq * 31) & 255
+        val sq: Int = seq & ((1 << dut.p.sqWidth) - 1)
+        val rob: Int = (seq * 31) & ((1 << CommitIndex.addressWidth(ZirconConfig.CommitParams().robEntries)) - 1)
         val address: Long = (base + imm) & 0xffffffffL
         val mask: Int = (((1 << (1 << size)) - 1) << (address & 3).toInt) & 15
         val alignedData: BigInt = (value << (8 * (address & 3).toInt)) & BigInt("ffffffff", 16)
@@ -124,6 +124,7 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
         sta.foreach { s =>
             val b = dut.io.iq.instPkg.bits
             dut.io.iq.instPkg.valid.poke(true)
+            b.fu.poke(ZirconConfig.DecodeUnit.Store)
             b.store.poke(true); b.sqIdx.poke(s.sq)
             b.prj.poke(s.prj); b.imm.poke(BigInt(s.imm & 0xffffffffL)); b.mtype.poke(s.size)
             b.robIdx.poke(s.rob); b.rdVld.poke(false)
@@ -137,10 +138,11 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
         val s = dut.io.iq.std.get
         s.valid.poke(std.nonEmpty)
         std.foreach { x =>
+            s.bits.fu.poke(ZirconConfig.DecodeUnit.Store)
             s.bits.prs(0).poke(x.prs); s.bits.sqIdx.poke(x.sq); s.bits.robIdx.poke(x.rob); s.bits.size.poke(x.size)
         }
-        dut.io.cmt.sq.addr.get.ready.poke(staReady)
-        dut.io.cmt.sq.data.get.ready.poke(stdReady)
+        dut.io.cmt.storeAddress.get.ready.poke(staReady)
+        dut.io.cmt.storeData.get.ready.poke(stdReady)
         fpProducer.foreach { case (r, v) =>
             dut.io.fpWrite(0).we.poke(true); dut.io.fpWrite(0).addr.poke(r); dut.io.fpWrite(0).data.poke(v)
         }
@@ -153,8 +155,8 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
         }
     }
     override def afterCycle(input: Option[Load], cancel: Option[Int]): Unit = {
-        val a = dut.io.cmt.sq.addr.get
-        val d = dut.io.cmt.sq.data.get
+        val a = dut.io.cmt.storeAddress.get
+        val d = dut.io.cmt.storeData.get
         stable(heldSTA, a.valid.peek().litToBoolean, fields(a.bits), "STA")
         stable(heldSTD, d.valid.peek().litToBoolean, fields(d.bits), "STD")
         heldSTA = if (a.valid.peek().litToBoolean && !staReady) Some(fields(a.bits)) else None

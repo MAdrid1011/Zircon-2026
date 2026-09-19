@@ -54,7 +54,7 @@ class FrontendTrainingMeta(p: FrontendParams) extends Bundle {
 }
 
 class FrontendTrainingRecord(p: FrontendParams) extends Bundle {
-    val pc = UInt(32.W)
+    val pcWord = UInt(30.W)
     val mask = UInt(p.fetchWidth.W)
     val kinds = Vec(p.fetchWidth, UInt(3.W))
     val taken = UInt(p.fetchWidth.W)

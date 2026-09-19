@@ -17,8 +17,13 @@ class FpConvertRequest(val tagWidth: Int) extends Bundle {
 class FpConvertResponse(val tagWidth: Int) extends Bundle {
     val res = UInt(32.W)
     val fflags = UInt(5.W)
-    val dstIsFp = Bool()
     val tag = UInt(tagWidth.W)
+}
+
+class FpConvertIO(tagWidth: Int) extends Bundle {
+    val in = Flipped(Decoupled(new FpConvertRequest(tagWidth)))
+    val out = Decoupled(new FpConvertResponse(tagWidth))
+    val flush = Input(Bool())
 }
 
 /** R1 holds only the shared shifter input and final-rounding controls. */
@@ -43,11 +48,7 @@ class FpConvertStage1(tagWidth: Int) extends Bundle {
 /** Two elastic stages for all four RV32 FP32/integer conversions. */
 class FpConvert(val tagWidth: Int = 32) extends Module {
     require(tagWidth > 0)
-    val io = IO(new Bundle {
-        val in = Flipped(Decoupled(new FpConvertRequest(tagWidth)))
-        val out = Decoupled(new FpConvertResponse(tagWidth))
-        val flush = Input(Bool())
-    })
+    val io = IO(new FpConvertIO(tagWidth))
 
     val r1 = Reg(new FpConvertStage1(tagWidth))
     val r2 = Reg(new FpConvertResponse(tagWidth))
@@ -113,12 +114,11 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
 
     // -(q + up) = ~q + !up: one shared increment, not rounding followed by negation.
     val negate = !r1.toFloat && r1.sign
-    val roundingAdder = BLevelPAdder32(
+    val rounded = BLevelPAdder32.sum(
         retained ^ Fill(32, negate),
         0.U(32.W),
         (roundUp ^ negate).asUInt
     )
-    val rounded = roundingAdder.io.res
     val floatCarry = retained(23, 0).andR && roundUp
     val floatExponent = Mux(floatCarry, r1.exponentCarry, r1.exponent)
     val floatResult = Mux(r1.zero, 0.U(32.W), Cat(r1.sign, floatExponent, rounded(22, 0)))
@@ -141,7 +141,6 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     val s2 = Wire(new FpConvertResponse(tagWidth))
     s2.res := Mux(r1.toFloat, floatResult, Mux(invalid, saturation, rounded))
     s2.fflags := Cat(!r1.toFloat && invalid, 0.U(3.W), inexact && (r1.toFloat || !invalid))
-    s2.dstIsFp := r1.toFloat
     s2.tag := r1.tag
 
     /* Each stage can fill a bubble independently while the other stage is blocked. */

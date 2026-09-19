@@ -52,7 +52,7 @@ class DCacheStressTop(backend: DualPortRamBackend) extends DCache(backend, DCach
         lookupMove.asUInt.orR
     )
     observation.lookupValid := RegNext(lookupMove.asUInt.orR, false.B)
-    observation.install := Cat(missUnit.io.install.bits.way, index(missUnit.io.install.bits.paddr))
+    observation.install := Cat(missUnit.io.install.bits.way, missUnit.io.install.bits.line(l1Index - 1, 0))
     observation.occupancy := PopCount(requestBufferValid) +& PopCount(lookupValid) +& PopCount(executeValid) +&
         PopCount(responseValid)
     observation.normalRead := loadIssue.asUInt

@@ -6,9 +6,7 @@ class NPCIO(p: FrontendParams) extends Bundle {
     val cmt = Flipped(Valid(new FrontendRedirect))
     val pd = Flipped(Valid(new FrontendRedirect))
     val pr = Flipped(Valid(new FrontendRedirect))
-    val fte = new Bundle {
-        val space = Input(Bool())
-    }
+    val space = Input(Bool())
     val request = Decoupled(new FrontendFetchRequest(p))
 }
 
@@ -27,7 +25,7 @@ class NPC(p: FrontendParams) extends Module {
     // Decode priority before the late prediction address arrives.
     val grants = sources.indices.map(i => sources(i).valid && !sources.take(i).map(_.valid).foldLeft(false.B)(_ || _))
     selected.bits := Mux1H(grants, sources.map(_.bits))
-    io.request.valid := io.fte.space && selected.valid
+    io.request.valid := io.space && selected.valid
     io.request.bits.pc := selected.bits.pc
     io.request.bits.token := token
     when(selected.valid) {

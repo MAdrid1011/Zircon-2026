@@ -63,7 +63,7 @@ final case class IssueQueueParams(
 }
 
 final case class IssueParams(
-    dispatchWidth: Int = 2,
+    dispatchWidth: Int = 3,
     wakeupPorts: Int = 8,
     arith0Entries: Int = 7,
     arith1Entries: Int = 7,
@@ -103,4 +103,14 @@ final case class IssueParams(
         IssueQueueParams(loadStoreAddressEntries, IssueQueueProfile.LoadStoreAddress, dispatchWidth, wakeupPorts)
     def storeData: IssueQueueParams =
         IssueQueueParams(storeDataEntries, IssueQueueProfile.StoreData, dispatchWidth, wakeupPorts)
+
+    /** Queue parameters in the order defined by IssueQueueIndex. */
+    def queueParams: Seq[IssueQueueParams] = Seq(
+        arith0,
+        arith1,
+        mixArith,
+        load,
+        loadStoreAddress,
+        storeData,
+    )
 }

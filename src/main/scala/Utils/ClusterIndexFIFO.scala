@@ -18,19 +18,27 @@ class ClusterEntry(wOffset: Int, wQidx: Int) extends Bundle {
     }
 }
 
-class ClusterIndexFIFOIO[T <: Data](gen: T, n: Int, len: Int, ew: Int, dw: Int, rw: Int, ww: Int)
+class ClusterIndexFIFOIO[T <: Data](
+    gen: T,
+    n: Int,
+    len: Int,
+    ew: Int,
+    dw: Int,
+    rw: Int,
+    ww: Int,
+    exposeDeqIndex: Boolean,
+)
     extends Bundle {
     val enq = Vec(ew, Flipped(Decoupled(gen)))
     val enqIdx = Output(Vec(ew, new ClusterEntry(len, n)))
     val deq = Vec(dw, Decoupled(gen))
-    val deqIdx = Output(Vec(dw, new ClusterEntry(len, n)))
+    val deqIdx = if (exposeDeqIndex) Some(Output(Vec(dw, new ClusterEntry(len, n)))) else None
     val ridx = Input(Vec(rw, new ClusterEntry(len, n)))
     val rdata = Output(Vec(rw, gen))
     val widx = Input(Vec(ww, new ClusterEntry(len, n)))
     val wen = Input(Vec(ww, Bool()))
     val wdata = Input(Vec(ww, gen))
     val flush = Input(Bool())
-    val dbgFIFO = Output(Vec(n * len, gen))
 }
 
 /** Banked FIFO with optional stable compaction directly into the bank write muxes.
@@ -46,6 +54,7 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     isFlst: Boolean = false,
     rstVal: Option[Seq[T]] = None,
     compactEnq: Boolean = false,
+    exposeDeqIndex: Boolean = false,
 ) extends Module {
     require(num > 0 && ew > 0 && dw > 0, "ClusterIndexFIFO depth and transfer widths must be positive")
     require(rw >= 0 && ww >= 0, "ClusterIndexFIFO random port counts must be nonnegative")
@@ -53,7 +62,7 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     require(num % n == 0, "ClusterIndexFIFO depth must be divisible by bank count")
     require(rstVal.forall(_.size == num), "ClusterIndexFIFO reset contents must match depth")
     val len: Int = num / n
-    val io = IO(new ClusterIndexFIFOIO(gen, n, len, ew, dw, rw, ww))
+    val io = IO(new ClusterIndexFIFOIO(gen, n, len, ew, dw, rw, ww, exposeDeqIndex))
 
     private val banks = Seq.tabulate(n) { bank =>
         Module(new IndexFIFO(gen, len, rw, ww, isFlst, rstVal.map(_.slice(bank * len, (bank + 1) * len)))).io
@@ -101,9 +110,11 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         val select = deqSelect(lane)
         io.deq(lane).valid := Mux1H(select, banks.map(_.deq.valid)) && allDeqValid
         io.deq(lane).bits := Mux1H(select, banks.map(_.deq.bits))
-        io.deqIdx(lane).qidx := select
-        io.deqIdx(lane).offset := Mux1H(select, banks.map(_.deqIdx))
-        io.deqIdx(lane).high := Mux1H(select, banks.map(_.deqHigh))
+        if (exposeDeqIndex) {
+            io.deqIdx.get(lane).qidx := select
+            io.deqIdx.get(lane).offset := Mux1H(select, banks.map(_.deqIdx))
+            io.deqIdx.get(lane).high := Mux1H(select, banks.map(_.deqHigh))
+        }
     }
     for (bank <- 0 until n) {
         banks(bank).deq.ready :=
@@ -142,7 +153,6 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         }
         for (bank <- 0 until n) banks(bank).wen(port) := io.wen(port) && io.widx(port).qidx(bank)
     }
-    for (row <- 0 until len; bank <- 0 until n) io.dbgFIFO(row * n + bank) := banks(bank).dbgFIFO(row)
 }
 
 object ClusterIndexFIFO {

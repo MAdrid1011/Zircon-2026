@@ -8,87 +8,6 @@ class ZirconInterrupts extends Bundle {
     val seip = Bool()
 }
 
-class ZirconRetireTrace extends Bundle {
-    val valid = Bool()
-    val pc = UInt(32.W)
-    val instruction = UInt(32.W)
-    val mispredicted = Bool()
-    val rd = UInt(5.W)
-    val isFp = Bool()
-    val writeValid = Bool()
-    val value = UInt(32.W)
-}
-
-class ZirconDebugIO extends Bundle {
-    val retire = Output(Vec(CommitParams().width, new ZirconRetireTrace))
-    val robHeadValid = Output(Bool())
-    val robHeadComplete = Output(Bool())
-    val robHeadPc = Output(UInt(32.W))
-    val privilege = Output(UInt(2.W))
-    val csr = Output(new CSRState)
-    val performance = Output(new ZirconPerformanceCounters)
-}
-
-class ZirconPerformanceCounters extends Bundle {
-    val icacheVisit = UInt(64.W)
-    val icacheHit = UInt(64.W)
-    val icacheMissCycles = UInt(64.W)
-    val fqBlockedCycles = UInt(64.W)
-    val fqEmptyCycles = UInt(64.W)
-    val ftqBlockedCycles = UInt(64.W)
-    val integerFreeListBlockedCycles = UInt(64.W)
-    val floatingFreeListBlockedCycles = UInt(64.W)
-    val dispatchBlockedCycles = UInt(64.W)
-    val branch = UInt(64.W)
-    val branchFail = UInt(64.W)
-    val directJump = UInt(64.W)
-    val directJumpFail = UInt(64.W)
-    val call = UInt(64.W)
-    val callFail = UInt(64.W)
-    val ret = UInt(64.W)
-    val retFail = UInt(64.W)
-    val indirect = UInt(64.W)
-    val indirectFail = UInt(64.W)
-    val loopTraining = UInt(64.W)
-    val loopProvider = UInt(64.W)
-    val loopCorrect = UInt(64.W)
-    val robFullCycles = UInt(64.W)
-    val storeBufferFullCycles = UInt(64.W)
-    val storeBufferBusyCycles = UInt(64.W)
-    val issueQueueFullCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
-    val pipelineIssueCycles = Vec(6, UInt(64.W))
-    val pipelineOperandWaitCycles = Vec(6, UInt(64.W))
-    val pipelineReplayBlockedCycles = Vec(6, UInt(64.W))
-    val pipelineExecutionBlockedCycles = Vec(6, UInt(64.W))
-    val divideBusyCycles = UInt(64.W)
-    val dcacheLoadVisits = Vec(2, UInt(64.W))
-    val dcacheLoadHits = Vec(2, UInt(64.W))
-    val dcacheLoadMisses = Vec(2, UInt(64.W))
-    val dcacheLoadRetries = Vec(2, UInt(64.W))
-    val dcacheLoadRetryTranslation = Vec(2, UInt(64.W))
-    val dcacheLoadRetryForwardBlocked = Vec(2, UInt(64.W))
-    val dcacheLoadRetryUncachedOrder = Vec(2, UInt(64.W))
-    val dcacheLoadRetryStaleLookup = Vec(2, UInt(64.W))
-    val dcacheLoadRetryMissBusy = Vec(2, UInt(64.W))
-    val dcacheLoadRetryStoreConflict = Vec(2, UInt(64.W))
-    val dcacheLoadRetryLaneConflict = Vec(2, UInt(64.W))
-    val dcacheStoreVisits = UInt(64.W)
-    val dcacheStoreHits = UInt(64.W)
-    val dcacheStoreMisses = UInt(64.W)
-    val dcacheMissBusyCycles = UInt(64.W)
-    val l2InstructionVisits = UInt(64.W)
-    val l2InstructionHits = UInt(64.W)
-    val l2InstructionMisses = UInt(64.W)
-    val l2DataVisits = UInt(64.W)
-    val l2DataHits = UInt(64.W)
-    val l2DataMisses = UInt(64.W)
-    val l2InstructionVictimInsertions = UInt(64.W)
-    val l2DataVictimInsertions = UInt(64.W)
-    val lowerMemoryReads = UInt(64.W)
-    val lowerMemoryWrites = UInt(64.W)
-    val l2EngineBusyCycles = UInt(64.W)
-}
-
 class ZirconCoreIO(simulationDebug: Boolean) extends Bundle {
     val axi = new AXI4MasterIO
     val interrupts = Input(new ZirconInterrupts)
@@ -101,29 +20,68 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
     val io = IO(new ZirconCoreIO(simulationDebug))
 
     private val frontendParams = FrontendParams(observe = simulationDebug)
-    val frontend = Module(new Frontend(p = frontendParams))
-    val middleend = Module(new Middleend(frontendParams = frontendParams))
-    val backend = Module(new Backend(observe = simulationDebug))
-    val commit = Module(new Commit(fp = frontendParams, simulationDebug = simulationDebug))
+    private val issueParams = IssueParams()
+    val frontend = Module(new Frontend(p = frontendParams, issue = issueParams))
+    val middleend = Module(new Middleend(frontendParams = frontendParams, issueParams = issueParams))
+    val backend = Module(new Backend(issueParams = issueParams, observe = simulationDebug))
+    val commit = Module(new Commit(fp = frontendParams, issue = issueParams, simulationDebug = simulationDebug))
     val ptw = Module(new PageTableWalker)
     val l2 = Module(new L2Cache(observe = simulationDebug))
     val bridge = Module(new L2AXI4Bridge)
 
+    /* Major pipeline blocks exchange one owned interface per module boundary. */
     frontend.io.middle <> middleend.io.frontend
-    middleend.io.csr := commit.io.environment.csr
+    middleend.io.fpState := commit.io.csr.state.mstatus(14, 13)
     middleend.io.backend <> backend.io.middleend
     frontend.io.commit <> commit.io.frontend
     middleend.io.commit <> commit.io.middleend
-    backend.io.arith0 <> commit.io.backend.arith0
-    backend.io.arith1 <> commit.io.backend.arith1
-    backend.io.mixRob <> commit.io.backend.mixRob
-    backend.io.mixCSR <> commit.io.backend.mixCSR
-    backend.io.ls0 <> commit.io.backend.ls0
-    backend.io.ls1 <> commit.io.backend.ls1
-    backend.io.store <> commit.io.backend.store
-    backend.io.atomic <> commit.io.backend.atomic
-    backend.io.flush := commit.io.backend.flush
-    backend.io.csrGrant <> commit.io.backend.csrGrant
+    backend.io.commit <> commit.io.backend
+    /* Instruction, data and page-table traffic share the unified L2 and AXI bridge. */
+    frontend.io.mem.l2 <> l2.io.icache
+    backend.io.l2 <> l2.io.dcache
+    l2.io.memory <> bridge.io.memory
+    bridge.io.axi <> io.axi
+
+    /* Commit owns CSR state; the core shell supplies time, interrupts and cache-idle status. */
+    val time = RegInit(0.U(64.W))
+    time := time + 1.U
+    commit.io.csr.time := time
+    commit.io.csr.interrupt.software := io.interrupts.msip
+    commit.io.csr.interrupt.timer := io.interrupts.mtip
+    commit.io.csr.interrupt.external := io.interrupts.meip
+    commit.io.csr.interrupt.supervisorExternal := io.interrupts.seip
+    commit.io.memoryIdle := backend.io.dcacheIdle && l2.io.idle
+    /* FENCE.I drains and invalidates both private caches in parallel. */
+    frontend.io.maintenance.request := commit.io.maintenance.request
+    backend.io.maintenance.request := commit.io.maintenance.request
+    commit.io.maintenance.done := frontend.io.maintenance.done && backend.io.maintenance.done
+
+    /* ITLB and DTLB use the same current address-space and privilege controls. */
+    val translation = Wire(new AddressTranslationControl)
+    translation.enabled := commit.io.csr.state.satp(31) && commit.io.csr.currentPrivilege =/= 3.U
+    translation.asid := commit.io.csr.state.satp(30, 22)
+    translation.privilege := commit.io.csr.currentPrivilege
+    translation.mxr := commit.io.csr.state.mstatus(19)
+    translation.sum := commit.io.csr.state.mstatus(18)
+    frontend.io.tlb.get.control := translation
+    frontend.io.tlb.get.refill := ptw.io.instruction.refill
+    frontend.io.tlb.get.flush := commit.io.csr.tlbFlush
+    backend.io.dtlb.get.control := translation
+    backend.io.dtlb.get.refill := ptw.io.data.refill
+    backend.io.dtlb.get.flush := commit.io.csr.tlbFlush
+
+    /* The shared PTW serves both TLBs through dedicated L2 request channels. */
+    ptw.io.control := translation
+    ptw.io.rootPpn := commit.io.csr.state.satp(21, 0)
+    ptw.io.flush := commit.io.csr.tlbFlush
+    ptw.io.instruction.miss := frontend.io.mmu.request
+    ptw.io.data.miss := backend.io.dtlbMiss.get
+    frontend.io.mmu.response.valid := false.B
+    frontend.io.mmu.response.bits := 0.U.asTypeOf(new ICacheTranslation)
+    ptw.io.iptw <> l2.io.iptw
+    ptw.io.dptw <> l2.io.dptw
+
+    /* Simulation-only observability stays after all architectural connections. */
     if (simulationDebug) {
         for (lane <- 0 until CommitParams().width) {
             io.debug.get.retire(lane) := commit.io.debug.retire(lane)
@@ -131,8 +89,8 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
         io.debug.get.robHeadValid := commit.io.debug.robHeadValid
         io.debug.get.robHeadComplete := commit.io.debug.robHeadComplete
         io.debug.get.robHeadPc := commit.io.debug.robHeadPc
-        io.debug.get.privilege := commit.io.environment.currentPrivilege
-        io.debug.get.csr := commit.io.environment.csr
+        io.debug.get.privilege := commit.io.csr.currentPrivilege
+        io.debug.get.csr := commit.io.csr.state
         io.debug.get.performance.icacheVisit := frontend.io.observe.get.icache.visit
         io.debug.get.performance.icacheHit := frontend.io.observe.get.icache.hit
         io.debug.get.performance.icacheMissCycles := frontend.io.observe.get.icache.missCycle
@@ -191,45 +149,85 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
         io.debug.get.performance.lowerMemoryWrites := l2.io.performance.get.lowerMemoryWrites
         io.debug.get.performance.l2EngineBusyCycles := l2.io.performance.get.engineBusyCycles
     }
+}
 
-    frontend.io.mem.l2 <> l2.io.icache
-    backend.io.l2 <> l2.io.dcache
-    l2.io.memory <> bridge.io.memory
-    bridge.io.axi <> io.axi
+class ZirconRetireTrace extends Bundle {
+    val valid = Bool()
+    val pc = UInt(32.W)
+    val instruction = UInt(32.W)
+    val mispredicted = Bool()
+    val rd = UInt(5.W)
+    val isFp = Bool()
+    val writeValid = Bool()
+    val value = UInt(32.W)
+}
 
-    val time = RegInit(0.U(64.W))
-    time := time + 1.U
-    commit.io.environment.time := time
-    commit.io.environment.privilege := 3.U
-    commit.io.environment.interrupt.software := io.interrupts.msip
-    commit.io.environment.interrupt.timer := io.interrupts.mtip
-    commit.io.environment.interrupt.external := io.interrupts.meip
-    commit.io.environment.interrupt.supervisorExternal := io.interrupts.seip
-    commit.io.environment.memoryIdle := backend.io.dcacheIdle && l2.io.idle
-    frontend.io.maintenance.request := commit.io.environment.maintenance.request && backend.io.maintenance.done
-    backend.io.maintenance.request := commit.io.environment.maintenance.request
-    commit.io.environment.maintenance.done := frontend.io.maintenance.done && backend.io.maintenance.done
+class ZirconDebugIO extends Bundle {
+    val retire = Output(Vec(CommitParams().width, new ZirconRetireTrace))
+    val robHeadValid = Output(Bool())
+    val robHeadComplete = Output(Bool())
+    val robHeadPc = Output(UInt(32.W))
+    val privilege = Output(UInt(2.W))
+    val csr = Output(new CSRState)
+    val performance = Output(new ZirconPerformanceCounters)
+}
 
-    val translation = Wire(new AddressTranslationControl)
-    translation.enabled := commit.io.environment.csr.satp(31) && commit.io.environment.currentPrivilege =/= 3.U
-    translation.asid := commit.io.environment.csr.satp(30, 22)
-    translation.privilege := commit.io.environment.currentPrivilege
-    translation.mxr := commit.io.environment.csr.mstatus(19)
-    translation.sum := commit.io.environment.csr.mstatus(18)
-    frontend.io.tlb.get.control := translation
-    frontend.io.tlb.get.refill := ptw.io.instruction.refill
-    frontend.io.tlb.get.flush := commit.io.environment.tlbFlush
-    backend.io.dtlb.get.control := translation
-    backend.io.dtlb.get.refill := ptw.io.data.refill
-    backend.io.dtlb.get.flush := commit.io.environment.tlbFlush
-
-    ptw.io.control := translation
-    ptw.io.satp := commit.io.environment.csr.satp
-    ptw.io.flush := commit.io.environment.tlbFlush
-    ptw.io.instruction.miss := frontend.io.mmu.request
-    ptw.io.data.miss := backend.io.dtlbMiss.get
-    frontend.io.mmu.response.valid := false.B
-    frontend.io.mmu.response.bits := 0.U.asTypeOf(new ICacheTranslation)
-    ptw.io.iptw <> l2.io.iptw
-    ptw.io.dptw <> l2.io.dptw
+class ZirconPerformanceCounters extends Bundle {
+    val icacheVisit = UInt(64.W)
+    val icacheHit = UInt(64.W)
+    val icacheMissCycles = UInt(64.W)
+    val fqBlockedCycles = UInt(64.W)
+    val fqEmptyCycles = UInt(64.W)
+    val ftqBlockedCycles = UInt(64.W)
+    val integerFreeListBlockedCycles = UInt(64.W)
+    val floatingFreeListBlockedCycles = UInt(64.W)
+    val dispatchBlockedCycles = UInt(64.W)
+    val branch = UInt(64.W)
+    val branchFail = UInt(64.W)
+    val directJump = UInt(64.W)
+    val directJumpFail = UInt(64.W)
+    val call = UInt(64.W)
+    val callFail = UInt(64.W)
+    val ret = UInt(64.W)
+    val retFail = UInt(64.W)
+    val indirect = UInt(64.W)
+    val indirectFail = UInt(64.W)
+    val loopTraining = UInt(64.W)
+    val loopProvider = UInt(64.W)
+    val loopCorrect = UInt(64.W)
+    val robFullCycles = UInt(64.W)
+    val storeBufferFullCycles = UInt(64.W)
+    val storeBufferBusyCycles = UInt(64.W)
+    val issueQueueFullCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineIssueCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineOperandWaitCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineReplayBlockedCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineExecutionBlockedCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val divideBusyCycles = UInt(64.W)
+    val dcacheLoadVisits = Vec(2, UInt(64.W))
+    val dcacheLoadHits = Vec(2, UInt(64.W))
+    val dcacheLoadMisses = Vec(2, UInt(64.W))
+    val dcacheLoadRetries = Vec(2, UInt(64.W))
+    val dcacheLoadRetryTranslation = Vec(2, UInt(64.W))
+    val dcacheLoadRetryForwardBlocked = Vec(2, UInt(64.W))
+    val dcacheLoadRetryUncachedOrder = Vec(2, UInt(64.W))
+    val dcacheLoadRetryStaleLookup = Vec(2, UInt(64.W))
+    val dcacheLoadRetryMissBusy = Vec(2, UInt(64.W))
+    val dcacheLoadRetryStoreConflict = Vec(2, UInt(64.W))
+    val dcacheLoadRetryLaneConflict = Vec(2, UInt(64.W))
+    val dcacheStoreVisits = UInt(64.W)
+    val dcacheStoreHits = UInt(64.W)
+    val dcacheStoreMisses = UInt(64.W)
+    val dcacheMissBusyCycles = UInt(64.W)
+    val l2InstructionVisits = UInt(64.W)
+    val l2InstructionHits = UInt(64.W)
+    val l2InstructionMisses = UInt(64.W)
+    val l2DataVisits = UInt(64.W)
+    val l2DataHits = UInt(64.W)
+    val l2DataMisses = UInt(64.W)
+    val l2InstructionVictimInsertions = UInt(64.W)
+    val l2DataVictimInsertions = UInt(64.W)
+    val lowerMemoryReads = UInt(64.W)
+    val lowerMemoryWrites = UInt(64.W)
+    val l2EngineBusyCycles = UInt(64.W)
 }

@@ -49,7 +49,16 @@ class ClusterIndexFIFOSpec extends AnyFreeSpec with ChiselSim {
     private val configs = Seq((8, 4, 2), (30, 2, 2), (12, 2, 1), (12, 3, 2), (16, 3, 4), (1, 1, 1), (2, 2, 2))
     for ((num, ew, dw) <- configs; compact <- Seq(false, true)) {
         s"$num entries $ew enqueue $dw dequeue compact=$compact preserve data, indices, indexed writes and flush" in {
-            simulate(new ClusterIndexFIFO(UInt(16.W), num, ew, dw, 2, 3, compactEnq = compact)) { d =>
+            simulate(new ClusterIndexFIFO(
+                UInt(16.W),
+                num,
+                ew,
+                dw,
+                2,
+                3,
+                compactEnq = compact,
+                exposeDeqIndex = true,
+            )) { d =>
                 init(d)
                 val banks = math.max(ew, dw)
                 val rows = num / banks
@@ -85,7 +94,7 @@ class ClusterIndexFIFOSpec extends AnyFreeSpec with ChiselSim {
                         d.io.deq(i).valid.expect(i < live.size)
                         if (i < live.size) {
                             d.io.deq(i).bits.expect(stored(live(i)))
-                            checkIndex(d.io.deqIdx(i), head + i, num, banks)
+                            checkIndex(d.io.deqIdx.get(i), head + i, num, banks)
                         }
                     }
                     d.io.rdata.zip(readAddresses).foreach { case (p, addr) => p.expect(stored(addr)) }

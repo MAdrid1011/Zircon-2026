@@ -20,8 +20,12 @@ class DivideRequest(val tagWidth: Int) extends Bundle {
 class DivideResponse(val tagWidth: Int) extends Bundle {
     val res = UInt(32.W)
     val fflags = UInt(5.W)
-    val dstIsFp = Bool()
     val tag = UInt(tagWidth.W)
+}
+
+class DivideWbInput extends Bundle {
+    val res = UInt(32.W)
+    val tag = new MixArithWakeTag
 }
 
 object SRT4Logic {
@@ -87,29 +91,32 @@ object SRT4Logic {
     }
 }
 
+class SRT4IterationIO extends Bundle {
+    import SRT4Logic._
+    val sqrt = Input(Bool())
+    val first = Input(Bool())
+    val divisor = Input(UInt((Width - 2).W))
+    val negativeDivisor = Input(UInt((Width - 2).W))
+    val sum = Input(UInt(Width.W))
+    val carry = Input(UInt(Width.W))
+    val result = Input(UInt(ResultWidth.W))
+    val resultMinus = Input(UInt(ResultWidth.W))
+    val position = Input(UInt((Width - 2).W))
+    val nextSum = Output(UInt(Width.W))
+    val nextCarry = Output(UInt(Width.W))
+    val nextResult = Output(UInt(ResultWidth.W))
+    val nextMinus = Output(UInt(ResultWidth.W))
+    val nextPosition = Output(UInt(Width.W))
+    val digit = Output(UInt(5.W))
+}
+
 /** One shared radix-4 iteration. Division emits q0 then fractional digits;
   * square root starts from S0=1 and emits fractional digits only.
   */
-class SRT4Iteration extends Module {
+class SRT4Iteration extends RawModule {
     import SRT4Logic._
-    val io = IO(new Bundle {
-        val sqrt = Input(Bool())
-        val first = Input(Bool())
-        val divisor = Input(UInt(Width.W))
-        val negativeDivisor = Input(UInt(Width.W))
-        val sum = Input(UInt(Width.W))
-        val carry = Input(UInt(Width.W))
-        val result = Input(UInt(ResultWidth.W))
-        val resultMinus = Input(UInt(ResultWidth.W))
-        val position = Input(UInt(Width.W)) // Thermometer code C from the previous step.
-        val nextSum = Output(UInt(Width.W))
-        val nextCarry = Output(UInt(Width.W))
-        val nextResult = Output(UInt(ResultWidth.W))
-        val nextMinus = Output(UInt(ResultWidth.W))
-        val nextPosition = Output(UInt(Width.W))
-        val digit = Output(UInt(5.W)) // One-hot: -2, -1, 0, +1, +2.
-    })
-    val position = (io.position.asSInt >> 2).pad(Width).asUInt
+    val io = IO(new SRT4IterationIO)
+    val position = io.position.asSInt.pad(Width).asUInt
     val bit = (position & ~(position << 1))(ResultWidth - 1, 0)
     val index = Mux(
         io.sqrt,
@@ -118,8 +125,9 @@ class SRT4Iteration extends Module {
     )
     // Sum only the leading Q4.4 fields, then truncate to Q4.3. The error
     // relative to the full carry-save residual is bounded by 3/16.
-    val highSum = io.sum(Width - 1, Fraction - 4) + io.carry(Width - 1, Fraction - 4)
-    val high = highSum(7, 1).asSInt
+    val highA = io.sum(Width - 1, Fraction - 4)
+    val highB = io.carry(Width - 1, Fraction - 4)
+    val high = (highA(7, 1) +& highB(7, 1) +& (highA(0) && highB(0)).asUInt)(6, 0).asSInt
     val m2 = VecInit(Seq(12, 14, 16, 16, 18, 20, 20, 24).map(_.S(7.W)))(index)
     val m1 = VecInit(Seq(4, 4, 4, 4, 6, 6, 8, 8).map(_.S(7.W)))(index)
     val m0 = VecInit(Seq(-4, -4, -6, -6, -6, -8, -8, -8).map(_.S(7.W)))(index)
@@ -138,11 +146,11 @@ class SRT4Iteration extends Module {
         (~(u << 2) & (position << 2))(Width - 1, 0)
     )
     val divTerms = Seq(
-        (io.divisor << 1)(Width - 1, 0),
-        io.divisor,
+        (io.divisor.pad(Width) << 1)(Width - 1, 0),
+        io.divisor.pad(Width),
         0.U(Width.W),
-        io.negativeDivisor,
-        (io.negativeDivisor << 1)(Width - 1, 0)
+        io.negativeDivisor.asSInt.pad(Width).asUInt,
+        (io.negativeDivisor.asSInt.pad(Width).asUInt << 1)(Width - 1, 0)
     )
     val addend = Mux1H((0 until 5).map(i => digit(i) -> Mux(io.sqrt, rootTerms(i), divTerms(i))))
     val xor = io.sum ^ io.carry ^ addend
@@ -211,6 +219,15 @@ class DivStage3(tagWidth: Int) extends Bundle {
     val meta = new DivMeta(tagWidth)
 }
 
+class DivSqrtSRT4IO(tagWidth: Int) extends Bundle {
+    val in = Flipped(Decoupled(new DivideRequest(tagWidth)))
+    val out = Decoupled(new DivideResponse(tagWidth))
+    val wbInput = Output(Valid(new DivideWbInput))
+    val present = Output(Bool())
+    val flush = Input(Bool())
+    val divBusy = Output(Bool())
+}
+
 /** Four execution stages, including output register R4:
   * EX1 magnitude/classification -> R12
   * EX2 INIT -> ITERATE* -> RESOLVE -> R23
@@ -224,14 +241,7 @@ class DivStage3(tagWidth: Int) extends Bundle {
 class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     import SRT4Logic._
     require(tagWidth > 0)
-    val io = IO(new Bundle {
-        val in = Flipped(Decoupled(new DivideRequest(tagWidth)))
-        val out = Decoupled(new DivideResponse(tagWidth))
-        val wbInput = Output(Valid(new DivideResponse(tagWidth)))
-        val present = Output(Bool())
-        val flush = Input(Bool())
-        val divBusy = Output(Bool())
-    })
+    val io = IO(new DivSqrtSRT4IO(tagWidth))
 
     val r1 = Reg(new DivStage1(tagWidth))
     val r2 = Reg(new DivStage2(tagWidth))
@@ -247,11 +257,11 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     // The busy state bit drives the public port directly, without an output decode.
     val ex2Busy = RegInit(false.B)
     val ex2Resolving = RegInit(false.B)
-    val iterCarry = Reg(UInt(Width.W))
-    val iterNegativeDivisor = Reg(UInt(Width.W))
-    val iterPosition = Reg(UInt(Width.W))
-    val iterCount = Reg(UInt(5.W))
-    val iterFirst = Reg(Bool())
+    val iterCarry = RegInit(0.U(Width.W))
+    val iterNegativeDivisor = RegInit(0.U((Width - 2).W))
+    val iterPosition = RegInit(0.U(Width.W))
+    val iterCount = RegInit(0.U(5.W))
+    val iterFirst = RegInit(false.B)
 
     val ready4 = !v4 || io.out.ready
     val ready3 = !v3 || ready4
@@ -265,6 +275,12 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     // Busy changes only at clock edges, including synchronous reset/flush.
     // It excludes completed R23 backpressure; upstream acceptance uses in.ready.
     io.divBusy := ex2Busy
+
+    def normalizeLeft32(value: UInt, amount: UInt): UInt = MuxLookup(amount, 0.U(32.W))(
+        (0 until 32).map { shift =>
+            shift.U -> (if (shift == 0) value else Cat(value(31 - shift, 0), 0.U(shift.W)))
+        }
+    )
 
     // -- EX1: classify, compute magnitudes and count leading zeros in parallel --
     val req = io.in.bits
@@ -334,8 +350,8 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     val fp1 = r1.meta.op >= FDIV.U
     val sqrt1 = r1.meta.op === FSQRT.U
     val special1 = r1.meta.special || (!fp1 && r1.a < r1.b)
-    val normalizedA = (r1.a << r1.leadingA)(31, 0)
-    val normalizedB = (r1.b << r1.leadingB)(31, 0)
+    val normalizedA = normalizeLeft32(r1.a, r1.leadingA)
+    val normalizedB = normalizeLeft32(r1.b, r1.leadingB)
     val divisor = Cat(0.U(3.W), normalizedB, 0.U(1.W))
     val dividend = Cat(0.U(3.W), normalizedA, 0.U(1.W))
     val delta = r1.leadingB - r1.leadingA
@@ -349,13 +365,13 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     val step = Module(new SRT4Iteration)
     step.io.sqrt := r2.meta.op === FSQRT.U
     step.io.first := iterFirst
-    step.io.divisor := r2.multiple
+    step.io.divisor := r2.multiple(Width - 3, 0)
     step.io.negativeDivisor := iterNegativeDivisor
     step.io.sum := r2.residual
     step.io.carry := iterCarry
     step.io.result := r2.result
     step.io.resultMinus := r2.resultMinus
-    step.io.position := iterPosition
+    step.io.position := iterPosition(Width - 1, 2)
 
     // -- EX2 RESOLVE: residual CPA and correction-multiple generation in parallel --
     val resolved = r2.residual + iterCarry
@@ -365,8 +381,7 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
 
     // -- EX3: correct residual/result; form the unrounded FP window or integer word --
     val negative = r2.residual(Width - 1)
-    // Reuse the original block-carry adder; unused upper bits are removed by synthesis.
-    val adjusted = BLevelPAdder64(r2.residual.pad(64), r2.multiple.pad(64), 0.U).io.res(Width - 1, 0)
+    val adjusted = BLevelPAdder36.sum(r2.residual, r2.multiple, 0.U)
     val correctedRemainder = Mux(negative, adjusted, r2.residual)
     val correctedResult = Mux(negative, r2.resultMinus, r2.result)
     val lowerThanOne = !correctedResult(Fraction)
@@ -387,15 +402,25 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
 
     // -- EX4: round FP once, restore integer scale/sign, and register every response --
     val (floatResult, floatFlags) = round(r3.data(26, 0), r3.exponent, r3.meta.sign, r3.meta.roundingMode)
-    val unsignedInteger = (r3.data >> r3.integerShift)(31, 0)
+    val unsignedInteger = MuxLookup(r3.integerShift, 0.U(32.W))(
+        (0 until Width).map { shift =>
+            val shifted = if (shift <= Width - 32) {
+                r3.data(shift + 31, shift)
+            } else {
+                Cat(0.U((shift - (Width - 32)).W), r3.data(Width - 1, shift))
+            }
+            shift.U -> shifted
+        }
+    )
     val integerResult = Mux(r3.meta.sign, -unsignedInteger, unsignedInteger)
     val s4 = Wire(new DivideResponse(tagWidth))
-    s4.dstIsFp := r3.meta.op >= FDIV.U
+    val floatOperation = r3.meta.op === FDIV.U || r3.meta.op === FSQRT.U
     s4.tag := r3.meta.tag
-    s4.res := Mux(r3.meta.special, r3.meta.specialBits, Mux(s4.dstIsFp, floatResult, integerResult))
-    s4.fflags := Mux(r3.meta.special, r3.meta.specialFlags, Mux(s4.dstIsFp, floatFlags, 0.U))
+    s4.res := Mux(r3.meta.special, r3.meta.specialBits, Mux(floatOperation, floatResult, integerResult))
+    s4.fflags := Mux(r3.meta.special, r3.meta.specialFlags, Mux(floatOperation, floatFlags, 0.U))
     io.wbInput.valid := ready4 && v3 && active
-    io.wbInput.bits := s4
+    io.wbInput.bits.res := s4.res
+    io.wbInput.bits.tag := MixArithWakeTag.fromUInt(s4.tag)
 
     // Each stage advances independently. EX2 busy blocks R12 consumption, never EX3/EX4 drain.
     when(io.flush) {
@@ -434,7 +459,7 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
                 r2.exponent := Mux(sqrt1, (exponentA >> 1) + 1.S, exponentA - exponentB)
                 r2.integerShift := Mux(r1.meta.op(1), 3.U + r1.leadingB, Fraction.U - evenDelta)
                 iterCarry := 0.U
-                iterNegativeDivisor := -divisor
+                iterNegativeDivisor := (-divisor)(Width - 3, 0)
                 iterPosition := Mux(
                     sqrt1,
                     (-(BigInt(1) << Fraction)).S(Width.W).asUInt,

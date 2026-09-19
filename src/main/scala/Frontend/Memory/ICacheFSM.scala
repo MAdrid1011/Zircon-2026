@@ -31,16 +31,18 @@ class ICacheFSML2IO extends Bundle {
     val pending = Output(Bool())
 }
 
+class ICacheFSMIO extends Bundle {
+    val cc = new ICacheFSMCacheIO
+    val l2 = new ICacheFSML2IO
+}
+
 class ICacheFSM extends Module {
-    val io = IO(new Bundle {
-        val cc = new ICacheFSMCacheIO
-        val l2 = new ICacheFSML2IO
-    })
+    val io = IO(new ICacheFSMIO)
 
     // Keep the original miss, installation and two-phase RAM recovery sequence.
     val mIdle :: mMiss :: mRefill :: mWait :: Nil = Enum(4)
     val mState = RegInit(mIdle)
-    val lruReg = Reg(UInt(2.W))
+    val lruReg = RegInit(0.U(2.W))
     val readIssued = RegInit(false.B)
     val requestHeld = RegInit(false.B)
     val waited = RegNext(mState === mWait, false.B)

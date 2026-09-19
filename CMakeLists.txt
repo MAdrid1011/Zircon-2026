@@ -16,6 +16,11 @@ find_program(SBT_EXECUTABLE sbt REQUIRED)
 
 set(ZIRCON_RTL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated")
 set(ZIRCON_RTL_TOP "${ZIRCON_RTL_DIR}/ZirconCore.sv")
+set(ZIRCON_XILINX_RAM_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/resources/Xilinx/XilinxSinglePortRamReadFirst.sv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/resources/Xilinx/XilinxTrueDualPortReadFirst1ClockRam.sv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/main/resources/Xilinx/XilinxTrueDualPortReadFirstByteWrite1ClockRam.sv"
+)
 
 file(GLOB_RECURSE ZIRCON_CHISEL_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/main/scala/*.scala"
@@ -27,8 +32,17 @@ file(GLOB ZIRCON_SBT_PROJECT_SOURCES CONFIGURE_DEPENDS
 
 if(NOT EXISTS "${ZIRCON_RTL_TOP}")
     execute_process(
-        COMMAND "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation ${ZIRCON_RTL_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "ZIRCON_INCLUDE_VIVADO_RAM_SOURCE=false"
+            "ZIRCON_USE_EXTERNAL_VIVADO_RAM=true"
+            "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation ${ZIRCON_RTL_DIR}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            ${ZIRCON_XILINX_RAM_SOURCES}
+            "${ZIRCON_RTL_DIR}"
         COMMAND_ERROR_IS_FATAL ANY
     )
 endif()
@@ -36,10 +50,17 @@ endif()
 add_custom_command(
     OUTPUT "${ZIRCON_RTL_TOP}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZIRCON_RTL_DIR}"
-    COMMAND "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation ${ZIRCON_RTL_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "ZIRCON_INCLUDE_VIVADO_RAM_SOURCE=false"
+        "ZIRCON_USE_EXTERNAL_VIVADO_RAM=true"
+        "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation ${ZIRCON_RTL_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        ${ZIRCON_XILINX_RAM_SOURCES}
+        "${ZIRCON_RTL_DIR}"
     DEPENDS
         ${ZIRCON_CHISEL_SOURCES}
         ${ZIRCON_SBT_PROJECT_SOURCES}
+        ${ZIRCON_XILINX_RAM_SOURCES}
         "${CMAKE_CURRENT_SOURCE_DIR}/build.sbt"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Elaborating ZirconCore RTL"

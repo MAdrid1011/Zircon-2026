@@ -79,16 +79,20 @@ class DCacheNonBlockingSpec extends AnyFreeSpec with ChiselSim {
             }
         }
 
-        s"$name: store resolution leaves both load array ports available" in {
+        s"$name: store resolution retains both loads and issues both ports after the write" in {
             simulate(new DCacheStressTop(backend)) { dut =>
                 var checkedResolve = false
+                var checkedDeferredRead = false
                 val driver = new DCacheDriver(dut) {
                     override def observeCycle(): Unit = {
                         val resolving = dut.observation.storeState.peek().litValue == 3
                         val presentingBothLoads = dut.io.load.map(_.req.valid.peek().litToBoolean).forall(identity)
                         if (resolving && presentingBothLoads) {
-                            dut.observation.normalRead.expect(3)
+                            dut.observation.normalRead.expect(0)
                             checkedResolve = true
+                        }
+                        if (checkedResolve && dut.observation.normalRead.peek().litValue == 3) {
+                            checkedDeferredRead = true
                         }
                     }
                 }
@@ -109,8 +113,9 @@ class DCacheNonBlockingSpec extends AnyFreeSpec with ChiselSim {
 
                 val accepted = tick(Seq(Some(load(0x2020L)), Some(load(0x2024L))))
                 assert(accepted.take(2).forall(identity), "store resolve backpressured a load request")
-                assert(checkedResolve, "store resolve reserved a load array port")
+                assert(checkedResolve, "store resolve did not exercise the registered input buffers")
                 drain()
+                assert(checkedDeferredRead, "dual-load requests were not retained across the RAM B write")
                 assert(reads == readsBefore, "loads overlapping a store hit missed in the cache")
             }
         }

@@ -3,15 +3,13 @@ import org.scalatest.freespec.AnyFreeSpec
 
 class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
     private def initialize(dut: ReorderBuffer): Unit = {
-        dut.io.request.valid.poke(0)
-        dut.io.request.store.poke(0)
         dut.io.enqueue.valid.poke(0)
         dut.io.pop.poke(0)
         dut.io.clear.poke(false)
         dut.io.readIdx.foreach(_.poke(0))
         dut.io.completion.foreach { port =>
             port.valid.poke(false)
-            port.bits.robIdx.poke(0)
+            port.bits.address.poke(0)
             port.bits.exception.valid.poke(false)
             port.bits.exception.cause.poke(0)
             port.bits.exception.tval.poke(0)
@@ -47,7 +45,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
 
     private def complete(dut: ReorderBuffer, port: Int, robIdx: BigInt): Unit = {
         dut.io.completion(port).valid.poke(true)
-        dut.io.completion(port).bits.robIdx.poke(robIdx)
+        dut.io.completion(port).bits.address.poke(robIdx)
         dut.io.completion(port).bits.data.poke(0)
         dut.io.completion(port).bits.exception.valid.poke(false)
         dut.io.completion(port).bits.exception.cause.poke(0)
@@ -59,8 +57,6 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
     "out-of-order completion exposes only a completed retirement prefix" in {
         simulate(new ReorderBuffer(dispatchWidth = 3)) { dut =>
             initialize(dut)
-            dut.io.request.valid.poke(7)
-            dut.io.request.store.poke(0)
             dut.io.availablePrefix.expect(7)
             val identities = dut.io.allocation.map(_.peek().litValue)
             assert(identities.distinct.size == 3)
@@ -69,7 +65,6 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
                 enqueueLane(dut, lane, token = 11, pc = 0x1000 + lane * 4, identities(lane))
             }
             dut.clock.step()
-            dut.io.request.valid.poke(0)
             dut.io.enqueue.valid.poke(0)
             dut.io.readIdx(0).poke(identities(2))
             dut.io.readPc(0).expect(0x1008)
@@ -89,7 +84,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             for (lane <- 0 until 3) {
                 dut.io.head(lane).valid.expect(true)
                 dut.io.head(lane).bits.complete.expect(true)
-                dut.io.headIdx(lane).expect(identities(lane))
+                dut.io.head(lane).bits.robIdx.expect(identities(lane))
             }
             dut.io.pop.poke(7)
             dut.clock.step()
@@ -101,19 +96,16 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
     "clear resets allocation generation after discarding speculative entries" in {
         simulate(new ReorderBuffer(dispatchWidth = 2)) { dut =>
             initialize(dut)
-            dut.io.request.valid.poke(3)
             val first = dut.io.allocation(0).peek().litValue
             dut.io.enqueue.valid.poke(3)
             for (lane <- 0 until 2) {
                 enqueueLane(dut, lane, token = 1, pc = 0x2000 + lane * 4, dut.io.allocation(lane).peek().litValue)
             }
             dut.clock.step()
-            dut.io.request.valid.poke(0)
             dut.io.enqueue.valid.poke(0)
             dut.io.clear.poke(true)
             dut.clock.step()
             dut.io.clear.poke(false)
-            dut.io.request.valid.poke(1)
             dut.io.allocation(0).expect(first)
             dut.io.head(0).valid.expect(false)
         }

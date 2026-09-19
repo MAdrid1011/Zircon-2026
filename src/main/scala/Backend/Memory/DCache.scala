@@ -3,6 +3,7 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.Cache._
 import ZirconConfig.DCacheParams
+import ZirconUtil.InheritFields
 
 class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
     val hit = UInt(l1Way.W)
@@ -18,7 +19,15 @@ class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
     val forwardBlocked = Bool()
 }
 
-class DCacheLookupStage(p: DCacheParams) extends DLoadRequest(p) {
+class DCacheLookupStage(p: DCacheParams) extends Bundle {
+    val cacheIndex = UInt(l1Index.W)
+    val paddr = UInt(34.W)
+    val slot = UInt(p.slotWidth.W)
+    val mtype = UInt(3.W)
+    val uncache = Bool()
+    val ioAuthorized = Bool()
+    val exception = UInt(4.W)
+    val translationMiss = Bool()
     val forwardValid = Bool()
     val forwardData = UInt(32.W)
     val forwardMask = UInt(4.W)
@@ -29,7 +38,7 @@ class DCacheStoreLookupResult extends Bundle {
     val hit = UInt(l1Way.W)
     val victimWay = UInt(l1Way.W)
     val victimValid = Bool()
-    val victimPaddr = UInt(34.W)
+    val victimLine = UInt((34 - l1Offset).W)
     val victimData = UInt(l1LineBits.W)
     val victimDirty = Bool()
 }
@@ -76,15 +85,29 @@ class DCache(
     def tag(address: UInt): UInt = address(33, l1Index + l1Offset)
     def byteMask(size: UInt): UInt =
         MuxLookup(size, 0.U(4.W))(Seq(0.U -> 1.U, 1.U -> 3.U, 2.U -> 15.U))
-    def accessMask(request: DLoadRequest): UInt = (byteMask(request.mtype(1, 0)) << request.paddr(1, 0))(3, 0)
+    def shiftMaskLeft(mask: UInt, amount: UInt): UInt = MuxLookup(amount, 0.U(4.W))(Seq(
+        0.U -> mask,
+        1.U -> Cat(mask(2, 0), 0.U(1.W)),
+        2.U -> Cat(mask(1, 0), 0.U(2.W)),
+        3.U -> Cat(mask(0), 0.U(3.W)),
+    ))
+    def accessMask(request: DLoadRequest): UInt =
+        shiftMaskLeft(byteMask(request.mtype(1, 0)), request.paddr(1, 0))
     def misaligned(address: UInt, size: UInt): Bool =
         size === 3.U || (size === 1.U && address(0)) || (size === 2.U && address(1, 0).orR)
-    def lineWord(line: UInt, address: UInt): UInt = (line >> (offset(address) << 3))(31, 0)
+    def lineWord(line: UInt, address: UInt): UInt =
+        line.asTypeOf(Vec(l1Line / 4, UInt(32.W)))(address(l1Offset - 1, 2))
+    def shiftMaskRight(mask: UInt, amount: UInt): UInt = MuxLookup(amount, 0.U(4.W))(Seq(
+        0.U -> mask,
+        1.U -> Cat(0.U(1.W), mask(3, 1)),
+        2.U -> Cat(0.U(2.W), mask(3, 2)),
+        3.U -> Cat(0.U(3.W), mask(3)),
+    ))
     def extend(data: UInt, mtype: UInt): UInt = MuxLookup(mtype(1, 0), data)(Seq(
         0.U -> Cat(Fill(24, data(7) && !mtype(2)), data(7, 0)),
         1.U -> Cat(Fill(16, data(15) && !mtype(2)), data(15, 0))
     ))
-    def preserved(request: DLoadRequest): Bool = request.uncache && request.ioAuthorized
+    def preserved(uncache: Bool, ioAuthorized: Bool): Bool = uncache && ioAuthorized
 
     // ==================== Cache arrays ====================
     // Load 0 owns RAM A. Load 1 shares RAM B with committed stores. Refill uses
@@ -143,9 +166,9 @@ class DCache(
         tagsNow(lane) := VecInit(tagTab.map(ram => if (lane == 0) ram.douta else ram.doutb))
         validWaysNow(lane) := VecInit(validTab.map(_.rdata(lane))).asUInt
         dirtyWaysNow(lane) := VecInit(dirtyTab.map(_.rdata(lane))).asUInt
-        validTab.foreach(_.raddr(lane) := index(lookupAddress(lookup(lane))))
-        dirtyTab.foreach(_.raddr(lane) := index(lookupAddress(lookup(lane))))
-        lruTab.raddr(lane) := index(lookupAddress(lookup(lane)))
+        validTab.foreach(_.raddr(lane) := lookup(lane).cacheIndex)
+        dirtyTab.foreach(_.raddr(lane) := lookup(lane).cacheIndex)
+        lruTab.raddr(lane) := lookup(lane).cacheIndex
     }
 
     // ==================== Miss and store state ====================
@@ -195,7 +218,10 @@ class DCache(
         6.U,
         0.U
     )
-    val storeLineMask = (storeRequest.mask << Cat(storeRequest.paddr(l1Offset - 1, 2), 0.U(2.W)))(l1Line - 1, 0)
+    val storeWord = storeRequest.paddr(l1Offset - 1, 2)
+    val storeLineMask = VecInit.tabulate(l1Line) { byte =>
+        storeWord === (byte / 4).U && storeRequest.mask(byte % 4)
+    }.asUInt
     val maintenanceStates = Enum(6)
     val maintenanceIdle = maintenanceStates(0)
     val maintenanceReadState = maintenanceStates(1)
@@ -219,7 +245,7 @@ class DCache(
     maintenanceRequest.bits := 0.U.asTypeOf(new DMemoryRequest)
     maintenanceRequest.bits.paddr := Cat(maintenanceTag, maintenanceSet, 0.U(l1Offset.W))
     maintenanceRequest.bits.victimValid := true.B
-    maintenanceRequest.bits.victimPaddr := maintenanceRequest.bits.paddr
+    maintenanceRequest.bits.victimLine := maintenanceRequest.bits.paddr(33, l1Offset)
     maintenanceRequest.bits.victimData := maintenanceData
     maintenanceRequest.bits.victimDirty := true.B
     maintenanceRequest.bits.victimOnly := true.B
@@ -335,17 +361,15 @@ class DCache(
 
     missUnit.io.allocate.valid := offerMiss
     missUnit.io.allocate.bits := 0.U.asTypeOf(new DCacheMissAllocate(p))
-    for ((name, field) <- selectedExecute.elements if missUnit.io.allocate.bits.elements.contains(name)) {
-        missUnit.io.allocate.bits.elements(name) := field
-    }
+    InheritFields(missUnit.io.allocate.bits, selectedExecute)
     missUnit.io.allocate.bits.lane := selectedMissLane
     missUnit.io.allocate.bits.way := Mux(selectedExecute.uncache, 0.U, victimWay)
     missUnit.io.allocate.bits.forwardData := Mux(selectedMissLane, effectiveForwardData(1), effectiveForwardData(0))
     missUnit.io.allocate.bits.forwardMask :=
         Mux(selectedMissLane, effectiveForwardMask(1), effectiveForwardMask(0)) & accessMask(selectedExecute)
     missUnit.io.allocate.bits.victimValid := (victimWay & selectedValidWays).orR && !selectedExecute.uncache
-    missUnit.io.allocate.bits.victimPaddr :=
-        Cat(Mux1H(victimWay, selectedExecute.tags), index(selectedExecute.paddr), 0.U(l1Offset.W))
+    missUnit.io.allocate.bits.victimLine :=
+        Cat(Mux1H(victimWay, selectedExecute.tags), index(selectedExecute.paddr))
     missUnit.io.allocate.bits.victimData := Mux1H(victimWay, selectedExecute.lines)
     missUnit.io.allocate.bits.victimDirty := Mux1H(victimWay, selectedExecute.dirtyWays.asBools)
 
@@ -363,7 +387,7 @@ class DCache(
         missUnit.io.allocate.bits.storeMask := storeRequest.mask
         missUnit.io.allocate.bits.storeSize := storeRequest.size
         missUnit.io.allocate.bits.victimValid := storeLookupResult.victimValid && !storeRequest.uncache
-        missUnit.io.allocate.bits.victimPaddr := storeLookupResult.victimPaddr
+        missUnit.io.allocate.bits.victimLine := storeLookupResult.victimLine
         missUnit.io.allocate.bits.victimData := storeLookupResult.victimData
         missUnit.io.allocate.bits.victimDirty := storeLookupResult.victimDirty
     }
@@ -381,14 +405,15 @@ class DCache(
 
     for (lane <- 0 until 2) {
         val selectedForAllocation = offerMiss && selectedMissLane === (lane == 1).B
-        val memoryWord = Mux(
+        val alignedWord = Mux(
             execute(lane).hit.orR,
             lineWord(Mux1H(execute(lane).hit, execute(lane).lines), execute(lane).paddr),
             0.U
         )
         val byteOffset = execute(lane).paddr(1, 0)
+        val memoryWord = alignedWord >> (byteOffset << 3)
         val shiftedForwardData = effectiveForwardData(lane) >> (byteOffset << 3)
-        val shiftedForwardMask = effectiveForwardMask(lane) >> byteOffset
+        val shiftedForwardMask = shiftMaskRight(effectiveForwardMask(lane), byteOffset)
         val mergedWord = VecInit((0 until 4).map { byte =>
             Mux(
                 shiftedForwardMask(byte),
@@ -484,7 +509,7 @@ class DCache(
         arrayRead(lane) := loadIssue(lane) || lookupReissue(lane)
         arrayAddress(lane) := Mux(
             lookupReissue(lane),
-            lookupAddress(lookup(lane)),
+            Cat(lookup(lane).cacheIndex, 0.U(l1Offset.W)),
             lookupAddress(candidate(lane))
         )
     }
@@ -581,7 +606,7 @@ class DCache(
             candidate(lane).exception === 0.U &&
             !misaligned(candidate(lane).paddr, candidate(lane).mtype(1, 0))
         io.forward(lane).query.valid := loadIssue(lane) && needsForward
-        io.forward(lane).query.bits.paddr := candidate(lane).paddr
+        io.forward(lane).query.bits.wordAddress := candidate(lane).paddr(33, 2)
         io.forward(lane).query.bits.slot := candidate(lane).slot
         io.forward(lane).query.bits.mask := accessMask(candidate(lane))
         when(io.forward(lane).result.valid && !io.flush) {
@@ -595,19 +620,19 @@ class DCache(
     // ==================== Load pipeline state updates ====================
     when(io.flush) {
         for (lane <- 0 until 2) {
-            when(requestBufferValid(lane) && !preserved(requestBuffer(lane))) {
+            when(requestBufferValid(lane) && !preserved(requestBuffer(lane).uncache, requestBuffer(lane).ioAuthorized)) {
                 requestBufferValid(lane) := false.B
             }
-            when(lookupValid(lane) && !preserved(lookup(lane))) {
+            when(lookupValid(lane) && !preserved(lookup(lane).uncache, lookup(lane).ioAuthorized)) {
                 lookupValid(lane) := false.B
                 lookupFresh(lane) := false.B
             }.elsewhen(lookupValid(lane)) {
                 lookupFresh(lane) := false.B
             }
-            when(executeValid(lane) && !preserved(execute(lane))) {
+            when(executeValid(lane) && !preserved(execute(lane).uncache, execute(lane).ioAuthorized)) {
                 executeValid(lane) := false.B
             }
-            when(inputFire(lane) && preserved(io.load(lane).req.bits)) {
+            when(inputFire(lane) && preserved(io.load(lane).req.bits.uncache, io.load(lane).req.bits.ioAuthorized)) {
                 requestBuffer(lane) := io.load(lane).req.bits
                 requestBufferValid(lane) := true.B
             }
@@ -624,9 +649,7 @@ class DCache(
 
             when(lookupMove(lane)) {
                 execute(lane) := 0.U.asTypeOf(new DCacheExecuteStage(p))
-                for ((name, field) <- lookup(lane).elements if execute(lane).elements.contains(name)) {
-                    execute(lane).elements(name) := field
-                }
+                InheritFields(execute(lane), lookup(lane))
                 execute(lane).hit := hitNow(lane)
                 execute(lane).tags := tagsNow(lane)
                 execute(lane).lines := linesNow(lane)
@@ -660,9 +683,8 @@ class DCache(
 
             when(loadIssue(lane)) {
                 lookup(lane) := 0.U.asTypeOf(new DCacheLookupStage(p))
-                for ((name, field) <- candidate(lane).elements if lookup(lane).elements.contains(name)) {
-                    lookup(lane).elements(name) := field
-                }
+                InheritFields(lookup(lane), candidate(lane))
+                lookup(lane).cacheIndex := index(lookupAddress(candidate(lane)))
                 lookup(lane).forwardValid := candidate(lane).translationMiss || candidate(lane).uncache ||
                     candidate(lane).exception =/= 0.U ||
                     misaligned(candidate(lane).paddr, candidate(lane).mtype(1, 0))
@@ -711,7 +733,7 @@ class DCache(
         storeLookupResult.hit := storeHitNow
         storeLookupResult.victimWay := storeVictimWay
         storeLookupResult.victimValid := storeVictimValid
-        storeLookupResult.victimPaddr := storeVictimPaddr
+        storeLookupResult.victimLine := storeVictimPaddr(33, l1Offset)
         storeLookupResult.victimData := storeVictimData
         storeLookupResult.victimDirty := storeVictimDirty
         storeState := storeResolve
@@ -747,12 +769,13 @@ class DCache(
     // ==================== Refill and array connections ====================
     missUnit.io.install.ready := !io.flush
     val installFire = missUnit.io.install.fire
+    val installAddress = Cat(missUnit.io.install.bits.line, 0.U(l1Offset.W))
     for (way <- 0 until l1Way) {
         tagTab(way).clka := clock
-        tagTab(way).addra := Mux(installFire, index(missUnit.io.install.bits.paddr), index(arrayAddress(0)))
+        tagTab(way).addra := Mux(installFire, index(installAddress), index(arrayAddress(0)))
         tagTab(way).ena := installFire || arrayRead(0)
         tagTab(way).wea := installFire && missUnit.io.install.bits.way(way)
-        tagTab(way).dina := tag(missUnit.io.install.bits.paddr)
+        tagTab(way).dina := tag(installAddress)
         tagTab(way).addrb := Mux(
             maintenanceRead,
             maintenanceSet,
@@ -772,7 +795,7 @@ class DCache(
             maintenanceSet,
             Mux(
                 installFire,
-                index(missUnit.io.install.bits.paddr),
+                index(installAddress),
                 Mux(
                     storeLookupIssue,
                     index(storeLookupAddress),
@@ -801,7 +824,7 @@ class DCache(
         validTab(way).waddr(0) := Mux(
             maintenanceInvalidate,
             maintenanceSet,
-            index(missUnit.io.install.bits.paddr)
+            index(installAddress)
         )
         validTab(way).wdata(0) := !maintenanceInvalidate
 
@@ -810,7 +833,7 @@ class DCache(
         dirtyTab(way).waddr(0) := Mux(
             maintenanceInvalidate,
             maintenanceSet,
-            index(missUnit.io.install.bits.paddr)
+            index(installAddress)
         )
         dirtyTab(way).wdata(0) := Mux(maintenanceInvalidate, false.B, missUnit.io.install.bits.dirty)
         dirtyTab(way).wen(1) := storeArrayWrite && storeLookupResult.hit(way)
@@ -829,10 +852,10 @@ class DCache(
     lruTab.waddr(2) := index(storeRequest.paddr)
     lruTab.wdata(2) := ~storeLookupResult.hit
     lruTab.wen(3) := installFire
-    lruTab.waddr(3) := index(missUnit.io.install.bits.paddr)
+    lruTab.waddr(3) := index(installAddress)
     lruTab.wdata(3) := ~missUnit.io.install.bits.way
     when(installFire) {
-        val installSet = index(missUnit.io.install.bits.paddr)
+        val installSet = index(installAddress)
         for (way <- 0 until l1Way) {
             when(missUnit.io.install.bits.way(way)) {
                 cacheGeneration(installSet)(way) := cacheGeneration(installSet)(way) + 1.U
@@ -850,6 +873,14 @@ class DCache(
 
     io.idle := pipelineIdle && maintenanceState === maintenanceIdle
 
+    assert(!(installFire && storeArrayWrite), "DCache: refill and committed store write overlap")
+    for (lane <- 0 until 2) {
+        when(lookupMove(lane)) {
+            assert(PopCount(hitNow(lane)) <= 1.U, "DCache: multiple hits")
+        }
+    }
+
+    /* Simulation-only counters stay after the cache datapath and invariants. */
     if (observe) {
         val loadVisits = RegInit(VecInit.fill(2)(0.U(64.W)))
         val loadHits = RegInit(VecInit.fill(2)(0.U(64.W)))
@@ -920,12 +951,5 @@ class DCache(
         io.performance.get.storeHits := storeHits
         io.performance.get.storeMisses := storeMisses
         io.performance.get.missBusyCycles := missBusyCycles
-    }
-
-    assert(!(installFire && storeArrayWrite), "DCache: refill and committed store write overlap")
-    for (lane <- 0 until 2) {
-        when(lookupMove(lane)) {
-            assert(PopCount(hitNow(lane)) <= 1.U, "DCache: multiple hits")
-        }
     }
 }

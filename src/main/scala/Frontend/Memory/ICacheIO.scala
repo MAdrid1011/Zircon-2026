@@ -21,7 +21,7 @@ class ICacheLineRequest(c: ICacheParams) extends Bundle {
     val paddr = UInt(34.W)
     val uncache = Bool()
     val victimValid = Bool()
-    val victimPaddr = UInt(34.W)
+    val victimLine = UInt((34 - c.offsetBits).W)
     val victimData = UInt(c.lineBits.W)
 }
 
@@ -36,12 +36,6 @@ class ICacheL2IO(c: ICacheParams) extends Bundle {
     val response = Flipped(Decoupled(new ICacheLineResponse(c)))
 }
 
-class ICacheDBG extends Bundle {
-    val visit = UInt(64.W)
-    val hit = UInt(64.W)
-    val missCycle = UInt(64.W)
-}
-
 class ICacheIO(p: FrontendParams, c: ICacheParams) extends Bundle {
     val pp = Flipped(new FrontendFetchIO(p))
     val flush = Input(Bool())
@@ -49,9 +43,12 @@ class ICacheIO(p: FrontendParams, c: ICacheParams) extends Bundle {
     val tlb = if (c.tlbEnabled) Some(new TLBManagementIO) else None
     val l2 = new ICacheL2IO(c)
     val miss = Output(Bool())
+    val maintenance = Flipped(new CacheMaintenanceIO)
     val dbg = if (p.observe) Some(Output(new ICacheDBG)) else None
-    val maintenance = new Bundle {
-        val request = Input(Bool())
-        val done = Output(Bool())
-    }
+}
+
+class ICacheDBG extends Bundle {
+    val visit = UInt(64.W)
+    val hit = UInt(64.W)
+    val missCycle = UInt(64.W)
 }

@@ -13,8 +13,13 @@ class FpLogicRequest(val tagWidth: Int) extends Bundle {
 class FpLogicResponse(val tagWidth: Int) extends Bundle {
     val res = UInt(32.W)
     val fflags = UInt(5.W)
-    val dstIsFp = Bool()
     val tag = UInt(tagWidth.W)
+}
+
+class FpLogicIO(tagWidth: Int) extends Bundle {
+    val in = Flipped(Decoupled(new FpLogicRequest(tagWidth)))
+    val out = Decoupled(new FpLogicResponse(tagWidth))
+    val flush = Input(Bool())
 }
 
 /** Raw IEEE classification; no normalization or NaN canonicalization. */
@@ -31,11 +36,7 @@ class FpLogicClass extends Bundle {
 /** One registered stage for FP32 comparisons, min/max, classification and bit operations. */
 class FpLogic(val tagWidth: Int = 32) extends Module {
     require(tagWidth > 0)
-    val io = IO(new Bundle {
-        val in = Flipped(Decoupled(new FpLogicRequest(tagWidth)))
-        val out = Decoupled(new FpLogicResponse(tagWidth))
-        val flush = Input(Bool())
-    })
+    val io = IO(new FpLogicIO(tagWidth))
 
     private def classify(bits: UInt): FpLogicClass = {
         val result = Wire(new FpLogicClass)
@@ -127,7 +128,6 @@ class FpLogic(val tagWidth: Int = 32) extends Module {
     val invalid = (isMinMax && signalingNaN) ||
         (isCompare && Mux(req.op === FEQ.U, signalingNaN, anyNaN))
     response.fflags := Cat(invalid, 0.U(4.W))
-    response.dstIsFp := isSign || isMinMax || req.op === FMV_W_X.U
     response.tag := req.tag
 
     /* A held result owns its register until accepted or killed. */

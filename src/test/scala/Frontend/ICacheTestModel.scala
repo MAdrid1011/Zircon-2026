@@ -81,7 +81,7 @@ object ICacheTestModel {
             d.io.l2.request.bits.paddr.peek().litValue,
             d.io.l2.request.bits.uncache.peek().litValue,
             d.io.l2.request.bits.victimValid.peek().litValue,
-            d.io.l2.request.bits.victimPaddr.peek().litValue,
+            d.io.l2.request.bits.victimLine.peek().litValue << Integer.numberOfTrailingZeros(lineBytes),
             d.io.l2.request.bits.victimData.peek().litValue
         )
 

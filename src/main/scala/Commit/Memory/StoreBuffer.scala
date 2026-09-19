@@ -2,25 +2,32 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.{CommitParams, DCacheParams}
 
-class StoreBufferIO(cp: CommitParams) extends Bundle {
+class StoreBufferCacheIO extends Bundle {
+    val request = Decoupled(new DStoreRequest)
+    val response = Flipped(Decoupled(new DStoreResponse))
+}
+
+class StoreBufferQueryIO(cache: DCacheParams) extends Bundle {
+    val request = Flipped(Valid(new DForwardQuery(cache)))
+    val response = Valid(new DForwardResult(cache))
+}
+
+class StoreBufferIO(cp: CommitParams, cache: DCacheParams) extends Bundle {
     val enqueue = Flipped(Decoupled(new CommittedStore))
-    val store = new Bundle {
-        val request = Decoupled(new DStoreRequest)
-        val response = Flipped(Decoupled(new DStoreResponse))
-    }
-    val query = Vec(2, new Bundle {
-        val request = Flipped(Valid(new DForwardQuery(DCacheParams())))
-        val response = Valid(new DForwardResult(DCacheParams()))
-    })
+    val store = new StoreBufferCacheIO
+    val query = Vec(2, new StoreBufferQueryIO(cache))
     val responseError = Valid(UInt(4.W))
     val empty = Output(Bool())
 }
 
 /** Architectural stores wait here while DCache services them in program order. */
-class StoreBuffer(val cp: CommitParams = CommitParams()) extends Module {
+class StoreBuffer(
+    val cp: CommitParams = CommitParams(),
+    val cache: DCacheParams = DCacheParams(),
+) extends Module {
     private val entries = cp.storeBufferEntries
     private val indexWidth = log2Ceil(entries)
-    val io = IO(new StoreBufferIO(cp))
+    val io = IO(new StoreBufferIO(cp, cache))
 
     val storage = Reg(Vec(entries, new CommittedStore))
     val valid = RegInit(VecInit.fill(entries)(false.B))
@@ -69,7 +76,7 @@ class StoreBuffer(val cp: CommitParams = CommitParams()) extends Module {
         val matches = Wire(Vec(entries, Bool()))
         val ages = Wire(Vec(entries, UInt(indexWidth.W)))
         for (position <- 0 until entries) {
-            matches(position) := valid(position) && storage(position).paddr(33, 2) === query.bits.paddr(33, 2)
+            matches(position) := valid(position) && storage(position).paddr(33, 2) === query.bits.wordAddress
             ages(position) := Mux(position.U >= head, position.U - head, position.U + entries.U - head)
         }
         val bytes = Wire(Vec(4, UInt(8.W)))
