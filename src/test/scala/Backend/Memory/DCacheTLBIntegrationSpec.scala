@@ -4,6 +4,8 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.DCacheParams
 
 class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.PeekPokeAPI {
+    private val pendingForward = Array.fill[Option[BigInt]](2)(None)
+
     def driveIdle(): Unit = {
         dut.io.flush.poke(false)
         for (lane <- 0 until 2) {
@@ -16,7 +18,8 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
             dut.io.load(lane).req.bits.ioAuthorized.poke(false)
             dut.io.load(lane).req.bits.exception.poke(0)
             dut.io.load(lane).req.bits.translationMiss.poke(false)
-            dut.io.forward(lane).result.valid.poke(true)
+            dut.io.forward(lane).result.valid.poke(false)
+            dut.io.forward(lane).result.bits.slot.poke(0)
             dut.io.forward(lane).result.bits.data.poke(0)
             dut.io.forward(lane).result.bits.mask.poke(0)
             dut.io.forward(lane).result.bits.blocked.poke(false)
@@ -38,7 +41,7 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
         dut.io.storeTranslation.get.request.bits.uncache.poke(false)
         dut.io.storeTranslation.get.request.bits.exception.poke(0)
         dut.io.tlb.get.refill.valid.poke(false)
-        dut.io.tlb.get.refill.bits.vaddr.poke(0)
+        dut.io.tlb.get.refill.bits.vpn.poke(0)
         dut.io.tlb.get.refill.bits.ppn.poke(0)
         dut.io.tlb.get.refill.bits.asid.poke(0)
         dut.io.tlb.get.refill.bits.global.poke(false)
@@ -61,9 +64,25 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
         dut.io.tlb.get.control.mxr.poke(false)
         dut.io.tlb.get.control.sum.poke(false)
         dut.reset.poke(true)
-        dut.clock.step(2)
+        step(2)
         dut.reset.poke(false)
-        dut.clock.step()
+        step()
+    }
+
+    def step(cycles: Int = 1): Unit = {
+        for (_ <- 0 until cycles) {
+            for (lane <- 0 until 2) {
+                val query = dut.io.forward(lane).query
+                val next = Option.when(query.valid.peek().litToBoolean)(query.bits.slot.peek().litValue)
+                dut.io.forward(lane).result.valid.poke(pendingForward(lane).nonEmpty)
+                dut.io.forward(lane).result.bits.slot.poke(pendingForward(lane).getOrElse(BigInt(0)))
+                dut.io.forward(lane).result.bits.data.poke(0)
+                dut.io.forward(lane).result.bits.mask.poke(0)
+                dut.io.forward(lane).result.bits.blocked.poke(false)
+                pendingForward(lane) = next
+            }
+            dut.clock.step()
+        }
     }
 
     def refill(
@@ -76,7 +95,7 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
         superpage: Boolean = false,
     ): Unit = {
         dut.io.tlb.get.refill.valid.poke(true)
-        dut.io.tlb.get.refill.bits.vaddr.poke(vaddr)
+        dut.io.tlb.get.refill.bits.vpn.poke(vaddr >> 12)
         dut.io.tlb.get.refill.bits.ppn.poke(ppn)
         dut.io.tlb.get.refill.bits.asid.poke(1)
         dut.io.tlb.get.refill.bits.global.poke(false)
@@ -88,7 +107,7 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
         dut.io.tlb.get.refill.bits.permissions.accessed.poke(true)
         dut.io.tlb.get.refill.bits.permissions.dirty.poke(dirty)
         dut.io.tlb.get.refill.bits.superpage.poke(superpage)
-        dut.clock.step()
+        step()
         dut.io.tlb.get.refill.valid.poke(false)
     }
 
@@ -120,7 +139,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             dut.io.tlbMiss.get(0).bits.vaddr.expect(va0)
             dut.io.tlbMiss.get(1).valid.expect(true)
             dut.io.tlbMiss.get(1).bits.vaddr.expect(va1)
-            dut.clock.step()
+            d.step()
             dut.io.load.foreach(_.req.valid.poke(false))
 
             var responses = Set.empty[Int]
@@ -131,7 +150,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.load(lane).rsp.bits.exception.expect(0)
                     responses += lane
                 }
-                dut.clock.step()
+                d.step()
             }
             assert(responses == Set(0, 1), s"missing retry responses: $responses")
         }
@@ -146,7 +165,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             d.refill(va, ppn)
             d.presentLoad(0, va, 3)
             dut.io.tlbMiss.get(0).valid.expect(false)
-            dut.clock.step()
+            d.step()
             dut.io.load(0).req.valid.poke(false)
 
             var lowerSeen = false
@@ -155,7 +174,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.l2.req.bits.paddr.expect(((ppn << 12) | (va & 0xfff)) & ~BigInt(31))
                     lowerSeen = true
                 }
-                dut.clock.step()
+                d.step()
             }
             assert(lowerSeen, "translated cache miss did not reach L2")
         }
@@ -166,7 +185,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             val deniedVa = BigInt("73456000", 16)
             d.refill(deniedVa, BigInt("24567", 16), read = false)
             d.presentLoad(0, deniedVa, 4)
-            dut.clock.step()
+            d.step()
             dut.io.load(0).req.valid.poke(false)
             var faultSeen = false
             for (_ <- 0 until 8) {
@@ -176,7 +195,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.load(0).rsp.bits.retry.expect(false)
                     faultSeen = true
                 }
-                dut.clock.step()
+                d.step()
             }
             assert(faultSeen, "load page fault response was not produced")
 
@@ -215,7 +234,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             dut.io.storeTranslation.get.request.bits.exception.poke(0)
             dut.io.storeTranslation.get.response.miss.expect(true)
             dut.io.tlbMiss.get(1).valid.expect(false)
-            dut.clock.step()
+            d.step()
 
             dut.io.load(1).req.valid.poke(false)
             dut.io.storeTranslation.get.response.miss.expect(false)

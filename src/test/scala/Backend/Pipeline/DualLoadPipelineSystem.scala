@@ -38,6 +38,7 @@ class DualLoadPipelineSystem(backend: DualPortRamBackend) extends Module {
     val fpRf = Module(new Regfile(fpParams))
     val cache = Module(new DCache(backend, DCacheParams(p.entries)))
     for ((pipe, port) <- Seq(ls0 -> io.ls0, ls1 -> io.ls1)) {
+        pipe.io.blockIssue := false.B
         pipe.io.iq <> port.iq
         pipe.io.cmt <> port.cmt
         port.wb := pipe.io.rf.wr
@@ -66,6 +67,7 @@ class DualLoadPipelineSystem(backend: DualPortRamBackend) extends Module {
     intRf.io.write.drop(2).zip(io.intWrite).foreach { case (a, b) => a <> b }
     fpRf.io.write.drop(2).zip(io.fpWrite).foreach { case (a, b) => a <> b }
     cache.io.flush := io.flush
+    cache.io.maintenance.request := false.B
     cache.io.store <> io.store
     io.l2 <> cache.io.l2
 }

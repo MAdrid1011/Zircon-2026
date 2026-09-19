@@ -66,6 +66,7 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
     val latencies = mutable.ArrayBuffer.empty[Int]
     private var heldLower: Option[Seq[BigInt]] = None
     private var heldStoreResponse: Option[Seq[BigInt]] = None
+    private val pendingForward = Array.fill[Option[(Int, Forward)]](2)(None)
     private var nextId = 0
     private val reservedIds = mutable.Set.empty[Int]
     def observeCycle(): Unit = ()
@@ -158,18 +159,26 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
                 keep
             }
             replay.foreach(_.filterInPlace(x => x.uncache && x.authorized))
+            pendingForward.indices.foreach(i => pendingForward(i) = None)
         }
         for (i <- 0 until 2) {
             val q = dut.io.forward(i).query
             val id = q.bits.slot.peek().litValue.toInt
-            val address = q.bits.paddr.peek().litValue.toLong
+            val address = q.bits.wordAddress.peek().litValue.toLong << 2
             var f = forward.getOrElse(id, Forward())
             if (!forward.contains(id)) store.filter(x => (x.address & ~3L) == (address & ~3L) && storeException(x) == 0)
                 .foreach(x => f = Forward(x.data, x.mask))
-            dut.io.forward(i).result.valid.poke(cycles >= f.available)
-            dut.io.forward(i).result.bits.data.poke(f.data)
-            dut.io.forward(i).result.bits.mask.poke(f.mask)
-            dut.io.forward(i).result.bits.blocked.poke(f.blocked)
+            val prior = pendingForward(i)
+            val priorReady = prior.exists { case (_, response) => cycles >= response.available }
+            dut.io.forward(i).result.valid.poke(priorReady)
+            dut.io.forward(i).result.bits.slot.poke(prior.map(_._1).getOrElse(0))
+            dut.io.forward(i).result.bits.data.poke(prior.map(_._2.data).getOrElse(BigInt(0)))
+            dut.io.forward(i).result.bits.mask.poke(prior.map(_._2.mask).getOrElse(0))
+            dut.io.forward(i).result.bits.blocked.poke(prior.exists(_._2.blocked))
+            pendingForward(i) =
+                if (q.valid.peek().litToBoolean) Some(id -> f)
+                else if (priorReady) None
+                else prior
             val responseValid = dut.io.load(i).rsp.valid.peek().litToBoolean
             val responseId = dut.io.load(i).rsp.bits.slot.peek().litValue.toInt
             val responseExpected = expected.contains((i, responseId))
@@ -222,7 +231,7 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
             dut.io.l2.req.bits.data,
             dut.io.l2.req.bits.mask,
             dut.io.l2.req.bits.size,
-            dut.io.l2.req.bits.victimPaddr,
+            dut.io.l2.req.bits.victimLine,
             dut.io.l2.req.bits.victimData
         ).map(_.peek().litValue) ++
             Seq(
@@ -254,7 +263,7 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
                     data,
                     dut.io.l2.req.bits.mask.peek().litValue,
                     victimValid,
-                    dut.io.l2.req.bits.victimPaddr.peek().litValue.toLong,
+                    dut.io.l2.req.bits.victimLine.peek().litValue.toLong << 5,
                     dut.io.l2.req.bits.victimData.peek().litValue,
                     victimDirty,
                     dirtyResponses.remove(address & ~31L),
@@ -264,7 +273,7 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
                 if (write || (victimValid && victimDirty)) writes += 1
                 if (victimValid && victimDirty) dirtyVictims += 1
                 if (victimValid && victimDirty) {
-                    dirtyVictimAddresses += dut.io.l2.req.bits.victimPaddr.peek().litValue.toLong
+                    dirtyVictimAddresses += dut.io.l2.req.bits.victimLine.peek().litValue.toLong << 5
                 }
                 if (victimValid && !victimDirty) cleanVictims += 1
                 if (!write) reads += 1

@@ -22,7 +22,7 @@ class CSRResponse extends Bundle {
 /** Already selected, architecturally accepted trap; selection and redirects belong to Commit. */
 class CSRTrap extends Bundle {
     val supervisor = Bool()
-    val pc = UInt(32.W)
+    val pcWord = UInt(30.W)
     val cause = UInt(32.W)
     val tval = UInt(32.W)
 }
@@ -46,6 +46,18 @@ class CSRState extends Bundle {
     val fflags = UInt(5.W)
 }
 
+class CSRInterrupts extends Bundle {
+    val software = Bool()
+    val timer = Bool()
+    val external = Bool()
+    val supervisorExternal = Bool()
+}
+
+class CSRFloatStatus extends Bundle {
+    val flags = UInt(5.W)
+    val dirty = Bool()
+}
+
 class CSRIO extends Bundle {
     val req = Flipped(Valid(new CSRRequest))
     val rsp = Valid(new CSRResponse)
@@ -54,16 +66,8 @@ class CSRIO extends Bundle {
     val privilege = Input(UInt(2.W))
     val retired = Input(UInt(2.W))
     val time = Input(UInt(64.W))
-    val interrupt = Input(new Bundle {
-        val software = Bool()
-        val timer = Bool()
-        val external = Bool()
-        val supervisorExternal = Bool()
-    })
-    val fp = Flipped(Valid(new Bundle {
-        val flags = UInt(5.W)
-        val dirty = Bool()
-    }))
+    val interrupt = Input(new CSRInterrupts)
+    val fp = Flipped(Valid(new CSRFloatStatus))
     val trap = Flipped(Valid(new CSRTrap))
     // False is an accepted MRET, true is an accepted SRET. No instruction decoding occurs here.
     val xret = Flipped(Valid(Bool()))
@@ -100,9 +104,9 @@ class CSR extends Module {
     val flags = RegInit(0.U(5.W))
     val rounding = RegInit(0.U(3.W))
     val cycleLowIncrement = BLevelPAdder32(cycleLow, 1.U, 0.U)
-    val cycleHighIncrement = BLevelPAdder32(cycleHigh, 1.U, 0.U)
+    val cycleHighIncrement = BLevelPAdder32.sum(cycleHigh, 1.U, 0.U)
     val instretLowIncrement = BLevelPAdder32(instretLow, io.retired, 0.U)
-    val instretHighIncrement = BLevelPAdder32(instretHigh, 1.U, 0.U)
+    val instretHighIncrement = BLevelPAdder32.sum(instretHigh, 1.U, 0.U)
     val cycleWrite = WireDefault(false.B)
     val instretWrite = WireDefault(false.B)
 
@@ -142,11 +146,11 @@ class CSR extends Module {
     /* Counters use the old inhibit state. An explicit write overrides this cycle's increment. */
     when(!inhibit(0) && !cycleWrite) {
         cycleLow := cycleLowIncrement.io.res
-        when(cycleLowIncrement.io.cout.asBool) { cycleHigh := cycleHighIncrement.io.res }
+        when(cycleLowIncrement.io.cout.get.asBool) { cycleHigh := cycleHighIncrement }
     }
     when(!inhibit(2) && !instretWrite) {
         instretLow := instretLowIncrement.io.res
-        when(instretLowIncrement.io.cout.asBool) { instretHigh := instretHighIncrement.io.res }
+        when(instretLowIncrement.io.cout.get.asBool) { instretHigh := instretHighIncrement }
     }
 
     csr(CSRAddress.mstatus, statusRead, Some(status)) { w =>
@@ -245,7 +249,11 @@ class CSR extends Module {
     val counter = io.req.bits.addr === CSRAddress.cycle.U || io.req.bits.addr === CSRAddress.cycleh.U ||
         io.req.bits.addr === CSRAddress.time.U || io.req.bits.addr === CSRAddress.timeh.U ||
         io.req.bits.addr === CSRAddress.instret.U || io.req.bits.addr === CSRAddress.instreth.U
-    val counterMask = UIntToOH(io.req.bits.addr(1, 0), 3)
+    val counterMask = MuxLookup(io.req.bits.addr(1, 0), 0.U(3.W))(Seq(
+        0.U -> 1.U,
+        1.U -> 2.U,
+        2.U -> 4.U,
+    ))
     val deniedCounter = counter && io.privilege =/= 3.U &&
         (!(mcounteren & counterMask).orR || (io.privilege === 0.U && !(scounteren & counterMask).orR))
     val implemented = VecInit(entries.map(_._1)).asUInt.orR
@@ -276,13 +284,13 @@ class CSR extends Module {
     /* Accepted hardware events update state, but never select traps or change the current privilege. */
     when(io.trap.valid) {
         when(io.trap.bits.supervisor) {
-            sepc := io.trap.bits.pc & "hfffffffc".U
+            sepc := Cat(io.trap.bits.pcWord, 0.U(2.W))
             scause := io.trap.bits.cause & "h8000001f".U
             stval := io.trap.bits.tval
             nextStatus := (status & (~bits(1, 5, 8) & BigInt("ffffffff", 16)).U) |
                 (status(1).asUInt << 5) | ((io.privilege === 1.U).asUInt << 8)
         }.otherwise {
-            mepc := io.trap.bits.pc & "hfffffffc".U
+            mepc := Cat(io.trap.bits.pcWord, 0.U(2.W))
             mcause := io.trap.bits.cause & "h8000001f".U
             mtval := io.trap.bits.tval
             nextStatus := (status & (~bits(3, 7, 11, 12) & BigInt("ffffffff", 16)).U) |
@@ -300,11 +308,9 @@ class CSR extends Module {
                     (status(7).asUInt << 3) | (1.U << 7)
         }
     }
-    status := Mux(
-        (writeFire && fpAddress && fpEnabled) || (io.fp.valid && (io.fp.bits.dirty || io.fp.bits.flags.orR)),
-        (nextStatus & "hffff9fff".U) | "h00006000".U,
-        nextStatus
-    )
+    val fpDirty = (writeFire && fpAddress && fpEnabled) ||
+        (io.fp.valid && (io.fp.bits.dirty || io.fp.bits.flags.orR))
+    status := Cat(nextStatus(31, 15), Mux(fpDirty, 3.U, nextStatus(14, 13)), nextStatus(12, 0))
 
     io.state.mstatus := statusRead
     io.state.mie := mie

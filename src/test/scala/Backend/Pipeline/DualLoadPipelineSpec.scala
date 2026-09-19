@@ -20,7 +20,8 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
             simulate(new DualLoadPipelineSystem(backend)) { dut =>
                 case class Load(lane: Int, id: Int, address: Long, fp: Boolean) {
                     val rd: Int = 4 + lane * 24 + id % 16
-                    val tag: Int = rd | (if (fp) 64 else 0)
+                    val tag: Int = rd | (if (fp) 1 << dut.p.physWidth else 0)
+                    val rob: Int = id & ((1 << dut.p.robWidth) - 1)
                 }
                 case class Transaction(id: BigInt, data: BigInt, due: Int)
                 val active = mutable.Map.empty[(Int, Int), Load]
@@ -37,6 +38,7 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
                 var storeAcquires = 0
                 var storePending = false
                 var storesDone = 0
+                var pendingForward = Seq.fill[Option[Int]](2)(None)
                 def bytes(addr: Long, n: Int): BigInt = (0 until n).foldLeft(BigInt(0))((v, i) =>
                     v | (BigInt(((addr + i) * 37 + ((addr + i) >> 7) + 0x81) & 255) << (i * 8))
                 )
@@ -58,25 +60,31 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
                     val sd = dut.io.ls1.iq.std.get
                     sd.valid.poke(false); BackendPackageTestUtils.clear(sd.bits)
                     sd.bits.prs(0).poke(0); sd.bits.sqIdx.poke(0); sd.bits.robIdx.poke(0); sd.bits.size.poke(2)
-                    dut.io.ls1.cmt.sq.addr.get.ready.poke(true); dut.io.ls1.cmt.sq.data.get.ready.poke(true)
+                    dut.io.ls1.cmt.storeAddress.get.ready.poke(true); dut.io.ls1.cmt.storeData.get.ready.poke(true)
                     if (cancel) {
                         active.clear()
                         written.clear()
                         replay.foreach(_.clear())
+                        pendingForward = pendingForward.map(_ => None)
                     }
                     for ((port, lane) <- ports.zipWithIndex) {
                         val x = presented(lane).getOrElse(Load(lane, 0, 0x1000, false))
                         val b = port.iq.instPkg.bits
                         BackendPackageTestUtils.clear(b)
                         port.iq.instPkg.valid.poke(presented(lane).nonEmpty)
+                        b.fu.poke(ZirconConfig.DecodeUnit.Load)
                         b.prj.poke(1); b.imm.poke(x.address - 0x1000); b.prd.poke(x.tag); b.rdVld.poke(true)
-                        b.robIdx.poke(x.id); b.sqTail.poke(0); b.mtype.poke(2)
+                        b.robIdx.poke(x.rob); b.sqTail.poke(0); b.mtype.poke(2)
                         b.uncache.poke(false); b.ioAuthorized.poke(false); b.exception.valid.poke(false)
                         b.store.poke(false); b.sqIdx.poke(0)
                         port.wk.grant.poke(0)
                         port.cmt.flush.poke(cancel);
-                        for (r <- Seq(port.cmt.sq.result, port.cmt.sb.result)) {
-                            r.valid.poke(true); r.bits.data.poke(0); r.bits.mask.poke(0); r.bits.blocked.poke(false)
+                        for (r <- Seq(port.cmt.sqResult, port.cmt.sbResult)) {
+                            r.valid.poke(pendingForward(lane).nonEmpty)
+                            r.bits.slot.poke(pendingForward(lane).getOrElse(0))
+                            r.bits.data.poke(0)
+                            r.bits.mask.poke(0)
+                            r.bits.blocked.poke(false)
                         }
                     }
                     dut.io.store.req.valid.poke(write && !storePending)
@@ -120,7 +128,7 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
                         if (port.cmt.rob.valid.peek().litToBoolean) {
                             val key = (lane, port.cmt.rob.bits.robIdx.peek().litValue.toInt)
                             val x = active.remove(key).get
-                            assert(written.remove(key)); port.cmt.rob.bits.vaddr.expect(x.address)
+                            assert(written.remove((lane, x.id))); port.cmt.rob.bits.vaddr.expect(x.address)
                             port.cmt.rob.bits.exception.expect(0); completed += 1
                         }
                     }
@@ -139,11 +147,16 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
                         val x = presented(i).get
                         if (presentingReplay(i)) {
                             replay(i).dequeue()
-                            assert(active.contains((i, x.id)))
+                            assert(active.contains((i, x.rob)))
                         } else {
-                            assert(!active.contains((i, x.id)))
-                            active((i, x.id)) = x
+                            assert(!active.contains((i, x.rob)))
+                            active((i, x.rob)) = x
                         }
+                    }
+                    pendingForward = ports.map { port =>
+                        val query = port.cmt.sqQuery
+                        port.cmt.sbQuery.valid.expect(query.valid.peek().litToBoolean)
+                        if (query.valid.peek().litToBoolean) Some(query.bits.slot.peek().litValue.toInt) else None
                     }
                     dut.clock.step(); cycle += 1; fire
                 }

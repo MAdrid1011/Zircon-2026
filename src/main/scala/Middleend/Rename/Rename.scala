@@ -11,7 +11,6 @@ class DomainRegisterInfo(p: RenameParams) extends Bundle {
 
 class DomainPhysicalInfo(p: RenameParams) extends Bundle {
     val prs = Vec(p.numSources, UInt(p.indexWidth.W))
-    val sourceIndependent = Vec(p.numSources, Bool())
     val prd = UInt(p.indexWidth.W)
     val pprd = UInt(p.indexWidth.W)
 }
@@ -22,24 +21,26 @@ class DomainCommitEntry(p: RenameParams) extends Bundle {
     val pprd = UInt(p.indexWidth.W)
 }
 
+class RenameIO(p: RenameParams) extends Bundle {
+    val rinfo = Input(Vec(p.renameWidth, new DomainRegisterInfo(p)))
+    val prepare = Input(UInt(p.renameWidth.W))
+    val allocate = Input(UInt(p.renameWidth.W))
+    val available = Output(Bool())
+    val freeAvailable = Output(Bool())
+    val freePrefix = Output(UInt(p.renameWidth.W))
+    val pinfo = Output(Vec(p.renameWidth, new DomainPhysicalInfo(p)))
+    val commit = Input(Vec(p.commitWidth, Valid(new DomainCommitEntry(p))))
+    val restore = Input(Bool())
+    val pra = Output(UInt(p.indexWidth.W))
+}
+
 /** One independently instantiable integer OR floating-point rename domain.
   * All tags are local. Sparse destination requests retain original lane order.
   * The caller combines domain availability and grants only dispatched lanes.
   * restore is the actual recovery cycle and may carry the final retirement update.
   */
 class Rename(val p: RenameParams = RenameParams()) extends Module {
-    val io = IO(new Bundle {
-        val rinfo = Input(Vec(p.renameWidth, new DomainRegisterInfo(p)))
-        val prepare = Input(UInt(p.renameWidth.W))
-        val allocate = Input(UInt(p.renameWidth.W))
-        val available = Output(Bool())
-        val freeAvailable = Output(Bool())
-        val freePrefix = Output(UInt(p.renameWidth.W))
-        val pinfo = Output(Vec(p.renameWidth, new DomainPhysicalInfo(p)))
-        val commit = Input(Vec(p.commitWidth, Valid(new DomainCommitEntry(p))))
-        val restore = Input(Bool())
-        val pra = Output(UInt(p.indexWidth.W))
-    })
+    val io = IO(new RenameIO(p))
     val fList = Module(new PRegFreeList(p.numPhys, p.renameWidth, p.commitWidth))
     val srat = Module(new SRat(
         p.indexWidth,
@@ -89,7 +90,6 @@ class Rename(val p: RenameParams = RenameParams()) extends Module {
             if (s == p.numSources) io.pinfo(i).pprd := Mux(valid, value, 0.U)
             else {
                 io.pinfo(i).prs(s) := Mux(valid, value, 0.U)
-                io.pinfo(i).sourceIndependent(s) := !(valid && bypass)
             }
         }
         srat.io.rename(i).valid := granted(i)

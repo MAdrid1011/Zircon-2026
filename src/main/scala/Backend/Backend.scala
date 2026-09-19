@@ -2,37 +2,17 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig._
 
-class BackendLoadCommitIO(p: LoadPipelineParams, withStore: Boolean) extends Bundle {
-    val rob = Valid(new LoadROBIO(p))
-    val sqQuery = Valid(new LoadSQQuery(p))
-    val sqResult = Flipped(Valid(new DForwardResult(DCacheParams(p.entries))))
-    val sbQuery = Valid(new DForwardQuery(DCacheParams(p.entries)))
-    val sbResult = Flipped(Valid(new DForwardResult(DCacheParams(p.entries))))
-    val storeAddress = if (withStore) Some(Decoupled(new StoreAddressResult(p))) else None
-    val storeData = if (withStore) Some(Decoupled(new StoreDataResult(p))) else None
+class ArithCommitIO extends Bundle {
+    val rob = new ArithRobIO
+    val branch = new ArithBranchContextIO
 }
 
 class BackendMiddleendIO(p: BackendParams, issue: IssueParams) extends Bundle {
-    val arith0 = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val arith1 = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val mixArith = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val load = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val loadStoreAddress = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val storeData = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
+    val enqueue = Input(Vec(IssueQueueIndex.Count, new IssueEnqueueGroup(p, issue.dispatchWidth)))
     val freeCount = Output(Vec(IssueQueueIndex.Count, UInt(issue.countWidth.W)))
     val wakeup = Output(Vec(issue.wakeupPorts, new BackendWakeup(p)))
     val memoryWakeup = Output(Vec(issue.wakeupPorts, new BackendWakeup(p)))
     val speculation = Output(new SpeculationResolution(p))
-}
-
-class BackendPerformanceCounters extends Bundle {
-    val issueQueueFullCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
-    val pipelineIssueCycles = Vec(6, UInt(64.W))
-    val pipelineOperandWaitCycles = Vec(6, UInt(64.W))
-    val pipelineReplayBlockedCycles = Vec(6, UInt(64.W))
-    val pipelineExecutionBlockedCycles = Vec(6, UInt(64.W))
-    val divideBusyCycles = UInt(64.W)
-    val dcache = new DCachePerformanceCounters
 }
 
 class BackendIO(
@@ -44,36 +24,13 @@ class BackendIO(
     observe: Boolean,
 ) extends Bundle {
     val middleend = new BackendMiddleendIO(p, issue)
-    val flush = Input(Bool())
-    val csrGrant = Flipped(Valid(new CsrIssueGrant(p)))
-
-    val arith0 = new Bundle {
-        val rob = new ArithRobIO
-        val branch = new ArithBranchContextIO
-    }
-    val arith1 = new Bundle {
-        val rob = new ArithRobIO
-        val branch = new ArithBranchContextIO
-    }
-    val mixRob = new MixArithRobIO
-    val mixCSR = new CSRExecutionPort
-    val ls0 = new BackendLoadCommitIO(load, withStore = false)
-    val ls1 = new BackendLoadCommitIO(load, withStore = true)
-
-    val store = new Bundle {
-        val req = Flipped(Decoupled(new DStoreRequest))
-        val rsp = Decoupled(new DStoreResponse)
-    }
-    val atomic = new AtomicBackendIO(p)
+    val commit = new BackendCommitIO(p, load)
     val l2 = new DCacheL2IO
     val dtlb = if (tlbEnabled) Some(new TLBManagementIO) else None
     val dtlbMiss = if (tlbEnabled) Some(Output(Vec(2, Valid(new DTLBMissRequest)))) else None
     val dcacheIdle = Output(Bool())
+    val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new BackendPerformanceCounters)) else None
-    val maintenance = new Bundle {
-        val request = Input(Bool())
-        val done = Output(Bool())
-    }
 }
 
 /**
@@ -98,21 +55,16 @@ class Backend(
     private val dcacheParams = DCacheParams(loadParams.entries)
     val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe))
 
-    val arith0IQ = Module(new IssueQueue(p, issueParams.arith0))
-    val arith1IQ = Module(new IssueQueue(p, issueParams.arith1))
-    val mixArithIQ = Module(new IssueQueue(p, issueParams.mixArith))
-    val loadIQ = Module(new IssueQueue(p, issueParams.load))
-    val loadStoreAddressIQ = Module(new IssueQueue(p, issueParams.loadStoreAddress))
-    val storeDataIQ = Module(new IssueQueue(p, issueParams.storeData))
-    val queues = Seq(
-        arith0IQ -> IssueQueueIndex.Arith0,
-        arith1IQ -> IssueQueueIndex.Arith1,
-        mixArithIQ -> IssueQueueIndex.MixArith,
-        loadIQ -> IssueQueueIndex.Load,
-        loadStoreAddressIQ -> IssueQueueIndex.LoadStoreAddress,
-        storeDataIQ -> IssueQueueIndex.StoreData,
-    )
+    /* IssueQueueIndex is the shared ordering contract for dispatch, counters and execution pipes. */
+    val queues = issueParams.queueParams.map(params => Module(new IssueQueue(p, params)))
+    val arith0IQ = queues(IssueQueueIndex.Arith0)
+    val arith1IQ = queues(IssueQueueIndex.Arith1)
+    val mixArithIQ = queues(IssueQueueIndex.MixArith)
+    val loadIQ = queues(IssueQueueIndex.Load)
+    val loadStoreAddressIQ = queues(IssueQueueIndex.LoadStoreAddress)
+    val storeDataIQ = queues(IssueQueueIndex.StoreData)
 
+    /* Five execution pipes consume six queues because LS1 owns independent STA and STD inputs. */
     val arith0 = Module(new ArithBranch)
     val arith1 = Module(new ArithBranch)
     val arithPipes = Seq(arith0, arith1)
@@ -122,6 +74,7 @@ class Backend(
     val dcache = Module(new DCache(ramBackend, dcacheParams, tlbEnabled, observe))
     val atomic = Module(new AtomicUnit(p, dcacheParams))
 
+    /* Central PRFs provide stable held reads while a downstream execution stage is stalled. */
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
         numReadPorts = 9,
@@ -141,49 +94,34 @@ class Backend(
     val wakeupRouter = Module(new WakeupRouter(p))
     val loadSpeculation = Module(new LoadSpeculationTracker(p))
 
-    val middleendPorts = Seq(
-        io.middleend.arith0 -> IssueQueueIndex.Arith0,
-        io.middleend.arith1 -> IssueQueueIndex.Arith1,
-        io.middleend.mixArith -> IssueQueueIndex.MixArith,
-        io.middleend.load -> IssueQueueIndex.Load,
-        io.middleend.loadStoreAddress -> IssueQueueIndex.LoadStoreAddress,
-        io.middleend.storeData -> IssueQueueIndex.StoreData,
-    )
-    queues.zip(middleendPorts).foreach { case ((queue, queueIndex), (middleendPort, portIndex)) =>
-        require(queueIndex == portIndex)
-        queue.io.enq := middleendPort
-    }
-    io.middleend.freeCount := VecInit(Seq(
-        arith0IQ.io.freeCount,
-        arith1IQ.io.freeCount,
-        mixArithIQ.io.freeCount,
-        loadIQ.io.freeCount,
-        loadStoreAddressIQ.io.freeCount,
-        storeDataIQ.io.freeCount,
-    ))
-    queues.foreach { case (queue, _) =>
-        queue.io.flush := io.flush
+    /* The indexed Middleend boundary connects homogeneously to the six issue queues. */
+    queues.zip(io.middleend.enqueue).foreach { case (queue, enqueue) => queue.io.enq := enqueue }
+    io.middleend.freeCount := VecInit(queues.map(_.io.freeCount))
+    queues.foreach { queue =>
+        queue.io.flush := io.commit.flush
         queue.io.speculation := loadSpeculation.io.resolution
     }
-    mixArithIQ.io.csrGrant.get := io.csrGrant
+    mixArithIQ.io.csrGrant.get := io.commit.csrGrant
     mixArithIQ.io.mixAvailable.get := mixArith.io.available
 
+    /* Queue issue ports map directly to their owning execution resources. */
     arith0.io.iq <> arith0IQ.io.issue
     arith1.io.iq <> arith1IQ.io.issue
-    mixArith.io.iq <> mixArithIQ.io.issue
+    mixArith.io.iq.valid := mixArithIQ.io.issue.valid
+    mixArith.io.iq.bits := MixArithIssue.fromBackend(mixArithIQ.io.issue.bits)
+    mixArithIQ.io.issue.ready := mixArith.io.iq.ready
     ls0.io.iq.instPkg <> loadIQ.io.issue
     ls1.io.iq.instPkg <> loadStoreAddressIQ.io.issue
     ls1.io.iq.std.get <> storeDataIQ.io.issue
-    ls0.io.blockIssue := io.atomic.blockMemoryIssue
-    ls1.io.blockIssue := io.atomic.blockMemoryIssue
+    ls0.io.blockIssue := io.commit.atomic.blockMemoryIssue
+    ls1.io.blockIssue := io.commit.atomic.blockMemoryIssue
 
+    /* WakeupRouter publishes stage-specific producers to compute and memory readiness domains. */
     arithPipes.foreach(_.io.speculation := loadSpeculation.io.resolution)
-    wakeupRouter.io.arith0Issue := arith0.io.wakeup.wakeIssue
-    wakeupRouter.io.arith0RF := arith0.io.wakeup.wakeRF
-    wakeupRouter.io.arith0WB := arith0.io.wakeup.wakeWB
-    wakeupRouter.io.arith1Issue := arith1.io.wakeup.wakeIssue
-    wakeupRouter.io.arith1RF := arith1.io.wakeup.wakeRF
-    wakeupRouter.io.arith1WB := arith1.io.wakeup.wakeWB
+    arithPipes.zipWithIndex.foreach { case (pipe, lane) =>
+        wakeupRouter.io.arithIssue(lane) := pipe.io.wakeup.wakeIssue
+        wakeupRouter.io.arithRF(lane) := pipe.io.wakeup.wakeRF
+    }
     def certainWake(valid: Bool, prd: UInt): BackendWakeup = {
         val wakeup = Wire(new BackendWakeup(p))
         wakeup.prd := Mux(valid, prd, 0.U)
@@ -193,10 +131,10 @@ class Backend(
     wakeupRouter.io.mixEX2 := certainWake(mixArith.io.wakeEX2.valid, mixArith.io.wakeEX2.bits)
     wakeupRouter.io.mixEX3 := certainWake(mixArith.io.wakeEX3.valid, mixArith.io.wakeEX3.bits)
     wakeupRouter.io.mixWB := certainWake(mixArith.io.wakeup.valid, mixArith.io.wakeup.bits)
-    wakeupRouter.io.load0D1 := ls0.io.wk.wakeD1
-    wakeupRouter.io.load1D1 := ls1.io.wk.wakeD1
-    wakeupRouter.io.load0WB := certainWake(ls0.io.wk.wakeWB.valid, ls0.io.wk.wakeWB.bits)
-    wakeupRouter.io.load1WB := certainWake(ls1.io.wk.wakeWB.valid, ls1.io.wk.wakeWB.bits)
+    Seq(ls0, ls1).zipWithIndex.foreach { case (pipe, lane) =>
+        wakeupRouter.io.loadD1(lane) := pipe.io.wk.wakeD1
+        wakeupRouter.io.loadWB(lane) := certainWake(pipe.io.wk.wakeWB.valid, pipe.io.wk.wakeWB.bits)
+    }
 
     Seq(arith0IQ, arith1IQ, mixArithIQ).foreach(_.io.wakeup := wakeupRouter.io.compute)
     Seq(loadIQ, loadStoreAddressIQ, storeDataIQ).foreach(_.io.wakeup := wakeupRouter.io.memory)
@@ -204,6 +142,7 @@ class Backend(
     io.middleend.memoryWakeup := wakeupRouter.io.memory
     io.middleend.speculation := loadSpeculation.io.resolution
 
+    /* Loads reserve speculation tags before early wakeup and resolve them at cache response. */
     loadSpeculation.io.request(0) := ls0.io.wk.request
     loadSpeculation.io.request(1) := ls1.io.wk.request
     ls0.io.wk.grant := loadSpeculation.io.grant(0)
@@ -212,7 +151,7 @@ class Backend(
     loadSpeculation.io.allocate(1) := ls1.io.wk.wakeRF.prd =/= 0.U
     loadSpeculation.io.result(0) := ls0.io.wk.result
     loadSpeculation.io.result(1) := ls1.io.wk.result
-    loadSpeculation.io.flush := io.flush
+    loadSpeculation.io.flush := io.commit.flush
 
     // Load completion and Retry address the retained issue entry directly.
     def connectLoadFeedback(queue: IssueQueue, pipe: LoadPipeline): Unit = {
@@ -254,6 +193,7 @@ class Backend(
     ls1.io.rf.std.get.fpData := fpRf.io.read(3).data
     fpRf.io.readHold.get := VecInit(Seq(false.B, false.B, false.B, ls1.io.rf.std.get.hold))
 
+    /* Writeback ports are statically assigned; LS1 and Atomic share the final integer port. */
     def intWrite(port: Int, valid: Bool, address: UInt, data: UInt): Unit = {
         intRf.io.write(port).we := valid
         intRf.io.write(port).addr := address
@@ -288,6 +228,7 @@ class Backend(
         fpRf.io.write(port).data := pipe.io.rf.wr.bits.data
     }
 
+    /* Arithmetic and load results feed the common bypass network before PRF visibility. */
     for ((pipe, port) <- arithPipes.zipWithIndex) {
         bypass.io.consumer(port) <> pipe.io.bypass.consumer
         bypass.io.producer(port) := pipe.io.bypass.producer
@@ -297,41 +238,42 @@ class Backend(
     bypass.io.producer(3) := ls0.io.bypass
     bypass.io.producer(4) := ls1.io.bypass
 
-    arithPipes.foreach(_.io.cmt.flush := io.flush)
-    mixArith.io.cmt.flush := io.flush
-    ls0.io.cmt.flush := io.flush
-    ls1.io.cmt.flush := io.flush
+    /* Commit owns recovery and all architecturally ordered completion interfaces. */
+    arithPipes.foreach(_.io.cmt.flush := io.commit.flush)
+    mixArith.io.cmt.flush := io.commit.flush
+    ls0.io.cmt.flush := io.commit.flush
+    ls1.io.cmt.flush := io.commit.flush
 
-    io.arith0.rob <> arith0.io.cmt.rob
-    io.arith0.branch <> arith0.io.cmt.branch
-    io.arith1.rob <> arith1.io.cmt.rob
-    io.arith1.branch <> arith1.io.cmt.branch
-    io.mixRob <> mixArith.io.cmt.rob
-    io.mixCSR <> mixArith.io.csr
-
-    def connectLoadCommit(external: BackendLoadCommitIO, pipe: LoadPipeline): Unit = {
-        external.rob := pipe.io.cmt.rob
-        external.sqQuery <> pipe.io.cmt.sq.query
-        pipe.io.cmt.sq.result <> external.sqResult
-        external.sbQuery <> pipe.io.cmt.sb.query
-        pipe.io.cmt.sb.result <> external.sbResult
+    io.commit.arith.zip(arithPipes).foreach { case (port, pipe) =>
+        port.rob <> pipe.io.cmt.rob
+        port.branch <> pipe.io.cmt.branch
     }
-    connectLoadCommit(io.ls0, ls0)
-    connectLoadCommit(io.ls1, ls1)
-    io.ls1.storeAddress.get <> ls1.io.cmt.sq.addr.get
-    io.ls1.storeData.get <> ls1.io.cmt.sq.data.get
+    io.commit.mixRob <> mixArith.io.cmt.rob
+    io.commit.mixCSR <> mixArith.io.csr
 
+    def connectLoadCommit(external: LoadCompletionIO, pipe: LoadPipeline): Unit = {
+        external.rob <> pipe.io.cmt.rob
+        external.sqQuery <> pipe.io.cmt.sqQuery
+        pipe.io.cmt.sqResult <> external.sqResult
+        external.sbQuery <> pipe.io.cmt.sbQuery
+        pipe.io.cmt.sbResult <> external.sbResult
+    }
+    connectLoadCommit(io.commit.ls0, ls0)
+    connectLoadCommit(io.commit.ls1, ls1)
+    io.commit.ls1.storeAddress.get <> ls1.io.cmt.storeAddress.get
+    io.commit.ls1.storeData.get <> ls1.io.cmt.storeData.get
+
+    /* LS0 owns DCache load port 0; LS1 shares port 1 with the serialized atomic unit. */
     ls0.connectCache(dcache.io)
     dcache.io.load(1).req.valid := Mux(atomic.io.busy, atomic.io.load.request.valid, ls1.io.cache.req.valid)
     dcache.io.load(1).req.bits := Mux(atomic.io.busy, atomic.io.load.request.bits, ls1.io.cache.req.bits)
     atomic.io.load.request.ready := atomic.io.busy && dcache.io.load(1).req.ready
     ls1.io.cache.req.ready := !atomic.io.busy && dcache.io.load(1).req.ready
-    atomic.io.load.wbSelect.valid := atomic.io.busy && dcache.io.load(1).wbSelect.valid
-    atomic.io.load.wbSelect.bits := dcache.io.load(1).wbSelect.bits
     ls1.io.cache.wbSelect.valid := !atomic.io.busy && dcache.io.load(1).wbSelect.valid
     ls1.io.cache.wbSelect.bits := dcache.io.load(1).wbSelect.bits
     atomic.io.load.response.valid := atomic.io.busy && dcache.io.load(1).rsp.valid
-    atomic.io.load.response.bits := dcache.io.load(1).rsp.bits
+    atomic.io.load.response.bits.data := dcache.io.load(1).rsp.bits.data
+    atomic.io.load.response.bits.exception := dcache.io.load(1).rsp.bits.exception
     ls1.io.cache.rsp.valid := !atomic.io.busy && dcache.io.load(1).rsp.valid
     ls1.io.cache.rsp.bits := dcache.io.load(1).rsp.bits
     ls1.io.cache.fixedLatency := !atomic.io.busy && dcache.io.load(1).fixedLatency
@@ -353,40 +295,58 @@ class Backend(
         dcache.io.storeTranslation.get.request := ls1.io.cache.storeTranslation.get.request
         ls1.io.cache.storeTranslation.get.response := dcache.io.storeTranslation.get.response
     }
-    dcache.io.flush := io.flush
+    dcache.io.flush := io.commit.flush
     if (tlbEnabled) {
         dcache.io.tlb.get.control := io.dtlb.get.control
         dcache.io.tlb.get.refill := io.dtlb.get.refill
         dcache.io.tlb.get.flush := io.dtlb.get.flush
         io.dtlbMiss.get := dcache.io.tlbMiss.get
     }
-    dcache.io.store.req.valid := Mux(atomic.io.store.request.valid, true.B, io.store.req.valid)
-    dcache.io.store.req.bits := Mux(atomic.io.store.request.valid, atomic.io.store.request.bits, io.store.req.bits)
+    dcache.io.store.req.valid := Mux(atomic.io.store.request.valid, true.B, io.commit.store.request.valid)
+    dcache.io.store.req.bits := Mux(
+        atomic.io.store.request.valid,
+        atomic.io.store.request.bits,
+        io.commit.store.request.bits,
+    )
     atomic.io.store.request.ready := dcache.io.store.req.ready
-    io.store.req.ready := !atomic.io.store.request.valid && dcache.io.store.req.ready
+    io.commit.store.request.ready := !atomic.io.store.request.valid && dcache.io.store.req.ready
     atomic.io.store.response.valid := atomic.io.busy && dcache.io.store.rsp.valid
     atomic.io.store.response.bits := dcache.io.store.rsp.bits
-    io.store.rsp.valid := !atomic.io.busy && dcache.io.store.rsp.valid
-    io.store.rsp.bits := dcache.io.store.rsp.bits
-    dcache.io.store.rsp.ready := Mux(atomic.io.busy, atomic.io.store.response.ready, io.store.rsp.ready)
-    atomic.io.clearReservation := io.store.req.fire
-    atomic.io.request <> io.atomic.request
-    io.atomic.response <> atomic.io.response
+    io.commit.store.response.valid := !atomic.io.busy && dcache.io.store.rsp.valid
+    io.commit.store.response.bits := dcache.io.store.rsp.bits
+    dcache.io.store.rsp.ready := Mux(
+        atomic.io.busy,
+        atomic.io.store.response.ready,
+        io.commit.store.response.ready,
+    )
+    atomic.io.clearReservation := io.commit.store.request.fire
+    atomic.io.request <> io.commit.atomic.request
+    io.commit.atomic.response <> atomic.io.response
     io.l2 <> dcache.io.l2
     io.dcacheIdle := dcache.io.idle && !atomic.io.busy
+    dcache.io.maintenance.request := io.maintenance.request
+    io.maintenance.done := dcache.io.maintenance.done
+
+    for (event <- wakeupRouter.io.compute.toSeq ++ wakeupRouter.io.memory.toSeq) {
+        when(event.prd === 0.U) {
+            assert(event.specMask === 0.U, "An empty wakeup cannot carry speculation state")
+        }
+    }
+
+    /* Simulation-only counters stay after the functional datapath. */
     if (observe) {
         val issueQueueFullCycles = RegInit(VecInit.fill(IssueQueueIndex.Count)(0.U(64.W)))
-        val pipelineIssueCycles = RegInit(VecInit.fill(6)(0.U(64.W)))
-        val pipelineOperandWaitCycles = RegInit(VecInit.fill(6)(0.U(64.W)))
-        val pipelineReplayBlockedCycles = RegInit(VecInit.fill(6)(0.U(64.W)))
-        val pipelineExecutionBlockedCycles = RegInit(VecInit.fill(6)(0.U(64.W)))
+        val pipelineIssueCycles = RegInit(VecInit.fill(IssueQueueIndex.Count)(0.U(64.W)))
+        val pipelineOperandWaitCycles = RegInit(VecInit.fill(IssueQueueIndex.Count)(0.U(64.W)))
+        val pipelineReplayBlockedCycles = RegInit(VecInit.fill(IssueQueueIndex.Count)(0.U(64.W)))
+        val pipelineExecutionBlockedCycles = RegInit(VecInit.fill(IssueQueueIndex.Count)(0.U(64.W)))
         val divideBusyCycles = RegInit(0.U(64.W))
-        for ((queue, index) <- queues) {
+        for ((queue, index) <- queues.zipWithIndex) {
             when(queue.io.freeCount === 0.U) {
                 issueQueueFullCycles(index) := issueQueueFullCycles(index) + 1.U
             }
         }
-        for (((queue, _), index) <- queues.zipWithIndex) {
+        for ((queue, index) <- queues.zipWithIndex) {
             val issued = queue.io.issue.fire
             val replayBlocked = !issued && queue.io.replayBlocked
             val executionBlocked = !issued && !replayBlocked &&
@@ -412,6 +372,14 @@ class Backend(
         io.performance.get.divideBusyCycles := divideBusyCycles
         io.performance.get.dcache := dcache.io.performance.get
     }
-    dcache.io.maintenance.request := io.maintenance.request
-    io.maintenance.done := dcache.io.maintenance.done
+}
+
+class BackendPerformanceCounters extends Bundle {
+    val issueQueueFullCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineIssueCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineOperandWaitCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineReplayBlockedCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val pipelineExecutionBlockedCycles = Vec(IssueQueueIndex.Count, UInt(64.W))
+    val divideBusyCycles = UInt(64.W)
+    val dcache = new DCachePerformanceCounters
 }

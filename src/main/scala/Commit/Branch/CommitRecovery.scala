@@ -2,55 +2,52 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
+class CommitRecoveryRetirement(p: FrontendParams) extends Bundle {
+    val mask = UInt(p.fetchWidth.W)
+    val taken = UInt(p.fetchWidth.W)
+    val targets = Vec(p.fetchWidth, UInt(32.W))
+    val nextPc = UInt(32.W)
+}
+
+class CommitRecoveryRecord(p: FrontendParams) extends Bundle {
+    val pcWord = UInt(30.W)
+    val kinds = Vec(p.fetchWidth, UInt(3.W))
+    val meta = new FrontendTrainingMeta(p)
+    val earlyDirections = UInt(p.fetchWidth.W)
+}
+
+class CommitRecoveryIO(p: FrontendParams) extends Bundle {
+    val valid = Input(Bool())
+    val retire = Input(new CommitRecoveryRetirement(p))
+    val record = Input(new CommitRecoveryRecord(p))
+    val state = Valid(new FrontendStateEvent(p))
+    val train = Valid(new FrontendTraining(p))
+}
+
 /** Convert one retired packet into committed predictor state and training data. */
-class CommitRecovery(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val valid = Input(Bool())
-        val redirect = Input(Bool())
-        val retire = Input(new FrontendRetirement(p))
-        val ftq = Input(new FrontendFtqEntry(p))
-        val ftqIdx = Input(UInt(p.ftqBits.W))
-        val state = Valid(new FrontendStateEvent(p))
-        val train = Valid(new FrontendTraining(p))
-    })
+class CommitRecovery(p: FrontendParams) extends RawModule {
+    val io = IO(new CommitRecoveryIO(p))
     val retirement = io.retire
-    val record = io.ftq.record
-    val headMatches = retirement.ftqIdx === io.ftqIdx && retirement.fetchToken === io.ftq.fetchToken
+    val record = io.record
     val prediction = Wire(new FrontendPrediction(p))
-    prediction.kinds := record.train.kinds
+    prediction.kinds := record.kinds
     prediction.targets := retirement.targets
     prediction.mask := retirement.mask
     prediction.taken := retirement.taken & retirement.mask
     prediction.nextPc := retirement.nextPc
     prediction.backward := VecInit((0 until p.fetchWidth).map(i =>
         FrontendCfi.conditional(prediction.kinds(i)) &&
-            FrontendMath.backwardBranch(FrontendMath.slotPc(record.train.pc, i, p), retirement.targets(i))
+            FrontendMath.backwardBranch(FrontendMath.slotPc(Cat(record.pcWord, 0.U(2.W)), i, p), retirement.targets(i))
     )).asUInt
-    val mismatch = retirement.nextPc =/= record.nextPc || retirement.mask =/= record.train.mask ||
-        ((retirement.taken ^ record.train.taken) & retirement.mask).orR
     io.state.valid := io.valid
-    io.state.bits.pc := record.train.pc
+    io.state.bits.pcWord := record.pcWord
     io.state.bits.prediction := prediction
     io.train.valid := io.valid
-    io.train.bits.pc := record.train.pc
+    io.train.bits.pcWord := record.pcWord
     io.train.bits.mask := retirement.mask
-    io.train.bits.kinds := record.train.kinds
+    io.train.bits.kinds := record.kinds
     io.train.bits.taken := retirement.taken
     io.train.bits.targets := retirement.targets
-    io.train.bits.meta := record.train.meta
-    io.train.bits.earlyDirections := record.train.earlyDirections
-    when(io.valid) {
-        assert(headMatches, "Retirement must reference the oldest FTQ index and fetch token")
-        assert(!mismatch || io.redirect, "Backend must redirect when the retired prediction disagrees")
-        assert(
-            (retirement.mask & ~record.train.mask) === 0.U && retirement.mask.orR,
-            "Retirement cannot execute instructions that were not delivered"
-        )
-        val control = VecInit(record.train.kinds.map(_ =/= 0.U)).asUInt
-        assert(
-            (retirement.mask & control & ~io.ftq.resolved) === 0.U,
-            "Every retired control-flow slot must provide its executed target"
-        )
-        assert(PopCount(retirement.taken & retirement.mask) <= 1.U)
-    }
+    io.train.bits.meta := record.meta
+    io.train.bits.earlyDirections := record.earlyDirections
 }

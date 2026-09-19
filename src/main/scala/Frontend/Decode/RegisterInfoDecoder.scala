@@ -2,14 +2,16 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
+class RegisterInfoDecoderIO extends Bundle {
+    val inst = Input(UInt(32.W))
+    val fields = Input(new FrontendPredecodeFields)
+    val rinfo = Output(new FrontendRegisterInfo)
+    val kind = Output(UInt(3.W))
+}
+
 /** PD resolves operand domains and the architectural x1/x5 RAS hints. */
-class RegisterInfoDecoder extends Module {
-    val io = IO(new Bundle {
-        val inst = Input(UInt(32.W))
-        val fields = Input(new FrontendPredecodeFields)
-        val rinfo = Output(new FrontendRegisterInfo)
-        val kind = Output(UInt(3.W))
-    })
+class RegisterInfoDecoder extends RawModule {
+    val io = IO(new RegisterInfoDecoderIO)
     val inst = io.inst
     val opcode = inst(6, 0)
     val funct3 = inst(14, 12)

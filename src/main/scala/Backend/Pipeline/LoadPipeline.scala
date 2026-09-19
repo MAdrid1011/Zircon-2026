@@ -1,6 +1,7 @@
 import chisel3._
 import chisel3.util._
 import ZirconConfig.{DCacheParams, LoadPipelineParams}
+import ZirconUtil.InheritFields
 
 class LoadIQIO(p: LoadPipelineParams, withStore: Boolean = false) extends Bundle {
     val instPkg = Flipped(Decoupled(new BackendPackage(p.backend)))
@@ -12,55 +13,66 @@ class LoadWriteback(p: LoadPipelineParams) extends Bundle {
     val data = UInt(32.W)
 }
 
+class LoadRegfileReadIO(p: LoadPipelineParams) extends Bundle {
+    val prj = Output(UInt(p.intWidth.W))
+    val prjData = Input(UInt(32.W))
+    val hold = Output(Bool())
+}
+
 class LoadRegfileIO(p: LoadPipelineParams, withStore: Boolean = false) extends Bundle {
-    val rd = new Bundle {
-        val prj = Output(UInt(p.intWidth.W))
-        val prjData = Input(UInt(32.W))
-        val hold = Output(Bool())
-    }
+    val rd = new LoadRegfileReadIO(p)
     val wr = Output(Valid(new LoadWriteback(p)))
     val std = if (withStore) Some(new StoreRegfileIO(p)) else None
 }
 
 class LoadROBIO(p: LoadPipelineParams) extends Bundle {
-    val robIdx = UInt(p.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(ZirconConfig.CommitParams().robEntries).W)
     val vaddr = UInt(32.W)
     val exception = UInt(4.W)
     val data = UInt(32.W)
 }
 
 class LoadSQQuery(p: LoadPipelineParams) extends DForwardQuery(DCacheParams(p.entries)) {
-    val sqTail = UInt(p.sqWidth.W)
+    val sqTail = UInt(log2Ceil(ZirconConfig.CommitParams().sqEntries * 2).W)
 }
 
-class LoadCommitIO(p: LoadPipelineParams, withStore: Boolean = false) extends Bundle {
+class LoadCompletionIO(p: LoadPipelineParams, withStore: Boolean = false) extends Bundle {
     val rob = Output(Valid(new LoadROBIO(p)))
-    val sq = new Bundle {
-        val query = Valid(new LoadSQQuery(p))
-        val result = Flipped(Valid(new DForwardResult(DCacheParams(p.entries))))
-        val addr = if (withStore) Some(Decoupled(new StoreAddressResult(p))) else None
-        val data = if (withStore) Some(Decoupled(new StoreDataResult(p))) else None
-    }
-    val sb = new Bundle {
-        val query = Valid(new DForwardQuery(DCacheParams(p.entries)))
-        val result = Flipped(Valid(new DForwardResult(DCacheParams(p.entries))))
-    }
+    val sqQuery = Valid(new LoadSQQuery(p))
+    val sqResult = Flipped(Valid(new DForwardResult(DCacheParams(p.entries))))
+    val sbQuery = Valid(new DForwardQuery(DCacheParams(p.entries)))
+    val sbResult = Flipped(Valid(new DForwardResult(DCacheParams(p.entries))))
+    val storeAddress = if (withStore) Some(Decoupled(new StoreAddressResult(p))) else None
+    val storeData = if (withStore) Some(Decoupled(new StoreDataResult(p))) else None
+}
+
+class LoadCommitIO(p: LoadPipelineParams, withStore: Boolean = false)
+    extends LoadCompletionIO(p, withStore) {
     val flush = Input(Bool())
+}
+
+class LoadForwardIO(p: LoadPipelineParams) extends Bundle {
+    val query = Flipped(Valid(new DForwardQuery(DCacheParams(p.entries))))
+    val result = Valid(new DForwardResult(DCacheParams(p.entries)))
+}
+
+class LoadStoreTranslationIO extends Bundle {
+    val request = Valid(new DStoreTranslationRequest)
+    val response = Input(new DStoreTranslationResponse)
+}
+
+class LoadDataResponse(p: LoadPipelineParams) extends Bundle {
+    val slot = UInt(p.slotWidth.W)
+    val data = UInt(32.W)
 }
 
 class LoadCacheIO(p: LoadPipelineParams, withStore: Boolean = false, tlbEnabled: Boolean = false) extends Bundle {
     val req = Decoupled(new DLoadRequest(DCacheParams(p.entries)))
     val fixedLatency = Input(Bool())
     val wbSelect = Flipped(Valid(new DLoadWBSelect(DCacheParams(p.entries))))
-    val rsp = Flipped(Valid(new DLoadResponse(DCacheParams(p.entries))))
-    val forward = new Bundle {
-        val query = Flipped(Valid(new DForwardQuery(DCacheParams(p.entries))))
-        val result = Valid(new DForwardResult(DCacheParams(p.entries)))
-    }
-    val storeTranslation = if (withStore && tlbEnabled) Some(new Bundle {
-        val request = Valid(new DStoreTranslationRequest)
-        val response = Input(new DStoreTranslationResponse)
-    }) else None
+    val rsp = Flipped(Valid(new LoadDataResponse(p)))
+    val forward = new LoadForwardIO(p)
+    val storeTranslation = if (withStore && tlbEnabled) Some(new LoadStoreTranslationIO) else None
 }
 
 class LoadWakeupIO(p: LoadPipelineParams) extends Bundle {
@@ -98,7 +110,9 @@ class LoadPipeline(
         cache.load(cacheLane).req <> io.cache.req
         io.cache.fixedLatency := cache.load(cacheLane).fixedLatency
         io.cache.wbSelect <> cache.load(cacheLane).wbSelect
-        io.cache.rsp <> cache.load(cacheLane).rsp
+        io.cache.rsp.valid := cache.load(cacheLane).rsp.valid
+        io.cache.rsp.bits.slot := cache.load(cacheLane).rsp.bits.slot
+        io.cache.rsp.bits.data := cache.load(cacheLane).rsp.bits.data
         io.cache.forward.query := cache.forward(cacheLane).query
         cache.forward(cacheLane).result := io.cache.forward.result
         if (withStore && tlbEnabled) {
@@ -108,7 +122,7 @@ class LoadPipeline(
         }
     }
 
-    val agu = Module(new BLevelPAdder32)
+    val agu = Module(new BLevelPAdder32(carryOut = false))
 
     /* Issue and RF stage */
     val instPkgRF = Reg(new BackendPackage(p.backend))
@@ -125,16 +139,22 @@ class LoadPipeline(
 
     val storeRF = instPkgRF.store
     val storeIS = io.iq.instPkg.bits.store
-    val addressFire = io.cache.req.fire || io.cmt.sq.addr.map(_.fire).getOrElse(false.B)
+    val acceptedUnit = Mux(
+        storeIS,
+        io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Store.U ||
+            io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Atomic.U,
+        io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Load.U,
+    )
+    val addressFire = io.cache.req.fire || io.cmt.storeAddress.map(_.fire).getOrElse(false.B)
 
     val free = VecInit((0 until p.entries).map(i =>
         !valid(i) || killed(pending(i)) || (io.cache.rsp.valid && io.cache.rsp.bits.slot === i.U)
     )).asUInt
     val indexIS = PriorityEncoder(free)
-    io.iq.instPkg.ready := !io.blockIssue && (storeIS || free.orR) && (!validRF || killed(instPkgRF) || addressFire) &&
-        !killed(io.iq.instPkg.bits)
+    io.iq.instPkg.ready := acceptedUnit && !io.blockIssue && (storeIS || free.orR) &&
+        (!validRF || killed(instPkgRF) || addressFire) && !killed(io.iq.instPkg.bits)
 
-    io.rf.rd.prj := instPkgRF.prj
+    io.rf.rd.prj := Mux(instPkgRF.prj(p.physWidth), 0.U, instPkgRF.prj(p.intWidth - 1, 0))
     io.rf.rd.hold := heldRF
     agu.io.src1 := io.rf.rd.prjData
     agu.io.src2 := instPkgRF.imm
@@ -229,7 +249,7 @@ class LoadPipeline(
         indexRF := indexIS
         heldRF := false.B
         when(!storeIS) {
-            for ((name, field) <- pending(indexIS).elements) { field := io.iq.instPkg.bits.elements(name) }
+            pending(indexIS) := io.iq.instPkg.bits
             valid(indexIS) := true.B
             sent(indexIS) := false.B
         }
@@ -254,7 +274,7 @@ class LoadPipeline(
 
     if (withStore) {
         /* STA uses the same RF/AGU stage as LD and terminates at the external SQ. */
-        val addr = io.cmt.sq.addr.get
+        val addr = io.cmt.storeAddress.get
         val atomicRF = instPkgRF.fu === ZirconConfig.DecodeUnit.Atomic.U
         val lrRF = atomicRF && instPkgRF.op === 2.U
         val misaligned = (instPkgRF.mtype === 1.U && agu.io.res(0)) ||
@@ -283,10 +303,15 @@ class LoadPipeline(
         addr.bits.vaddr := agu.io.res
         addr.bits.paddr := translatedPaddr
         addr.bits.size := instPkgRF.mtype(1, 0)
-        addr.bits.mask :=
-            (MuxLookup(instPkgRF.mtype, 0.U(4.W))(
-                Seq(0.U -> 1.U, 1.U -> 3.U, 2.U -> 15.U)
-            ) << agu.io.res(1, 0))(3, 0)
+        val baseMask = MuxLookup(instPkgRF.mtype, 0.U(4.W))(
+            Seq(0.U -> 1.U, 1.U -> 3.U, 2.U -> 15.U)
+        )
+        addr.bits.mask := MuxLookup(agu.io.res(1, 0), 0.U(4.W))(Seq(
+            0.U -> baseMask,
+            1.U -> Cat(baseMask(2, 0), 0.U(1.W)),
+            2.U -> Cat(baseMask(1, 0), 0.U(2.W)),
+            3.U -> Cat(baseMask(0), 0.U(3.W)),
+        ))
         addr.bits.exception := Mux(
             instPkgRF.exception.valid,
             instPkgRF.exception.cause(3, 0),
@@ -301,8 +326,10 @@ class LoadPipeline(
         val killedDataRF = io.cmt.flush
         val std = io.iq.std.get
         val rf = io.rf.std.get
-        val data = io.cmt.sq.data.get
-        std.ready := !io.blockIssue && (!validDataRF || killedDataRF || data.fire) && !io.cmt.flush
+        val data = io.cmt.storeData.get
+        val storeDataUnit = std.bits.fu === ZirconConfig.DecodeUnit.Store.U ||
+            std.bits.fu === ZirconConfig.DecodeUnit.Atomic.U
+        std.ready := storeDataUnit && !io.blockIssue && (!validDataRF || killedDataRF || data.fire) && !io.cmt.flush
         rf.intAddr := Mux(instDataRF.prs(0)(p.physWidth), 0.U, instDataRF.prs(0)(p.physWidth - 1, 0))
         rf.fpAddr := Mux(instDataRF.prs(0)(p.physWidth), instDataRF.prs(0)(p.physWidth - 1, 0), 0.U)
         rf.hold := heldDataRF
@@ -334,28 +361,28 @@ class LoadPipeline(
     val queryLive = valid(forwardIndex) && (sent(forwardIndex) || currentRequest) &&
         !killed(pending(forwardIndex))
     val forwardQuery = io.cache.forward.query.valid && queryLive
-    io.cmt.sq.query.valid := forwardQuery
-    io.cmt.sb.query.valid := forwardQuery
-    io.cmt.sb.query.bits := io.cache.forward.query.bits
-    for ((name, field) <- io.cache.forward.query.bits.elements) { io.cmt.sq.query.bits.elements(name) := field }
-    io.cmt.sq.query.bits.sqTail := pending(forwardIndex).sqTail
+    io.cmt.sqQuery.valid := forwardQuery
+    io.cmt.sbQuery.valid := forwardQuery
+    io.cmt.sbQuery.bits := io.cache.forward.query.bits
+    InheritFields(io.cmt.sqQuery.bits, io.cache.forward.query.bits)
+    io.cmt.sqQuery.bits.sqTail := pending(forwardIndex).sqTail
 
-    val resultIndex = io.cmt.sq.result.bits.slot
+    val resultIndex = io.cmt.sqResult.bits.slot
     val resultLive = valid(resultIndex) && sent(resultIndex) && !killed(pending(resultIndex))
-    val resultsAligned = io.cmt.sq.result.bits.slot === io.cmt.sb.result.bits.slot
-    io.cache.forward.result.valid := io.cmt.sq.result.valid && io.cmt.sb.result.valid &&
+    val resultsAligned = io.cmt.sqResult.bits.slot === io.cmt.sbResult.bits.slot
+    io.cache.forward.result.valid := io.cmt.sqResult.valid && io.cmt.sbResult.valid &&
         resultsAligned && resultLive && !io.cmt.flush
     io.cache.forward.result.bits.slot := resultIndex
-    io.cache.forward.result.bits.mask := io.cmt.sq.result.bits.mask | io.cmt.sb.result.bits.mask
-    io.cache.forward.result.bits.blocked := io.cmt.sq.result.bits.blocked || io.cmt.sb.result.bits.blocked
+    io.cache.forward.result.bits.mask := io.cmt.sqResult.bits.mask | io.cmt.sbResult.bits.mask
+    io.cache.forward.result.bits.blocked := io.cmt.sqResult.bits.blocked || io.cmt.sbResult.bits.blocked
     io.cache.forward.result.bits.data := VecInit((0 until 4).map(b =>
         Mux(
-            io.cmt.sq.result.bits.mask(b),
-            io.cmt.sq.result.bits.data(8 * b + 7, 8 * b),
-            io.cmt.sb.result.bits.data(8 * b + 7, 8 * b)
+            io.cmt.sqResult.bits.mask(b),
+            io.cmt.sqResult.bits.data(8 * b + 7, 8 * b),
+            io.cmt.sbResult.bits.data(8 * b + 7, 8 * b)
         )
     )).asUInt
-    when(io.cmt.sq.result.valid && io.cmt.sb.result.valid && !io.cmt.flush) {
+    when(io.cmt.sqResult.valid && io.cmt.sbResult.valid && !io.cmt.flush) {
         assert(resultsAligned, "SQ and SB forwarding responses must identify the same load")
     }
 
@@ -377,11 +404,6 @@ class LoadPipeline(
         false.B,
         io.cache.wbSelect.valid
     )
-    val bypassValidWB = RegInit(false.B)
-    val bypassPrdWB = Reg(UInt(p.backend.tagWidth.W))
-    bypassValidWB := io.cache.wbSelect.valid && contextValidD2WB && contextD2WB.rdVld &&
-        io.cache.wbSelect.bits.exception === 0.U && !io.cache.wbSelect.bits.retry
-    bypassPrdWB := contextD2WB.prd
     val validWB = io.cache.rsp.valid && contextValidWB && !killed(instPkgWB)
 
     io.rf.wr.valid := validWB && writeResultWB
@@ -401,13 +423,10 @@ class LoadPipeline(
     // dependent consumers through the same token instead of extending this timing path.
     io.bypass.nextWb.valid := expectedValid(1) && !io.cmt.flush
     io.bypass.nextWb.bits := expectedPrd(1)
-    io.bypass.result.valid := bypassValidWB
-    io.bypass.result.bits.prd := bypassPrdWB
-    io.bypass.result.bits.data := io.cache.rsp.bits.data
+    io.bypass.result := io.cache.rsp.bits.data
 
     when(io.cache.rsp.valid && !killed(instPkgWB)) {
-        assert(io.cache.rsp.bits.slot === indexWB && io.cache.rsp.bits.exception === exceptionWB &&
-            io.cache.rsp.bits.retry === retryWB && validWB, "Cache response must match the selected WB context")
+        assert(io.cache.rsp.bits.slot === indexWB && validWB, "Cache response must match the selected WB context")
     }
     when(io.cache.wbSelect.valid) {
         assert(indexD2WB < p.entries.U && contextValidD2WB, "DCache WB select must name a live accepted load")

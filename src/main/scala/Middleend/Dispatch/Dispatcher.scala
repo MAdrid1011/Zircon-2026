@@ -11,12 +11,7 @@ class DispatcherIO(p: BackendParams, issue: IssueParams) extends Bundle {
     val flush = Input(Bool())
 
     val accepted = Output(UInt(issue.dispatchWidth.W))
-    val arith0 = Output(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val arith1 = Output(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val mixArith = Output(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val load = Output(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val loadStoreAddress = Output(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val storeData = Output(new IssueEnqueueGroup(p, issue.dispatchWidth))
+    val enqueue = Output(Vec(IssueQueueIndex.Count, new IssueEnqueueGroup(p, issue.dispatchWidth)))
 }
 
 /**
@@ -38,6 +33,7 @@ class Dispatcher(
     val preferArith = RegInit(false.B)
     val preferLoadStore = RegInit(false.B)
 
+    /* Classify every lane once; later planning operates only on these route classes. */
     val alu = VecInit(io.in.entries.map(_.fu === DecodeUnit.ALU.U))
     val branch = VecInit(io.in.entries.map(_.fu === DecodeUnit.Branch.U))
     val multiply = VecInit(io.in.entries.map(_.fu === DecodeUnit.Multiply.U))
@@ -67,6 +63,7 @@ class Dispatcher(
     private def arithQueue(index: UInt): UInt =
         Mux(index(0), queue(IssueQueueIndex.Arith1), queue(IssueQueueIndex.Arith0))
 
+    /* Prefer the less occupied interchangeable queue, alternating when occupancy ties. */
     val arithFree = VecInit(Seq(
         io.freeCount(IssueQueueIndex.Arith0),
         io.freeCount(IssueQueueIndex.Arith1),
@@ -77,7 +74,12 @@ class Dispatcher(
         0.U(1.W),
     )
     val arithOrder = VecInit(Seq(firstArith, ~firstArith))
+    val loadFree = io.freeCount(IssueQueueIndex.Load)
+    val loadStoreAddressFree = io.freeCount(IssueQueueIndex.LoadStoreAddress)
+    val firstLoadToAddress = loadStoreAddressFree > loadFree ||
+        (loadStoreAddressFree === loadFree && preferLoadStore)
 
+    /* Enumerate legal routes for every ordered prefix before making any enqueue decision. */
     val prefixPlans: Seq[(Bool, Seq[UInt])] = if (width == 2) {
         val choiceValid = Wire(Vec(width, Vec(2, Bool())))
         val choiceRoute = Wire(Vec(width, Vec(2, UInt(queueCount.W))))
@@ -158,15 +160,17 @@ class Dispatcher(
     } else {
         (1 to width).map { count =>
             val inputValid = io.in.valid(count - 1, 0).andR && recognized.take(count).reduce(_ && _)
-            val plans = for (arithOffset <- 0 until 2; loadOffset <- 0 until 2) yield {
+            val plans = for (arithAlternative <- 0 until 2; loadAlternative <- 0 until 2) yield {
+                val arithOffset = firstArith ^ arithAlternative.B
+                val loadOffset = firstLoadToAddress ^ loadAlternative.B
                 val routes = (0 until width).map { lane =>
                     if (lane >= count) {
                         0.U(queueCount.W)
                     } else {
                         val arithRank = if (lane == 0) 0.U else PopCount(shortArith.take(lane))
                         val loadRank = if (lane == 0) 0.U else PopCount(load.take(lane))
-                        val arithIndex = (arithRank + arithOffset.U)(0)
-                        val loadToAddress = (loadRank + loadOffset.U)(0)
+                        val arithIndex = (arithRank + arithOffset)(0)
+                        val loadToAddress = (loadRank + loadOffset)(0)
                         MuxCase(0.U(queueCount.W), Seq(
                             noIssue(lane) -> 0.U(queueCount.W),
                             shortArith(lane) -> arithQueue(arithIndex),
@@ -196,6 +200,7 @@ class Dispatcher(
         }
     }
 
+    /* Select the longest prefix permitted by both Commit resources and IQ capacity. */
     val eligiblePrefix = VecInit((1 to width).map { count =>
         !io.flush && io.resourcePrefix(count - 1) && prefixPlans(count - 1)._1
     }).asUInt
@@ -211,15 +216,8 @@ class Dispatcher(
         selectedRoute(lane) := Mux1H(selectedPrefix, prefixPlans.map(_._2(lane)))
     }
 
-    val outputs = Seq(
-        io.arith0,
-        io.arith1,
-        io.mixArith,
-        io.load,
-        io.loadStoreAddress,
-        io.storeData,
-    )
-    for ((output, index) <- outputs.zipWithIndex) {
+    /* Compact each queue's selected lanes while preserving their program order. */
+    for ((output, index) <- io.enqueue.zipWithIndex) {
         val hits = VecInit((0 until width).map(lane => io.accepted(lane) && selectedRoute(lane)(index)))
         val inputEntries = if (
             index == IssueQueueIndex.Load || index == IssueQueueIndex.LoadStoreAddress ||
@@ -243,6 +241,7 @@ class Dispatcher(
         }
     }
 
+    /* Rotate equal-cost choices only after a matching instruction is actually accepted. */
     when(io.flush) {
         preferArith := false.B
         preferLoadStore := false.B
@@ -255,11 +254,12 @@ class Dispatcher(
         }
     }
 
+    /* These invariants define the ordered, all-or-nothing dispatch contract. */
     FIFOUtil.assertPrefix(io.in.valid.asBools, "Dispatcher input valid must be a prefix")
     FIFOUtil.assertPrefix(io.resourcePrefix.asBools, "Dispatcher resource permission must be a prefix")
     FIFOUtil.assertPrefix(io.accepted.asBools, "Dispatcher acceptance must be a prefix")
-    outputs.foreach(output => FIFOUtil.assertPrefix(output.valid.asBools, "Issue queue enqueue must be a prefix"))
-    for ((output, index) <- outputs.zipWithIndex) {
+    io.enqueue.foreach(output => FIFOUtil.assertPrefix(output.valid.asBools, "Issue queue enqueue must be a prefix"))
+    for ((output, index) <- io.enqueue.zipWithIndex) {
         assert(PopCount(output.valid) <= io.freeCount(index), "Dispatcher must not overbook an issue queue")
     }
 }

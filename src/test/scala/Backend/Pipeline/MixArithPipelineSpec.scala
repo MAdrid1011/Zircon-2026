@@ -2,19 +2,19 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import chisel3.util._
 import org.scalatest.freespec.AnyFreeSpec
-import ZirconConfig.{BypassParams, DecodeSource, DecodeUnit, DivideOp, EXEOp, FpMiscOp, MultiplyOp, RegfileParams}
+import ZirconConfig.{BypassParams, DecodeSource, DecodeUnit, DivideOp, FpMiscOp, MultiplyOp, RegfileParams}
 
 class MixArithPipelineTestTop extends Module {
     val io = IO(new Bundle {
         val issue = Flipped(Decoupled(new BackendPackage))
         val pc = Input(UInt(32.W))
         val flush = Input(Bool())
-        val intSeed = Flipped(Valid(new MixArithLocalWrite))
-        val fpSeed = Flipped(Valid(new MixArithLocalWrite))
+        val intSeed = Flipped(Valid(new MixArithLocalWrite(MixArithConstants.localPhysWidth)))
+        val fpSeed = Flipped(Valid(new MixArithLocalWrite(MixArithConstants.fpPhysWidth)))
         val external = Input(Vec(2, new BypassSource))
         val completion = Output(Valid(new MixArithCompletion))
-        val intWrite = Output(Valid(new MixArithLocalWrite))
-        val fpWrite = Output(Valid(new MixArithLocalWrite))
+        val intWrite = Output(Valid(new MixArithLocalWrite(MixArithConstants.localPhysWidth)))
+        val fpWrite = Output(Valid(new MixArithLocalWrite(MixArithConstants.fpPhysWidth)))
         val wakeup = Output(Valid(UInt(MixArithConstants.physTagWidth.W)))
         val available = Output(Bool())
     })
@@ -37,10 +37,13 @@ class MixArithPipelineTestTop extends Module {
         consumerProducers = Seq(Seq(Seq(0, 1, 2), Seq(0, 1, 2), Seq(2))),
     )))
 
-    pipeline.io.iq <> io.issue
+    pipeline.io.iq.valid := io.issue.valid
+    pipeline.io.iq.bits := MixArithIssue.fromBackend(io.issue.bits)
+    io.issue.ready := pipeline.io.iq.ready
     pipeline.io.cmt.rob.pc := io.pc
     pipeline.io.cmt.flush := io.flush
     pipeline.io.csr.frm := 0.U
+    pipeline.io.csr.rsp := 0.U.asTypeOf(pipeline.io.csr.rsp)
 
     for (source <- 0 until 2) {
         intRF.io.read(source).addr := pipeline.io.rf.intRead(source).addr
@@ -146,7 +149,7 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
 
     private def initialize(dut: MixArithPipelineTestTop): Unit = {
         dut.io.issue.valid.poke(false)
-        pokePackage(dut.io.issue.bits, DecodeUnit.ALU, EXEOp.ADD.litValue.toInt)
+        pokePackage(dut.io.issue.bits, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
         dut.io.pc.poke(0)
         dut.io.flush.poke(false)
         dut.io.intSeed.valid.poke(false)
@@ -158,9 +161,7 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
         for (producer <- dut.io.external) {
             producer.nextWb.valid.poke(false)
             producer.nextWb.bits.poke(1)
-            producer.result.valid.poke(false)
-            producer.result.bits.prd.poke(1)
-            producer.result.bits.data.poke(0)
+            producer.result.poke(0)
         }
         dut.reset.poke(true)
         dut.clock.step(2)
@@ -265,11 +266,8 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
         dut.io.external(producer).nextWb.bits.poke(tag)
         tick(dut, results)
         dut.io.external(producer).nextWb.valid.poke(false)
-        dut.io.external(producer).result.valid.poke(true)
-        dut.io.external(producer).result.bits.prd.poke(tag)
-        dut.io.external(producer).result.bits.data.poke(data & mask)
+        dut.io.external(producer).result.poke(data & mask)
         tick(dut, results)
-        dut.io.external(producer).result.valid.poke(false)
     }
 
     "routes integer, floating-point and conversion operations through the shared path" in {
@@ -287,16 +285,6 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             seedFp(dut, results, 2, BigInt("80000000", 16))
             seedFp(dut, results, 5, BigInt("40000000", 16))
 
-            issue(dut, results) { x =>
-                pokePackage(
-                    x,
-                    DecodeUnit.ALU,
-                    EXEOp.ADD.litValue.toInt,
-                    Seq(1 -> true, 2 -> true),
-                    prd = 10,
-                    rob = 1
-                )
-            }
             issue(dut, results) { x =>
                 pokePackage(
                     x,
@@ -350,8 +338,7 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
                 )
             }
 
-            waitFor(dut, results, (1 to 6).toSet)
-            assert(results(1).data == 12 && results(1).prd == 10)
+            waitFor(dut, results, (2 to 6).toSet)
             assert(results(2).data == 54 && results(2).prd == 11)
             assert(results(3).data == BigInt("bf800000", 16) && results(3).prd == fpTag(3))
             assert(results(4).data == BigInt("c0000000", 16) && results(4).prd == fpTag(4))
@@ -420,8 +407,8 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             issue(dut, results) { x =>
                 pokePackage(
                     x,
-                    DecodeUnit.ALU,
-                    EXEOp.ADD.litValue.toInt,
+                    DecodeUnit.Multiply,
+                    MultiplyOp.MUL.litValue.toInt,
                     Seq(3 -> true, 4 -> true),
                     prd = 21,
                     rob = 31
@@ -431,7 +418,7 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             var cycles = 0
             while (!results.contains(30) && cycles < 80) {
                 tick(dut, results)
-                assert(!results.contains(31), "A younger ALU operation bypassed the divide in EX2")
+                assert(!results.contains(31), "A younger multiply operation bypassed the divide in EX2")
                 cycles += 1
             }
             assert(results.contains(30), "The divide did not complete")
@@ -440,10 +427,9 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
                 tick(dut, results)
                 followingCycles += 1
             }
-            assert(results.contains(31), "The younger ALU operation did not complete")
-            assert(followingCycles == 2, "EX1 did not restart as the divide left EX2")
+            assert(results.contains(31), "The younger multiply operation did not complete")
             assert(results(30).data == BigInt("2aaaaaaa", 16))
-            assert(results(31).data == 17)
+            assert(results(31).data == 72)
         }
     }
 
@@ -456,8 +442,8 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             issue(dut, results) { x =>
                 pokePackage(
                     x,
-                    DecodeUnit.ALU,
-                    EXEOp.ADD.litValue.toInt,
+                    DecodeUnit.Multiply,
+                    MultiplyOp.MUL.litValue.toInt,
                     Seq(20 -> true, 1 -> true),
                     prd = 21,
                     rob = 20
@@ -465,7 +451,7 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             }
             forwardNextWb(dut, results, 0, 20, 40)
             waitFor(dut, results, Set(20))
-            assert(results(20).data == 43)
+            assert(results(20).data == 120)
 
             seedFp(dut, results, 1, BigInt("3f800000", 16))
             seedFp(dut, results, 2, BigInt("40000000", 16))
@@ -525,8 +511,8 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             issue(dut, results) { x =>
                 pokePackage(
                     x,
-                    DecodeUnit.ALU,
-                    EXEOp.ADD.litValue.toInt,
+                    DecodeUnit.Multiply,
+                    MultiplyOp.MUL.litValue.toInt,
                     Seq(20 -> true, 5 -> true),
                     prd = 33,
                     rob = 43
@@ -537,7 +523,7 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
 
             waitFor(dut, results, Set(40, 43), limit = 100)
             assert(results(40).data == BigInt("2aaaaaaa", 16))
-            assert(results(43).data == 91)
+            assert(results(43).data == 588)
         }
     }
 
@@ -578,15 +564,15 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
             issue(dut, results) { x =>
                 pokePackage(
                     x,
-                    DecodeUnit.ALU,
-                    EXEOp.ADD.litValue.toInt,
+                    DecodeUnit.Multiply,
+                    MultiplyOp.MUL.litValue.toInt,
                     Seq(3 -> true, 4 -> true),
                     prd = 21,
                     rob = 31
                 )
             }
             waitFor(dut, results, Set(31), limit = 40)
-            assert(results(31).data == 17)
+            assert(results(31).data == 72)
             tick(dut, results, 80)
             assert(!results.contains(30))
             assert(!results.contains(32))

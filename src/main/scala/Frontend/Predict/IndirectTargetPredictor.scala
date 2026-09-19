@@ -7,24 +7,30 @@ class IndirectTargetRow(p: FrontendParams) extends Bundle {
     val slot = UInt(p.slotBits.W)
     val target = UInt(30.W)
     val confidence = UInt(2.W)
-    val useful = Bool()
+}
+
+class IndirectTargetQueryIO(p: FrontendParams) extends Bundle {
+    val pcWord = Input(UInt(30.W))
+    val folds = Input(Vec(p.tageCount, UInt(p.hashBits.W)))
+    val fire = Input(Bool())
+    val invalidate = Input(Bool())
+}
+
+class IndirectTargetPredictorIO(p: FrontendParams) extends Bundle {
+    val query = new IndirectTargetQueryIO(p)
+    val meta = Output(new FrontendIndirectMeta(p))
+    val train = Flipped(Valid(new FrontendTraining(p)))
 }
 
 /** Compact ITTAGE-like target predictor. The Main BTB supplies the base target. */
 class IndirectTargetPredictor(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val query = new Bundle {
-            val pc = Input(UInt(32.W))
-            val folds = Input(Vec(p.tageCount, UInt(p.hashBits.W)))
-            val fire = Input(Bool())
-            val invalidate = Input(Bool())
-        }
-        val meta = Output(new FrontendIndirectMeta(p))
-        val train = Flipped(Valid(new FrontendTraining(p)))
-    })
+    val io = IO(new IndirectTargetPredictorIO(p))
 
-    val tables = Seq.fill(p.ittageCount)(Mem(p.ittageSets, new IndirectTargetRow(p)))
+    val tables = Seq.fill(p.ittageCount)(
+        Module(new AsyncRegRam(new IndirectTargetRow(p), p.ittageSets, 1, 2))
+    )
     val valid = Seq.fill(p.ittageCount)(RegInit(VecInit.fill(p.ittageSets)(false.B)))
+    val useful = Seq.fill(p.ittageCount)(RegInit(VecInit.fill(p.ittageSets)(false.B)))
 
     val aheadRows = Reg(Vec(p.ittageCount, new IndirectTargetRow(p)))
     val aheadValid = Reg(Vec(p.ittageCount, Bool()))
@@ -35,7 +41,7 @@ class IndirectTargetPredictor(p: FrontendParams) extends Module {
         candidates(i) && !candidates.drop(i + 1).foldLeft(false.B)(_ || _)
     }
 
-    val pcWord = io.query.pc(31, 2)
+    val pcWord = io.query.pcWord
     val indices = VecInit(p.ittageHistoryIndices.zipWithIndex.map { case (history, table) =>
         FrontendMath.fold(pcWord ^ io.query.folds(history) ^ (table + 1).U, p.ittageIndexBits)
     })
@@ -74,10 +80,13 @@ class IndirectTargetPredictor(p: FrontendParams) extends Module {
     }
     io.meta.alternateValid := alternateValid.asUInt
 
+    for (table <- 0 until p.ittageCount) {
+        tables(table).io.raddr(0) := indices(table)
+    }
     when(io.query.fire) {
         ahead := true.B
         for (table <- 0 until p.ittageCount) {
-            aheadRows(table) := tables(table).read(indices(table))
+            aheadRows(table) := tables(table).io.rdata(0)
             aheadValid(table) := valid(table)(indices(table))
             aheadIndices(table) := indices(table)
         }
@@ -94,9 +103,10 @@ class IndirectTargetPredictor(p: FrontendParams) extends Module {
         assert(PopCount(trainSlots) <= 1.U, "At most one ordinary indirect jump can train ITTAGE per block")
     }
 
-    val trainRows = (0 until p.ittageCount).map(table =>
-        tables(table).read(train.meta.ittage.indices(table))
-    )
+    val trainRows = (0 until p.ittageCount).map { table =>
+        tables(table).io.raddr(1) := train.meta.ittage.indices(table)
+        tables(table).io.rdata(1)
+    }
     val trainMatches = VecInit((0 until p.ittageCount).map { table =>
         valid(table)(train.meta.ittage.indices(table)) &&
             trainRows(table).tag === train.meta.ittage.tags(table) && trainRows(table).slot === trainSlot
@@ -115,13 +125,16 @@ class IndirectTargetPredictor(p: FrontendParams) extends Module {
     val mispredicted = predictedTarget =/= actualTarget
     val needAllocation = mispredicted && !providerCorrect
     val allocatable = VecInit((0 until p.ittageCount).map { table =>
-        (table + 1).U > provider && (!valid(table)(train.meta.ittage.indices(table)) || !trainRows(table).useful)
+        (table + 1).U > provider && (
+            !valid(table)(train.meta.ittage.indices(table)) || !useful(table)(train.meta.ittage.indices(table))
+        )
     })
     val allocate = PriorityEncoderOH(allocatable)
 
     for (table <- 0 until p.ittageCount) {
         val old = trainRows(table)
         val next = WireDefault(old)
+        val nextUseful = WireDefault(useful(table)(train.meta.ittage.indices(table)))
         val isProvider = providerMatches(table)
         val doAllocate = needAllocation && allocate(table)
         val ageUseful = needAllocation && !allocatable.asUInt.orR && (table + 1).U > provider
@@ -134,20 +147,26 @@ class IndirectTargetPredictor(p: FrontendParams) extends Module {
                 next.target := actualTarget(31, 2)
             }
             when(providerTarget =/= alternateTarget) {
-                next.useful := providerTarget === actualTarget
+                nextUseful := providerTarget === actualTarget
             }
         }
-        when(ageUseful) { next.useful := false.B }
+        when(ageUseful) { nextUseful := false.B }
         when(doAllocate) {
             next.tag := train.meta.ittage.tags(table)
             next.slot := trainSlot
             next.target := actualTarget(31, 2)
             next.confidence := 0.U
-            next.useful := false.B
+            nextUseful := false.B
         }
-        when(trainValid && (isProvider || ageUseful || doAllocate)) {
-            tables(table).write(train.meta.ittage.indices(table), next)
-            when(doAllocate) { valid(table)(train.meta.ittage.indices(table)) := true.B }
+        val write = trainValid && (isProvider || ageUseful || doAllocate)
+        tables(table).io.wen(0) := write
+        tables(table).io.waddr(0) := train.meta.ittage.indices(table)
+        tables(table).io.wdata(0) := next
+        when(write) {
+            useful(table)(train.meta.ittage.indices(table)) := nextUseful
+            when(doAllocate) {
+                valid(table)(train.meta.ittage.indices(table)) := true.B
+            }
         }
     }
 }

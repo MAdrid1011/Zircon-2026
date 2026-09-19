@@ -18,17 +18,22 @@ class MainBTBComparison(p: FrontendParams) extends Module {
     })
     val dut = Module(new MainBTB(p))
     val reference = Module(new BlockBTB(p, p.btbSets, p.btbWays))
-    dut.io.query <> io.query
-    reference.io.pc := io.query.bits
+    dut.io.query.valid := io.query.valid
+    dut.io.query.bits := io.query.bits(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
+    reference.io.index := io.query.bits(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
     val train = WireDefault(0.U.asTypeOf(new FrontendTraining(p)))
-    train.pc := io.train.bits.pc
+    train.pcWord := io.train.bits.pc(31, 2)
     train.mask := io.train.bits.mask
     train.kinds := io.train.bits.kinds
     train.targets := io.train.bits.targets
     dut.io.train.valid := io.train.valid
     reference.io.train.valid := io.train.valid
-    dut.io.train.bits := train
-    reference.io.train.bits := train
+    for (btbTrain <- Seq(dut.io.train, reference.io.train)) {
+        btbTrain.bits.pcBlock := train.pcWord(29, p.blockBits - 2)
+        btbTrain.bits.mask := train.mask
+        btbTrain.bits.kinds := train.kinds
+        btbTrain.bits.targetWords := VecInit(train.targets.map(_(31, 2)))
+    }
     val expected = Reg(new FrontendBtbRaw(p, p.btbSets, p.btbWays))
     when(io.query.valid) {
         expected := reference.io.raw
@@ -43,8 +48,7 @@ class MainBTBComparison(p: FrontendParams) extends Module {
         result.valid === old.valid && (!old.valid.orR || dut.io.raw.tags(w) === expected.tags(w)) &&
         (0 until p.fetchWidth).map(i =>
             !old.valid(i) || (
-                result.kinds(i) === old.kinds(i) && result.targets(i) === old.targets(i) &&
-                    result.backward(i) === old.backward(i)
+                result.kinds(i) === old.kinds(i) && result.targets(i) === old.targets(i)
             )
         ).reduce(_ && _)
     }.reduce(_ && _)

@@ -5,8 +5,8 @@ import chisel3.util.log2Ceil
 case class LoadPipelineParams(
     numIntPhys: Int = 72,
     numFpPhys: Int = 48,
-    robWidth: Int = 8,
-    sqWidth: Int = 8,
+    robWidth: Int = 6,
+    sqWidth: Int = 5,
     entries: Int = 4,
 ) {
     require(numIntPhys >= 2 && numFpPhys >= 2)

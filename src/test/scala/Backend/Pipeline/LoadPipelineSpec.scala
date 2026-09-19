@@ -58,6 +58,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
     val otherReplay = mutable.Queue.empty[(Int, Long, Int)]
     private var heldRequest: Option[Seq[BigInt]] = None
     private var heldLower: Option[Seq[BigInt]] = None
+    private var pendingForward: Option[(Int, Load)] = None
     private var serial = 0
     val hitLatencies = mutable.ArrayBuffer.empty[Int]
     val requestCycles = mutable.ArrayBuffer.empty[Int]
@@ -77,14 +78,14 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
         authorized: Boolean = false
     ): Load = {
         val x = Load(
-            serial & 255,
+            serial & ((1 << dut.p.robWidth) - 1),
             base,
             imm,
             prj,
             prd,
             mtype,
             rdVld,
-            (serial * 37) & 255,
+            (serial * 37) & ((1 << dut.p.sqWidth) - 1),
             exception,
             uncache,
             authorized,
@@ -118,6 +119,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
     def pokeLoad(x: Load): Unit = {
         val b = dut.io.iq.instPkg.bits
         BackendPackageTestUtils.clear(b)
+        b.fu.poke(ZirconConfig.DecodeUnit.Load)
         b.store.poke(false)
         b.sqIdx.poke(0)
         b.prj.poke(x.prj)
@@ -187,8 +189,8 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             BackendPackageTestUtils.clear(s.bits)
             s.bits.prs(0).poke(0); s.bits.sqIdx.poke(0); s.bits.robIdx.poke(0); s.bits.size.poke(0)
         }
-        dut.io.cmt.sq.addr.foreach(_.ready.poke(true))
-        dut.io.cmt.sq.data.foreach(_.ready.poke(true))
+        dut.io.cmt.storeAddress.foreach(_.ready.poke(true))
+        dut.io.cmt.storeData.foreach(_.ready.poke(true))
         beforeCycle(input, cancel)
 
         cancel.foreach { _ =>
@@ -200,28 +202,43 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             otherPending.clear()
             otherReplay.clear()
             heldRequest = None
+            pendingForward = None
             count("cancel")
         }
 
-        val q = dut.io.cmt.sq.query
-        val query = if (q.valid.peek().litToBoolean) {
-            val id = q.bits.slot.peek().litValue.toInt
-            val x = requests(id)
-            q.bits.paddr.expect(x.address)
-            q.bits.sqTail.expect(x.sq)
-            dut.io.cmt.sb.query.valid.expect(true)
-            Some(x)
-        } else None
+        val q = dut.io.cmt.sqQuery
+        val priorForward = pendingForward
+        val forwardReady = priorForward.exists { case (_, x) =>
+            cycles >= math.max(x.sqForward.available, x.sbForward.available)
+        }
         for (
             (f, port) <- Seq(
-                query.map(_.sqForward).getOrElse(Forward()) -> dut.io.cmt.sq.result,
-                query.map(_.sbForward).getOrElse(Forward()) -> dut.io.cmt.sb.result
+                priorForward.map(_._2.sqForward).getOrElse(Forward()) -> dut.io.cmt.sqResult,
+                priorForward.map(_._2.sbForward).getOrElse(Forward()) -> dut.io.cmt.sbResult
             )
         ) {
-            port.valid.poke(cycles >= f.available)
+            port.valid.poke(forwardReady)
+            port.bits.slot.poke(priorForward.map(_._1).getOrElse(0))
             port.bits.data.poke(f.data)
             port.bits.mask.poke(f.mask)
             port.bits.blocked.poke(f.blocked)
+        }
+        val query = if (q.valid.peek().litToBoolean) {
+            val id = q.bits.slot.peek().litValue.toInt
+            // A request accepted directly into an empty DCache lookup can start
+            // forwarding in the same cycle that the scoreboard records it.
+            val x = requests.getOrElse(id, accepted.front)
+            q.bits.wordAddress.expect(x.address >> 2)
+            q.bits.sqTail.expect(x.sq & ((1 << q.bits.sqTail.getWidth) - 1))
+            dut.io.cmt.sbQuery.valid.expect(true)
+            Some(x)
+        } else None
+        pendingForward = query match {
+            case Some(x) =>
+                assert(priorForward.isEmpty || forwardReady, s"Overlapping forwarding queries at $cycles")
+                Some(q.bits.slot.peek().litValue.toInt -> x)
+            case None if forwardReady => None
+            case None => priorForward
         }
         if (query.nonEmpty) {
             count("forward_query")
@@ -248,15 +265,12 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
 
         val wbValid = dut.io.wb.valid.peek().litToBoolean
         dut.io.wk.wakeWB.valid.expect(wbValid)
-        val bypassValid = dut.io.bypass.result.valid.peek().litToBoolean
-        if (wbValid) dut.io.bypass.result.valid.expect(true)
-        if (bypassValid && cancel.isEmpty) {
-            val prd = dut.io.bypass.result.bits.prd.peek().litValue.toInt
+        if (wbValid && cancel.isEmpty) {
+            val prd = dut.io.wb.bits.prd.peek().litValue.toInt
             val a = active.values.find(_.load.prd == prd).get
             assert(a.load.rdVld && a.load.fault == 0 && !a.load.retry)
-            dut.io.bypass.result.bits.data.expect(value(a.load))
+            dut.io.bypass.result.expect(value(a.load))
         }
-        if (bypassValid && cancel.nonEmpty) count("registered_bypass_during_flush")
         if (cancel.nonEmpty) {
             dut.io.wb.valid.expect(false)
             dut.io.wk.wakeWB.valid.expect(false)
@@ -270,7 +284,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             assert(a.load.rdVld && a.load.fault == 0 && !a.load.retry)
             dut.io.wb.bits.data.expect(value(a.load), s"Result mismatch for ${a.load} at $cycles")
             dut.io.wk.wakeWB.bits.expect(prd)
-            dut.io.bypass.result.bits.data.expect(value(a.load))
+            dut.io.bypass.result.expect(value(a.load))
             if ((prd & (1 << dut.p.physWidth)) != 0) {
                 fpValues(prd & ((1 << dut.p.physWidth) - 1)) = value(a.load); count("fp_write")
             } else { intValues(prd) = value(a.load); count("int_write") }
@@ -345,7 +359,10 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             val write = r.write.peek().litToBoolean
             val dirtyVictim = r.victimValid.peek().litToBoolean && r.victimDirty.peek().litToBoolean
             if (dirtyVictim) {
-                putLine(r.victimPaddr.peek().litValue.toLong, r.victimData.peek().litValue)
+                putLine(
+                    r.victimLine.peek().litValue.toLong << ZirconConfig.Cache.l1Offset,
+                    r.victimData.peek().litValue
+                )
                 storeWrites += 1
             }
             val data = if (write) r.data.peek().litValue
@@ -503,15 +520,17 @@ class LoadPipelineSpec extends AnyFreeSpec with ChiselSim {
                         if (pending.isEmpty) {
                             val t = Seq(0, 1, 2, 4, 5)(rng.nextInt(5))
                             val off = rng.nextInt(4096) & ~((1 << (t & 3)) - 1)
-                            val dest = 16 + (i % 40)
+                            val fpDestination = i % 3 == 0
+                            val dest = 16 + i %
+                                (if (fpDestination) dut.p.numFpPhys - 16 else dut.p.numIntPhys - 16)
                             val x = load(
                                 0x1000,
                                 imm = off,
-                                prd = if (i % 3 == 0) fp(dest) else dest,
-                                mtype = if (i % 3 == 0) 2 else t
+                                prd = if (fpDestination) fp(dest) else dest,
+                                mtype = if (fpDestination) 2 else t
                             )
                             if (!active.values.exists(_.load.prd == x.prd))
-                                pending = Some(if (i % 3 == 0) x.copy(imm = off & ~3L) else x)
+                                pending = Some(if (fpDestination) x.copy(imm = off & ~3L) else x)
                         }
                         if (other.isEmpty && otherReplay.isEmpty) {
                             val slot = otherId & 3
@@ -546,7 +565,6 @@ class LoadPipelineSpec extends AnyFreeSpec with ChiselSim {
                             "authorized_io_survives",
                             "cancel_stage",
                             "cancel_miss",
-                            "registered_bypass_during_flush",
                             "dual_cache_accept",
                             "rf_stall",
                             "lower_stall"

@@ -2,23 +2,23 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig._
 
-class ReadyBoardQuery(p: BackendParams) extends Bundle {
-    val prs = Vec(3, UInt(p.tagWidth.W))
-    val valid = Vec(3, Bool())
+class ReadyBoardQuery(p: BackendParams, numSources: Int) extends Bundle {
+    val prs = Vec(numSources, UInt(p.tagWidth.W))
+    val valid = Vec(numSources, Bool())
 }
 
-class ReadyBoardState(p: BackendParams) extends Bundle {
-    val ready = Vec(3, Bool())
-    val specMask = Vec(3, UInt(p.specWidth.W))
+class ReadyBoardState(p: BackendParams, numSources: Int) extends Bundle {
+    val ready = Vec(numSources, Bool())
+    val specMask = Vec(numSources, UInt(p.specWidth.W))
 }
 
-class ReadyBoardIO(p: BackendParams, width: Int, wakeupPorts: Int) extends Bundle {
-    val query = Input(Vec(width, new ReadyBoardQuery(p)))
+class ReadyBoardIO(p: BackendParams, width: Int, wakeupPorts: Int, numSources: Int) extends Bundle {
+    val query = Input(Vec(width, new ReadyBoardQuery(p, numSources)))
     val allocate = Input(Vec(width, Valid(UInt(p.tagWidth.W))))
     val wakeup = Input(Vec(wakeupPorts, new BackendWakeup(p)))
     val speculation = Input(new SpeculationResolution(p))
     val flush = Input(Bool())
-    val state = Output(Vec(width, new ReadyBoardState(p)))
+    val state = Output(Vec(width, new ReadyBoardState(p, numSources)))
 }
 
 /** Readiness of integer and floating-point physical registers.
@@ -30,10 +30,11 @@ class ReadyBoard(
     val p: BackendParams = BackendParams(),
     val width: Int = 2,
     val wakeupPorts: Int = 7,
+    val numSources: Int = 3,
 ) extends Module {
-    require(width > 0 && wakeupPorts > 0)
+    require(width > 0 && wakeupPorts > 0 && numSources > 0)
 
-    val io = IO(new ReadyBoardIO(p, width, wakeupPorts))
+    val io = IO(new ReadyBoardIO(p, width, wakeupPorts, numSources))
     private val intReady = RegInit(VecInit(Seq.fill(p.numIntPhys)(true.B)))
     private val fpReady = RegInit(VecInit(Seq.fill(p.numFpPhys)(true.B)))
     private val intSpec = RegInit(VecInit(Seq.fill(p.numIntPhys)(0.U(p.specWidth.W))))
@@ -77,7 +78,7 @@ class ReadyBoard(
     updateDomain(intReady, intSpec, isFp = false)
     updateDomain(fpReady, fpSpec, isFp = true)
 
-    for (lane <- 0 until width; source <- 0 until 3) {
+    for (lane <- 0 until width; source <- 0 until numSources) {
         val query = io.query(lane)
         val isFp = query.prs(source)(p.tagWidth - 1)
         val index = query.prs(source)(p.physWidth - 1, 0)

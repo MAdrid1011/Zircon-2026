@@ -6,13 +6,14 @@ class MiddleendInstruction(p: FrontendParams) extends Bundle {
     val fetchToken = UInt(32.W)
     val ftqIdx = UInt(p.ftqBits.W)
     val slot = UInt(p.slotBits.W)
+    val packetStart = Bool()
     val packetEnd = Bool()
+    val ftqRecord = new FrontendFtqRecord(p)
     val instruction = new FrontendInstruction(p)
 }
 
 class MiddleendPhysicalInfo(p: BackendParams) extends Bundle {
     val prs = Vec(3, UInt(p.tagWidth.W))
-    val sourceIndependent = Vec(3, Bool())
     val prd = UInt(p.tagWidth.W)
     val pprd = UInt(p.tagWidth.W)
 }
@@ -22,18 +23,14 @@ class MiddleendRenameEntry(fp: FrontendParams, bp: BackendParams) extends Bundle
     val physical = new MiddleendPhysicalInfo(bp)
 }
 
-class MiddleendFetchPacket(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
-    val ftqIdx = UInt(p.ftqBits.W)
-    val mask = UInt(p.fetchWidth.W)
-    val instructions = Vec(p.fetchWidth, new FrontendInstruction(p))
-}
-
 class MiddleendCommitDestination(p: BackendParams) extends Bundle {
     val rd = UInt(5.W)
     val isFp = Bool()
-    val prd = UInt(p.tagWidth.W)
-    val pprd = UInt(p.tagWidth.W)
+    val prd = UInt(p.physWidth.W)
+    val pprd = UInt(p.physWidth.W)
+
+    /** Integer physical zero is fixed, while floating-point physical zero is an ordinary register. */
+    def writesPhysical: Bool = isFp || prd.orR
 }
 
 class MiddleendCommitEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
@@ -45,6 +42,7 @@ class MiddleendCommitEntry(fp: FrontendParams, bp: BackendParams) extends Bundle
 class MiddleendCommitRequest(fp: FrontendParams, width: Int) extends Bundle {
     val valid = UInt(width.W)
     val store = UInt(width.W)
+    val packetStart = UInt(width.W)
 }
 
 class MiddleendCommitEnqueue(fp: FrontendParams, bp: BackendParams, width: Int) extends Bundle {
@@ -63,20 +61,13 @@ class CommitMiddleendIO(
     // Bit n permits the ordered prefix through instruction n.
     val resourcePrefix = Input(UInt(dispatchWidth.W))
     val allocation = Input(Vec(dispatchWidth, new BackendAllocation(bp)))
-    val ftqAllocate = Decoupled(new FrontendFtqAllocation(fp))
-    val ftqIdx = Input(UInt(fp.ftqBits.W))
+    val ftqAllocate = Output(Vec(dispatchWidth, Valid(new FrontendFtqAllocation(fp))))
+    val ftqIdx = Input(Vec(dispatchWidth, UInt(fp.ftqBits.W)))
     val enqueue = Output(new MiddleendCommitEnqueue(fp, bp, dispatchWidth))
     val retire = Input(Vec(commitWidth, Valid(new MiddleendCommitDestination(bp))))
     val flush = Input(Bool())
     // Restore occurs after the last retirement update belonging to a flush.
     val restore = Input(Bool())
-}
-
-class MiddleendPerformanceCounters extends Bundle {
-    val integerFreeListBlockedCycles = UInt(64.W)
-    val floatingFreeListBlockedCycles = UInt(64.W)
-    val dispatchBlockedCycles = UInt(64.W)
-    val ftqBlockedCycles = UInt(64.W)
 }
 
 class MiddleendIO(
@@ -85,19 +76,18 @@ class MiddleendIO(
     issue: IssueParams,
     commitParams: CommitParams,
 ) extends Bundle {
-    val frontend = Flipped(new FrontendMiddleIO(fp))
+    val frontend = Flipped(new FrontendMiddleIO(fp, issue.dispatchWidth))
     val backend = Flipped(new BackendMiddleendIO(bp, issue))
     val commit = new CommitMiddleendIO(fp, bp, issue.dispatchWidth, commitParams.width)
-    val csr = Input(new CSRState)
+    val fpState = Input(UInt(2.W))
     val performance = if (fp.observe) Some(Output(new MiddleendPerformanceCounters)) else None
 }
 
 /** Decode, rename, readiness lookup and parallel dispatch.
   *
   * A Rename-to-Dispatch pipeline register keeps RAT lookup and physical
-  * allocation out of the dispatch path. An active packet and one skid packet keep
-  * Frontend ready independent of the current dispatch decision. Backpressure
-  * retains every renamed instruction until dispatch accepts it.
+  * allocation out of the dispatch path. FQ supplies an ordered instruction group
+  * directly; backpressure retains every renamed instruction until Dispatch accepts it.
   */
 class Middleend(
     val frontendParams: FrontendParams = FrontendParams(),
@@ -127,48 +117,23 @@ class Middleend(
     private def unifiedTag(isFp: Boolean, index: UInt): UInt =
         Cat(isFp.B, index.pad(backendParams.physWidth))
 
-    /* Fetch packet holding and instruction selection. */
-    val activePacket = Reg(new MiddleendFetchPacket(frontendParams))
-    val activeValid = RegInit(false.B)
-    val skidPacket = Reg(new MiddleendFetchPacket(frontendParams))
-    val skidValid = RegInit(false.B)
-    val incomingPacket = Wire(new MiddleendFetchPacket(frontendParams))
-    incomingPacket.fetchToken := io.frontend.out.bits.fetchToken
-    incomingPacket.ftqIdx := io.commit.ftqIdx
-    incomingPacket.mask := io.frontend.out.bits.mask
-    incomingPacket.instructions := io.frontend.out.bits.instructions
-
+    /* This compacting register is the only Decode/Rename-to-Dispatch state boundary. */
     val renameStageEntries = Reg(Vec(width, new MiddleendRenameEntry(frontendParams, backendParams)))
     val renameStageValid = RegInit(0.U(width.W))
-    val renameValid = renameStageValid
     val accepted = Wire(UInt(width.W))
 
-    val selectedMasks = Wire(Vec(width, UInt(frontendParams.fetchWidth.W)))
-    val selectedInstructions = Wire(Vec(width, new FrontendInstruction(frontendParams)))
-    for (lane <- 0 until width) {
-        selectedMasks(lane) := VecInit((0 until frontendParams.fetchWidth).map { slot =>
-            val older = if (slot == 0) 0.U else PopCount(activePacket.mask(slot - 1, 0))
-            activePacket.mask(slot) && older === lane.U
-        }).asUInt
-        selectedInstructions(lane) := Mux(
-            activeValid && selectedMasks(lane).orR,
-            Mux1H(selectedMasks(lane).asBools, activePacket.instructions),
-            0.U.asTypeOf(new FrontendInstruction(frontendParams)),
-        )
-    }
+    val instructions = io.frontend.out.map(_.bits.instruction)
     val decoders = Seq.fill(width)(Module(new Decoder(frontendParams)))
-    for (lane <- 0 until width) {
-        decoders(lane).io.in := selectedInstructions(lane)
-    }
+    decoders.zip(instructions).foreach { case (decoder, instruction) => decoder.io.in := instruction }
 
     /* Decode and Rename run in parallel before the shared buffer boundary. */
     val integerRename = Module(new Rename(intParams))
     val floatingRename = Module(new Rename(fpParams))
     val renames = Seq(integerRename -> false, floatingRename -> true)
     for ((rename, isFp) <- renames; lane <- 0 until width) {
-        val instruction = selectedInstructions(lane)
+        val instruction = instructions(lane)
         val rinfo = rename.io.rinfo(lane)
-        val candidate = activeValid && selectedMasks(lane).orR
+        val candidate = io.frontend.out(lane).valid
         rinfo.request := candidate && instruction.rinfo.dest.valid &&
             instruction.rinfo.dest.isFp === isFp.B
         rinfo.rd := instruction.rinfo.dest.index
@@ -179,25 +144,27 @@ class Middleend(
         }
     }
 
-    io.commit.request.valid := Mux(io.commit.flush, 0.U, renameValid)
+    /* Commit reserves ROB, SQ and FTQ resources for the same ordered prefix Dispatch may accept. */
+    io.commit.request.valid := Mux(io.commit.flush, 0.U, renameStageValid)
     io.commit.request.store := VecInit(renameStageEntries.map(
         entry => entry.context.instruction.fu === DecodeUnit.Store.U ||
             entry.context.instruction.fu === DecodeUnit.Atomic.U
     )).asUInt
+    io.commit.request.packetStart := VecInit(renameStageEntries.map(_.context.packetStart)).asUInt
     FIFOUtil.assertPrefix(io.commit.resourcePrefix.asBools, "Commit resource permission must be a prefix")
 
-    val decodeCandidate = VecInit(selectedMasks.map(mask => activeValid && mask.orR))
+    /* Admission remains an ordered prefix across FQ space and both physical-register domains. */
+    val decodeCandidate = VecInit(io.frontend.out.map(_.valid))
     val decodeNeedsInt = VecInit((0 until width).map { lane =>
-        decodeCandidate(lane) && selectedInstructions(lane).rinfo.dest.valid &&
-            !selectedInstructions(lane).rinfo.dest.isFp
+        decodeCandidate(lane) && instructions(lane).rinfo.dest.valid &&
+            !instructions(lane).rinfo.dest.isFp
     })
     val decodeNeedsFp = VecInit((0 until width).map { lane =>
-        decodeCandidate(lane) && selectedInstructions(lane).rinfo.dest.valid &&
-            selectedInstructions(lane).rinfo.dest.isFp
+        decodeCandidate(lane) && instructions(lane).rinfo.dest.valid &&
+            instructions(lane).rinfo.dest.isFp
     })
-    val decodeAllowed = !io.commit.flush && !io.commit.restore
     val acceptedCount = PopCount(accepted)
-    val retainedCount = PopCount(renameValid) - acceptedCount
+    val retainedCount = PopCount(renameStageValid) - acceptedCount
     val renameStageFree = width.U - retainedCount
     val laneRenameReady = VecInit((0 until width).map { lane =>
         (!decodeNeedsInt(lane) || integerRename.io.freePrefix(lane)) &&
@@ -205,7 +172,7 @@ class Middleend(
     })
     val decodeGrant = VecInit((0 until width).map { lane =>
         val requested = PopCount(decodeCandidate.take(lane + 1))
-        decodeCandidate(lane) && renameStageFree >= requested && decodeAllowed &&
+        decodeCandidate(lane) && renameStageFree >= requested && !io.commit.flush && !io.commit.restore &&
             laneRenameReady.take(lane + 1).reduce(_ && _)
     }).asUInt
     integerRename.io.prepare := decodeGrant
@@ -215,27 +182,23 @@ class Middleend(
     integerRename.io.restore := io.commit.restore
     floatingRename.io.restore := io.commit.restore
 
+    /* Assemble the registered payload once Decode and the two rename domains have completed. */
     val renameIncoming = Wire(Vec(width, new MiddleendRenameEntry(frontendParams, backendParams)))
     for (lane <- 0 until width) {
-        val instruction = selectedInstructions(lane)
+        val instruction = instructions(lane)
         val intInfo = integerRename.io.pinfo(lane)
         val fpInfo = floatingRename.io.pinfo(lane)
-        renameIncoming(lane).context.fetchToken := activePacket.fetchToken
-        renameIncoming(lane).context.ftqIdx := activePacket.ftqIdx
-        renameIncoming(lane).context.slot := OHToUInt(selectedMasks(lane))
-        renameIncoming(lane).context.packetEnd := VecInit((0 until frontendParams.fetchWidth).map { slot =>
-            val later = if (slot + 1 < frontendParams.fetchWidth) {
-                activePacket.mask(frontendParams.fetchWidth - 1, slot + 1).orR
-            } else {
-                false.B
-            }
-            selectedMasks(lane)(slot) && !later
-        }).asUInt.orR
+        renameIncoming(lane).context.fetchToken := io.frontend.out(lane).bits.fetchToken
+        renameIncoming(lane).context.ftqIdx := 0.U
+        renameIncoming(lane).context.slot := io.frontend.out(lane).bits.slot
+        renameIncoming(lane).context.packetStart := io.frontend.out(lane).bits.packetStart
+        renameIncoming(lane).context.packetEnd := io.frontend.out(lane).bits.packetEnd
+        renameIncoming(lane).context.ftqRecord := io.frontend.out(lane).bits.record
         val decoderOut = decoders(lane).io.out
         val decoded = WireDefault(decoderOut)
         val usesFp = decoderOut.rinfo.dest.valid && decoderOut.rinfo.dest.isFp ||
             decoderOut.rinfo.src.map(source => source.valid && source.isFp).reduce(_ || _)
-        when(!decoderOut.exception.valid && usesFp && io.csr.mstatus(14, 13) === 0.U) {
+        when(!decoderOut.exception.valid && usesFp && io.fpState === 0.U) {
             decoded.fu := DecodeUnit.None.U
             decoded.exception.valid := true.B
             decoded.exception.cause := DecodeException.IllegalInstruction.U
@@ -252,11 +215,6 @@ class Middleend(
                     unifiedTag(isFp = false, intInfo.prs(source)),
                 ),
                 0.U,
-            )
-            renameIncoming(lane).physical.sourceIndependent(source) := !operand.valid || Mux(
-                operand.isFp,
-                fpInfo.sourceIndependent(source),
-                intInfo.sourceIndependent(source),
             )
         }
         val destination = instruction.rinfo.dest
@@ -292,7 +250,7 @@ class Middleend(
 
     /* ReadyBoard lookup and backend package construction. */
     val readyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts))
-    val memoryReadyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts))
+    val memoryReadyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts, numSources = 2))
     readyBoard.io.wakeup := io.backend.wakeup
     memoryReadyBoard.io.wakeup := io.backend.memoryWakeup
     readyBoard.io.speculation := io.backend.speculation
@@ -306,26 +264,32 @@ class Middleend(
         val stored = renameStageEntries(lane).physical
         for (source <- 0 until 3) {
             val operand = instruction.rinfo.src(source)
-            physicalInfo(lane).prs(source) := stored.prs(source)
-            physicalInfo(lane).sourceIndependent(source) := stored.sourceIndependent(source)
-            readyBoard.io.query(lane).prs(source) := physicalInfo(lane).prs(source)
+            readyBoard.io.query(lane).prs(source) := stored.prs(source)
             // A same-group producer may finish before its consumer reaches
             // Dispatch, so every live source observes the current ReadyBoard state.
-            readyBoard.io.query(lane).valid(source) := renameValid(lane) && operand.valid
-            physicalInfo(lane).sourceReady(source) := readyBoard.io.state(lane).ready(source)
-            physicalInfo(lane).sourceSpecMask(source) := readyBoard.io.state(lane).specMask(source)
-            memoryPhysicalInfo(lane).prs(source) := physicalInfo(lane).prs(source)
-            memoryPhysicalInfo(lane).sourceIndependent(source) := physicalInfo(lane).sourceIndependent(source)
-            memoryPhysicalInfo(lane).sourceReady(source) := memoryReadyBoard.io.state(lane).ready(source)
-            memoryPhysicalInfo(lane).sourceSpecMask(source) := memoryReadyBoard.io.state(lane).specMask(source)
+            readyBoard.io.query(lane).valid(source) := renameStageValid(lane) && operand.valid
         }
-        memoryReadyBoard.io.query(lane) := readyBoard.io.query(lane)
+        for (source <- 0 until 2) {
+            memoryReadyBoard.io.query(lane).prs(source) := stored.prs(source)
+            memoryReadyBoard.io.query(lane).valid(source) := readyBoard.io.query(lane).valid(source)
+        }
+        physicalInfo(lane).prs := stored.prs
+        physicalInfo(lane).sourceReady := readyBoard.io.state(lane).ready
+        physicalInfo(lane).sourceSpecMask := readyBoard.io.state(lane).specMask
         physicalInfo(lane).prd := stored.prd
+        memoryPhysicalInfo(lane).prs := stored.prs
+        memoryPhysicalInfo(lane).sourceReady := VecInit(
+            memoryReadyBoard.io.state(lane).ready :+ true.B
+        )
+        memoryPhysicalInfo(lane).sourceSpecMask := VecInit(
+            memoryReadyBoard.io.state(lane).specMask :+ 0.U(backendParams.specWidth.W)
+        )
         memoryPhysicalInfo(lane).prd := stored.prd
     }
 
+    /* Dispatch sees complete backend packages and emits one indexed group per issue queue. */
     val dispatcher = Module(new Dispatcher(backendParams, issueParams))
-    dispatcher.io.in.valid := renameValid
+    dispatcher.io.in.valid := renameStageValid
     for (lane <- 0 until width) {
         dispatcher.io.in.entries(lane) := BackendPackage.fromFrontend(
             renameStageEntries(lane).context.instruction,
@@ -344,51 +308,49 @@ class Middleend(
         Fill(width, !io.commit.flush && !io.commit.restore)
     dispatcher.io.freeCount := io.backend.freeCount
     dispatcher.io.flush := io.commit.flush || io.commit.restore
-    io.backend.arith0 := dispatcher.io.arith0
-    io.backend.arith1 := dispatcher.io.arith1
-    io.backend.mixArith := dispatcher.io.mixArith
-    io.backend.load := dispatcher.io.load
-    io.backend.loadStoreAddress := dispatcher.io.loadStoreAddress
-    io.backend.storeData := dispatcher.io.storeData
+    io.backend.enqueue := dispatcher.io.enqueue
 
+    /* A fetch packet may span dispatch groups, so continuation lanes reuse its allocated FTQ index. */
     accepted := dispatcher.io.accepted
+    val openPacketValid = RegInit(false.B)
+    val openPacketFtqIdx = RegInit(0.U(frontendParams.ftqBits.W))
+    val dispatchedFtqIdx = Wire(Vec(width, UInt(frontendParams.ftqBits.W)))
+    var precedingFtqIdx = openPacketFtqIdx
+    for (lane <- 0 until width) {
+        val context = renameStageEntries(lane).context
+        dispatchedFtqIdx(lane) := Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
+        precedingFtqIdx = Mux(renameStageValid(lane) && context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
+    }
+    /* Accepted lanes update readiness and enter Commit atomically with their backend issue tasks. */
     for (lane <- 0 until width) {
         val destination = renameStageEntries(lane).context.instruction.rinfo.dest
-        val incomingDestination = selectedInstructions(lane).rinfo.dest
+        val incomingDestination = instructions(lane).rinfo.dest
         readyBoard.io.allocate(lane).valid := decodeGrant(lane) && incomingDestination.valid
         readyBoard.io.allocate(lane).bits := renameIncoming(lane).physical.prd
         memoryReadyBoard.io.allocate(lane) := readyBoard.io.allocate(lane)
         io.commit.enqueue.entries(lane).context := renameStageEntries(lane).context
+        io.commit.enqueue.entries(lane).context.ftqIdx := dispatchedFtqIdx(lane)
         io.commit.enqueue.entries(lane).destination.rd := destination.index
         io.commit.enqueue.entries(lane).destination.isFp := destination.isFp
         io.commit.enqueue.entries(lane).destination.prd := physicalInfo(lane).prd
         io.commit.enqueue.entries(lane).destination.pprd := renameStageEntries(lane).physical.pprd
         io.commit.enqueue.entries(lane).allocation := io.commit.allocation(lane)
+        io.commit.ftqAllocate(lane).valid := accepted(lane) && renameStageEntries(lane).context.packetStart &&
+            !io.commit.flush
+        io.commit.ftqAllocate(lane).bits.fetchToken := renameStageEntries(lane).context.fetchToken
+        io.commit.ftqAllocate(lane).bits.record := renameStageEntries(lane).context.ftqRecord
     }
     io.commit.enqueue.valid := accepted
 
-    if (frontendParams.observe) {
-        val integerFreeListBlockedCycles = RegInit(0.U(64.W))
-        val floatingFreeListBlockedCycles = RegInit(0.U(64.W))
-        val dispatchBlockedCycles = RegInit(0.U(64.W))
-        val ftqBlockedCycles = RegInit(0.U(64.W))
-        val integerBlocked = VecInit((0 until width).map { lane =>
-            decodeNeedsInt(lane) && !integerRename.io.freePrefix(lane)
-        }).asUInt.orR
-        val floatingBlocked = VecInit((0 until width).map { lane =>
-            decodeNeedsFp(lane) && !floatingRename.io.freePrefix(lane)
-        }).asUInt.orR
-        when(integerBlocked) { integerFreeListBlockedCycles := integerFreeListBlockedCycles + 1.U }
-        when(floatingBlocked) { floatingFreeListBlockedCycles := floatingFreeListBlockedCycles + 1.U }
-        val issueQueueFull = io.backend.freeCount.map(_ === 0.U).reduce(_ || _)
-        when(issueQueueFull) { dispatchBlockedCycles := dispatchBlockedCycles + 1.U }
-        when(io.frontend.out.valid && !io.commit.ftqAllocate.ready && !io.commit.flush) {
-            ftqBlockedCycles := ftqBlockedCycles + 1.U
-        }
-        io.performance.get.integerFreeListBlockedCycles := integerFreeListBlockedCycles
-        io.performance.get.floatingFreeListBlockedCycles := floatingFreeListBlockedCycles
-        io.performance.get.dispatchBlockedCycles := dispatchBlockedCycles
-        io.performance.get.ftqBlockedCycles := ftqBlockedCycles
+    val acceptedAny = accepted.orR
+    val lastAccepted = VecInit.tabulate(width)(lane => acceptedAny && acceptedCount === (lane + 1).U).asUInt
+    val lastAcceptedEnd = Mux1H(lastAccepted.asBools, renameStageEntries.map(_.context.packetEnd))
+    val lastAcceptedFtqIdx = Mux1H(lastAccepted.asBools, dispatchedFtqIdx)
+    when(io.commit.flush) {
+        openPacketValid := false.B
+    }.elsewhen(acceptedAny) {
+        openPacketValid := !lastAcceptedEnd
+        openPacketFtqIdx := lastAcceptedFtqIdx
     }
 
     /* Rename-to-Dispatch is one compacting pipeline register. */
@@ -420,60 +382,21 @@ class Middleend(
         renameStageEntries := nextRenameEntries
     }
 
-    val consumedMask = (0 until width).map { lane =>
-        Mux(decodeGrant(lane), selectedMasks(lane), 0.U)
-    }.reduce(_ | _)
-    val remainingMask = activePacket.mask & ~consumedMask
-    val activeFinishes = activeValid && consumedMask.orR && !remainingMask.orR
-    io.frontend.out.ready := !skidValid && io.commit.ftqAllocate.ready && !io.commit.flush
-    val frontendFire = io.frontend.out.fire
-    io.commit.ftqAllocate.valid := io.frontend.out.valid && !skidValid && !io.commit.flush
-    io.commit.ftqAllocate.bits.fetchToken := io.frontend.out.bits.fetchToken
-    io.commit.ftqAllocate.bits.record := io.frontend.out.bits.record
-    assert(frontendFire === io.commit.ftqAllocate.fire, "FQ transfer and FTQ allocation must be atomic")
-    when(io.commit.flush) {
-        activeValid := false.B
-        skidValid := false.B
-    }.otherwise {
-        when(activeValid && consumedMask.orR) {
-            activePacket.mask := remainingMask
-        }
-        when(activeFinishes) {
-            when(skidValid) {
-                activePacket := skidPacket
-                activeValid := true.B
-                skidValid := false.B
-            }.otherwise {
-                activeValid := false.B
-            }
-        }
-        when(frontendFire) {
-            when(!activeValid || (activeFinishes && !skidValid)) {
-                activePacket := incomingPacket
-                activeValid := true.B
-            }.otherwise {
-                skidPacket := incomingPacket
-                skidValid := true.B
-            }
-        }
+    /* FQ dequeue follows the same prefix grant that enters the rename-stage register. */
+    for (lane <- 0 until width) {
+        io.frontend.out(lane).ready := decodeGrant(lane) && !io.commit.flush
     }
-
-    when(frontendFire) {
-        assert(io.frontend.out.bits.mask.orR, "Frontend must not enqueue an empty fetch packet")
-    }
-    assert(!skidValid || activeValid, "A skid packet requires an active packet")
-    assert((accepted & ~renameValid) === 0.U, "Dispatch cannot consume an invalid renamed instruction")
+    assert((accepted & ~renameStageValid) === 0.U, "Dispatch cannot consume an invalid renamed instruction")
     FIFOUtil.assertPrefix(accepted.asBools, "Middleend acceptance must remain an ordered prefix")
+    FIFOUtil.assertPrefix(decodeGrant.asBools, "Middleend decode must consume an ordered prefix")
+    when(accepted(0) && !renameStageEntries(0).context.packetStart) {
+        assert(openPacketValid, "A continued fetch packet must retain its FTQ mapping")
+    }
     for (lane <- 0 until commitParams.width) {
         when(io.commit.retire(lane).valid) {
             val destination = io.commit.retire(lane).bits
-            assert(
-                destination.prd(backendParams.tagWidth - 1) === destination.isFp &&
-                    destination.pprd(backendParams.tagWidth - 1) === destination.isFp,
-                "Retired physical tags must match the architectural register domain",
-            )
-            val prdIndex = destination.prd(backendParams.physWidth - 1, 0)
-            val pprdIndex = destination.pprd(backendParams.physWidth - 1, 0)
+            val prdIndex = destination.prd
+            val pprdIndex = destination.pprd
             val limit = Mux(destination.isFp, backendParams.numFpPhys.U, backendParams.numIntPhys.U)
             assert(prdIndex < limit && pprdIndex < limit, "Retired physical index is out of range")
             when(!destination.isFp) {
@@ -484,4 +407,38 @@ class Middleend(
             }
         }
     }
+
+    /* Simulation-only counters stay after the decode, rename and dispatch datapath. */
+    if (frontendParams.observe) {
+        val integerFreeListBlockedCycles = RegInit(0.U(64.W))
+        val floatingFreeListBlockedCycles = RegInit(0.U(64.W))
+        val dispatchBlockedCycles = RegInit(0.U(64.W))
+        val ftqBlockedCycles = RegInit(0.U(64.W))
+        val integerBlocked = VecInit((0 until width).map { lane =>
+            decodeNeedsInt(lane) && !integerRename.io.freePrefix(lane)
+        }).asUInt.orR
+        val floatingBlocked = VecInit((0 until width).map { lane =>
+            decodeNeedsFp(lane) && !floatingRename.io.freePrefix(lane)
+        }).asUInt.orR
+        when(integerBlocked) { integerFreeListBlockedCycles := integerFreeListBlockedCycles + 1.U }
+        when(floatingBlocked) { floatingFreeListBlockedCycles := floatingFreeListBlockedCycles + 1.U }
+        val dispatchBlocked = renameStageValid.orR && accepted =/= renameStageValid
+        when(dispatchBlocked) { dispatchBlockedCycles := dispatchBlockedCycles + 1.U }
+        val ftqBlocked = io.commit.request.valid.orR && io.commit.request.packetStart.orR &&
+            (io.commit.resourcePrefix & io.commit.request.valid) =/= io.commit.request.valid
+        when(ftqBlocked && !io.commit.flush) {
+            ftqBlockedCycles := ftqBlockedCycles + 1.U
+        }
+        io.performance.get.integerFreeListBlockedCycles := integerFreeListBlockedCycles
+        io.performance.get.floatingFreeListBlockedCycles := floatingFreeListBlockedCycles
+        io.performance.get.dispatchBlockedCycles := dispatchBlockedCycles
+        io.performance.get.ftqBlockedCycles := ftqBlockedCycles
+    }
+}
+
+class MiddleendPerformanceCounters extends Bundle {
+    val integerFreeListBlockedCycles = UInt(64.W)
+    val floatingFreeListBlockedCycles = UInt(64.W)
+    val dispatchBlockedCycles = UInt(64.W)
+    val ftqBlockedCycles = UInt(64.W)
 }

@@ -2,38 +2,37 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.FrontendParams
 
+class PredictFetchIO(p: FrontendParams) extends Bundle {
+    val instPkg = Input(new FrontendPackage(p))
+    val out = Output(new FrontendPackage(p))
+}
+
+class PredictLookupIO(p: FrontendParams) extends Bundle {
+    val in = Input(new FrontendPackage(p))
+    val mainTag = Input(UInt((32 - p.blockBits - log2Ceil(p.btbSets)).W))
+    val prediction = Output(new FrontendTargetPrediction(p))
+    val directions = Output(UInt(p.fetchWidth.W))
+    val meta = Output(new FrontendDirectionMeta(p))
+}
+
+class PredictCommitIO(p: FrontendParams) extends Bundle {
+    val train = Flipped(Valid(new FrontendTraining(p)))
+    val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
+    val flush = Input(Bool())
+}
+
+class PredictAdvanceIO extends Bundle {
+    val accept = Input(Bool())
+    val flush = Input(Bool())
+}
+
 class PredictIO(p: FrontendParams) extends Bundle {
-    val fc = new Bundle {
-        val instPkg = Input(new FrontendPackage(p))
-        val out = Output(new FrontendPackage(p))
-    }
-    val lookup = new Bundle {
-        val in = Input(new FrontendPackage(p))
-        val prediction = Output(new FrontendPrediction(p))
-        val directions = Output(UInt(p.fetchWidth.W))
-        val meta = Output(new FrontendDirectionMeta(p))
-    }
+    val fc = new PredictFetchIO(p)
+    val lookup = new PredictLookupIO(p)
     val pd = Flipped(Valid(new FrontendStateRepair(p)))
-    val cmt = new Bundle {
-        val train = Flipped(Valid(new FrontendTraining(p)))
-        val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
-        val flush = Input(Bool())
-    }
-    val fte = new Bundle {
-        val accept = Input(Bool())
-        val flush = Input(Bool())
-    }
-    val dbg = if (p.observe) Some(new Bundle {
-        val aheadValid = Output(Bool())
-        val history = Output(UInt(32.W))
-        val rasTop = Output(UInt(32.W))
-        val rasCount = Output(UInt((p.rasBits + 1).W))
-        val btbReadSkipped = Output(Bool())
-        val loopTraining = Output(UInt(64.W))
-        val loopProvider = Output(UInt(64.W))
-        val loopCorrect = Output(UInt(64.W))
-    })
-    else None
+    val cmt = new PredictCommitIO(p)
+    val fte = new PredictAdvanceIO
+    val dbg = if (p.observe) Some(new PredictDebugIO) else None
 }
 
 /** Direction/target prediction and speculative state, with lookup latency exposed at the frontend boundary. */
@@ -50,21 +49,20 @@ class Predict(p: FrontendParams) extends Module {
     val earlySelect = Module(new FrontendPredictionSelect(p))
     val mainLookup = Module(new BlockBTBLookup(p, p.btbSets, p.btbWays))
     val corrector = Module(new StatisticalCorrector(p))
-    val mainSelect = Module(new FrontendPredictionSelect(p))
 
     /* IF1: Fast Prediction */
     // Match saved ahead candidates while reading candidates for the next accepted block.
     val currentPc = io.fc.instPkg.startPc
-    fastBtb.io.pc := currentPc
-    mainBtb.io.query.bits := currentPc
+    fastBtb.io.index := currentPc(p.blockBits + log2Ceil(p.fastBtbSets) - 1, p.blockBits)
+    mainBtb.io.query.bits := currentPc(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
     mainBtb.io.query.valid := io.fte.accept
-    fastLookup.io.pc := currentPc
+    fastLookup.io.tag := currentPc(31, p.blockBits + log2Ceil(p.fastBtbSets))
     fastLookup.io.raw := fastBtb.io.raw
-    direction.io.query.pc := currentPc
+    direction.io.query.pcWord := currentPc(31, 2)
     direction.io.query.folds := state.io.folds
-    indirect.io.query.pc := currentPc
+    indirect.io.query.pcWord := currentPc(31, 2)
     indirect.io.query.folds := state.io.folds
-    earlySelect.io.pc := currentPc
+    earlySelect.io.pcBlock := currentPc(31, p.blockBits)
     earlySelect.io.range := FrontendMath.range(currentPc, p)
     earlySelect.io.directions := direction.io.directions
     earlySelect.io.backward := fastLookup.io.line.backward.asUInt
@@ -107,31 +105,25 @@ class Predict(p: FrontendParams) extends Module {
     corrector.io.earlyDirections := io.lookup.in.predict.earlyDirections
     corrector.io.meta := io.lookup.in.predict.meta
     corrector.io.read := io.lookup.in.predict.scRead
-    mainLookup.io.pc := io.lookup.in.startPc
+    mainLookup.io.tag := io.lookup.mainTag
     mainLookup.io.raw := mainBtb.io.raw
-    mainSelect.io.pc := io.lookup.in.startPc
-    mainSelect.io.range := io.lookup.in.predict.range
-    mainSelect.io.directions := corrector.io.directions
-    mainSelect.io.backward := VecInit((0 until p.fetchWidth).map(i =>
-        Mux(mainLookup.io.line.valid(i), mainLookup.io.line.backward(i), io.lookup.in.predict.early.backward(i))
-    )).asUInt
     val lookupMeta = WireDefault(io.lookup.in.predict.meta)
+    val mainKinds = Wire(Vec(p.fetchWidth, UInt(3.W)))
+    val mainTargets = Wire(Vec(p.fetchWidth, UInt(32.W)))
     lookupMeta.scPredictions := corrector.io.scPredictions
     lookupMeta.scLowMargin := corrector.io.scLowMargin
     for (i <- 0 until p.fetchWidth) {
         // A missing main-BTB slot keeps its fast prediction.
         val mainHit = mainLookup.io.line.valid(i)
         val kind = Mux(mainHit, mainLookup.io.line.kinds(i), io.lookup.in.predict.early.kinds(i))
-        mainSelect.io.kinds(i) := kind
-        mainSelect.io.control(i) := kind =/= 0.U
-        mainSelect.io.conditional(i) := FrontendCfi.conditional(kind)
+        mainKinds(i) := kind
         val baseTarget = Mux(mainHit, Cat(mainLookup.io.line.targets(i), 0.U(2.W)), io.lookup.in.predict.early.targets(i))
         val ittage = io.lookup.in.predict.meta.ittage
         val providerValid = ittage.aheadValid && ittage.providers(i) =/= 0.U
         val alternateTarget = Mux(ittage.alternateValid(i), ittage.alternateTargets(i), baseTarget)
         val ittageTarget = Mux(ittage.providerConfidence(i) =/= 0.U, ittage.providerTargets(i), alternateTarget)
         val useIttage = kind === FrontendCfi.Indirect.U && providerValid
-        mainSelect.io.targets(i) := Mux(
+        mainTargets(i) := Mux(
             FrontendCfi.pop(kind) && io.lookup.in.predict.before.count =/= 0.U,
             FrontendMath.rasTop(io.lookup.in.predict.before),
             Mux(useIttage, ittageTarget, baseTarget)
@@ -140,7 +132,8 @@ class Predict(p: FrontendParams) extends Module {
         lookupMeta.ittage.predictedTargets(i) := Mux(useIttage, ittageTarget, baseTarget)
     }
 
-    io.lookup.prediction := mainSelect.io.prediction
+    io.lookup.prediction.kinds := mainKinds
+    io.lookup.prediction.targets := mainTargets
     io.lookup.directions := corrector.io.directions
     io.lookup.meta := lookupMeta
 
@@ -151,27 +144,44 @@ class Predict(p: FrontendParams) extends Module {
     indirect.io.query.fire := io.fte.accept
     indirect.io.query.invalidate := io.fte.flush
     state.io.early.valid := io.fte.accept
-    state.io.early.bits.pc := io.fc.instPkg.startPc
+    state.io.early.bits.pcWord := io.fc.instPkg.startPc(31, 2)
     state.io.early.bits.prediction := earlySelect.io.prediction
     state.io.repair <> io.pd
     state.io.retire <> io.cmt.retire
     state.io.flush := io.cmt.flush
 
     /* Commit Training */
-    direction.io.train <> io.cmt.train
+    direction.io.train.valid := io.cmt.train.valid
+    direction.io.train.bits.pcWord := io.cmt.train.bits.pcWord
+    direction.io.train.bits.mask := io.cmt.train.bits.mask
+    direction.io.train.bits.kinds := io.cmt.train.bits.kinds
+    direction.io.train.bits.taken := io.cmt.train.bits.taken
+    direction.io.train.bits.meta := io.cmt.train.bits.meta
+    direction.io.train.bits.earlyDirections := io.cmt.train.bits.earlyDirections
+    for (slot <- 0 until p.fetchWidth) {
+        direction.io.train.bits.targetLow(slot) := io.cmt.train.bits.targets(slot)(12, 0)
+    }
     indirect.io.train <> io.cmt.train
-    fastBtb.io.train <> io.cmt.train
-    mainBtb.io.train <> io.cmt.train
+    for (train <- Seq(fastBtb.io.train, mainBtb.io.train)) {
+        train.valid := io.cmt.train.valid
+        train.bits.pcBlock := io.cmt.train.bits.pcWord(29, p.blockBits - 2)
+        train.bits.mask := io.cmt.train.bits.mask
+        train.bits.kinds := io.cmt.train.bits.kinds
+        for (slot <- 0 until p.fetchWidth) {
+            train.bits.targetWords(slot) := io.cmt.train.bits.targets(slot)(31, 2)
+        }
+    }
 
     /* Observation */
     if (p.observe) {
-        io.dbg.get.aheadValid := direction.io.meta.aheadValid
-        io.dbg.get.history := FrontendMath.fold(state.io.snapshot.history, 32)
-        io.dbg.get.rasTop := Mux(state.io.snapshot.count =/= 0.U, FrontendMath.rasTop(state.io.snapshot), 0.U)
-        io.dbg.get.rasCount := state.io.snapshot.count
-        io.dbg.get.btbReadSkipped := mainBtb.io.readSkipped.get
         io.dbg.get.loopTraining := direction.io.dbg.get.loopTraining
         io.dbg.get.loopProvider := direction.io.dbg.get.loopProvider
         io.dbg.get.loopCorrect := direction.io.dbg.get.loopCorrect
     }
+}
+
+class PredictDebugIO extends Bundle {
+    val loopTraining = Output(UInt(64.W))
+    val loopProvider = Output(UInt(64.W))
+    val loopCorrect = Output(UInt(64.W))
 }

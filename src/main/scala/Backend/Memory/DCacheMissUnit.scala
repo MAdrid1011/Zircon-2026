@@ -2,6 +2,7 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.Cache._
 import ZirconConfig.DCacheParams
+import ZirconUtil.InheritFields
 
 class DCacheMissEntry(p: DCacheParams) extends DLoadRequest(p) {
     val store = Bool()
@@ -13,7 +14,7 @@ class DCacheMissEntry(p: DCacheParams) extends DLoadRequest(p) {
     val storeMask = UInt(4.W)
     val storeSize = UInt(2.W)
     val victimValid = Bool()
-    val victimPaddr = UInt(34.W)
+    val victimLine = UInt((34 - l1Offset).W)
     val victimDirty = Bool()
 }
 
@@ -22,7 +23,7 @@ class DCacheMissAllocate(p: DCacheParams) extends DCacheMissEntry(p) {
 }
 
 class DCacheInstall extends Bundle {
-    val paddr = UInt(34.W)
+    val line = UInt((34 - l1Offset).W)
     val way = UInt(l1Way.W)
     val data = UInt(l1LineBits.W)
     val dirty = Bool()
@@ -36,13 +37,15 @@ class DCacheMissCompletion(p: DCacheParams) extends Bundle {
     val preserve = Bool()
 }
 
+class DCacheMissMemoryIO extends Bundle {
+    val req = Decoupled(new DMemoryRequest)
+    val rsp = Flipped(Decoupled(new DMemoryResponse))
+}
+
 class DCacheMissUnitIO(p: DCacheParams) extends Bundle {
     val allocate = Flipped(Decoupled(new DCacheMissAllocate(p)))
     val flush = Input(Bool())
-    val memory = new Bundle {
-        val req = Decoupled(new DMemoryRequest)
-        val rsp = Flipped(Decoupled(new DMemoryResponse))
-    }
+    val memory = new DCacheMissMemoryIO
     val install = Decoupled(new DCacheInstall)
     val complete = Decoupled(new DCacheMissCompletion(p))
     val busy = Output(Bool())
@@ -58,8 +61,8 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
 
     val idle :: send :: waitResponse :: install :: respond :: Nil = Enum(5)
     val state = RegInit(idle)
-    val entry = Reg(new DCacheMissEntry(p))
-    val line = Reg(UInt(l1LineBits.W))
+    val entry = RegInit(0.U.asTypeOf(new DCacheMissEntry(p)))
+    val line = RegInit(0.U(l1LineBits.W))
     val lineDirty = RegInit(false.B)
     val error = RegInit(false.B)
     val discard = RegInit(false.B)
@@ -74,9 +77,9 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
 
     val preserve = entry.store || (entry.uncache && entry.ioAuthorized)
     val flushed = io.flush && !preserve
-    val cachedWord = (line >> (offset(entry.paddr) << 3))(31, 0)
-    val memoryWord = Mux(entry.uncache, line(31, 0), cachedWord)
+    val cachedWord = line.asTypeOf(Vec(l1Line / 4, UInt(32.W)))(entry.paddr(l1Offset - 1, 2))
     val byteOffset = entry.paddr(1, 0)
+    val memoryWord = Mux(entry.uncache, line(31, 0), cachedWord >> (byteOffset << 3))
     val shiftedForwardData = entry.forwardData >> (byteOffset << 3)
     val shiftedForwardMask = entry.forwardMask >> byteOffset
     val mergedWord = VecInit((0 until 4).map { byte =>
@@ -86,7 +89,10 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
             memoryWord(8 * byte + 7, 8 * byte)
         )
     }).asUInt
-    val storeLineMask = (entry.storeMask << Cat(entry.paddr(l1Offset - 1, 2), 0.U(2.W)))(l1Line - 1, 0)
+    val storeWord = entry.paddr(l1Offset - 1, 2)
+    val storeLineMask = VecInit.tabulate(l1Line) { byte =>
+        storeWord === (byte / 4).U && entry.storeMask(byte % 4)
+    }.asUInt
     val storeLineData = Fill(l1Line / 4, entry.storeData)
     val installedLine = VecInit((0 until l1Line).map { byte =>
         Mux(storeLineMask(byte), storeLineData(8 * byte + 7, 8 * byte), line(8 * byte + 7, 8 * byte))
@@ -106,14 +112,14 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
     io.memory.req.bits.data := entry.storeData
     io.memory.req.bits.mask := entry.storeMask
     io.memory.req.bits.victimValid := entry.victimValid && !entry.uncache
-    io.memory.req.bits.victimPaddr := entry.victimPaddr
+    io.memory.req.bits.victimLine := entry.victimLine
     io.memory.req.bits.victimData := line
     io.memory.req.bits.victimDirty := entry.victimDirty
     io.memory.req.bits.victimOnly := false.B
     io.memory.rsp.ready := state === waitResponse
 
     io.install.valid := state === install
-    io.install.bits.paddr := entry.paddr
+    io.install.bits.line := entry.paddr(33, l1Offset)
     io.install.bits.way := entry.way
     io.install.bits.data := Mux(entry.store, installedLine, line)
     io.install.bits.dirty := entry.store || lineDirty
@@ -133,9 +139,7 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
         is(idle) {
             when(io.allocate.fire) {
                 entry := 0.U.asTypeOf(new DCacheMissEntry(p))
-                for ((name, field) <- io.allocate.bits.elements if entry.elements.contains(name)) {
-                    entry.elements(name) := field
-                }
+                InheritFields(entry, io.allocate.bits)
                 line := io.allocate.bits.victimData
                 lineDirty := false.B
                 error := false.B
@@ -222,7 +226,6 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
         }
         when(io.allocate.bits.victimValid) {
             assert(!io.allocate.bits.uncache, "DCacheMissUnit: uncached access cannot carry a victim")
-            assert(io.allocate.bits.victimPaddr(l1Offset - 1, 0) === 0.U)
         }
     }
 }

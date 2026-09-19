@@ -1,5 +1,5 @@
 import chisel3._
-import chisel3.util.Valid
+import chisel3.util.{log2Ceil, Valid}
 import ZirconConfig.Cache._
 import ZirconConfig.DCacheParams
 
@@ -61,7 +61,7 @@ class DStoreResponse extends Bundle {
 }
 
 class DForwardQuery(val p: DCacheParams = DCacheParams()) extends Bundle {
-    val paddr = UInt(34.W)
+    val wordAddress = UInt(32.W)
     val slot = UInt(p.slotWidth.W)
     val mask = UInt(4.W)
 }
@@ -79,9 +79,9 @@ class DMemoryRequest extends Bundle {
     val uncache = Bool()
     val size = UInt(2.W)
     val data = UInt(l1LineBits.W)
-    val mask = UInt(l1Line.W)
+    val mask = UInt(4.W)
     val victimValid = Bool()
-    val victimPaddr = UInt(34.W)
+    val victimLine = UInt((34 - log2Ceil(l1Line)).W)
     val victimData = UInt(l1LineBits.W)
     val victimDirty = Bool()
     val victimOnly = Bool()
@@ -96,6 +96,47 @@ class DMemoryResponse extends Bundle {
 class DCacheL2IO extends Bundle {
     val req = chisel3.util.Decoupled(new DMemoryRequest)
     val rsp = Flipped(chisel3.util.Decoupled(new DMemoryResponse))
+}
+
+class DCacheLoadIO(p: DCacheParams) extends Bundle {
+    val req = Flipped(chisel3.util.Decoupled(new DLoadRequest(p)))
+    val fixedLatency = Output(Bool())
+    val wbSelect = chisel3.util.Valid(new DLoadWBSelect(p))
+    val rsp = chisel3.util.Valid(new DLoadResponse(p))
+}
+
+class DCacheStoreIO extends Bundle {
+    val req = Flipped(chisel3.util.Decoupled(new DStoreRequest))
+    val rsp = chisel3.util.Decoupled(new DStoreResponse)
+}
+
+class DCacheForwardIO(p: DCacheParams) extends Bundle {
+    val query = chisel3.util.Valid(new DForwardQuery(p))
+    val result = Flipped(chisel3.util.Valid(new DForwardResult(p)))
+}
+
+class DCacheStoreTranslationIO extends Bundle {
+    val request = Flipped(Valid(new DStoreTranslationRequest))
+    val response = Output(new DStoreTranslationResponse)
+}
+
+class DCacheIO(
+    val p: DCacheParams = DCacheParams(),
+    val tlbEnabled: Boolean = false,
+    val observe: Boolean = false,
+) extends Bundle {
+    // Lane 0 is LS0 / RAM A; lane 1 is LS1 / RAM B. Committed writes use the separate store interface.
+    val load = Vec(2, new DCacheLoadIO(p))
+    val store = new DCacheStoreIO
+    val forward = Vec(2, new DCacheForwardIO(p))
+    val flush = Input(Bool())
+    val tlb = if (tlbEnabled) Some(new TLBManagementIO) else None
+    val tlbMiss = if (tlbEnabled) Some(Output(Vec(2, Valid(new DTLBMissRequest)))) else None
+    val storeTranslation = if (tlbEnabled) Some(new DCacheStoreTranslationIO) else None
+    val l2 = new DCacheL2IO
+    val idle = Output(Bool())
+    val maintenance = Flipped(new CacheMaintenanceIO)
+    val performance = if (observe) Some(Output(new DCachePerformanceCounters)) else None
 }
 
 class DCachePerformanceCounters extends Bundle {
@@ -114,46 +155,4 @@ class DCachePerformanceCounters extends Bundle {
     val storeHits = UInt(64.W)
     val storeMisses = UInt(64.W)
     val missBusyCycles = UInt(64.W)
-}
-
-class DCacheIO(
-    val p: DCacheParams = DCacheParams(),
-    val tlbEnabled: Boolean = false,
-    val observe: Boolean = false,
-) extends Bundle {
-    // Lane 0 is LS0 / RAM A; lane 1 is LS1 / RAM B. Committed writes use the separate store interface.
-    val load = Vec(
-        2,
-        new Bundle {
-            val req = Flipped(chisel3.util.Decoupled(new DLoadRequest(p)))
-            val fixedLatency = Output(Bool())
-            val wbSelect = chisel3.util.Valid(new DLoadWBSelect(p))
-            val rsp = chisel3.util.Valid(new DLoadResponse(p))
-        }
-    )
-    val store = new Bundle {
-        val req = Flipped(chisel3.util.Decoupled(new DStoreRequest))
-        val rsp = chisel3.util.Decoupled(new DStoreResponse)
-    }
-    val forward = Vec(
-        2,
-        new Bundle {
-            val query = chisel3.util.Valid(new DForwardQuery(p))
-            val result = Flipped(chisel3.util.Valid(new DForwardResult(p)))
-        }
-    )
-    val flush = Input(Bool())
-    val tlb = if (tlbEnabled) Some(new TLBManagementIO) else None
-    val tlbMiss = if (tlbEnabled) Some(Output(Vec(2, Valid(new DTLBMissRequest)))) else None
-    val storeTranslation = if (tlbEnabled) Some(new Bundle {
-        val request = Flipped(Valid(new DStoreTranslationRequest))
-        val response = Output(new DStoreTranslationResponse)
-    }) else None
-    val l2 = new DCacheL2IO
-    val idle = Output(Bool())
-    val performance = if (observe) Some(Output(new DCachePerformanceCounters)) else None
-    val maintenance = new Bundle {
-        val request = Input(Bool())
-        val done = Output(Bool())
-    }
 }

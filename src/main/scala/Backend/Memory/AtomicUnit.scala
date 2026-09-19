@@ -1,9 +1,9 @@
 import chisel3._
 import chisel3.util._
-import ZirconConfig.{BackendParams, DCacheParams}
+import ZirconConfig.{BackendParams, CommitParams, DCacheParams}
 
 class AtomicRequest(p: BackendParams) extends Bundle {
-    val robIdx = UInt(p.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
     val prd = UInt(p.tagWidth.W)
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
@@ -14,7 +14,7 @@ class AtomicRequest(p: BackendParams) extends Bundle {
 }
 
 class AtomicResponse(p: BackendParams) extends Bundle {
-    val robIdx = UInt(p.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
     val prd = UInt(p.tagWidth.W)
     val vaddr = UInt(32.W)
     val data = UInt(32.W)
@@ -27,23 +27,31 @@ class AtomicBackendIO(p: BackendParams) extends Bundle {
     val blockMemoryIssue = Input(Bool())
 }
 
+class AtomicLoadIO(cache: DCacheParams) extends Bundle {
+    val request = Decoupled(new DLoadRequest(cache))
+    val response = Flipped(Valid(new AtomicLoadResponse))
+    val forwardQuery = Flipped(Valid(new DForwardQuery(cache)))
+    val forwardResult = Valid(new DForwardResult(cache))
+}
+
+class AtomicLoadResponse extends Bundle {
+    val data = UInt(32.W)
+    val exception = UInt(4.W)
+}
+
+class AtomicStoreIO extends Bundle {
+    val request = Decoupled(new DStoreRequest)
+    val response = Flipped(Decoupled(new DStoreResponse))
+}
+
 class AtomicUnitIO(p: BackendParams, cache: DCacheParams) extends Bundle {
     val request = Flipped(Decoupled(new AtomicRequest(p)))
     val response = Decoupled(new AtomicResponse(p))
     val clearReservation = Input(Bool())
     val busy = Output(Bool())
 
-    val load = new Bundle {
-        val request = Decoupled(new DLoadRequest(cache))
-        val wbSelect = Flipped(Valid(new DLoadWBSelect(cache)))
-        val response = Flipped(Valid(new DLoadResponse(cache)))
-        val forwardQuery = Flipped(Valid(new DForwardQuery(cache)))
-        val forwardResult = Valid(new DForwardResult(cache))
-    }
-    val store = new Bundle {
-        val request = Decoupled(new DStoreRequest)
-        val response = Flipped(Decoupled(new DStoreResponse))
-    }
+    val load = new AtomicLoadIO(cache)
+    val store = new AtomicStoreIO
 }
 
 /** Commit-authorized RV32 word atomics sharing one DCache load lane and its store port. */
@@ -54,11 +62,11 @@ class AtomicUnit(
     val io = IO(new AtomicUnitIO(p, cache))
     val idle :: loadRequest :: loadWait :: storeRequest :: storeWait :: respond :: Nil = Enum(6)
     val state = RegInit(idle)
-    val request = Reg(new AtomicRequest(p))
-    val result = Reg(UInt(32.W))
-    val exception = Reg(UInt(4.W))
+    val request = RegInit(0.U.asTypeOf(new AtomicRequest(p)))
+    val result = RegInit(0.U(32.W))
+    val exception = RegInit(0.U(4.W))
     val reservationValid = RegInit(false.B)
-    val reservationAddress = Reg(UInt(32.W))
+    val reservationAddress = RegInit(0.U(32.W))
 
     val isLr = request.op === 2.U
     val isSc = request.op === 3.U
@@ -155,7 +163,6 @@ class AtomicUnit(
         }.otherwise {
             state := storeRequest
         }
-        assert(!io.load.response.bits.retry, "An isolated atomic load must not replay")
     }
     when(io.store.request.fire) {
         state := storeWait
@@ -171,9 +178,6 @@ class AtomicUnit(
         state := idle
     }
 
-    when(state === loadWait) {
-        assert(!io.load.wbSelect.valid || io.load.wbSelect.bits.slot === 0.U)
-    }
     when(state === storeRequest || state === storeWait) {
         assert(!isLr)
         assert(!isSc || reservationHit || !reservationValid)

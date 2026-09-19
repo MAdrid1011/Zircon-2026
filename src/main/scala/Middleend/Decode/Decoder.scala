@@ -11,10 +11,18 @@ class DecoderIO(p: FrontendParams) extends Bundle {
 class Decoder(
     p: FrontendParams = FrontendParams(),
     support: DecodeSupport = DecodeSupport.current,
-) extends Module {
+) extends RawModule {
     val io = IO(new DecoderIO(p))
     val inst = io.in.inst
     val table = DecodeTable.entries
+    table.filter(_.supportedBy(support)).combinations(2).foreach { pair =>
+        val left = pair.head.pattern
+        val right = pair.last.pattern
+        require(
+            ((left.value ^ right.value) & left.mask & right.mask) != 0,
+            s"Decode patterns ${pair.head.name} and ${pair.last.name} overlap",
+        )
+    }
     // Missing consumers are removed during elaboration, not checked through extra comparators.
     val hits = VecInit(table.map(row => if (row.supportedBy(support)) row.pattern === inst else false.B))
     val instPkgOut = WireDefault(io.in)
@@ -69,5 +77,4 @@ class Decoder(
         instPkgOut.exception.tval := inst
     }
     io.out := instPkgOut
-    assert(PopCount(hits) <= 1.U, "Instruction table must remain mutually exclusive")
 }

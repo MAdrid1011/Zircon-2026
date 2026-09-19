@@ -26,7 +26,7 @@ class ICacheTLBIntegrationDriver(val dut: ICache) extends chisel3.simulator.Peek
         dut.io.tlb.get.control.mxr.poke(false)
         dut.io.tlb.get.control.sum.poke(false)
         dut.io.tlb.get.refill.valid.poke(false)
-        dut.io.tlb.get.refill.bits.vaddr.poke(0)
+        dut.io.tlb.get.refill.bits.vpn.poke(0)
         dut.io.tlb.get.refill.bits.ppn.poke(0)
         dut.io.tlb.get.refill.bits.asid.poke(0)
         dut.io.tlb.get.refill.bits.global.poke(false)
@@ -47,7 +47,7 @@ class ICacheTLBIntegrationDriver(val dut: ICache) extends chisel3.simulator.Peek
 
     def refill(vaddr: BigInt, ppn: BigInt, execute: Boolean = true, pma: Int = 0): Unit = {
         dut.io.tlb.get.refill.valid.poke(true)
-        dut.io.tlb.get.refill.bits.vaddr.poke(vaddr)
+        dut.io.tlb.get.refill.bits.vpn.poke(vaddr >> 12)
         dut.io.tlb.get.refill.bits.ppn.poke(ppn)
         dut.io.tlb.get.refill.bits.asid.poke(1)
         dut.io.tlb.get.refill.bits.global.poke(false)

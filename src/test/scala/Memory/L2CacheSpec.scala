@@ -39,6 +39,20 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         ((original & ~mask) | ((data & 0xffffffffL) << (8 * byteOffset))) & lineMask
     }
 
+    def pteValue(pte: Sv32Pte): BigInt =
+        (pte.ppn.peek().litValue << 10) |
+            (pte.dirty.peek().litValue << 7) |
+            (pte.accessed.peek().litValue << 6) |
+            (pte.global.peek().litValue << 5) |
+            (pte.user.peek().litValue << 4) |
+            (pte.execute.peek().litValue << 3) |
+            (pte.write.peek().litValue << 2) |
+            (pte.read.peek().litValue << 1) |
+            pte.valid.peek().litValue
+
+    def expectPte(pte: Sv32Pte, expected: BigInt): Unit =
+        assert(pteValue(pte) == (expected & ~BigInt(0x300)))
+
     private def clearClients(): Unit = {
         dut.io.dcache.req.valid.poke(false)
         dut.io.dcache.req.bits.paddr.poke(0)
@@ -48,7 +62,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         dut.io.dcache.req.bits.data.poke(0)
         dut.io.dcache.req.bits.mask.poke(0)
         dut.io.dcache.req.bits.victimValid.poke(false)
-        dut.io.dcache.req.bits.victimPaddr.poke(0)
+        dut.io.dcache.req.bits.victimLine.poke(0)
         dut.io.dcache.req.bits.victimData.poke(0)
         dut.io.dcache.req.bits.victimDirty.poke(false)
         dut.io.icache.request.valid.poke(false)
@@ -56,7 +70,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         dut.io.icache.request.bits.paddr.poke(0)
         dut.io.icache.request.bits.uncache.poke(false)
         dut.io.icache.request.bits.victimValid.poke(false)
-        dut.io.icache.request.bits.victimPaddr.poke(0)
+        dut.io.icache.request.bits.victimLine.poke(0)
         dut.io.icache.request.bits.victimData.poke(0)
         dut.io.iptw.req.valid.poke(false)
         dut.io.iptw.req.bits.paddr.poke(0)
@@ -99,7 +113,8 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
                 val error = failing(address)
                 if (write) {
                     writes += 1
-                    if (!error) putMasked(address, data, mask)
+                    if (!error && uncache) putMasked(address, data, mask)
+                    else if (!error) putLine(address, data)
                 } else {
                     reads += 1
                 }
@@ -139,7 +154,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         dut.io.dcache.req.bits.data.poke(data)
         dut.io.dcache.req.bits.mask.poke(mask)
         dut.io.dcache.req.bits.victimValid.poke(victim.nonEmpty)
-        dut.io.dcache.req.bits.victimPaddr.poke(victim.map(_._1).getOrElse(0L))
+        dut.io.dcache.req.bits.victimLine.poke(victim.map(_._1 >> dut.p.offsetBits).getOrElse(0L))
         dut.io.dcache.req.bits.victimData.poke(victim.map(_._2).getOrElse(BigInt(0)))
         dut.io.dcache.req.bits.victimDirty.poke(victim.exists(_._3))
         waitFor(dut.io.dcache.req.ready.peek().litToBoolean)
@@ -164,7 +179,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         dut.io.icache.request.bits.paddr.poke(address)
         dut.io.icache.request.bits.uncache.poke(uncache)
         dut.io.icache.request.bits.victimValid.poke(victim.nonEmpty)
-        dut.io.icache.request.bits.victimPaddr.poke(victim.map(_._1).getOrElse(0L))
+        dut.io.icache.request.bits.victimLine.poke(victim.map(_._1 >> dut.p.offsetBits).getOrElse(0L))
         dut.io.icache.request.bits.victimData.poke(victim.map(_._2).getOrElse(BigInt(0)))
         waitFor(dut.io.icache.request.ready.peek().litToBoolean)
         tick()
@@ -184,7 +199,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         tick()
         dut.io.iptw.req.valid.poke(false)
         waitFor(dut.io.iptw.rsp.valid.peek().litToBoolean)
-        val result = dut.io.iptw.rsp.bits.data.peek().litValue
+        val result = pteValue(dut.io.iptw.rsp.bits.pte)
         val error = dut.io.iptw.rsp.bits.error.peek().litToBoolean
         tick()
         result -> error
@@ -197,7 +212,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         tick()
         dut.io.dptw.req.valid.poke(false)
         waitFor(dut.io.dptw.rsp.valid.peek().litToBoolean)
-        val result = dut.io.dptw.rsp.bits.data.peek().litValue
+        val result = pteValue(dut.io.dptw.rsp.bits.pte)
         val error = dut.io.dptw.rsp.bits.error.peek().litToBoolean
         tick()
         result -> error
@@ -224,7 +239,8 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
         )
     ) {
         s"$name: biased-exclusive moves, dirty writeback, instruction quota, PTW and uncached traffic" in {
-            simulate(new L2Cache(backend)) { dut =>
+            val params = ZirconConfig.L2CacheParams(sets = 16)
+            simulate(new L2Cache(backend, p = params)) { dut =>
                 val d = new L2CacheDriver(dut)
                 import d._
                 tick()
@@ -295,7 +311,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 )
                 assert(!storeError && bytes(uncached, 4) == uncachedData)
                 val (uncachedRead, uncachedError) = dptw(uncached)
-                assert(!uncachedError && uncachedRead == uncachedData)
+                assert(!uncachedError && uncachedRead == (uncachedData & ~BigInt(0x300)))
 
                 val failed = 0x50000L
                 failing += failed
@@ -341,7 +357,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.dcache.req.bits.data.poke(0)
                 dut.io.dcache.req.bits.mask.poke(0)
                 dut.io.dcache.req.bits.victimValid.poke(false)
-                dut.io.dcache.req.bits.victimPaddr.poke(0)
+                dut.io.dcache.req.bits.victimLine.poke(0)
                 dut.io.dcache.req.bits.victimData.poke(0)
                 dut.io.dcache.req.bits.victimDirty.poke(false)
             }
@@ -352,7 +368,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.icache.request.bits.paddr.poke(address)
                 dut.io.icache.request.bits.uncache.poke(false)
                 dut.io.icache.request.bits.victimValid.poke(false)
-                dut.io.icache.request.bits.victimPaddr.poke(0)
+                dut.io.icache.request.bits.victimLine.poke(0)
                 dut.io.icache.request.bits.victimData.poke(0)
             }
 
@@ -456,7 +472,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                     sawD = true
                 }
                 if (dut.io.dptw.rsp.valid.peek().litToBoolean) {
-                    dut.io.dptw.rsp.bits.data.expect(bytes(priorityPtw + 4, 4))
+                    expectPte(dut.io.dptw.rsp.bits.pte, bytes(priorityPtw + 4, 4))
                     sawPtw = true
                 }
                 tick()
@@ -492,7 +508,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                     sawI = true
                 }
                 if (dut.io.iptw.rsp.valid.peek().litToBoolean) {
-                    dut.io.iptw.rsp.bits.data.expect(bytes(priorityIPtw + 8, 4))
+                    expectPte(dut.io.iptw.rsp.bits.pte, bytes(priorityIPtw + 8, 4))
                     sawIPtw = true
                 }
                 tick()
@@ -517,8 +533,8 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 !dut.io.iptw.rsp.valid.peek().litToBoolean ||
                 !dut.io.dptw.rsp.valid.peek().litToBoolean
             ) tick()
-            dut.io.iptw.rsp.bits.data.expect(bytes(simultaneousIPtw + 12, 4))
-            dut.io.dptw.rsp.bits.data.expect(bytes(simultaneousDPtw + 16, 4))
+            expectPte(dut.io.iptw.rsp.bits.pte, bytes(simultaneousIPtw + 12, 4))
+            expectPte(dut.io.dptw.rsp.bits.pte, bytes(simultaneousDPtw + 16, 4))
             assert(cycle - ptwIssueCycle == 3)
             tick()
             assert(reads == simultaneousPtwReads, "simultaneous I/D PTW hits accessed lower memory")
@@ -538,11 +554,11 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             var sawDPtwMiss = false
             while (!sawIPtwMiss || !sawDPtwMiss) {
                 if (dut.io.iptw.rsp.valid.peek().litToBoolean) {
-                    dut.io.iptw.rsp.bits.data.expect(bytes(missIPtw, 4))
+                    expectPte(dut.io.iptw.rsp.bits.pte, bytes(missIPtw, 4))
                     sawIPtwMiss = true
                 }
                 if (dut.io.dptw.rsp.valid.peek().litToBoolean) {
-                    dut.io.dptw.rsp.bits.data.expect(bytes(missDPtw, 4))
+                    expectPte(dut.io.dptw.rsp.bits.pte, bytes(missDPtw, 4))
                     sawDPtwMiss = true
                 }
                 tick()
@@ -561,7 +577,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             dut.io.dcache.req.bits.data.poke(0)
             dut.io.dcache.req.bits.mask.poke(0)
             dut.io.dcache.req.bits.victimValid.poke(false)
-            dut.io.dcache.req.bits.victimPaddr.poke(0)
+            dut.io.dcache.req.bits.victimLine.poke(0)
             dut.io.dcache.req.bits.victimData.poke(0)
             dut.io.dcache.req.bits.victimDirty.poke(false)
             dut.io.dcache.rsp.ready.poke(false)

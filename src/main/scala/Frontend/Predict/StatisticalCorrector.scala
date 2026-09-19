@@ -12,24 +12,32 @@ class ScRow(p: FrontendParams) extends Bundle {
     val counters = Vec(p.fetchWidth, UInt(p.scCounterBits.W))
 }
 
+class ScBiasPredictionRow(p: FrontendParams) extends Bundle {
+    val tag = UInt(10.W)
+    val counters = Vec(p.fetchWidth, UInt(3.W))
+}
+
 class FrontendCorrectorRead(p: FrontendParams) extends Bundle {
     val biasValid = Bool()
-    val biasRow = new ScBiasRow(p)
+    val biasRow = new ScBiasPredictionRow(p)
+    val biasStrong = Vec(p.fetchWidth, Bool())
     val scValid = Vec(p.scCount, UInt(p.fetchWidth.W))
     val scRows = Vec(p.scCount, new ScRow(p))
     val scThreshold = UInt(7.W)
 }
 
+class StatisticalCorrectorIO(p: FrontendParams) extends Bundle {
+    val earlyDirections = Input(UInt(p.fetchWidth.W))
+    val meta = Input(new FrontendDirectionMeta(p))
+    val read = Input(new FrontendCorrectorRead(p))
+    val directions = Output(UInt(p.fetchWidth.W))
+    val scPredictions = Output(UInt(p.fetchWidth.W))
+    val scLowMargin = Output(UInt(p.fetchWidth.W))
+}
+
 /** Compact TAGE-SC-L-inspired Multi-GEHL corrector evaluated in IF2. */
-class StatisticalCorrector(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val earlyDirections = Input(UInt(p.fetchWidth.W))
-        val meta = Input(new FrontendDirectionMeta(p))
-        val read = Input(new FrontendCorrectorRead(p))
-        val directions = Output(UInt(p.fetchWidth.W))
-        val scPredictions = Output(UInt(p.fetchWidth.W))
-        val scLowMargin = Output(UInt(p.fetchWidth.W))
-    })
+class StatisticalCorrector(p: FrontendParams) extends RawModule {
+    val io = IO(new StatisticalCorrectorIO(p))
 
     val biasDirections = Wire(Vec(p.fetchWidth, Bool()))
     val directions = Wire(Vec(p.fetchWidth, Bool()))
@@ -53,9 +61,9 @@ class StatisticalCorrector(p: FrontendParams) extends Module {
     for (rank <- 0 until p.fetchWidth) {
         /* Proven PC Bias */
         val biasRow = io.read.biasRow
-        val biasStrong = biasRow.counters(rank) <= 1.U || biasRow.counters(rank) >= 6.U
-        val useBias = io.read.biasValid && biasRow.tag === io.meta.scBiasTag && biasStrong &&
-            biasRow.confidence(rank) >= 4.U
+        val counterStrong = biasRow.counters(rank) <= 1.U || biasRow.counters(rank) >= 6.U
+        val useBias = io.read.biasValid && biasRow.tag === io.meta.scBiasTag && counterStrong &&
+            io.read.biasStrong(rank)
         biasDirections(rank) := Mux(useBias, biasRow.counters(rank)(2), io.earlyDirections(rank))
 
         /* Multi-GEHL Statistical Correction */

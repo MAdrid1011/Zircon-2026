@@ -1,6 +1,6 @@
 import chisel3._
 import chisel3.util.log2Ceil
-import ZirconConfig.LoadPipelineParams
+import ZirconConfig.{CommitParams, LoadPipelineParams}
 import _root_.circt.stage.ChiselStage
 
 class StoreRegfileIO(p: LoadPipelineParams) extends Bundle {
@@ -13,7 +13,7 @@ class StoreRegfileIO(p: LoadPipelineParams) extends Bundle {
 
 class StoreAddressResult(p: LoadPipelineParams) extends Bundle {
     val sqIdx = UInt(p.sqWidth.W)
-    val robIdx = UInt(p.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
     val size = UInt(2.W)
@@ -24,7 +24,7 @@ class StoreAddressResult(p: LoadPipelineParams) extends Bundle {
 
 class StoreDataResult(p: LoadPipelineParams) extends Bundle {
     val sqIdx = UInt(p.sqWidth.W)
-    val robIdx = UInt(p.robWidth.W)
+    val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
     val size = UInt(2.W)
     // The SQ aligns raw register data after joining it with the STA result.
     val data = UInt(32.W)

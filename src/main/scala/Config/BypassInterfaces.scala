@@ -2,12 +2,6 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.BackendParams
 
-/** Physical-register result carried by every WB bypass producer. */
-class BypassResult(val p: BackendParams = BackendParams()) extends Bundle {
-    val prd = UInt(p.tagWidth.W)
-    val data = UInt(32.W)
-}
-
 /** One RF-stage operand lookup against all results promised for the next WB cycle. */
 class BypassQuery(val p: BackendParams = BackendParams()) extends Bundle {
     val prs = UInt(p.tagWidth.W)
@@ -25,13 +19,13 @@ class BypassConsumerPort(val numSources: Int, val p: BackendParams = BackendPara
 /** A producer announces the tag that will accompany its registered result next cycle. */
 class BypassProducerPort(val p: BackendParams = BackendParams()) extends Bundle {
     val nextWb = Output(Valid(UInt(p.tagWidth.W)))
-    val result = Output(Valid(new BypassResult(p)))
+    val result = Output(UInt(32.W))
 }
 
 /** The registered WB value paired with its one-cycle-ahead tag announcement. */
 class BypassSource(val p: BackendParams = BackendParams()) extends Bundle {
     val nextWb = Valid(UInt(p.tagWidth.W))
-    val result = Valid(new BypassResult(p))
+    val result = UInt(32.W)
 }
 
 /** A compute pipeline consumes operands in EX/EX1 and produces one result in WB. */

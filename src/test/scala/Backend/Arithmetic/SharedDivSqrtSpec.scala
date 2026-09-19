@@ -78,7 +78,6 @@ class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
                         val clue = s"cycle=$cycles op=${y.op} rm=${y.rm} a=${y.a.toString(16)} b=${y.b.toString(16)}"
                         dut.io.out.bits.res.expect(y.result, clue)
                         dut.io.out.bits.fflags.expect(y.flags, clue)
-                        dut.io.out.bits.dstIsFp.expect((y.op >= 4).B, clue)
                         dut.io.out.bits.tag.expect(y.tag, clue)
                     }
                 }

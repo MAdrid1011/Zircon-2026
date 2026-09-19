@@ -40,6 +40,20 @@ class AXI4MasterIO extends Bundle {
     val b = Flipped(Decoupled(new AXI4WriteResponse))
 }
 
+class L2AXI4BridgeIO(p: L2CacheParams) extends Bundle {
+    val memory = Flipped(new L2MemoryIO(p))
+    val axi = new AXI4MasterIO
+}
+
+class L2BridgeRequest(p: L2CacheParams) extends Bundle {
+    val paddr = UInt(34.W)
+    val write = Bool()
+    val uncache = Bool()
+    val size = UInt(2.W)
+    val data = UInt(p.lineBits.W)
+    val mask = UInt(4.W)
+}
+
 /** Converts one complete L2 lower-memory transaction into AXI4 transfers.
   *
   * The L2 currently permits one lower-memory transaction at a time, so the bridge
@@ -55,16 +69,13 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
     require(p.lineBytes % axiBytes == 0)
     require(isPow2(lineBeats))
 
-    val io = IO(new Bundle {
-        val memory = Flipped(new L2MemoryIO(p))
-        val axi = new AXI4MasterIO
-    })
+    val io = IO(new L2AXI4BridgeIO(p))
 
     val idle :: readAddress :: readData :: writeAddress :: writeData :: writeResponse :: respond :: Nil = Enum(7)
     val state = RegInit(idle)
-    val request = Reg(new L2MemoryRequest(p))
+    val request = RegInit(0.U.asTypeOf(new L2BridgeRequest(p)))
     val beat = RegInit(0.U(beatBits.W))
-    val readBeats = Reg(Vec(lineBeats, UInt(32.W)))
+    val readBeats = RegInit(VecInit.fill(lineBeats)(0.U(32.W)))
     val responseError = RegInit(false.B)
 
     val lastBeat = Mux(request.uncache, 0.U(beatBits.W), (lineBeats - 1).U(beatBits.W))
@@ -127,14 +138,18 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
             )
             when(io.memory.req.bits.write) {
                 assert(
-                    io.memory.req.bits.mask(p.lineBytes - 1, 4) === 0.U &&
-                        io.memory.req.bits.mask(3, 0) === uncachedMask(3, 0),
+                    io.memory.req.bits.mask === uncachedMask(3, 0),
                     "L2AXI4Bridge: uncached write strobe does not match its address and size"
                 )
             }
         }
 
-        request := io.memory.req.bits
+        request.paddr := io.memory.req.bits.paddr
+        request.write := io.memory.req.bits.write
+        request.uncache := io.memory.req.bits.uncache
+        request.size := io.memory.req.bits.size
+        request.data := io.memory.req.bits.data
+        request.mask := io.memory.req.bits.mask
         beat := 0.U
         readBeats.foreach(_ := 0.U)
         responseError := false.B
@@ -154,9 +169,9 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
             Mux(request.size === 1.U, shiftedData & "h0000ffff".U, shiftedData)
         )
 
-        assert(io.axi.r.bits.id === 0.U, "L2AXI4Bridge: unexpected AXI read ID")
         readBeats(beat) := Mux(request.uncache, selectedData, io.axi.r.bits.data)
-        responseError := responseError || io.axi.r.bits.resp(1) || (io.axi.r.bits.last =/= expectedLast)
+        responseError := responseError || io.axi.r.bits.id.orR || io.axi.r.bits.resp.orR ||
+            (io.axi.r.bits.last =/= expectedLast)
         when(io.axi.r.bits.last || expectedLast) {
             state := respond
         }.otherwise {
@@ -178,8 +193,7 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
     }
 
     when(io.axi.b.fire) {
-        assert(io.axi.b.bits.id === 0.U, "L2AXI4Bridge: unexpected AXI write ID")
-        responseError := responseError || io.axi.b.bits.resp(1)
+        responseError := responseError || io.axi.b.bits.id.orR || io.axi.b.bits.resp.orR
         state := respond
     }
 

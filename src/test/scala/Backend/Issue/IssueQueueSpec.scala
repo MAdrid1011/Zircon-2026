@@ -517,7 +517,6 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.instruction.rinfo.src(source).isFp.poke(false)
                 dut.io.instruction.rinfo.src(source).valid.poke(source < 2)
                 dut.io.physical.prs(source).poke(10 + source)
-                dut.io.physical.sourceIndependent(source).poke(source != 0)
                 dut.io.physical.sourceReady(source).poke(source != 1)
                 dut.io.physical.sourceSpecMask(source).poke(0)
             }

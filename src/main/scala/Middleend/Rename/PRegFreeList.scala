@@ -1,6 +1,17 @@
 import chisel3._
 import chisel3.util._
 
+class PRegFreeListIO(numPhys: Int, renameWidth: Int, commitWidth: Int) extends Bundle {
+    private val indexWidth = log2Ceil(numPhys)
+    val request = Input(Vec(renameWidth, Bool()))
+    val allocate = Input(Vec(renameWidth, Bool()))
+    val available = Output(Bool())
+    val availablePrefix = Output(UInt(renameWidth.W))
+    val prd = Output(Vec(renameWidth, UInt(indexWidth.W)))
+    val release = Input(Vec(commitWidth, Valid(UInt(indexWidth.W))))
+    val restore = Input(Bool())
+}
+
 /** Resource-exchange ring derived from Zircon-2024.
   *
   * Divisible geometries keep the original banked allocation order and compact
@@ -14,15 +25,7 @@ class PRegFreeList(numPhys: Int, renameWidth: Int, commitWidth: Int) extends Mod
     private val banks = math.max(renameWidth, commitWidth)
     require(depth >= banks)
 
-    val io = IO(new Bundle {
-        val request = Input(Vec(renameWidth, Bool()))
-        val allocate = Input(Vec(renameWidth, Bool()))
-        val available = Output(Bool())
-        val availablePrefix = Output(UInt(renameWidth.W))
-        val prd = Output(Vec(renameWidth, UInt(width.W)))
-        val release = Input(Vec(commitWidth, Valid(UInt(width.W))))
-        val restore = Input(Bool())
-    })
+    val io = IO(new PRegFreeListIO(numPhys, renameWidth, commitWidth))
 
     if (depth % banks == 0) {
         val fList = Module(new ClusterIndexFIFO(

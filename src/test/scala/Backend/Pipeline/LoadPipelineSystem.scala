@@ -79,8 +79,10 @@ class LoadPipelineSystem(
     }
     pipe.connectCache(cache.io)
     cache.io.load(1 - pipe.cacheLane) <> io.other
-    cache.io.forward(1 - pipe.cacheLane).result.valid := true.B
-    cache.io.forward(1 - pipe.cacheLane).result.bits := 0.U.asTypeOf(new DForwardResult)
+    val otherForward = cache.io.forward(1 - pipe.cacheLane)
+    otherForward.result.valid := RegNext(otherForward.query.valid, false.B)
+    otherForward.result.bits := 0.U.asTypeOf(new DForwardResult)
+    otherForward.result.bits.slot := RegEnable(otherForward.query.bits.slot, otherForward.query.valid)
     cache.io.store <> io.store
     io.l2 <> cache.io.l2
     cache.io.flush := io.cmt.flush

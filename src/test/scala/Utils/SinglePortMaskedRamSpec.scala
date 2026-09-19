@@ -30,7 +30,14 @@ class SinglePortMaskedRamSpec extends AnyFreeSpec with ChiselSim {
                 val memory = Array.fill(depth)(BigInt(0))
                 val laneMask = (BigInt(1) << bits) - 1
                 var address = 0
-                var valid = false
+                for (initialAddress <- 0 until depth) {
+                    d.io.enable.poke(true)
+                    d.io.write.poke(true)
+                    d.io.address.poke(initialAddress)
+                    d.io.dataIn.poke(0)
+                    d.io.mask.poke((BigInt(1) << lanes) - 1)
+                    d.clock.step()
+                }
                 for (cycle <- 0 until 300) {
                     val next = random.nextInt(depth)
                     val enable = cycle == 0 || random.nextInt(3) != 0
@@ -43,7 +50,7 @@ class SinglePortMaskedRamSpec extends AnyFreeSpec with ChiselSim {
                     d.io.dataIn.poke(data)
                     d.io.mask.poke(mask)
                     // Changing the input address alone must not select another word.
-                    if (valid) d.io.dataOut.expect(memory(address))
+                    d.io.dataOut.expect(memory(address))
                     if (enable) {
                         if (write) {
                             for (i <- 0 until lanes if (mask & (1 << i)) != 0) {
@@ -52,7 +59,6 @@ class SinglePortMaskedRamSpec extends AnyFreeSpec with ChiselSim {
                             }
                         }
                         address = next
-                        valid = true
                     }
                     d.clock.step()
                     // The legacy registered-address template exposes newly written lanes after the edge.

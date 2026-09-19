@@ -40,6 +40,14 @@ class DecoderTestTop(support: DecodeSupport) extends Module {
     io.out := decoder.io.out
 }
 
+class DecoderPassthroughTestTop extends Module {
+    private val p = FrontendParams()
+    val io = IO(new DecoderIO(p))
+    val decoder = Module(new Decoder(p))
+    decoder.io.in := io.in
+    io.out := decoder.io.out
+}
+
 class DecoderSpec extends AnyFreeSpec with ChiselSim {
     import DecoderReference._
 
@@ -167,7 +175,7 @@ class DecoderSpec extends AnyFreeSpec with ChiselSim {
     }
 
     "incoming faults dominate decode and all non-decode instruction fields pass through" in {
-        simulate(new Decoder) { d =>
+        simulate(new DecoderPassthroughTestTop) { d =>
             d.io.in.pc.poke(0x80001004L)
             d.io.in.kind.poke(6)
             d.io.in.predictedTaken.poke(true)

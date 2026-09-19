@@ -55,8 +55,9 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     }
 }
 
-class ROBCompletion(bp: BackendParams) extends Bundle {
-    val robIdx = UInt(bp.robWidth.W)
+/** Completion payload after Commit has reduced the ROB identity to a physical slot. */
+class ROBWrite(addressWidth: Int) extends Bundle {
+    val address = UInt(addressWidth.W)
     val data = UInt(32.W)
     val exception = new BackendException
     val fflags = UInt(5.W)
@@ -70,22 +71,22 @@ class ReorderBufferIO(
     cp: CommitParams,
     simulationDebug: Boolean,
 ) extends Bundle {
-    val request = Input(new MiddleendCommitRequest(fp, dispatchWidth))
+    private val addressWidth = CommitIndex.addressWidth(cp.robEntries)
+
     val availablePrefix = Output(UInt(dispatchWidth.W))
     val allocation = Output(Vec(dispatchWidth, UInt(bp.robWidth.W)))
     val enqueue = Input(new MiddleendCommitEnqueue(fp, bp, dispatchWidth))
 
-    val completion = Input(Vec(cp.completionPorts, Valid(new ROBCompletion(bp))))
-    val readIdx = Input(Vec(cp.robReadPorts, UInt(bp.robWidth.W)))
+    val completion = Input(Vec(cp.completionPorts, Valid(new ROBWrite(addressWidth))))
+    val readIdx = Input(Vec(cp.robReadPorts, UInt(addressWidth.W)))
     val readPc = Output(Vec(cp.robReadPorts, UInt(32.W)))
     val readEntry = Output(Vec(cp.robReadPorts, new ROBEntry(fp, bp)))
 
     val head = Output(Vec(cp.width, Valid(new ROBEntry(fp, bp))))
-    val headIdx = Output(Vec(cp.width, UInt(bp.robWidth.W)))
-    val headData = if (simulationDebug) Some(Output(Vec(cp.width, UInt(32.W)))) else None
     val pop = Input(UInt(cp.width.W))
     val clear = Input(Bool())
     val fullCycles = Output(UInt(64.W))
+    val headData = if (simulationDebug) Some(Output(Vec(cp.width, UInt(32.W)))) else None
 }
 
 /** 48-entry banked ROB with parallel completion and a three-entry head window. */
@@ -135,14 +136,17 @@ class ReorderBuffer(
             entry.systemOp <= SystemOp.CSRRCI.U
         entry.complete := incoming.context.instruction.exception.valid || (entry.isSystem && !csrSystem)
         entry.exception.valid := incoming.context.instruction.exception.valid
-        entry.exception.cause := incoming.context.instruction.exception.cause
+        entry.exception.cause := Mux(
+            incoming.context.instruction.exception.cause(4),
+            15.U,
+            incoming.context.instruction.exception.cause(3, 0),
+        )
         entry.exception.tval := incoming.context.instruction.exception.tval
         queue.io.enq(lane).valid := io.enqueue.valid(lane) && !io.clear
         queue.io.enq(lane).bits := entry
         io.allocation(lane) := CommitIndex.encode(queue.io.enqIdx(lane), cp.robEntries, banks, bp.robWidth)
     }
     when(!io.clear) {
-        assert((io.enqueue.valid & ~io.request.valid) === 0.U, "ROB enqueue must have a matching resource request")
         assert((io.enqueue.valid & ~io.availablePrefix) === 0.U, "ROB enqueue exceeded available capacity")
     }
 
@@ -154,28 +158,12 @@ class ReorderBuffer(
         update.fflags := completion.bits.fflags
         update.fpFlagsValid := completion.bits.fpFlagsValid
         queue.io.wen(port) := completion.valid && !io.clear
-        queue.io.widx(port) := CommitIndex.decode(completion.bits.robIdx, cp.robEntries, banks)
+        queue.io.widx(port) := CommitIndex.decodeAddress(completion.bits.address, cp.robEntries, banks)
         queue.io.wdata(port) := update
     }
 
-    if (simulationDebug) {
-        val bankWidth = log2Ceil(banks)
-        val rowWidth = log2Ceil(cp.robEntries / banks)
-        val resultMemory = Mem(1 << (bankWidth + rowWidth), UInt(32.W))
-        def resultIndex(index: UInt): UInt = index(bankWidth + rowWidth - 1, 0)
-
-        for (port <- 0 until cp.completionPorts) {
-            when(io.completion(port).valid && !io.clear) {
-                resultMemory(resultIndex(io.completion(port).bits.robIdx)) := io.completion(port).bits.data
-            }
-        }
-        for (lane <- 0 until cp.width) {
-            io.headData.get(lane) := resultMemory(resultIndex(io.headIdx(lane)))
-        }
-    }
-
     for (port <- 0 until cp.robReadPorts) {
-        queue.io.ridx(port) := CommitIndex.decode(io.readIdx(port), cp.robEntries, banks)
+        queue.io.ridx(port) := CommitIndex.decodeAddress(io.readIdx(port), cp.robEntries, banks)
         io.readPc(port) := queue.io.rdata(port).pc
         io.readEntry(port) := queue.io.rdata(port)
     }
@@ -183,7 +171,6 @@ class ReorderBuffer(
     for (lane <- 0 until cp.width) {
         io.head(lane).valid := queue.io.deq(lane).valid
         io.head(lane).bits := queue.io.deq(lane).bits
-        io.headIdx(lane) := CommitIndex.encode(queue.io.deqIdx(lane), cp.robEntries, banks, bp.robWidth)
         queue.io.deq(lane).ready := io.pop(lane)
         when(io.pop(lane) && !io.clear) {
             assert(queue.io.deq(lane).valid && queue.io.deq(lane).bits.complete)
@@ -197,4 +184,26 @@ class ReorderBuffer(
     val fullCycles = RegInit(0.U(64.W))
     when(!ready) { fullCycles := fullCycles + 1.U }
     io.fullCycles := fullCycles
+
+    /* Simulation-only result values are isolated from the architectural ROB state. */
+    if (simulationDebug) {
+        val bankWidth = log2Ceil(banks)
+        val rowWidth = log2Ceil(cp.robEntries / banks)
+        val resultMemory = Module(new AsyncRegRam(
+            UInt(32.W),
+            1 << (bankWidth + rowWidth),
+            cp.completionPorts,
+            cp.width,
+        ))
+
+        for (port <- 0 until cp.completionPorts) {
+            resultMemory.io.wen(port) := io.completion(port).valid && !io.clear
+            resultMemory.io.waddr(port) := io.completion(port).bits.address
+            resultMemory.io.wdata(port) := io.completion(port).bits.data
+        }
+        for (lane <- 0 until cp.width) {
+            resultMemory.io.raddr(lane) := queue.io.deq(lane).bits.robIdx(bankWidth + rowWidth - 1, 0)
+            io.headData.get(lane) := resultMemory.io.rdata(lane)
+        }
+    }
 }

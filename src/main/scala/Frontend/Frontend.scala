@@ -1,37 +1,34 @@
 import chisel3._
 import chisel3.util._
-import ZirconConfig.{FrontendParams, ICacheParams}
+import ZirconConfig.{FrontendParams, ICacheParams, IssueParams}
 
 class FrontendMemoryIO(c: ICacheParams) extends Bundle {
     val l2 = new ICacheL2IO(c)
 }
 
-class FrontendIO(p: FrontendParams, c: ICacheParams, tlbEnabled: Boolean) extends Bundle {
+class FrontendIO(p: FrontendParams, c: ICacheParams, tlbEnabled: Boolean, dispatchWidth: Int) extends Bundle {
     val mmu = new IMMUIO(p)
     val tlb = if (tlbEnabled) Some(new TLBManagementIO) else None
     val mem = new FrontendMemoryIO(c)
-    val middle = new FrontendMiddleIO(p)
+    val middle = new FrontendMiddleIO(p, dispatchWidth)
     val commit = new FrontendCommitIO(p)
-    val observe = if (p.observe) Some(new FrontendObserveIO(p)) else None
-    val maintenance = new Bundle {
-        val request = Input(Bool())
-        val done = Output(Bool())
-    }
+    val maintenance = Flipped(new CacheMaintenanceIO)
+    val observe = if (p.observe) Some(new FrontendObserveIO) else None
 }
 
 class Frontend(
     p: FrontendParams = FrontendParams(),
     c: ICacheParams = ICacheParams(),
     tlbEnabled: Boolean = true,
+    issue: IssueParams = IssueParams(),
 ) extends Module {
-    val io = IO(new FrontendIO(p, c, tlbEnabled))
+    val io = IO(new FrontendIO(p, c, tlbEnabled, issue.dispatchWidth))
     val npc = Module(new NPC(p))
     val pr = Module(new Predict(p))
     val ic = Module(new ICache(p, c.copy(tlbEnabled = tlbEnabled)))
     val fields = Seq.fill(p.fetchWidth)(Module(new PredecodeFields))
     val pd = Module(new PreDecoders(p))
-    val fq = Module(new FetchQueue(p))
-    val pc = Reg(UInt(32.W))
+    val fq = Module(new FetchQueue(p, issue.dispatchWidth))
 
     val if1Fire = Wire(Bool())
     val if2Fire = Wire(Bool())
@@ -57,32 +54,30 @@ class Frontend(
     npc.io.pd.bits.pc := pd.io.out.nextPc
     npc.io.pr.valid := if1Fire
     npc.io.pr.bits.pc := pr.io.fc.out.predict.early.nextPc
-    npc.io.fte.space := !validIF1 || if1Fire || flushYounger
+    npc.io.space := !validIF1 || if1Fire || flushYounger
     ic.io.pp.request <> npc.io.request
     instPkgPF.fetchToken := npc.io.request.bits.token
     instPkgPF.startPc := npc.io.request.bits.pc
     when(if1Fire || flushYounger) { validIF1 := false.B }
     when(ic.io.pp.request.fire) {
-        pc := npc.io.request.bits.pc
         instPkgIF1 := instPkgPF
         validIF1 := true.B
     }
 
     /* Fetch Stage 1 */
-    val instPkgIF2In = WireDefault(instPkgIF1)
     pr.io.fc.instPkg := instPkgIF1
     pr.io.fte.accept := if1Fire
     pr.io.fte.flush := flushYounger
-    instPkgIF2In := pr.io.fc.out
     val instPkgIF2 = Reg(new FrontendPackage(p))
     val validIF2 = RegInit(false.B)
     if1Fire := validIF1 && (!validIF2 || if2Fire) && !flushYounger
     when(if2Fire || flushYounger) { validIF2 := false.B }
-    when(if1Fire) { instPkgIF2 := instPkgIF2In; validIF2 := true.B }
+    when(if1Fire) { instPkgIF2 := pr.io.fc.out; validIF2 := true.B }
 
     /* Fetch Stage 2 */
     val instPkgPDIn = WireDefault(instPkgIF2)
     pr.io.lookup.in := instPkgIF2
+    pr.io.lookup.mainTag := instPkgIF2.startPc(31, p.blockBits + log2Ceil(p.btbSets))
     fields.zip(ic.io.pp.response.bits.inst).foreach { case (decoder, inst) => decoder.io.inst := inst }
     instPkgPDIn.predict.main := pr.io.lookup.prediction
     instPkgPDIn.predict.directions := pr.io.lookup.directions
@@ -121,10 +116,19 @@ class Frontend(
     pr.io.pd.valid := pdFlush
     pr.io.pd.bits := pd.io.repair
     when(pdFlush && !pdFire) { pdRepairApplied := true.B }
-    fq.io.enq.valid := validPD && !cmtFlush && !io.maintenance.request
-    fq.io.enq.bits := instPkgFQIn
+    for (slot <- 0 until p.fetchWidth) {
+        val earlier = if (slot == 0) false.B else instPkgFQIn.mask(slot - 1, 0).orR
+        val later = if (slot + 1 == p.fetchWidth) false.B else instPkgFQIn.mask(p.fetchWidth - 1, slot + 1).orR
+        fq.io.enq(slot).valid := validPD && instPkgFQIn.mask(slot) && !cmtFlush && !io.maintenance.request
+        fq.io.enq(slot).bits.fetchToken := instPkgFQIn.fetchToken
+        fq.io.enq(slot).bits.slot := slot.U
+        fq.io.enq(slot).bits.packetStart := !earlier
+        fq.io.enq(slot).bits.packetEnd := !later
+        fq.io.enq(slot).bits.instruction := instPkgFQIn.instructions(slot)
+        fq.io.enq(slot).bits.record := instPkgFQIn.record
+    }
     fq.io.flush := cmtFlush
-    pdFire := fq.io.enq.fire
+    pdFire := validPD && fq.io.enq(0).ready && !cmtFlush && !io.maintenance.request
     io.middle.out <> fq.io.out
 
     /* Commit Feedback */
@@ -135,54 +139,16 @@ class Frontend(
     /* Observation */
     if (p.observe) {
         val observe = io.observe.get
-        observe.fetchRequest.valid := ic.io.pp.request.valid
-        observe.fetchRequest.bits := ic.io.pp.request.bits
-        observe.fetchRequestReady := ic.io.pp.request.ready
-        observe.fetchResponse.valid := ic.io.pp.response.valid
-        observe.fetchResponse.bits := ic.io.pp.response.bits
-        observe.fetchResponseReady := ic.io.pp.response.ready
         observe.icache := ic.io.dbg.get
-        observe.icacheMiss := ic.io.miss
-        val events = Seq(
-            (if1Fire, instPkgIF1.fetchToken, pc, pr.io.fc.out.predict.early, pr.io.fc.out.predict.earlyDirections),
-            (if2Fire, instPkgIF2.fetchToken, instPkgIF2.startPc, pr.io.lookup.prediction, pr.io.lookup.directions),
-            (pdFire, instPkgPD.fetchToken, pd.io.out.startPc, pd.io.prediction, instPkgPD.predict.directions)
-        )
-        observe.stages.zip(events).foreach { case (out, (valid, token, pc, prediction, directions)) =>
-            out.valid := valid
-            out.bits.token := token
-            out.bits.pc := pc
-            out.bits.prediction := prediction
-            out.bits.directions := directions
-        }
-        observe.cancel.valid := flushYounger
-        observe.cancel.bits.global := cmtFlush
-        observe.cancel.bits.boundaryToken := instPkgPD.fetchToken
-        observe.cancel.bits.target := Mux(cmtFlush, io.commit.rob.redirect.bits.pc, instPkgFQIn.nextPc)
-        observe.repair.valid := pdFlush
-        observe.repair.bits.token := instPkgPD.fetchToken
-        observe.repair.bits.pc := pd.io.out.startPc
-        observe.repair.bits.prediction := pd.io.prediction
-        observe.repair.bits.directions := instPkgPD.predict.directions
-        observe.history := pr.io.dbg.get.history
-        observe.rasTop := pr.io.dbg.get.rasTop
-        observe.rasCount := pr.io.dbg.get.rasCount
-        observe.aheadValid := pr.io.dbg.get.aheadValid
-        observe.ftqUsed := io.commit.ftq.used.get
-        observe.ftqEnqIdx := 0.U
-        observe.ftqBlocked := false.B
-        observe.btbReadSkipped := pr.io.dbg.get.btbReadSkipped
-        observe.training := io.commit.ftq.train.valid
         observe.loopTraining := pr.io.dbg.get.loopTraining
         observe.loopProvider := pr.io.dbg.get.loopProvider
         observe.loopCorrect := pr.io.dbg.get.loopCorrect
 
         val fqBlockedCycles = RegInit(0.U(64.W))
         val fqEmptyCycles = RegInit(0.U(64.W))
-        when(validPD && !fq.io.enq.ready && !cmtFlush) { fqBlockedCycles := fqBlockedCycles + 1.U }
-        when(!fq.io.out.valid) { fqEmptyCycles := fqEmptyCycles + 1.U }
+        when(validPD && !fq.io.enq(0).ready && !cmtFlush) { fqBlockedCycles := fqBlockedCycles + 1.U }
+        when(!fq.io.out.map(_.valid).reduce(_ || _)) { fqEmptyCycles := fqEmptyCycles + 1.U }
         observe.fqBlockedCycles := fqBlockedCycles
         observe.fqEmptyCycles := fqEmptyCycles
-        observe.ftqBlockedCycles := 0.U
     }
 }

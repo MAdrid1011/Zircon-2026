@@ -12,7 +12,7 @@ class FrontendStateSnapshot(p: FrontendParams) extends Bundle {
 }
 
 class FrontendStateEvent(p: FrontendParams) extends Bundle {
-    val pc = UInt(32.W)
+    val pcWord = UInt(30.W)
     val prediction = new FrontendPrediction(p)
 }
 
@@ -21,16 +21,18 @@ class FrontendStateRepair(p: FrontendParams) extends Bundle {
     val event = new FrontendStateEvent(p)
 }
 
+class SpeculativeStateIO(p: FrontendParams) extends Bundle {
+    val early = Flipped(Valid(new FrontendStateEvent(p)))
+    val repair = Flipped(Valid(new FrontendStateRepair(p)))
+    val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
+    val flush = Input(Bool())
+    val snapshot = Output(new FrontendStateSnapshot(p))
+    val folds = Output(Vec(p.tageCount, UInt(p.hashBits.W)))
+}
+
 /** A complete PD snapshot includes overwritten RAS data, not only its pointer. */
 class SpeculativeState(p: FrontendParams) extends Module {
-    val io = IO(new Bundle {
-        val early = Flipped(Valid(new FrontendStateEvent(p)))
-        val repair = Flipped(Valid(new FrontendStateRepair(p)))
-        val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
-        val flush = Input(Bool())
-        val snapshot = Output(new FrontendStateSnapshot(p))
-        val folds = Output(Vec(p.tageCount, UInt(p.hashBits.W)))
-    })
+    val io = IO(new SpeculativeStateIO(p))
 
     /* Speculative and Committed State */
     val speculative = RegInit(0.U.asTypeOf(new FrontendStateSnapshot(p)))
@@ -41,12 +43,13 @@ class SpeculativeState(p: FrontendParams) extends Module {
         val next = WireDefault(before)
         val prediction = event.prediction
         val selected = prediction.taken.asBools
+        val pc = Cat(event.pcWord, 0.U(2.W))
 
         // Decode each slot before selecting the RAS operation.
         val returnPc = Mux1H(
             selected,
             (0 until p.fetchWidth).map(i =>
-                FrontendMath.slotPc(event.pc, i, p) + 4.U
+                FrontendMath.slotPc(pc, i, p)(31, 2) + 1.U
             )
         )
         val pop = selected.zip(prediction.kinds).map { case (taken, kind) =>
@@ -58,7 +61,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
         val pushOnly = push && !pop
         val popOnly = pop && !push
         val previousTop = FrontendMath.read(before.ras.toSeq, (before.pointer - 2.U)(p.rasBits - 1, 0))
-        next.top := Mux(push, returnPc(31, 2), Mux(pop, Mux(before.count > 1.U, previousTop, 0.U), before.top))
+        next.top := Mux(push, returnPc, Mux(pop, Mux(before.count > 1.U, previousTop, 0.U), before.top))
         when(pushOnly) { next.pointer := before.pointer + 1.U }
         when(popOnly) { next.pointer := before.pointer - 1.U }
         when(pushOnly && before.count < p.rasDepth.U) { next.count := before.count + 1.U }
@@ -67,11 +70,11 @@ class SpeculativeState(p: FrontendParams) extends Module {
             // Decode both positions before the prediction arrives; a coroutine replaces the top.
             val pushHere = pushOnly && before.pointer === i.U
             val replaceHere = push && pop && before.pointer === ((i + 1) % p.rasDepth).U
-            when(pushHere || replaceHere) { next.ras(i) := returnPc(31, 2) }
+            when(pushHere || replaceHere) { next.ras(i) := returnPc }
         }
 
         // Update the full history and its incremental folds from the same block signature.
-        val signature = FrontendMath.signature(event.pc, prediction, p)
+        val signature = FrontendMath.signature(pc, prediction, p)
         next.history := FrontendMath.append(before.history, signature, p)
         def rotate(value: UInt, shift: Int): UInt = {
             val amount = shift % p.hashBits

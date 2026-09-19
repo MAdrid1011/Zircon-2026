@@ -18,20 +18,22 @@ class TLBPermissions extends Bundle {
     val dirty = Bool()
 }
 
-class TLBLookupRequest(p: TLBParams) extends Bundle {
-    val vaddr = UInt(p.vaddrBits.W)
+class TLBLookupRequest(p: TLBParams, vaddrLowBits: Int) extends Bundle {
+    require(vaddrLowBits >= 0 && vaddrLowBits < p.vaddrBits)
+    val vaddr = UInt((p.vaddrBits - vaddrLowBits).W)
 }
 
-class TLBLookupResponse(p: TLBParams) extends Bundle {
+class TLBLookupResponse(p: TLBParams, paddrLowBits: Int = 0) extends Bundle {
+    require(paddrLowBits >= 0 && paddrLowBits < p.paddrBits)
     val hit = Bool()
-    val paddr = UInt(p.paddrBits.W)
+    val paddr = UInt((p.paddrBits - paddrLowBits).W)
     val pma = UInt(p.pmaBits.W)
     val permissions = new TLBPermissions
     val superpage = Bool()
 }
 
 class TLBRefill(p: TLBParams) extends Bundle {
-    val vaddr = UInt(p.vaddrBits.W)
+    val vpn = UInt((p.vaddrBits - 12).W)
     val ppn = UInt(p.ppnBits.W)
     val asid = UInt(p.asidBits.W)
     val global = Bool()
@@ -66,18 +68,20 @@ private class TLB4MEntry(p: TLBParams) extends Bundle {
     val permissions = new TLBPermissions
 }
 
+class TLBIO(p: TLBParams, paddrLowBits: Int) extends Bundle {
+    val lookup = Flipped(Vec(p.queryPorts, Valid(new TLBLookupRequest(p, paddrLowBits))))
+    val response = Output(Vec(p.queryPorts, new TLBLookupResponse(p, paddrLowBits)))
+    val refill = Flipped(Valid(new TLBRefill(p)))
+    val scopeUpdate = Flipped(Valid(new TLBScopeUpdate(p)))
+    val flush = Input(Bool())
+}
+
 /** Small combinational Sv32 TLB with a set-associative 4 KiB bank and a fully associative 4 MiB bank.
   * `inScope` removes ASID/global comparisons from the lookup path. The owner must pulse `scopeUpdate`
   * with the accepted satp ASID whenever the active address space changes.
   */
-class TLB(val p: TLBParams = TLBParams()) extends Module {
-    val io = IO(new Bundle {
-        val lookup = Flipped(Vec(p.queryPorts, Valid(new TLBLookupRequest(p))))
-        val response = Output(Vec(p.queryPorts, new TLBLookupResponse(p)))
-        val refill = Flipped(Valid(new TLBRefill(p)))
-        val scopeUpdate = Flipped(Valid(new TLBScopeUpdate(p)))
-        val flush = Input(Bool())
-    })
+class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Module {
+    val io = IO(new TLBIO(p, paddrLowBits))
 
     val currentAsid = RegInit(0.U(p.asidBits.W))
 
@@ -108,15 +112,17 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
     val normalLookupSet = Wire(Vec(p.queryPorts, UInt(p.setBits.W)))
     for (port <- 0 until p.queryPorts) {
         val request = io.lookup(port)
-        val index = setIndex(request.bits.vaddr)
+        val vaddr = if (paddrLowBits == 0) request.bits.vaddr
+        else Cat(request.bits.vaddr, 0.U(paddrLowBits.W))
+        val index = setIndex(vaddr)
         normalLookupSet(port) := index
         for (way <- 0 until p.ways) {
             normalLookupHit(port)(way) := request.valid && normal(index)(way).inScope &&
-                normal(index)(way).tag === normalTag(request.bits.vaddr)
+                normal(index)(way).tag === normalTag(vaddr)
         }
         for (entry <- 0 until p.superEntries) {
             superLookupHit(port)(entry) := request.valid && superpage(entry).inScope &&
-                superpage(entry).vpn1 === request.bits.vaddr(31, 22)
+                superpage(entry).vpn1 === vaddr(31, 22)
         }
 
         val normalHit = normalLookupHit(port).asUInt.orR
@@ -126,11 +132,12 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
         val response = io.response(port)
         response.hit := normalHit || superHit
         response.superpage := superHit
-        response.paddr := Mux(
+        val physicalAddress = Mux(
             superHit,
-            Cat(superPayload.ppn1, request.bits.vaddr(21, 0)),
-            Cat(normalPayload.ppn, request.bits.vaddr(11, 0))
+            Cat(superPayload.ppn1, vaddr(21, 0)),
+            Cat(normalPayload.ppn, vaddr(11, 0))
         )
+        response.paddr := physicalAddress(p.paddrBits - 1, paddrLowBits)
         response.pma := Mux(superHit, superPayload.pma, normalPayload.pma)
         response.permissions := Mux(superHit, superPayload.permissions, normalPayload.permissions)
         when(!response.hit) {
@@ -148,8 +155,8 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
     }
 
     val refill = io.refill.bits
-    val refillSet = setIndex(refill.vaddr)
-    val refillTag = normalTag(refill.vaddr)
+    val refillSet = refill.vpn(p.setBits - 1, 0)
+    val refillTag = refill.vpn(19, p.setBits)
     val activeAsid = Mux(io.scopeUpdate.valid, io.scopeUpdate.bits.asid, currentAsid)
     val normalRefillMatches = VecInit((0 until p.ways).map(way =>
         normal(refillSet)(way).valid && normal(refillSet)(way).tag === refillTag &&
@@ -162,7 +169,7 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
         Mux(normalInvalid.asUInt.orR, PriorityEncoder(normalInvalid), plruVictim(normalPlru(refillSet)))
     )
     val superRefillMatches = VecInit((0 until p.superEntries).map(entry =>
-        superpage(entry).valid && superpage(entry).vpn1 === refill.vaddr(31, 22) &&
+        superpage(entry).valid && superpage(entry).vpn1 === refill.vpn(19, 10) &&
             sameAddressSpace(superpage(entry).global, superpage(entry).asid, refill.global, refill.asid)
     ))
     val superInvalid = VecInit((0 until p.superEntries).map(entry => !superpage(entry).valid))
@@ -202,9 +209,14 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
         // Lookup updates are intentionally approximate when several ports touch one set in one cycle.
         // The highest-numbered hit wins; replacement quality never affects translation correctness.
         for (port <- 0 until p.queryPorts) {
+            val lookupPlru = Cat(
+                Mux1H((0 until p.sets).map(set => (normalLookupSet(port) === set.U) -> normalPlru(set)(2))),
+                Mux1H((0 until p.sets).map(set => (normalLookupSet(port) === set.U) -> normalPlru(set)(1))),
+                0.U(1.W),
+            )
             when(normalLookupHit(port).asUInt.orR) {
                 normalPlru(normalLookupSet(port)) :=
-                    plruAfter(normalPlru(normalLookupSet(port)), PriorityEncoder(normalLookupHit(port)))
+                    plruAfter(lookupPlru, PriorityEncoder(normalLookupHit(port)))
             }
         }
 
@@ -214,7 +226,7 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
                 // A new superpage supersedes every overlapping small-page translation in the same address space.
                 for (set <- 0 until p.sets; way <- 0 until p.ways) {
                     when(normal(set)(way).valid && normal(set)(way).tag(p.normalTagBits - 1, 10 - p.setBits) ===
-                        refill.vaddr(31, 22) &&
+                        refill.vpn(19, 10) &&
                         sameAddressSpace(normal(set)(way).global, normal(set)(way).asid, refill.global, refill.asid)) {
                         normal(set)(way).valid := false.B
                         normal(set)(way).inScope := false.B
@@ -226,7 +238,7 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
                         superpage(entry).inScope := false.B
                     }
                 }
-                superpage(superRefillEntry).vpn1 := refill.vaddr(31, 22)
+                superpage(superRefillEntry).vpn1 := refill.vpn(19, 10)
                 superpage(superRefillEntry).asid := refill.asid
                 superpage(superRefillEntry).global := refill.global
                 superpage(superRefillEntry).ppn1 := refill.ppn(p.ppnBits - 1, 10)
@@ -238,7 +250,7 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
             }.otherwise {
                 // A small-page refill removes an overlapping superpage for the affected address space.
                 for (entry <- 0 until p.superEntries) {
-                    when(superpage(entry).valid && superpage(entry).vpn1 === refill.vaddr(31, 22) &&
+                    when(superpage(entry).valid && superpage(entry).vpn1 === refill.vpn(19, 10) &&
                         sameAddressSpace(superpage(entry).global, superpage(entry).asid, refill.global, refill.asid)) {
                         superpage(entry).valid := false.B
                         superpage(entry).inScope := false.B
@@ -271,6 +283,7 @@ class TLB(val p: TLBParams = TLBParams()) extends Module {
     }
 }
 
-class InstructionTLB(p: TLBParams = TLBParams()) extends TLB(p.copy(queryPorts = 1))
+class InstructionTLB(p: TLBParams = TLBParams(), paddrLowBits: Int = 2)
+    extends TLB(p.copy(queryPorts = 1), paddrLowBits)
 
 class DataTLB(p: TLBParams = TLBParams()) extends TLB(p.copy(queryPorts = 2))

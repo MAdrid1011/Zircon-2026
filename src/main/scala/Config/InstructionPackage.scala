@@ -4,7 +4,7 @@ import ZirconConfig.BackendParams
 /** Exception state carried by every backend pipeline. */
 class BackendException extends Bundle {
     val valid = Bool()
-    val cause = UInt(5.W)
+    val cause = UInt(4.W)
     val tval = UInt(32.W)
 }
 
@@ -70,7 +70,6 @@ class BackendPackage(val p: BackendParams = BackendParams()) extends Bundle {
 /** Physical mappings and initial readiness attached after rename and ReadyBoard lookup. */
 class BackendRenameInfo(val p: BackendParams = BackendParams()) extends Bundle {
     val prs = Vec(3, UInt(p.tagWidth.W))
-    val sourceIndependent = Vec(3, Bool())
     val sourceReady = Vec(3, Bool())
     val sourceSpecMask = Vec(3, UInt(p.specWidth.W))
     val prd = UInt(p.tagWidth.W)

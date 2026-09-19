@@ -6,6 +6,15 @@ class RatWrite(width: Int) extends Bundle {
     val data = UInt(width.W)
 }
 
+class SRatIO(width: Int, readers: Int, renameWidth: Int, commitWidth: Int) extends Bundle {
+    val readAddr = Input(Vec(readers, UInt(5.W)))
+    val readData = Output(Vec(readers, UInt(width.W)))
+    val rename = Input(Vec(renameWidth, Valid(new RatWrite(width))))
+    val commit = Input(Vec(commitWidth, Valid(new RatWrite(width))))
+    val restore = Input(Bool())
+    val pra = Output(UInt(width.W))
+}
+
 /** Zircon-2024 SRat: identity initialization, speculative/committed maps and
   * parallel committed-map restore. A restore includes commits accepted on the same
   * edge, matching the free list's post-commit tail. Domain type is implicit.
@@ -17,14 +26,7 @@ class SRat(
     commitWidth: Int,
     hasZero: Boolean
 ) extends Module {
-    val io = IO(new Bundle {
-        val readAddr = Input(Vec(readers, UInt(5.W)))
-        val readData = Output(Vec(readers, UInt(width.W)))
-        val rename = Input(Vec(renameWidth, Valid(new RatWrite(width))))
-        val commit = Input(Vec(commitWidth, Valid(new RatWrite(width))))
-        val restore = Input(Bool())
-        val pra = Output(UInt(width.W))
-    })
+    val io = IO(new SRatIO(width, readers, renameWidth, commitWidth))
     val ratRnm = RegInit(VecInit.tabulate(32)(i => i.U(width.W)))
     val ratCmt = RegInit(VecInit.tabulate(32)(i => i.U(width.W)))
 

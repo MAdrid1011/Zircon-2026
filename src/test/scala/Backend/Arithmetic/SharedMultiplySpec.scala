@@ -39,7 +39,6 @@ class SharedMultiplySpec extends AnyFreeSpec with ChiselSim {
                         dut.io.out.bits.res.expect(y.res, clue)
                         dut.io.out.bits.fflags.expect(y.flags, clue)
                         dut.io.out.bits.tag.expect(y.tag, clue)
-                        dut.io.out.bits.dstIsFp.expect((y.op >= 4).B, clue)
                     }
                 }
                 check()

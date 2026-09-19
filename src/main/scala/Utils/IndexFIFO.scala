@@ -31,7 +31,6 @@ class IndexFIFOIO[T <: Data](gen: T, n: Int, rw: Int, ww: Int) extends Bundle {
     val wen = Input(Vec(ww, Bool()))
     val wdata = Input(Vec(ww, gen))
     val flush = Input(Bool())
-    val dbgFIFO = Output(Vec(n, gen))
 }
 
 /** One-hot indexed bank. FreeList mode restores the allocation head to the recycle tail. */
@@ -133,5 +132,4 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
             }
         }
     }
-    io.dbgFIFO := q
 }

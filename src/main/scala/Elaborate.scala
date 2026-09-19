@@ -9,7 +9,10 @@ object Elaborate {
         ChiselStage.emitSystemVerilogFile(
             new ZirconCore(simulationDebug = simulation),
             Array("--target-dir", remaining.headOption.getOrElse("generated")),
-            Array("--lowering-options=disallowPackedArrays,disallowLocalVariables"),
+            Array(
+                "--disable-all-randomization",
+                "--lowering-options=disallowPackedArrays",
+            ),
         )
     }
 }

@@ -59,8 +59,8 @@ class Branch extends Module {
     val comparison = BLevelPAdder32(io.src1, ~io.src2, 1.U)
     BranchLogic.resolve(
         io,
-        io.src1 === io.src2,
-        !comparison.io.cout.asBool,
+        comparison.io.res === 0.U,
+        !comparison.io.cout.get.asBool,
         target,
         target === io.predOffset
     )

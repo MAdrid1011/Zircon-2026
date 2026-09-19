@@ -29,7 +29,7 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
 
             def lookup(history: BigInt): Lookup = {
                 clearTrain()
-                d.io.query.pc.poke(pc)
+                d.io.query.pcWord.poke(pc >> 2)
                 for (i <- 0 until p.tageCount) {
                     d.io.query.folds(i).poke(history + i)
                 }
@@ -50,7 +50,7 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
 
             def train(meta: Lookup, actual: BigInt, predicted: BigInt): Unit = {
                 d.io.train.bits.poke(0.U.asTypeOf(new FrontendTraining(p)))
-                d.io.train.bits.pc.poke(pc)
+                d.io.train.bits.pcWord.poke(pc >> 2)
                 d.io.train.bits.mask.poke(1)
                 d.io.train.bits.kinds(0).poke(FrontendCfi.Indirect)
                 d.io.train.bits.taken.poke(1)

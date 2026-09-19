@@ -66,8 +66,8 @@ class DCacheStressEventsSpec extends AnyFreeSpec with ChiselSim {
                         val addr = 0x13000000L + (if (warm) 0x10000 else 0) + offset * 32 + mask * 1024
                         if (warm) { issue(Some(load(addr))); drain() }
                         issue(write = Some(Store(addr, BigInt("817fa05c", 16), mask, id = mask)))
-                        tick()
-                        tick()
+                        // Present loads while the store hit writes RAM B. Both requests enter
+                        // their input buffers and issue together after the cache-array update.
                         tick()
                         val beforeBuffered = coverage("buffered_read_1")
                         val accepted = tick(Seq(Some(load(addr + offset)), Some(load(addr))))
