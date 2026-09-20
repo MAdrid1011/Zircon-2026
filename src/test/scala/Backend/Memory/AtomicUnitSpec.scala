@@ -41,6 +41,7 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
         dut.io.load.response.valid.poke(true)
         dut.io.load.response.bits.data.poke(value)
         dut.io.load.response.bits.exception.poke(0)
+        dut.io.load.response.bits.retry.poke(false)
         dut.clock.step()
         dut.io.load.response.valid.poke(false)
     }

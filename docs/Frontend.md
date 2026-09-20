@@ -21,12 +21,13 @@ RAS 和推测历史。IF1 产生早期方向和目标，IF2 合并同步表结�
 
 ## ICache 与 ITLB
 
-ICache 为 2 路、16 set、32 B line，总容量 2 KiB。虚拟地址在 IF1 查询 ITLB；命中后使用
+ICache 为 2 路、16 set、32 B line，总容量 1 KiB。虚拟地址在 IF1 查询 ITLB；命中后使用
 34 位物理地址完成 Tag 比较。TLB miss 交给共享 `PageTableWalker`，Cache miss 通过 I 侧 L2
 接口处理。`FENCE.I` 维护请求会失效 ICache 内容。
 
 ## 队列与恢复
 
-`FetchQueue` 默认深度为 8 个取指块，向中端提供一个完整块及其有效掩码。FTQ 位于 `Commit`，
-默认 16 项；前端只通过分配、退休和训练接口访问 FTQ。提交重定向优先于 PD 修正，并同时清空
-前端流水和 Fetch Queue。
+`FetchQueue` 默认保存 8 个四指令取指块的容量。入队时移除无效槽，出队时直接提供全局最老的
+三条指令，因此一个三宽组可以跨越相邻 fetch packet。FTQ 位于 `Commit`，默认 16 项；
+`packetStart` 和 `packetEnd` 标记确保每个 packet 只分配一个 FTQ 表项。提交重定向优先于 PD
+修正，并同时清空前端流水和 Fetch Queue。

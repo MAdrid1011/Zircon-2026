@@ -26,8 +26,14 @@ class CsrIssueGrant(p: BackendParams) extends Bundle {
     val robIdx = UInt(p.robWidth.W)
 }
 
+/** Authorize one ordered uncached Load after it reaches the ROB head. */
+class LoadIssueGrant(p: BackendParams) extends Bundle {
+    val robIdx = UInt(p.robWidth.W)
+}
+
 class IssueQueueFeedback(p: BackendParams) extends Bundle {
     val robIdx = UInt(p.robWidth.W)
+    val uncache = Bool()
 }
 
 class IssueQueueIO(p: BackendParams, q: IssueQueueParams) extends Bundle {
@@ -53,6 +59,9 @@ class IssueQueueIO(p: BackendParams, q: IssueQueueParams) extends Bundle {
     // These ports describe changing execution resources, so they do not belong in BackendPackage.
     val csrGrant = if (q.profile == IssueQueueProfile.MixArith) {
         Some(Flipped(Valid(new CsrIssueGrant(p))))
+    } else None
+    val loadGrant = if (q.profile == IssueQueueProfile.Load || q.profile == IssueQueueProfile.LoadStoreAddress) {
+        Some(Flipped(Valid(new LoadIssueGrant(p))))
     } else None
     val mixAvailable = if (q.profile == IssueQueueProfile.MixArith) {
         Some(Input(Bool()))
@@ -147,8 +156,11 @@ class IssueQueue(
             val grant = io.csrGrant.get
             val csrAuthorized = !csr || (grant.valid && grant.bits.robIdx === item.robIdx)
             io.mixAvailable.get && !speculationMask(item).orR && csrAuthorized
-        case IssueQueueProfile.Load | IssueQueueProfile.LoadStoreAddress | IssueQueueProfile.StoreData =>
-            !speculationMask(item).orR
+        case IssueQueueProfile.Load | IssueQueueProfile.LoadStoreAddress =>
+            val grant = io.loadGrant.get
+            val ordered = !item.uncache || (grant.valid && grant.bits.robIdx === item.robIdx)
+            !speculationMask(item).orR && ordered
+        case IssueQueueProfile.StoreData => !speculationMask(item).orR
         case _ => true.B
     }
 
@@ -236,6 +248,10 @@ class IssueQueue(
     val lockedFailed = selectionLocked && selectedFailed
     io.issue.valid := !io.flush && !selectedFailed && selectedExists
     io.issue.bits := selectedItem
+    if (q.profile == IssueQueueProfile.Load || q.profile == IssueQueueProfile.LoadStoreAddress) {
+        val grant = io.loadGrant.get
+        io.issue.bits.ioAuthorized := selectedItem.uncache && grant.valid && grant.bits.robIdx === selectedItem.robIdx
+    }
     val issueFire = io.issue.fire
 
     // Wake stored entries before either normal compaction or flush packing.
@@ -277,6 +293,12 @@ class IssueQueue(
         }
         when(retryHit) {
             retained(position).issued := false.B
+        }
+        io.retry.foreach { feedback =>
+            when(retryHit) {
+                retained(position).item.uncache := feedback.bits.uncache
+                retained(position).item.ioAuthorized := false.B
+            }
         }
         remove(position) := live && ((selectedHere && !issuedLoad) || completionHit)
         when(completionHit || retryHit) {

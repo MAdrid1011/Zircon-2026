@@ -1,6 +1,7 @@
 import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
+import ZirconConfig.Cache.{l1IndexNum, l1Line, l1Offset}
 
 import scala.collection.mutable
 import scala.util.Random
@@ -40,6 +41,8 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
         error: Boolean
     )
     val random = new Random(seed)
+    val lineBytes = l1Line
+    val setStride = l1IndexNum * l1Line
     val memory = mutable.Map.empty[Long, Int]
     val reference = mutable.Map.empty[Long, Int]
     val expected = mutable.Map.empty[(Int, Int), Expected]
@@ -63,6 +66,8 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
     var lowerReady = true
     var randomStalls = false
     var storeReady = true
+    var maintenanceRequest = false
+    var maintenanceInvalidate = false
     val latencies = mutable.ArrayBuffer.empty[Int]
     private var heldLower: Option[Seq[BigInt]] = None
     private var heldStoreResponse: Option[Seq[BigInt]] = None
@@ -93,7 +98,9 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
     def put(map: mutable.Map[Long, Int], address: Long, data: BigInt, mask: Int): Unit =
         for (b <- 0 until 4 if (mask & (1 << b)) != 0) map((address & ~3L) + b) = ((data >> (8 * b)) & 255).toInt
     def putLine(map: mutable.Map[Long, Int], address: Long, data: BigInt): Unit =
-        for (b <- 0 until 32) map((address & ~31L) + b) = ((data >> (8 * b)) & 255).toInt
+        for (b <- 0 until lineBytes) {
+            map((address & ~(lineBytes - 1).toLong) + b) = ((data >> (8 * b)) & 255).toInt
+        }
     def aligned(address: Long, size: Int): Boolean = size < 3 && (address & ((1 << size) - 1)) == 0
     def storeException(x: Store): Int =
         if (x.expectedException >= 0) x.expectedException
@@ -146,6 +153,8 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
         dut.io.store.req.bits.size.poke(s.size)
         dut.io.store.req.bits.uncache.poke(s.uncache)
         dut.io.store.rsp.ready.poke(storeReady)
+        dut.io.maintenance.request.poke(maintenanceRequest)
+        dut.io.maintenance.invalidate.poke(maintenanceInvalidate)
         dut.io.l2.req.ready.poke(lowerReady && (!randomStalls || random.nextInt(3) != 0))
         val response = transaction.filter(_.due <= cycles)
         dut.io.l2.rsp.valid.poke(response.nonEmpty)
@@ -253,9 +262,9 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
                 val io = dut.io.l2.req.bits.uncache.peek().litToBoolean
                 val victimValid = dut.io.l2.req.bits.victimValid.peek().litToBoolean
                 val victimDirty = dut.io.l2.req.bits.victimDirty.peek().litToBoolean
-                if (!write && !io) assert((address & 31) == 0)
+                if (!write && !io) assert((address & (lineBytes - 1)) == 0)
                 val data = if (write) dut.io.l2.req.bits.data.peek().litValue
-                else bytes(memory, address, if (io) 1 << size else 32)
+                else bytes(memory, address, if (io) 1 << size else lineBytes)
                 transaction = Some(Transaction(
                     0,
                     address,
@@ -263,17 +272,17 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
                     data,
                     dut.io.l2.req.bits.mask.peek().litValue,
                     victimValid,
-                    dut.io.l2.req.bits.victimLine.peek().litValue.toLong << 5,
+                    dut.io.l2.req.bits.victimLine.peek().litValue.toLong << l1Offset,
                     dut.io.l2.req.bits.victimData.peek().litValue,
                     victimDirty,
-                    dirtyResponses.remove(address & ~31L),
+                    dirtyResponses.remove(address & ~(lineBytes - 1).toLong),
                     cycles + latency + (if (randomStalls) random.nextInt(5) else 0),
                     errors(address)
                 ))
                 if (write || (victimValid && victimDirty)) writes += 1
                 if (victimValid && victimDirty) dirtyVictims += 1
                 if (victimValid && victimDirty) {
-                    dirtyVictimAddresses += dut.io.l2.req.bits.victimLine.peek().litValue.toLong << 5
+                    dirtyVictimAddresses += dut.io.l2.req.bits.victimLine.peek().litValue.toLong << l1Offset
                 }
                 if (victimValid && !victimDirty) cleanVictims += 1
                 if (!write) reads += 1
@@ -294,7 +303,7 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
             val f = forward.getOrElse(x.id, Forward())
             val fault = if (x.exception != 0) x.exception
             else if (!aligned(x.address, x.mtype & 3)) 4
-            else if (errors(if (x.uncache) x.address else x.address & ~31L)) 5 else 0
+            else if (errors(if (x.uncache) x.address else x.address & ~(lineBytes - 1).toLong)) 5 else 0
             val retry = fault == 0 && (if (x.uncache) !x.authorized else f.blocked)
             assert(!expected.contains((i, x.id)))
             expected((i, x.id)) = Expected(x, value(x, f), fault, retry, cycles)
@@ -329,6 +338,19 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
         }
         assert(n < 1000, s"drain stalled $cycles pending=$expected")
         for (_ <- 0 until 6) tick()
+    }
+    def maintain(invalidate: Boolean): Unit = {
+        maintenanceRequest = true
+        maintenanceInvalidate = invalidate
+        var n = 0
+        while (!dut.io.maintenance.done.peek().litToBoolean && n < 4000) {
+            tick()
+            n += 1
+        }
+        assert(n < 4000, s"cache maintenance stalled $cycles")
+        maintenanceRequest = false
+        tick()
+        drain()
     }
 }
 
@@ -376,7 +398,7 @@ class DCacheSpec extends AnyFreeSpec with ChiselSim {
                 drain()
                 // All byte masks, including four independently supplied store bytes and subword offsets.
                 for (mask <- 0 until 16) {
-                    val x = load(0x3000 + mask * 32)
+                    val x = load(0x3000 + mask * lineBytes)
                     forward(x.id) = Forward(BigInt("44332211", 16), mask)
                     val r = reads
                     issue(Some(x))
@@ -618,9 +640,9 @@ class DCacheSpec extends AnyFreeSpec with ChiselSim {
                 dirtyResponses += dirtyTransfer
                 issue(Some(load(dirtyTransfer)))
                 drain()
-                issue(Some(load(dirtyTransfer + 0x200)))
+                issue(Some(load(dirtyTransfer + setStride)))
                 drain()
-                issue(Some(load(dirtyTransfer + 0x400)))
+                issue(Some(load(dirtyTransfer + 2 * setStride)))
                 drain()
                 assert(dirtyVictimAddresses.contains(dirtyTransfer))
                 // Random traffic mixes replacement, 34-bit tags, widths, writes and independent backpressure.

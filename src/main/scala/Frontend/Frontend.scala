@@ -43,6 +43,7 @@ class Frontend(
     }
     io.mem.l2 <> ic.io.l2
     ic.io.maintenance.request := io.maintenance.request
+    ic.io.maintenance.invalidate := io.maintenance.invalidate
     io.maintenance.done := ic.io.maintenance.done
 
     /* Previous Fetch Stage */

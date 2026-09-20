@@ -19,14 +19,14 @@ class DCacheReplacementSpec extends AnyFreeSpec with ChiselSim {
             simulate(new DCache(backend)) { dut =>
                 val d = new DCacheDriver(dut)
                 import d._
-                // All five addresses map to set 2 and have distinct physical tags.
+                // All five addresses map to one set and have distinct physical tags.
                 val a = 0x20040L
-                val b = a + 0x200
-                val c = a + 0x400
-                val e = a + 0x600
-                val f = a + 0x800
+                val b = a + setStride
+                val c = a + 2 * setStride
+                val e = a + 3 * setStride
+                val f = a + 4 * setStride
                 def readLine(address: Long): Unit = {
-                    for (word <- 0 until 8 by 2) {
+                    for (word <- 0 until lineBytes / 4 by 2) {
                         issue(Some(load(address + word * 4)), Some(load(address + (word + 1) * 4)))
                     }
                     drain()
@@ -88,8 +88,29 @@ class DCacheReplacementSpec extends AnyFreeSpec with ChiselSim {
                 readLine(f)
                 assert(reads == 7 && writes == 1)
                 assert(cleanVictims > 0)
+
+                val maintenanceAddress = 0xa0040L
+                issue(Some(load(maintenanceAddress)))
+                drain()
+                issue(write = Some(Store(maintenanceAddress + 4, BigInt("12345678", 16))))
+                drain()
+                assert(bytes(memory, maintenanceAddress + 4, 4) != bytes(reference, maintenanceAddress + 4, 4))
+                maintain(invalidate = false)
+                assert(bytes(memory, maintenanceAddress + 4, 4) == bytes(reference, maintenanceAddress + 4, 4))
+                val readsAfterClean = reads
+                issue(Some(load(maintenanceAddress + 4)))
+                drain()
+                assert(reads == readsAfterClean, "clean maintenance must preserve the L1 line")
+
+                issue(write = Some(Store(maintenanceAddress + 8, BigInt("89abcdef", 16))))
+                drain()
+                maintain(invalidate = true)
+                val readsAfterInvalidate = reads
+                issue(Some(load(maintenanceAddress + 8)))
+                drain()
+                assert(reads == readsAfterInvalidate + 1, "invalidate maintenance must remove the L1 line")
                 info(
-                    s"$name: seven acquisitions, one dirty writeback, clean victims=$cleanVictims; every returned byte checked"
+                    s"$name: replacement and clean/invalidate maintenance preserved every returned byte"
                 )
             }
         }

@@ -81,17 +81,18 @@ class ICacheFSM extends Module {
             when(io.l2.rrsp) {
                 readIssued := false.B
                 when(!io.l2.more) {
-                    // A redirected cacheable fetch no longer needs a response, but its returned line remains useful.
-                    mState := Mux(io.cc.uncache || io.l2.error, mWait, mRefill)
+                    mState := Mux(!io.cc.rreq || io.cc.flush || io.cc.uncache || io.l2.error, mWait, mRefill)
                 }
             }
         }
         is(mRefill) {
             mState := mWait
-            io.cc.addrOH := 4.U
-            io.cc.lruUpd := ~lruReg
-            io.cc.tagvWe := lruReg
-            io.cc.memWe := lruReg
+            when(!io.cc.flush) {
+                io.cc.addrOH := 4.U
+                io.cc.lruUpd := ~lruReg
+                io.cc.tagvWe := lruReg
+                io.cc.memWe := lruReg
+            }
         }
         is(mWait) {
             // Restore the held IF1 address before releasing miss. Hold the IF2 result until consumed.

@@ -6,9 +6,9 @@ L2 Cache，以及连接外部 AXI4 主接口的 `L2AXI4Bridge`。L1 与 L2 使�
 
 ## L1 Cache
 
-ICache 和 DCache 默认均为 2 路、16 set，总容量各 2 KiB。ICache 提供四条指令的块读取；
-DCache 提供两个固定 Load 端口和一个已提交 Store 端口。两者都使用三级命中流水，并将 miss
-状态保存在独立寄存器中，使状态机只读取末级请求。
+ICache 和 DCache 默认均为 2 路、16 set、32 B line，总容量各 1 KiB。ICache 提供四条指令的
+块读取；DCache 提供两个固定 Load 端口和一个已提交 Store 端口。两者都使用三级命中流水，
+并将 miss 状态保存在独立寄存器中，使状态机只读取末级请求。
 
 DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；Store miss 先取得整行
 再合并字节 mask。DCache 使用单项 miss 单元，支持无冲突命中的 hit-under-miss；同一资源冲突

@@ -170,17 +170,17 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
         result | ((word & 0xffffffffL) << (32 * i))
     }
 
-    "cached reads preserve 34-bit addresses and assemble eight AXI beats" in {
+    "cached reads preserve 34-bit addresses and assemble a complete cache line" in {
         simulate(new L2AXI4Bridge) { dut =>
             val d = new L2AXI4BridgeDriver(dut)
             d.initialize()
 
-            val address = BigInt("312345620", 16)
-            val words = (0 until 8).map(i => BigInt("81230000", 16) + i * 0x101)
+            val address = BigInt("312345640", 16)
+            val words = (0 until dut.p.lineBytes / 4).map(i => BigInt("81230000", 16) + i * 0x101)
             d.request(address, write = false, uncached = false)
-            d.acceptReadAddress(address, length = 7, size = 2, cached = true, stalls = 3)
+            d.acceptReadAddress(address, length = words.size - 1, size = 2, cached = true, stalls = 3)
             words.zipWithIndex.foreach { case (word, i) =>
-                d.sendReadBeat(word, last = i == 7, delay = i % 3)
+                d.sendReadBeat(word, last = i == words.size - 1, delay = i % 3)
             }
             d.acceptResponse(line(words), error = false, stalls = 4)
         }
@@ -192,17 +192,17 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
             d.initialize()
 
             val address = BigInt("220004000", 16)
-            val words = (0 until 8).map(i => BigInt("dead0000", 16) + i * 0x111)
+            val words = (0 until dut.p.lineBytes / 4).map(i => BigInt("dead0000", 16) + i * 0x111)
             d.request(
                 address,
                 write = true,
                 uncached = false,
                 data = line(words),
-                mask = BigInt("ffffffff", 16)
+                mask = 15
             )
-            d.acceptWriteAddress(address, length = 7, size = 2, cached = true, stalls = 2)
+            d.acceptWriteAddress(address, length = words.size - 1, size = 2, cached = true, stalls = 2)
             words.zipWithIndex.foreach { case (word, i) =>
-                d.acceptWriteBeat(word, strobe = 15, last = i == 7, stalls = (i + 1) % 3)
+                d.acceptWriteBeat(word, strobe = 15, last = i == words.size - 1, stalls = (i + 1) % 3)
             }
             d.sendWriteResponse(delay = 3)
             d.acceptResponse(0, error = false, stalls = 2)
@@ -249,7 +249,8 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
 
             val readAddress = BigInt("100006000", 16)
             d.request(readAddress, write = false, uncached = false)
-            d.acceptReadAddress(readAddress, length = 7, size = 2, cached = true, stalls = 0)
+            val lineWords = dut.p.lineBytes / 4
+            d.acceptReadAddress(readAddress, length = lineWords - 1, size = 2, cached = true, stalls = 0)
             d.sendReadBeat(BigInt("12345678", 16), last = true)
             d.acceptResponse(BigInt("12345678", 16), error = true, stalls = 2)
 
@@ -259,25 +260,25 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
             d.sendReadBeat(BigInt("89abcdef", 16), last = true, response = 2)
             d.acceptResponse(BigInt("89abcdef", 16), error = true, stalls = 0)
 
-            val missingLastAddress = BigInt("100007020", 16)
-            val missingLastWords = (0 until 8).map(i => BigInt("76540000", 16) + i)
+            val missingLastAddress = BigInt("100007040", 16)
+            val missingLastWords = (0 until lineWords).map(i => BigInt("76540000", 16) + i)
             d.request(missingLastAddress, write = false, uncached = false)
-            d.acceptReadAddress(missingLastAddress, length = 7, size = 2, cached = true, stalls = 0)
+            d.acceptReadAddress(missingLastAddress, length = lineWords - 1, size = 2, cached = true, stalls = 0)
             missingLastWords.foreach(word => d.sendReadBeat(word, last = false))
             d.acceptResponse(line(missingLastWords), error = true, stalls = 0)
 
             val writeAddress = BigInt("100008000", 16)
-            val words = (0 until 8).map(i => BigInt(i + 1))
+            val words = (0 until lineWords).map(i => BigInt(i + 1))
             d.request(
                 writeAddress,
                 write = true,
                 uncached = false,
                 data = line(words),
-                mask = BigInt("ffffffff", 16)
+                mask = 15
             )
-            d.acceptWriteAddress(writeAddress, length = 7, size = 2, cached = true, stalls = 0)
+            d.acceptWriteAddress(writeAddress, length = lineWords - 1, size = 2, cached = true, stalls = 0)
             words.zipWithIndex.foreach { case (word, i) =>
-                d.acceptWriteBeat(word, strobe = 15, last = i == 7, stalls = 0)
+                d.acceptWriteBeat(word, strobe = 15, last = i == words.size - 1, stalls = 0)
             }
             d.sendWriteResponse(response = 3)
             d.acceptResponse(0, error = true, stalls = 0)
@@ -302,8 +303,9 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
                     random.nextInt(4)
                 }
                 val base = (BigInt(random.nextInt(4)) << 32) | BigInt(0x10000 + transaction * 0x40)
-                val address = if (cached) base & ~BigInt(31) else (base & ~BigInt(3)) + offset
-                val beats = if (cached) 8 else 1
+                val lineBytes = dut.p.lineBytes
+                val address = if (cached) base & ~(BigInt(lineBytes) - 1) else (base & ~BigInt(3)) + offset
+                val beats = if (cached) lineBytes / 4 else 1
                 val words = (0 until beats).map(_ => BigInt(32, random))
                 val requestData = if (write) {
                     if (cached) line(words) else words.head
@@ -313,7 +315,7 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
                 val requestMask = if (!write) {
                     BigInt(0)
                 } else if (cached) {
-                    BigInt("ffffffff", 16)
+                    BigInt(15)
                 } else {
                     ((BigInt(1) << (1 << size)) - 1) << offset
                 }

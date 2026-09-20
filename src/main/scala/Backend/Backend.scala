@@ -31,6 +31,7 @@ class BackendIO(
     val dcacheIdle = Output(Bool())
     val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new BackendPerformanceCounters)) else None
+    val debug = if (observe) Some(Output(new BackendDebugIO)) else None
 }
 
 /**
@@ -72,7 +73,8 @@ class Backend(
     val ls0 = Module(new LoadPipeline(loadParams))
     val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled))
     val dcache = Module(new DCache(ramBackend, dcacheParams, tlbEnabled, observe))
-    val atomic = Module(new AtomicUnit(p, dcacheParams))
+    val atomic = Module(new AtomicUnit(p, dcacheParams, observe))
+    val sharedStore = Module(new SharedStorePort)
 
     /* Central PRFs provide stable held reads while a downstream execution stage is stalled. */
     val intRfParams = RegfileParams(
@@ -102,6 +104,8 @@ class Backend(
         queue.io.speculation := loadSpeculation.io.resolution
     }
     mixArithIQ.io.csrGrant.get := io.commit.csrGrant
+    loadIQ.io.loadGrant.get := io.commit.loadGrant
+    loadStoreAddressIQ.io.loadGrant.get := io.commit.loadGrant
     mixArithIQ.io.mixAvailable.get := mixArith.io.available
 
     /* Queue issue ports map directly to their owning execution resources. */
@@ -157,8 +161,10 @@ class Backend(
     def connectLoadFeedback(queue: IssueQueue, pipe: LoadPipeline): Unit = {
         queue.io.completed.get.valid := pipe.io.cmt.rob.valid
         queue.io.completed.get.bits.robIdx := pipe.io.cmt.rob.bits.robIdx
+        queue.io.completed.get.bits.uncache := false.B
         queue.io.retry.get.valid := pipe.io.wk.replay.valid
         queue.io.retry.get.bits.robIdx := pipe.io.wk.replay.bits.robIdx
+        queue.io.retry.get.bits.uncache := pipe.io.wk.replay.bits.uncache
     }
     connectLoadFeedback(loadIQ, ls0)
     connectLoadFeedback(loadStoreAddressIQ, ls1)
@@ -274,6 +280,7 @@ class Backend(
     atomic.io.load.response.valid := atomic.io.busy && dcache.io.load(1).rsp.valid
     atomic.io.load.response.bits.data := dcache.io.load(1).rsp.bits.data
     atomic.io.load.response.bits.exception := dcache.io.load(1).rsp.bits.exception
+    atomic.io.load.response.bits.retry := dcache.io.load(1).rsp.bits.retry
     ls1.io.cache.rsp.valid := !atomic.io.busy && dcache.io.load(1).rsp.valid
     ls1.io.cache.rsp.bits := dcache.io.load(1).rsp.bits
     ls1.io.cache.fixedLatency := !atomic.io.busy && dcache.io.load(1).fixedLatency
@@ -302,29 +309,23 @@ class Backend(
         dcache.io.tlb.get.flush := io.dtlb.get.flush
         io.dtlbMiss.get := dcache.io.tlbMiss.get
     }
-    dcache.io.store.req.valid := Mux(atomic.io.store.request.valid, true.B, io.commit.store.request.valid)
-    dcache.io.store.req.bits := Mux(
-        atomic.io.store.request.valid,
-        atomic.io.store.request.bits,
-        io.commit.store.request.bits,
-    )
-    atomic.io.store.request.ready := dcache.io.store.req.ready
-    io.commit.store.request.ready := !atomic.io.store.request.valid && dcache.io.store.req.ready
-    atomic.io.store.response.valid := atomic.io.busy && dcache.io.store.rsp.valid
-    atomic.io.store.response.bits := dcache.io.store.rsp.bits
-    io.commit.store.response.valid := !atomic.io.busy && dcache.io.store.rsp.valid
-    io.commit.store.response.bits := dcache.io.store.rsp.bits
-    dcache.io.store.rsp.ready := Mux(
-        atomic.io.busy,
-        atomic.io.store.response.ready,
-        io.commit.store.response.ready,
-    )
-    atomic.io.clearReservation := io.commit.store.request.fire
+    sharedStore.io.reserveAtomic := atomic.io.busy || io.commit.atomic.request.valid
+    sharedStore.io.atomicRequest <> atomic.io.store.request
+    atomic.io.store.response <> sharedStore.io.atomicResponse
+    sharedStore.io.committedRequest <> io.commit.store.request
+    io.commit.store.response <> sharedStore.io.committedResponse
+    dcache.io.store.req <> sharedStore.io.cacheRequest
+    sharedStore.io.cacheResponse <> dcache.io.store.rsp
+    atomic.io.clearReservation := sharedStore.io.committedRequest.fire
     atomic.io.request <> io.commit.atomic.request
     io.commit.atomic.response <> atomic.io.response
+    when(io.commit.flush) {
+        assert(!atomic.io.busy, "Commit must not flush an active atomic operation")
+    }
     io.l2 <> dcache.io.l2
-    io.dcacheIdle := dcache.io.idle && !atomic.io.busy
+    io.dcacheIdle := ls0.io.idle && ls1.io.idle && dcache.io.idle && !atomic.io.busy
     dcache.io.maintenance.request := io.maintenance.request
+    dcache.io.maintenance.invalidate := io.maintenance.invalidate
     io.maintenance.done := dcache.io.maintenance.done
 
     for (event <- wakeupRouter.io.compute.toSeq ++ wakeupRouter.io.memory.toSeq) {
@@ -371,7 +372,28 @@ class Backend(
         io.performance.get.pipelineExecutionBlockedCycles := pipelineExecutionBlockedCycles
         io.performance.get.divideBusyCycles := divideBusyCycles
         io.performance.get.dcache := dcache.io.performance.get
+        io.debug.get.atomicState := atomic.io.debug.get.state
+        io.debug.get.atomicRequestValid := io.commit.atomic.request.valid
+        io.debug.get.atomicRequestReady := atomic.io.request.ready
+        io.debug.get.atomicLoadRequestValid := atomic.io.load.request.valid
+        io.debug.get.atomicLoadResponseValid := atomic.io.load.response.valid
+        io.debug.get.atomicStoreRequestValid := atomic.io.store.request.valid
+        io.debug.get.atomicStoreResponseValid := atomic.io.store.response.valid
+        io.debug.get.dcacheIdle := dcache.io.idle
+        io.debug.get.dcache := dcache.io.debug.get
     }
+}
+
+class BackendDebugIO extends Bundle {
+    val atomicState = UInt(3.W)
+    val atomicRequestValid = Bool()
+    val atomicRequestReady = Bool()
+    val atomicLoadRequestValid = Bool()
+    val atomicLoadResponseValid = Bool()
+    val atomicStoreRequestValid = Bool()
+    val atomicStoreResponseValid = Bool()
+    val dcacheIdle = Bool()
+    val dcache = new DCacheDebugIO
 }
 
 class BackendPerformanceCounters extends Bundle {

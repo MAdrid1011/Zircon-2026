@@ -351,8 +351,7 @@ object DecodeTable {
             "SFENCE_VMA",
             Instructions.SFENCE_VMA,
             System,
-            SystemOp.SFENCE_VMA,
-            src = Seq(Integer, Integer)
+            SystemOp.SFENCE_VMA
         ),
         DecodeEntry("WFI", Instructions.WFI, System, SystemOp.WFI),
     )

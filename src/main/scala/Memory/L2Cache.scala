@@ -45,7 +45,7 @@ class L2Cache(
     val io = IO(new L2CacheIO(c, p, observe))
     require(c.lineBytes == p.lineBytes)
     if (ramBackend == DualPortRamBackend.OpenRAM) {
-        require(p.sets == 16 && p.tagBits == 25)
+        require(p.sets == 16 && p.tagBits <= 25)
     }
 
     private def index(address: UInt): UInt = address(p.offsetBits + p.indexBits - 1, p.offsetBits)
@@ -116,8 +116,13 @@ class L2Cache(
     val engineVictimPort = engineState === engineVictimRead || engineState === engineVictimLookup
     val engineArrayWrite = engineState === engineVictimInstall
     val engineArrayRecovery = RegNext(engineArrayWrite, false.B)
-    val iPipelineBlocked = engineArrayWrite || engineArrayRecovery || (engineVictimPort && engineSourceI)
-    val dPipelineBlocked = engineArrayWrite || engineArrayRecovery || (engineVictimPort && !engineSourceI)
+    // Re-read the held S2 address after a victim lookup changes a synchronous RAM port.
+    val iVictimPortRecovery = RegNext(engineVictimPort && engineSourceI, false.B)
+    val dVictimPortRecovery = RegNext(engineVictimPort && !engineSourceI, false.B)
+    val iPipelineBlocked = engineArrayWrite || engineArrayRecovery ||
+        (engineVictimPort && engineSourceI) || iVictimPortRecovery
+    val dPipelineBlocked = engineArrayWrite || engineArrayRecovery ||
+        (engineVictimPort && !engineSourceI) || dVictimPortRecovery
 
     // ==================== Three-stage channel registers ====================
     val iS1Valid = RegInit(false.B)
