@@ -94,6 +94,7 @@ class LoadPipelineIO(p: LoadPipelineParams, withStore: Boolean = false, tlbEnabl
     val wk = new LoadWakeupIO(p)
     val bypass = new BypassProducerPort(p.backend)
     val blockIssue = Input(Bool())
+    val idle = Output(Bool())
 }
 
 /** RF/AGU share a cycle; the external DCache owns the D1, D2 and WB registers. */
@@ -129,6 +130,7 @@ class LoadPipeline(
     val validRF = RegInit(false.B)
     val indexRF = Reg(UInt(p.slotWidth.W))
     val heldRF = RegInit(false.B)
+    io.idle := !validRF
 
     // Context includes the RF reservation, so a cache stall cannot change the request identity.
     val pending = Reg(Vec(p.entries, new BackendPackage(p.backend)))
@@ -399,6 +401,7 @@ class LoadPipeline(
     val contextValidWB = RegEnable(contextValidD2WB, false.B, io.cache.wbSelect.valid)
     val exceptionWB = RegEnable(io.cache.wbSelect.bits.exception, io.cache.wbSelect.valid)
     val retryWB = RegEnable(io.cache.wbSelect.bits.retry, false.B, io.cache.wbSelect.valid)
+    val uncacheWB = RegEnable(io.cache.wbSelect.bits.uncache, false.B, io.cache.wbSelect.valid)
     val writeResultWB = RegEnable(
         contextD2WB.rdVld && io.cache.wbSelect.bits.exception === 0.U && !io.cache.wbSelect.bits.retry,
         false.B,
@@ -416,6 +419,8 @@ class LoadPipeline(
     io.cmt.rob.bits.data := io.cache.rsp.bits.data
     io.wk.replay.valid := validWB && retryWB
     io.wk.replay.bits := instPkgWB
+    io.wk.replay.bits.uncache := instPkgWB.uncache || uncacheWB
+    io.wk.replay.bits.ioAuthorized := false.B
 
     io.wk.wakeWB.valid := io.rf.wr.valid
     io.wk.wakeWB.bits := instPkgWB.prd

@@ -56,19 +56,14 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
         Mux1H(io.data.miss.map(_.valid), io.data.miss.map(_.bits.vaddr)),
     )
 
-    io.iptw.req.valid := state === levelOneRequest || state === levelZeroRequest
+    val requestState = state === levelOneRequest || state === levelZeroRequest
+    val responseState = state === levelOneResponse || state === levelZeroResponse
+    io.iptw.req.valid := sourceInstruction && requestState
     io.iptw.req.bits.paddr := pteAddress
-    io.iptw.rsp.ready := state === levelOneResponse || state === levelZeroResponse
-    io.dptw.req.valid := io.iptw.req.valid
+    io.iptw.rsp.ready := sourceInstruction && responseState
+    io.dptw.req.valid := !sourceInstruction && requestState
     io.dptw.req.bits.paddr := pteAddress
-    io.dptw.rsp.ready := io.iptw.rsp.ready
-    when(!sourceInstruction) {
-        io.iptw.req.valid := false.B
-        io.iptw.rsp.ready := false.B
-    }.otherwise {
-        io.dptw.req.valid := false.B
-        io.dptw.rsp.ready := false.B
-    }
+    io.dptw.rsp.ready := !sourceInstruction && responseState
 
     val responseValid = Mux(sourceInstruction, io.iptw.rsp.valid, io.dptw.rsp.valid)
     val responseError = Mux(sourceInstruction, io.iptw.rsp.bits.error, io.dptw.rsp.bits.error)

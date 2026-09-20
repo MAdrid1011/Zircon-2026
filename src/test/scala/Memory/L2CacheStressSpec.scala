@@ -18,7 +18,8 @@ class L2CacheStressSpec extends AnyFreeSpec with ChiselSim {
         )
     ) {
         s"$name: randomized 34-bit target, clean-victim and PTW traffic" in {
-            simulate(new L2Cache(backend)) { dut =>
+            val params = ZirconConfig.L2CacheParams(sets = 16)
+            simulate(new L2Cache(backend, p = params)) { dut =>
                 val d = new L2CacheDriver(dut)
                 val random = new Random(20260916L)
                 import d._
@@ -26,8 +27,8 @@ class L2CacheStressSpec extends AnyFreeSpec with ChiselSim {
 
                 def cachedAddress(): Long = {
                     val high = random.nextInt(3).toLong << 32
-                    val set = random.nextInt(16).toLong << 5
-                    val tag = random.nextInt(32).toLong << 9
+                    val set = random.nextInt(params.sets).toLong << params.offsetBits
+                    val tag = random.nextInt(32).toLong << (params.offsetBits + params.indexBits)
                     high | 0x08000000L | tag | set
                 }
 
@@ -47,16 +48,16 @@ class L2CacheStressSpec extends AnyFreeSpec with ChiselSim {
                             val (data, error) = icache(target, victim, token = iteration + 1)
                             assert(!error && data == line(target), s"ICache data mismatch at iteration $iteration")
                         case _ =>
-                            val wordAddress = target + random.nextInt(8) * 4
+                            val wordAddress = target + random.nextInt(params.lineBytes / 4) * 4
                             val (data, error) = if (random.nextBoolean()) iptw(wordAddress) else dptw(wordAddress)
                             assert(
-                                !error && data == bytes(wordAddress, 4),
+                                !error && data == (bytes(wordAddress, 4) & ~BigInt(0x300)),
                                 s"PTW data mismatch at iteration $iteration"
                             )
                     }
                 }
 
-                for (word <- 0 until 32) {
+                for (word <- 0 until params.lineBytes / 4) {
                     val address = 0x380000000L + word * 4
                     val data = BigInt(32, random)
                     val (_, writeError) = dcache(address, uncache = true, write = true, data = data, mask = 15)

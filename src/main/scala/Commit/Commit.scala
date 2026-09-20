@@ -6,6 +6,7 @@ import ZirconConfig._
 class BackendCommitIO(bp: BackendParams, load: LoadPipelineParams) extends Bundle {
     val flush = Input(Bool())
     val csrGrant = Flipped(Valid(new CsrIssueGrant(bp)))
+    val loadGrant = Flipped(Valid(new LoadIssueGrant(bp)))
     val arith = Vec(2, new ArithCommitIO)
     val mixRob = new MixArithRobIO
     val mixCSR = new CSRExecutionPort
@@ -42,7 +43,7 @@ class CommitIO(
     /* This aggregate includes cache/L2 state and is therefore computed by the shell. */
     val memoryIdle = Input(Bool())
 
-    /* Commit starts FENCE.I; each cache executes its own local maintenance FSM. */
+    /* Commit starts cache maintenance required by FENCE.I and SFENCE.VMA. */
     val maintenance = new CacheMaintenanceIO
     val debug = new CommitDebugIO(bp, cp.width)
 }
@@ -208,6 +209,9 @@ class Commit(
     val fenceI = headSystem && headSystemOp === SystemOp.FENCE_I.U
     val sfence = headSystem && headSystemOp === SystemOp.SFENCE_VMA.U
     val memoryDrained = sq.io.committedEmpty && sb.io.empty && io.memoryIdle
+    io.backend.loadGrant.valid := rob.io.head(0).valid && !rob.io.head(0).bits.complete &&
+        memoryDrained && !delayedRecovery
+    io.backend.loadGrant.bits.robIdx := rob.io.head(0).bits.robIdx
     sq.io.atomic.sqIdx.valid := headAtomic && !delayedRecovery
     sq.io.atomic.sqIdx.bits := rob.io.head(0).bits.sqIdx
     io.backend.atomic.request.valid := headAtomic && !rob.io.head(0).bits.complete &&
@@ -222,16 +226,18 @@ class Commit(
     io.backend.atomic.request.bits.exception := sq.io.atomic.request.bits.exception
     io.backend.atomic.blockMemoryIssue := headAtomic && sq.io.atomic.request.valid && !delayedRecovery
     val maintenanceStarted = RegInit(false.B)
-    when(!fenceI || delayedRecovery) {
+    val cacheMaintenance = fenceI || sfence
+    when(!cacheMaintenance || delayedRecovery) {
         maintenanceStarted := false.B
     }.elsewhen(memoryDrained) {
         maintenanceStarted := true.B
     }
-    io.maintenance.request := fenceI && maintenanceStarted && !delayedRecovery
+    io.maintenance.request := cacheMaintenance && maintenanceStarted && !delayedRecovery
+    io.maintenance.invalidate := fenceI
     val systemReady = !headSystem || Mux(
-        fenceI,
+        cacheMaintenance,
         maintenanceStarted && io.maintenance.done,
-        Mux(fence || sfence, memoryDrained, true.B),
+        Mux(fence, memoryDrained, true.B),
     )
     /* Each ROB head must identify one of the ordered FTQ heads before it can retire. */
     val headMatchesFtq = VecInit((0 until cp.width).map { lane =>
@@ -250,6 +256,24 @@ class Commit(
     val retire = Wire(Vec(cp.width, Bool()))
     val recovery = Wire(Vec(cp.width, Bool()))
     val packetEnd = Wire(Vec(cp.width, Bool()))
+    def writesSatp(entry: ROBEntry): Bool = {
+        val unconditional = entry.systemOp === SystemOp.CSRRW.U || entry.systemOp === SystemOp.CSRRWI.U
+        val conditional = entry.systemOp === SystemOp.CSRRS.U || entry.systemOp === SystemOp.CSRRC.U ||
+            entry.systemOp === SystemOp.CSRRSI.U || entry.systemOp === SystemOp.CSRRCI.U
+        entry.isSystem && entry.instruction(31, 20) === CSRAddress.satp.U &&
+            (unconditional || (conditional && entry.instruction(19, 15).orR))
+    }
+    def writesExecutionState(entry: ROBEntry): Bool = {
+        val unconditional = entry.systemOp === SystemOp.CSRRW.U || entry.systemOp === SystemOp.CSRRWI.U
+        val conditional = entry.systemOp === SystemOp.CSRRS.U || entry.systemOp === SystemOp.CSRRC.U ||
+            entry.systemOp === SystemOp.CSRRSI.U || entry.systemOp === SystemOp.CSRRCI.U
+        val writes = unconditional || (conditional && entry.instruction(19, 15).orR)
+        val address = entry.instruction(31, 20)
+        val affectsExecution = address === CSRAddress.fflags.U || address === CSRAddress.frm.U ||
+            address === CSRAddress.fcsr.U || address === CSRAddress.sstatus.U ||
+            address === CSRAddress.satp.U || address === CSRAddress.mstatus.U
+        entry.isSystem && writes && affectsExecution
+    }
     var continue = true.B
     for (lane <- 0 until cp.width) {
         val entry = rob.io.head(lane).bits
@@ -265,7 +289,8 @@ class Commit(
         val sretIllegal = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
         val systemException = ecall || ebreak || mretIllegal || sretIllegal
-        val recoveryCandidate = entry.exception.valid || mispredicted || commitSystem || entry.isAtomic || systemException
+        val recoveryCandidate = entry.exception.valid || mispredicted || commitSystem || writesExecutionState(entry) ||
+            entry.isAtomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate
         val completed = rob.io.head(lane).valid && entry.complete && headMatchesFtq(lane).asUInt.orR &&
             (if (lane == 0) systemReady else !headSystem && !entry.isSystem) &&
@@ -276,7 +301,8 @@ class Commit(
         retire(lane) := continue && completed && !entry.exception.valid && !systemException
         continue = continue && completed && !recover && !entry.isSystem && !entry.isAtomic
     }
-    val retireFire = VecInit(retire.map(_ && !delayedRecovery))
+    val takeInterrupt = Wire(Bool())
+    val retireFire = VecInit(retire.map(_ && !delayedRecovery && !takeInterrupt))
     rob.io.pop := retireFire.asUInt
 
     /* Interrupt selection shares the recovery path and obeys privilege delegation. */
@@ -292,8 +318,8 @@ class Commit(
             machineInterruptEnabled && !delegated,
         )
     })
-    val takeInterrupt = interruptEligible.asUInt.orR && rob.io.head(0).valid &&
-        !recovery.asUInt.orR && !delayedRecovery && !headSystem
+    takeInterrupt := interruptEligible.asUInt.orR && rob.io.head(0).valid &&
+        !recovery.asUInt.orR && !delayedRecovery && !headSystem && !headAtomic
     val interruptCause = Mux1H(interruptEligible, interruptCandidates.map(_.U(5.W)))
     val recoveryValid = (recovery.asUInt.orR || takeInterrupt) && !delayedRecovery
     val recoveryEntry = Mux1H(recovery, rob.io.head.map(_.bits))
@@ -531,7 +557,15 @@ class Commit(
     csr.io.trap.bits.supervisor := delegatedTrap
     csr.io.trap.bits.pcWord := selectedEntry.pc(31, 2)
     csr.io.trap.bits.cause := trapCause
-    csr.io.trap.bits.tval := Mux(selectedEbreak, selectedEntry.pc, Mux(selectedSystemException, selectedEntry.instruction, selectedEntry.exception.tval))
+    csr.io.trap.bits.tval := Mux(
+        takeInterrupt || selectedEcall,
+        0.U,
+        Mux(
+            selectedEbreak,
+            selectedEntry.pc,
+            Mux(selectedMretIllegal || selectedSretIllegal, selectedEntry.instruction, selectedEntry.exception.tval),
+        ),
+    )
     csr.io.xret.valid := recoveryValid && !trap && (selectedMret || selectedSret)
     csr.io.xret.bits := selectedSret
     when(csr.io.trap.valid) {
@@ -543,13 +577,17 @@ class Commit(
             csr.io.state.mstatus(12, 11),
         )
     }
-    io.csr.tlbFlush := (recoveryValid && sfence) ||
-        (io.backend.mixCSR.commit && csr.io.req.bits.addr === CSRAddress.satp.U && !csr.io.rsp.bits.illegal)
+    // SATP changes become visible only after all younger work is discarded and the
+    // frontend redirects to the next instruction under the new translation regime.
+    io.csr.tlbFlush := recoveryValid && (sfence || (writesSatp(selectedEntry) && !trap))
     io.csr.currentPrivilege := privilege
     io.csr.state := csr.io.state
 
-    when(recoveryValid) {
+    when(recoveryValid && !takeInterrupt) {
         assert(PopCount(recovery) === 1.U)
+    }
+    when(csr.io.trap.valid) {
+        assert(!retireFire.asUInt.orR, "Trap acceptance and instruction retirement must not share a cycle")
     }
     for (lane <- 0 until cp.width) {
         when(retireFire(lane) || recovery(lane)) {
@@ -632,6 +670,11 @@ class Commit(
     io.debug.robHeadValid := rob.io.head(0).valid
     io.debug.robHeadComplete := rob.io.head(0).bits.complete
     io.debug.robHeadPc := rob.io.head(0).bits.pc
+    io.debug.trap.valid := csr.io.trap.valid
+    io.debug.trap.bits.epc := Cat(csr.io.trap.bits.pcWord, 0.U(2.W))
+    io.debug.trap.bits.cause := csr.io.trap.bits.cause
+    io.debug.trap.bits.tval := csr.io.trap.bits.tval
+    io.debug.trap.bits.targetPrivilege := Mux(csr.io.trap.bits.supervisor, 1.U, 3.U)
     io.debug.performance.branch := branchCount
     io.debug.performance.branchFail := branchFailCount
     io.debug.performance.directJump := directJumpCount
@@ -659,6 +702,13 @@ class CommitRetireTrace(bp: BackendParams) extends Bundle {
     val value = UInt(32.W)
 }
 
+class CommitTrapTrace extends Bundle {
+    val epc = UInt(32.W)
+    val cause = UInt(32.W)
+    val tval = UInt(32.W)
+    val targetPrivilege = UInt(2.W)
+}
+
 class CommitPerformanceCounters extends Bundle {
     val branch = UInt(64.W)
     val branchFail = UInt(64.W)
@@ -680,5 +730,6 @@ class CommitDebugIO(bp: BackendParams, width: Int) extends Bundle {
     val robHeadValid = Output(Bool())
     val robHeadComplete = Output(Bool())
     val robHeadPc = Output(UInt(32.W))
+    val trap = Output(Valid(new CommitTrapTrace))
     val performance = Output(new CommitPerformanceCounters)
 }

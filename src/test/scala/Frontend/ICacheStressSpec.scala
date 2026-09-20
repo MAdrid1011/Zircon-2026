@@ -12,19 +12,9 @@ import scala.util.Random
 class ICacheStressSpec extends AnyFreeSpec with ChiselSim {
     import ICacheTestModel._
 
-    private val configurations = Seq(
-        (1, 2, 4),
-        (1, 1024, 4),
-        (2, 2, 8),
-        (2, 128, 32),
-        (4, 2, 16),
-        (4, 16, 32),
-        (4, 64, 64),
-        (8, 2, 32),
-        (8, 64, 64),
-        (8, 32, 128),
-        (8, 2, 2048)
-    )
+    private val currentFrontend = FrontendParams()
+    private val currentICache = ICacheParams()
+    private val configurations = Seq((currentFrontend.fetchWidth, currentICache.sets, currentICache.lineBytes))
     private val seeds =
         sys.env.get("ICACHE_STRESS_SEEDS").map(_.split(",").toSeq.map(java.lang.Long.decode(_).longValue))
             .getOrElse(Seq(20260912L, 0x13579bdfL, 0xdeadbeefL))

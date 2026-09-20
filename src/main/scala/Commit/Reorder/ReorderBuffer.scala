@@ -129,9 +129,17 @@ class ReorderBuffer(
         entry.isSystem := incoming.context.instruction.fu === DecodeUnit.System.U
         entry.systemOp := incoming.context.instruction.op
         entry.instruction := incoming.context.instruction.inst
+        val fpMultiplyFlags = incoming.context.instruction.fu === DecodeUnit.Multiply.U &&
+            incoming.context.instruction.op >= MultiplyOp.FADD
+        val fpDivideFlags = incoming.context.instruction.fu === DecodeUnit.Divide.U &&
+            incoming.context.instruction.op >= DivideOp.FDIV.U
+        val fpMiscFlags = incoming.context.instruction.fu === DecodeUnit.FpMisc.U &&
+            ((incoming.context.instruction.op >= FpMiscOp.FMIN.U &&
+                incoming.context.instruction.op <= FpMiscOp.FLE.U) ||
+                (incoming.context.instruction.op >= FpMiscOp.FCVT_W_S.U &&
+                    incoming.context.instruction.op <= FpMiscOp.FCVT_S_WU.U))
         entry.fpDirty := incoming.context.instruction.rinfo.dest.valid &&
-            incoming.context.instruction.rinfo.dest.isFp ||
-            incoming.context.instruction.rinfo.src.map(source => source.valid && source.isFp).reduce(_ || _)
+            incoming.context.instruction.rinfo.dest.isFp || fpMultiplyFlags || fpDivideFlags || fpMiscFlags
         val csrSystem = entry.isSystem && entry.systemOp >= SystemOp.CSRRW.U &&
             entry.systemOp <= SystemOp.CSRRCI.U
         entry.complete := incoming.context.instruction.exception.valid || (entry.isSystem && !csrSystem)

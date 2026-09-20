@@ -62,7 +62,8 @@ class ICacheSpec extends AnyFreeSpec with ChiselSim {
 
     "ICache drains canceled transactions, holds responses and reports translation/lower errors" in {
         simulate(new ICache(FrontendParams(observe = true))) { d =>
-            val e = new Environment(d, 4, 32)
+            val lineBytes = ICacheParams().lineBytes
+            val e = new Environment(d, 4, lineBytes)
             val base = BigInt("80004000", 16)
             // Cancel after S2 detects miss, before the miss FSM starts its lower request.
             val early = e.add(base)
@@ -73,7 +74,7 @@ class ICacheSpec extends AnyFreeSpec with ChiselSim {
 
             // A request already held at the lower interface survives flush unchanged.
             e.lowerReady = false
-            val held = e.add(base + 32)
+            val held = e.add(base + lineBytes)
             e.until(d.io.l2.request.valid.peek().litToBoolean)
             e.step()
             e.flush()
@@ -82,32 +83,32 @@ class ICacheSpec extends AnyFreeSpec with ChiselSim {
             e.drain()
             assert(!e.completed.contains(held))
             val reads = e.requests.size
-            e.fetch(base + 32)
+            e.fetch(base + lineBytes)
             assert(e.requests.size == reads + 1, "canceled refill installed a line")
 
             // Cancel with a read outstanding, then immediately queue the same PC under a new token.
-            val pending = e.add(base + 64)
+            val pending = e.add(base + 2 * lineBytes)
             e.until(e.pending.exists(_.token == pending))
             e.flush()
-            val fresh = e.add(base + 64)
+            val fresh = e.add(base + 2 * lineBytes)
             e.drain()
             assert(!e.completed.contains(pending) && e.completed.contains(fresh))
 
             // The cycle after the lower response is the original refill phase.
-            val cancelInstall = e.add(base + 96)
+            val cancelInstall = e.add(base + 3 * lineBytes)
             val returned = e.lowerReturns
             e.until(e.lowerReturns > returned)
             e.flush()
             e.drain()
             assert(!e.completed.contains(cancelInstall))
             val beforeInstall = e.requests.size
-            e.fetch(base + 96)
+            e.fetch(base + 3 * lineBytes)
             assert(e.requests.size == beforeInstall + 1)
 
             // Output backpressure holds the return buffer while a younger translation waits.
             e.outputReady = false
-            e.add(base + 128)
-            e.add(base + 160, delay = 3)
+            e.add(base + 4 * lineBytes)
+            e.add(base + 5 * lineBytes, delay = 3)
             e.until(d.io.pp.response.valid.peek().litToBoolean)
             for (_ <- 0 until 17) e.step()
             e.outputReady = true
@@ -115,21 +116,21 @@ class ICacheSpec extends AnyFreeSpec with ChiselSim {
 
             // Flush a held hit and drain its younger delayed translation.
             e.outputReady = false
-            val hit = e.add(base + 160)
-            e.add(base + 192, delay = 23)
+            val hit = e.add(base + 5 * lineBytes)
+            e.add(base + 6 * lineBytes, delay = 23)
             e.until(d.io.pp.response.valid.peek().litToBoolean)
             e.step()
             e.flush()
             e.outputReady = true
-            e.fetch(base + 192)
+            e.fetch(base + 6 * lineBytes)
             assert(!e.completed.contains(hit))
 
             // A redirect may accept its new PF request on the same edge that cancels a held hit.
             e.outputReady = false
-            val oldHit = e.add(base + 192)
+            val oldHit = e.add(base + 6 * lineBytes)
             e.until(d.io.pp.response.valid.peek().litToBoolean)
             e.step()
-            val redirect = e.add(base + 192)
+            val redirect = e.add(base + 6 * lineBytes)
             val redirectCycle = e.cycle
             e.step(flush = true)
             e.outputReady = true
@@ -138,28 +139,29 @@ class ICacheSpec extends AnyFreeSpec with ChiselSim {
             assert(!e.completed.contains(oldHit))
 
             val beforeFault = e.requests.size
-            e.fetch(base + 224, fault = true)
-            e.fetch(base + 225)
+            e.fetch(base + 7 * lineBytes, fault = true)
+            e.fetch(base + 7 * lineBytes + 1)
             assert(e.requests.size == beforeFault, "faulting fetch accessed lower memory")
-            e.failing += base + 256
-            e.fetch(base + 260)
+            e.failing += base + 8 * lineBytes
+            e.fetch(base + 8 * lineBytes + 4)
             e.failing.clear()
             val afterError = e.requests.size
-            e.fetch(base + 260)
+            e.fetch(base + 8 * lineBytes + 4)
             assert(e.requests.size == afterError + 1, "failed lower read installed a line")
 
             // Uncached words occupy their aligned slots and never allocate a cache line.
-            e.failing += base + 300
+            val uncachedPc = base + 9 * lineBytes + 4
+            e.failing += uncachedPc + 8
             val uncached = e.requests.size
-            e.fetch(base + 292, uncached = true)
+            e.fetch(uncachedPc, uncached = true)
             assert(e.requests.size == uncached + 3)
             e.failing.clear()
-            e.fetch(base + 292, uncached = true)
+            e.fetch(uncachedPc, uncached = true)
             assert(e.requests.size == uncached + 6)
-            e.fetch(base + 292)
+            e.fetch(uncachedPc)
             assert(e.requests.size == uncached + 7)
 
-            val uncachedCancel = e.add(base + 320, uncached = true)
+            val uncachedCancel = e.add(base + 10 * lineBytes, uncached = true)
             e.until(e.pending.exists(_.token == uncachedCancel))
             val uncachedBefore = e.requests.size
             e.flush()
@@ -174,7 +176,7 @@ class ICacheSpec extends AnyFreeSpec with ChiselSim {
 
     "ICache handles randomized translation, lower-memory and consumer delays with repeated flushes" in {
         simulate(new ICache(FrontendParams(observe = true), ICacheParams(sets = 4))) { d =>
-            val e = new Environment(d, 4, 32)
+            val e = new Environment(d, 4, ICacheParams().lineBytes)
             val random = new Random(20260911L)
             val base = BigInt("90000000", 16)
             for (cycle <- 0 until 5000) {

@@ -68,6 +68,7 @@ class DualLoadPipelineSystem(backend: DualPortRamBackend) extends Module {
     fpRf.io.write.drop(2).zip(io.fpWrite).foreach { case (a, b) => a <> b }
     cache.io.flush := io.flush
     cache.io.maintenance.request := false.B
+    cache.io.maintenance.invalidate := false.B
     cache.io.store <> io.store
     io.l2 <> cache.io.l2
 }

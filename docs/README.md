@@ -9,5 +9,6 @@
 - [后端](Backend.md)
 - [提交与恢复](Commit.md)
 - [存储系统](Memory.md)
+- [Linux 启动基线](Linux-Bringup.md)
 
 源码中的类名、接口名和流水级名称在文档中保持原样，便于从说明直接定位到实现。

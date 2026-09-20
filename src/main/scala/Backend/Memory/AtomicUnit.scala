@@ -37,6 +37,7 @@ class AtomicLoadIO(cache: DCacheParams) extends Bundle {
 class AtomicLoadResponse extends Bundle {
     val data = UInt(32.W)
     val exception = UInt(4.W)
+    val retry = Bool()
 }
 
 class AtomicStoreIO extends Bundle {
@@ -44,7 +45,7 @@ class AtomicStoreIO extends Bundle {
     val response = Flipped(Decoupled(new DStoreResponse))
 }
 
-class AtomicUnitIO(p: BackendParams, cache: DCacheParams) extends Bundle {
+class AtomicUnitIO(p: BackendParams, cache: DCacheParams, observe: Boolean) extends Bundle {
     val request = Flipped(Decoupled(new AtomicRequest(p)))
     val response = Decoupled(new AtomicResponse(p))
     val clearReservation = Input(Bool())
@@ -52,14 +53,16 @@ class AtomicUnitIO(p: BackendParams, cache: DCacheParams) extends Bundle {
 
     val load = new AtomicLoadIO(cache)
     val store = new AtomicStoreIO
+    val debug = if (observe) Some(Output(new AtomicUnitDebugIO)) else None
 }
 
 /** Commit-authorized RV32 word atomics sharing one DCache load lane and its store port. */
 class AtomicUnit(
     val p: BackendParams = BackendParams(),
     val cache: DCacheParams = DCacheParams(),
+    val observe: Boolean = false,
 ) extends Module {
-    val io = IO(new AtomicUnitIO(p, cache))
+    val io = IO(new AtomicUnitIO(p, cache, observe))
     val idle :: loadRequest :: loadWait :: storeRequest :: storeWait :: respond :: Nil = Enum(6)
     val state = RegInit(idle)
     val request = RegInit(0.U.asTypeOf(new AtomicRequest(p)))
@@ -154,7 +157,9 @@ class AtomicUnit(
     when(state === loadWait && io.load.response.valid) {
         result := io.load.response.bits.data
         exception := io.load.response.bits.exception
-        when(io.load.response.bits.exception.orR) {
+        when(io.load.response.bits.retry) {
+            state := loadRequest
+        }.elsewhen(io.load.response.bits.exception.orR) {
             state := respond
         }.elsewhen(isLr) {
             reservationValid := true.B
@@ -182,4 +187,12 @@ class AtomicUnit(
         assert(!isLr)
         assert(!isSc || reservationHit || !reservationValid)
     }
+
+    if (observe) {
+        io.debug.get.state := state
+    }
+}
+
+class AtomicUnitDebugIO extends Bundle {
+    val state = UInt(3.W)
 }

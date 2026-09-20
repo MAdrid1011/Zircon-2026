@@ -15,6 +15,8 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
     private var pending: Option[Pending] = None
     var heldMemoryRequest: Option[Seq[BigInt]] = None
 
+    def lowerResponseDue: Boolean = pending.exists(_.due <= cycle)
+
     private val lineBytes = dut.p.lineBytes
     private val lineMask = (BigInt(1) << dut.p.lineBits) - 1
 
@@ -245,13 +247,14 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 import d._
                 tick()
 
+                val setStride = params.sets * params.lineBytes
                 val a = 0x10000L
-                val b = a + 0x200
-                val c = a + 0x400
-                val e = a + 0x600
-                val f = a + 0x800
-                val g = a + 0xa00
-                val targets = (0 until 8).map(i => 0x20020L + i * 0x200)
+                val b = a + setStride
+                val c = a + 2 * setStride
+                val e = a + 3 * setStride
+                val f = a + 4 * setStride
+                val g = a + 5 * setStride
+                val targets = (0 until 8).map(i => 0x20040L + i * setStride)
 
                 val (aFromMemory, aError) = dcache(a)
                 assert(!aError && aFromMemory == line(a) && reads == 1)
@@ -281,15 +284,18 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
 
                 val ptwReads = reads
                 val (pte, pteError) = iptw(g + 4)
-                assert(!pteError && pte == bytes(g + 4, 4) && reads == ptwReads, "IPTW did not retain an L2 hit")
+                assert(
+                    !pteError && pte == (bytes(g + 4, 4) & ~BigInt(0x300)) && reads == ptwReads,
+                    "IPTW did not retain an L2 hit"
+                )
                 val (gFromL2, gError) = icache(g, token = 12)
                 assert(!gError && gFromL2 == line(g) && reads == ptwReads, "ICache did not consume the retained line")
                 icache(g, token = 13)
                 assert(reads == ptwReads + 1, "clean L2 hit was not removed after transfer to L1")
 
                 val i1 = 0x30040L
-                val i2 = i1 + 0x200
-                val i3 = i1 + 0x400
+                val i2 = i1 + setStride
+                val i3 = i1 + 2 * setStride
                 icache(targets(0) + 0x40, Some((i1, line(i1))), token = 21)
                 icache(targets(1) + 0x40, Some((i2, line(i2))), token = 22)
                 icache(targets(2) + 0x40, Some((i3, line(i3))), token = 23)
@@ -324,7 +330,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 val retainedVictim = 0x61000L
                 val failedTarget = 0x62020L
                 val retainedDirty = replaceWord(line(retainedVictim), 4, BigInt("3a4b5c6d", 16))
-                failing += (failedTarget & ~31L)
+                failing += (failedTarget & ~(params.lineBytes - 1).toLong)
                 val (_, failedTargetError) = dcache(
                     failedTarget,
                     Some((retainedVictim, retainedDirty, true))
@@ -338,6 +344,85 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
 
                 drain()
                 info(s"$name: cycles=$cycle lowerReads=$reads lowerWrites=$writes; all returned bytes checked")
+            }
+        }
+
+        s"$name: instruction lookup recovers after the victim engine uses its RAM port" in {
+            val params = ZirconConfig.L2CacheParams(sets = 16)
+            simulate(new L2Cache(backend, p = params)) { dut =>
+                val d = new L2CacheDriver(dut)
+                import d._
+                tick()
+
+                // The target and alias share a tag but occupy different sets. A stale alias
+                // RAM output must not be accepted when the victim engine releases port A.
+                val target = 0x20060L
+                val alias = 0x20180L
+                val source = 0x202a0L
+                val backgroundVictim = 0x20980L
+                dcache(0x30000L, Some((target, line(target), false)))
+                for (way <- 0 until params.ways) {
+                    val resident = alias + way * 0x200L
+                    dcache(0x31020L + way * 0x20L, Some((resident, line(resident), true)))
+                }
+                dcache(0x32040L, Some((source, line(source), false)))
+                val setupReads = reads
+                val (targetPte, targetPteError) = iptw(target)
+                assert(!targetPteError && targetPte == (bytes(target, 4) & ~BigInt(0x300)))
+                assert(reads == setupReads, "the target was not resident before the victim-port overlap")
+
+                // Occupy the shared engine through a D-side victim installation. The
+                // victim uses another set so the alias remains available on port A.
+                dut.io.dcache.req.valid.poke(true)
+                dut.io.dcache.req.bits.paddr.poke(0x40000L)
+                dut.io.dcache.req.bits.write.poke(false)
+                dut.io.dcache.req.bits.uncache.poke(false)
+                dut.io.dcache.req.bits.size.poke(2)
+                dut.io.dcache.req.bits.data.poke(0)
+                dut.io.dcache.req.bits.mask.poke(0)
+                dut.io.dcache.req.bits.victimValid.poke(true)
+                dut.io.dcache.req.bits.victimLine.poke(0x404e0L >> params.offsetBits)
+                dut.io.dcache.req.bits.victimData.poke(line(0x404e0L))
+                dut.io.dcache.req.bits.victimDirty.poke(false)
+                while (!dut.io.dcache.req.ready.peek().litToBoolean) tick()
+                tick()
+                dut.io.dcache.req.valid.poke(false)
+
+                dut.io.icache.request.valid.poke(true)
+                dut.io.icache.request.bits.token.poke(201)
+                dut.io.icache.request.bits.paddr.poke(source)
+                dut.io.icache.request.bits.uncache.poke(false)
+                dut.io.icache.request.bits.victimValid.poke(true)
+                dut.io.icache.request.bits.victimLine.poke(backgroundVictim >> params.offsetBits)
+                dut.io.icache.request.bits.victimData.poke(line(backgroundVictim))
+                while (!dut.io.icache.request.ready.peek().litToBoolean) tick()
+                tick()
+                dut.io.icache.request.valid.poke(false)
+                while (!dut.io.icache.response.valid.peek().litToBoolean) tick()
+                dut.io.icache.response.bits.token.expect(201)
+                dut.io.icache.response.bits.data.expect(line(source))
+                tick()
+
+                // Advance the returning D miss through victim-read into victim-lookup.
+                // A target accepted there remains in S1 through the following install.
+                while (!lowerResponseDue) tick()
+                tick()
+                tick()
+                val readsBeforeTarget = reads
+                dut.io.icache.request.valid.poke(true)
+                dut.io.icache.request.bits.token.poke(202)
+                dut.io.icache.request.bits.paddr.poke(target)
+                dut.io.icache.request.bits.victimValid.poke(false)
+                assert(dut.io.icache.request.ready.peek().litToBoolean)
+                tick()
+                dut.io.icache.request.valid.poke(false)
+                while (!dut.io.icache.response.valid.peek().litToBoolean) tick()
+                dut.io.icache.response.bits.token.expect(202)
+                dut.io.icache.response.bits.data.expect(line(target))
+                assert(!dut.io.icache.response.bits.error.peek().litToBoolean)
+                tick()
+                assert(reads == readsBeforeTarget, "the resident target unexpectedly missed in L2")
+                drain()
             }
         }
     }
@@ -416,11 +501,15 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             assert(reads == hitReads, "simultaneous I/D L2 hits unexpectedly accessed lower memory")
             drain()
 
-            val dBurst = (0 until 3).map(i => 0x80000L + i * 0x20)
-            val iBurst = (0 until 3).map(i => 0x81080L + i * 0x20)
+            val dBurst = (0 until 3).map(i => 0x80000L + i * dut.p.lineBytes)
+            val iBurst = (0 until 3).map(i => 0x81080L + i * dut.p.lineBytes)
             for (i <- dBurst.indices) {
-                dcache(0x90000L + i * 0x20, Some((dBurst(i), line(dBurst(i)), false)))
-                icache(0x91080L + i * 0x20, Some((iBurst(i), line(iBurst(i)))), token = 80 + i)
+                dcache(0x90000L + i * dut.p.lineBytes, Some((dBurst(i), line(dBurst(i)), false)))
+                icache(
+                    0x91080L + i * dut.p.lineBytes,
+                    Some((iBurst(i), line(iBurst(i)))),
+                    token = 80 + i
+                )
             }
             val burstReads = reads
             val burstIssueCycle = cycle

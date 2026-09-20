@@ -37,16 +37,22 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             grant.valid.poke(false)
             grant.bits.robIdx.poke(0)
         }
+        dut.io.loadGrant.foreach { grant =>
+            grant.valid.poke(false)
+            grant.bits.robIdx.poke(0)
+        }
         dut.io.mixAvailable.foreach { available =>
             available.poke(true)
         }
         dut.io.completed.foreach { feedback =>
             feedback.valid.poke(false)
             feedback.bits.robIdx.poke(0)
+            feedback.bits.uncache.poke(false)
         }
         dut.io.retry.foreach { feedback =>
             feedback.valid.poke(false)
             feedback.bits.robIdx.poke(0)
+            feedback.bits.uncache.poke(false)
         }
         dut.reset.poke(true)
         dut.clock.step(2)
@@ -187,8 +193,6 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
                 )
             )
             dut.io.issue.ready.poke(true)
-            dut.io.issue.bits.robIdx.expect(31)
-            dut.clock.step()
             dut.io.issue.valid.expect(false)
 
             dut.io.csrGrant.get.valid.poke(true)
@@ -197,6 +201,10 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.csrGrant.get.bits.robIdx.poke(30)
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(30)
+            dut.clock.step()
+            dut.io.csrGrant.get.valid.poke(false)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(31)
         }
     }
 
@@ -288,6 +296,33 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "uncached Load waits for its exact commit grant and marks the authorized retry" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.Load, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            enqueue(dut, Seq((52, DecodeUnit.Load, 2, None, true)))
+            dut.io.issue.ready.poke(true)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.ioAuthorized.expect(false)
+            dut.clock.step()
+
+            dut.io.retry.get.valid.poke(true)
+            dut.io.retry.get.bits.robIdx.poke(52)
+            dut.io.retry.get.bits.uncache.poke(true)
+            dut.clock.step()
+            dut.io.retry.get.valid.poke(false)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.loadGrant.get.valid.poke(true)
+            dut.io.loadGrant.get.bits.robIdx.poke(51)
+            dut.io.issue.valid.expect(false)
+            dut.io.loadGrant.get.bits.robIdx.poke(52)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(52)
+            dut.io.issue.bits.ioAuthorized.expect(true)
+        }
+    }
+
     "speculative issue leaves the compact queue and uses its internal replay queue" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 4)
         simulate(new IssueQueue(backend, q)) { dut =>
@@ -346,8 +381,8 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             enqueue(
                 dut,
                 Seq(
-                    (70, DecodeUnit.ALU, 0, Some(9), false),
-                    (71, DecodeUnit.Branch, 0, Some(9), false),
+                    (52, DecodeUnit.ALU, 0, Some(9), false),
+                    (53, DecodeUnit.Branch, 0, Some(9), false),
                 ),
             )
             dut.io.wakeup(0).prd.poke(9)
@@ -356,9 +391,9 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.wakeup(0).prd.poke(0)
             dut.io.wakeup(0).specMask.poke(0)
 
-            dut.io.issue.bits.robIdx.expect(70)
+            dut.io.issue.bits.robIdx.expect(52)
             dut.clock.step()
-            dut.io.issue.bits.robIdx.expect(71)
+            dut.io.issue.bits.robIdx.expect(53)
             dut.clock.step()
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(2)
@@ -378,14 +413,14 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enq.valid.poke(3)
             packageEntry(
                 dut.io.enq.entries(0),
-                80,
+                54,
                 DecodeUnit.ALU,
                 sourceTag = Some(10),
                 sourceSpecMask = 1,
             )
             packageEntry(
                 dut.io.enq.entries(1),
-                81,
+                55,
                 DecodeUnit.ALU,
                 sourceTag = Some(11),
                 sourceSpecMask = 2,
@@ -393,7 +428,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.enq.valid.poke(0)
 
-            dut.io.issue.bits.robIdx.expect(80)
+            dut.io.issue.bits.robIdx.expect(54)
             dut.clock.step()
             dut.io.occupancy.expect(1)
             dut.io.replayOccupancy.expect(1)
@@ -403,7 +438,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.speculation.resolvedMask.poke(0)
             dut.io.issue.valid.expect(true)
-            dut.io.issue.bits.robIdx.expect(81)
+            dut.io.issue.bits.robIdx.expect(55)
             dut.clock.step()
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(1)
@@ -418,14 +453,14 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enq.valid.poke(3)
             packageEntry(
                 dut.io.enq.entries(0),
-                90,
+                56,
                 DecodeUnit.ALU,
                 sourceTag = Some(12),
                 sourceSpecMask = 1,
             )
             packageEntry(
                 dut.io.enq.entries(1),
-                91,
+                57,
                 DecodeUnit.Branch,
                 sourceTag = Some(13),
                 sourceSpecMask = 2,
@@ -472,7 +507,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
                     nextId += 1
                     val tag = if (random.nextBoolean()) Some(1 + random.nextInt(12)) else None
                     val ready = tag.isEmpty || random.nextBoolean()
-                    val rob = id & 0xff
+                    val rob = id & ((1 << backend.robWidth) - 1)
                     packageEntry(
                         dut.io.enq.entries(lane),
                         rob,
@@ -546,7 +581,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.base.store.expect(true)
             dut.io.base.prs(0).expect(10)
             dut.io.base.prs(1).expect(11)
-            dut.io.base.sourceReady(0).expect(false)
+            dut.io.base.sourceReady(0).expect(true)
             dut.io.base.sourceReady(1).expect(false)
             dut.io.base.sourceReady(2).expect(true)
             dut.io.base.mtype.expect(2)

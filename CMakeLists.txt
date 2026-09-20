@@ -70,3 +70,13 @@ add_custom_command(
 add_custom_target(zircon-rtl DEPENDS "${ZIRCON_RTL_TOP}")
 
 add_subdirectory(ZirconSim)
+
+find_program(MAKE_EXECUTABLE NAMES gmake make REQUIRED)
+set(ZIRCON_LINUX_SYSTEM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/RV-Software/linux-system")
+foreach(target IN ITEMS image qemu-check linux-check linux)
+    add_custom_target(linux-${target}
+        COMMAND "${MAKE_EXECUTABLE}" -C "${ZIRCON_LINUX_SYSTEM_DIR}" ${target}
+        USES_TERMINAL
+        VERBATIM
+    )
+endforeach()

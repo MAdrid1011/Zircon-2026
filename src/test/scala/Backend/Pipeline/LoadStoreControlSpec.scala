@@ -34,6 +34,7 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
             dut.io.cache.wbSelect.bits.slot.poke(0)
             dut.io.cache.wbSelect.bits.exception.poke(0)
             dut.io.cache.wbSelect.bits.retry.poke(false)
+            dut.io.cache.wbSelect.bits.uncache.poke(false)
             dut.io.cache.rsp.valid.poke(false)
             dut.io.cache.rsp.bits.slot.poke(0)
             dut.io.cache.rsp.bits.data.poke(0)

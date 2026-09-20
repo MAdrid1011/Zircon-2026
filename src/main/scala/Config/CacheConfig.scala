@@ -15,7 +15,7 @@ case class L2CacheParams(
 ) {
     require(sets >= 2 && isPow2(sets))
     require(ways == 4, "The current tree-PLRU implementation requires four ways")
-    require(lineBytes == 32, "L2 and both L1 caches currently exchange 32-byte lines")
+    require(lineBytes >= 32 && isPow2(lineBytes))
     require(maxInstructionWays >= 1 && maxInstructionWays < ways)
     val offsetBits: Int = log2Ceil(lineBytes)
     val indexBits: Int = log2Ceil(sets)
@@ -43,7 +43,7 @@ object Cache {
     val icLineBits = icLine * 8
     val fetchOffset = 2 + log2Ceil(nfch)
     assert(l1Offset >= fetchOffset, "l1Offset must be greater than fetchOffset")
-    val l2Offset = 6
+    val l2Offset = 5
     val l2Index = 5
     val l2IndexNum = 1 << l2Index
     val l2Tag = 32 - l2Offset - l2Index

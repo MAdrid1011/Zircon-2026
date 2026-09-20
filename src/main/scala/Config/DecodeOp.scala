@@ -116,4 +116,5 @@ object DecodeSupport {
 
 object DecodeException {
     val IllegalInstruction = 2
+    val InstructionPageFault = 12
 }

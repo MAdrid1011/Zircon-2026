@@ -232,6 +232,7 @@ class DCache(
     val maintenanceState = RegInit(maintenanceIdle)
     val maintenanceSet = RegInit(0.U(l1Index.W))
     val maintenanceWay = RegInit(0.U(log2Ceil(l1Way).W))
+    val maintenanceShouldInvalidate = RegInit(false.B)
     val maintenanceRead = maintenanceState === maintenanceReadState
     val maintenanceActive = maintenanceState =/= maintenanceIdle && maintenanceState =/= maintenanceDone
     val maintenanceWaySelect = UIntToOH(maintenanceWay, l1Way)
@@ -240,6 +241,7 @@ class DCache(
     val maintenanceTag = Mux1H(maintenanceWaySelect, tagTab.map(_.doutb))
     val maintenanceData = Mux1H(maintenanceWaySelect, dataTab.map(_.doutb))
     val maintenanceInvalidate = WireDefault(false.B)
+    val maintenanceClean = WireDefault(false.B)
     val maintenanceRequest = Wire(Decoupled(new DMemoryRequest))
     maintenanceRequest.valid := maintenanceState === maintenanceSend
     maintenanceRequest.bits := 0.U.asTypeOf(new DMemoryRequest)
@@ -274,6 +276,7 @@ class DCache(
             when(io.maintenance.request && pipelineIdle) {
                 maintenanceSet := 0.U
                 maintenanceWay := 0.U
+                maintenanceShouldInvalidate := io.maintenance.invalidate
                 maintenanceState := maintenanceReadState
             }
         }
@@ -284,7 +287,7 @@ class DCache(
             when(maintenanceValid && maintenanceDirty) {
                 maintenanceState := maintenanceSend
             }.otherwise {
-                maintenanceInvalidate := maintenanceValid
+                maintenanceInvalidate := maintenanceValid && maintenanceShouldInvalidate
                 advanceMaintenance()
             }
         }
@@ -293,7 +296,8 @@ class DCache(
         }
         is(maintenanceWait) {
             when(io.l2.rsp.fire) {
-                maintenanceInvalidate := !io.l2.rsp.bits.error
+                maintenanceInvalidate := !io.l2.rsp.bits.error && maintenanceShouldInvalidate
+                maintenanceClean := !io.l2.rsp.bits.error
                 advanceMaintenance()
             }
         }
@@ -431,6 +435,7 @@ class DCache(
             (execute(lane).translationMiss || effectiveForwardBlocked(lane) ||
                 (execute(lane).uncache && !execute(lane).ioAuthorized) ||
                 requiresMemory(lane) || staleLookup(lane))
+        localResponse(lane).uncache := execute(lane).uncache && !execute(lane).translationMiss
 
         responseInputValid(lane) := missCompletionForLane(lane) || localResponseValid(lane)
         responseInput(lane) := localResponse(lane)
@@ -449,6 +454,7 @@ class DCache(
         io.load(lane).wbSelect.bits.slot := responseInput(lane).slot
         io.load(lane).wbSelect.bits.exception := responseInput(lane).exception
         io.load(lane).wbSelect.bits.retry := responseInput(lane).retry
+        io.load(lane).wbSelect.bits.uncache := responseInput(lane).uncache
     }
 
     // Each lane has one fixed WB register. Its current response is consumed every
@@ -526,8 +532,9 @@ class DCache(
             translation.io.lookup(lane).bits.vaddr := rawCandidate(lane).vaddr
             val hit = translation.io.response(lane).hit && !asidChanged && !manage.flush
             val miss = rawCandidate(lane).exception === 0.U && !direct && !hit
-            val permissionFault = hit && !MMUPermission.data(translation.io.response(lane), manage.control, false.B)
-            val accessFault = hit && translation.io.response(lane).pma === PMAAttribute.invalid
+            val permissionFault = !direct && hit &&
+                !MMUPermission.data(translation.io.response(lane), manage.control, false.B)
+            val accessFault = !direct && hit && translation.io.response(lane).pma === PMAAttribute.invalid
             candidate(lane).paddr := Mux(
                 direct,
                 Cat(0.U(2.W), rawCandidate(lane).vaddr),
@@ -559,12 +566,12 @@ class DCache(
             val miss = io.storeTranslation.get.request.bits.exception === 0.U && !direct && !hit
             val readPermitted = MMUPermission.data(translation.io.response(1), manage.control, false.B)
             val writePermitted = MMUPermission.data(translation.io.response(1), manage.control, true.B)
-            val permissionFault = hit && Mux(
+            val permissionFault = !direct && hit && Mux(
                 io.storeTranslation.get.request.bits.atomic,
                 !readPermitted || (!io.storeTranslation.get.request.bits.lr && !writePermitted),
                 !writePermitted,
             )
-            val accessFault = hit && translation.io.response(1).pma === PMAAttribute.invalid
+            val accessFault = !direct && hit && translation.io.response(1).pma === PMAAttribute.invalid
             val directAccessFault = Mux(
                 io.storeTranslation.get.request.bits.atomic,
                 !PMA.readable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) ||
@@ -828,14 +835,18 @@ class DCache(
         )
         validTab(way).wdata(0) := !maintenanceInvalidate
 
-        dirtyTab(way).wen(0) := maintenanceInvalidate && maintenanceWay === way.U ||
+        dirtyTab(way).wen(0) := (maintenanceInvalidate || maintenanceClean) && maintenanceWay === way.U ||
             (installFire && missUnit.io.install.bits.way(way))
         dirtyTab(way).waddr(0) := Mux(
-            maintenanceInvalidate,
+            maintenanceInvalidate || maintenanceClean,
             maintenanceSet,
             index(installAddress)
         )
-        dirtyTab(way).wdata(0) := Mux(maintenanceInvalidate, false.B, missUnit.io.install.bits.dirty)
+        dirtyTab(way).wdata(0) := Mux(
+            maintenanceInvalidate || maintenanceClean,
+            false.B,
+            missUnit.io.install.bits.dirty,
+        )
         dirtyTab(way).wen(1) := storeArrayWrite && storeLookupResult.hit(way)
         dirtyTab(way).waddr(1) := index(storeRequest.paddr)
         dirtyTab(way).wdata(1) := true.B
@@ -951,5 +962,18 @@ class DCache(
         io.performance.get.storeHits := storeHits
         io.performance.get.storeMisses := storeMisses
         io.performance.get.missBusyCycles := missBusyCycles
+        io.debug.get.requestBufferValid := requestBufferValid.asUInt
+        io.debug.get.lookupValid := lookupValid.asUInt
+        io.debug.get.lookupFresh := lookupFresh.asUInt
+        io.debug.get.executeValid := executeValid.asUInt
+        io.debug.get.responseValid := responseValid.asUInt
+        io.debug.get.forwardQueryValid := io.forward(1).query.valid
+        io.debug.get.forwardResultValid := io.forward(1).result.valid
+        io.debug.get.lookupResponseMatch := lookupResponseMatch(1)
+        io.debug.get.lookupMove := lookupMove(1)
+        io.debug.get.executeRelease := executeRelease(1)
+        io.debug.get.missBusy := missUnit.io.busy
+        io.debug.get.storeState := storeState
+        io.debug.get.flush := io.flush
     }
 }

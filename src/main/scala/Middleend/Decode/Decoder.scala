@@ -70,8 +70,13 @@ class Decoder(
     instPkgOut.aq := execute && any(_.aqrl) && inst(26)
     instPkgOut.rl := execute && any(_.aqrl) && inst(25)
 
-    // Preserve an older fault even when the returned instruction bits are invalid.
-    when(!priorException && !legal) {
+    // Translation faults become precise exceptions here, after the fetch packet
+    // has preserved the virtual PC needed for stval.
+    when(io.in.fault) {
+        instPkgOut.exception.valid := true.B
+        instPkgOut.exception.cause := DecodeException.InstructionPageFault.U
+        instPkgOut.exception.tval := io.in.pc
+    }.elsewhen(!priorException && !legal) {
         instPkgOut.exception.valid := true.B
         instPkgOut.exception.cause := DecodeException.IllegalInstruction.U
         instPkgOut.exception.tval := inst

@@ -14,7 +14,7 @@
 </div>
 
 Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 位 RISC-V 乱序处理器。当前核心
-包含四指令取指、双宽译码与派发、三宽退休、两条整数/分支流水线、一条共享整数乘除与 FP32
+包含四指令取指、三宽译码与派发、三宽退休、两条整数/分支流水线、一条共享整数乘除与 FP32
 流水线，以及两条访存流水线。存储系统由独立 L1 ICache/DCache、Sv32 ITLB/DTLB、硬件页表
 遍历器和一颗偏 victim 组织的共享 L2 Cache 构成。
 
@@ -22,8 +22,8 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 模型和 OpenRAM `1RW+1R` 接口。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
 
 > [!NOTE]
-> 当前版本已稳定运行裸机功能程序与 CoreMark，但尚未宣称可以启动通用操作系统。Sv32、M/S/U
-> 特权状态和异常路径已经接入整核；PMP、完整系统软件启动与更广泛的特权架构验证仍在后续范围内。
+> 当前版本已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
+> 输入、文件系统挂载和定时器路径验证。PMP 与更广泛的特权架构一致性验证仍在后续范围内。
 
 ## 架构概览
 
@@ -41,7 +41,7 @@ flowchart LR
             BP --> IC --> FQ
         end
 
-        subgraph ME[Middleend · 2-wide]
+        subgraph ME[Middleend · 3-wide]
             DEC[Decode]
             REN[Rename]
             DSP[Dispatch]
@@ -96,13 +96,13 @@ flowchart LR
 | 项目 | 当前配置 |
 | --- | --- |
 | ISA | `RV32IMAF_Zicsr_Zifencei_Zaamo_Zalrsc` |
-| 取指 / 译码与派发 / 退休宽度 | 4 / 2 / 3 |
+| 取指 / 译码与派发 / 退休宽度 | 4 / 3 / 3 |
 | 整数 / 浮点物理寄存器 | 72 / 48 |
 | ROB / SQ / Store Buffer | 48 / 12 / 4 项 |
 | FTQ / Fetch Queue | 16 / 8 项 |
 | 计算流水线 | 2 x `ArithBranch` + 1 x `MixArithPipeline` |
 | 访存流水线 | LS0 Load + LS1 Load/Store Address，Store Data 独立发射 |
-| L1 ICache / DCache | 各 2 KiB，2 路组相连，32 B Cache Line |
+| L1 ICache / DCache | 各 1 KiB，2 路组相连，32 B Cache Line |
 | L2 Cache | 4 KiB，4 路组相连，32 B Cache Line |
 | ITLB / DTLB | 4 组 x 4 路，另含 4 项 4 MiB 大页表 |
 | 地址宽度 | 32 位虚拟地址，34 位物理地址 |
@@ -128,6 +128,7 @@ flowchart LR
 ### 环境依赖
 
 - CMake 3.25 或更新版本
+- Clang/AppleClang 与 `llvm-profdata`（默认 Linux PGO 构建）
 - JDK 与 sbt
 - Verilator
 - Spike（`riscv-isa-sim`）
@@ -175,6 +176,17 @@ make -C RV-Software/arch-test run
 当前精简测试集使用 Clang 构建 149 项正式 RISC-V Architecture Test，并通过 ZirconSim 与
 进程内 Spike 逐提交对拍。覆盖范围和工具要求见 `RV-Software/arch-test/README.md`。
 
+### 启动 Linux
+
+```sh
+make -C RV-Software/linux-system linux
+```
+
+该入口构建固定的软件镜像，并自动生成或复用与当前 RTL、仿真器和 payload 匹配的 PGO profile。
+正式仿真默认使用 `O3`、ThinLTO、主机原生指令、5 个 Verilator 运行线程、Spike 逐提交差分、
+交互 UART、4000 万周期滚动检查点和完整日志。macOS 使用 Docker 构建软件镜像，Linux 主机直接
+构建；详细环境与产物见 [Linux 启动文档](docs/Linux-Bringup.md)。
+
 ### 生成 RTL
 
 ```sh
@@ -196,7 +208,7 @@ sbt "runMain Elaborate --simulation generated"
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
-| Sv32 操作系统级端到端启动 | 尚未完成 |
+| Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
 | PMP 与完整特权架构一致性验证 | 尚未完成 |
 
 ## 模块文档

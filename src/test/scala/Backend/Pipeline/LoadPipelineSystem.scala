@@ -51,6 +51,7 @@ class LoadPipelineSystem(
     val cache = Module(new DCache(backend, DCacheParams(p.entries)))
     pipe.io.blockIssue := false.B
     cache.io.maintenance.request := false.B
+    cache.io.maintenance.invalidate := false.B
     pipe.io.iq <> io.iq
     pipe.io.cmt <> io.cmt
     io.wk <> pipe.io.wk

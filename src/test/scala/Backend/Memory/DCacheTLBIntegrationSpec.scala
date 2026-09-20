@@ -40,6 +40,8 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
         dut.io.storeTranslation.get.request.bits.vaddr.poke(0)
         dut.io.storeTranslation.get.request.bits.uncache.poke(false)
         dut.io.storeTranslation.get.request.bits.exception.poke(0)
+        dut.io.storeTranslation.get.request.bits.atomic.poke(false)
+        dut.io.storeTranslation.get.request.bits.lr.poke(false)
         dut.io.tlb.get.refill.valid.poke(false)
         dut.io.tlb.get.refill.bits.vpn.poke(0)
         dut.io.tlb.get.refill.bits.ppn.poke(0)
@@ -171,7 +173,9 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             var lowerSeen = false
             for (_ <- 0 until 10 if !lowerSeen) {
                 if (dut.io.l2.req.valid.peek().litToBoolean) {
-                    dut.io.l2.req.bits.paddr.expect(((ppn << 12) | (va & 0xfff)) & ~BigInt(31))
+                    dut.io.l2.req.bits.paddr.expect(
+                        ((ppn << 12) | (va & 0xfff)) & ~BigInt(ZirconConfig.Cache.l1Line - 1)
+                    )
                     lowerSeen = true
                 }
                 d.step()
@@ -240,6 +244,48 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             dut.io.storeTranslation.get.response.miss.expect(false)
             dut.io.storeTranslation.get.response.paddr.expect((superPpn1 << 22) | (storeVa & 0x3fffff))
             dut.io.storeTranslation.get.response.exception.expect(0)
+        }
+    }
+
+    "direct load and store paths ignore a matching stale DTLB entry" in {
+        for ((enabled, privilege, name) <- Seq(
+            (false, 1, "disabled translation"),
+            (true, 3, "M-mode"),
+        )) {
+            withClue(s"$name: ") {
+                simulate(new DCache(DualPortRamBackend.Registers, DCacheParams(), tlbEnabled = true)) { dut =>
+                    val d = new DCacheTLBIntegrationDriver(dut)
+                    d.initialize()
+                    val address = BigInt("a1000000", 16)
+                    d.refill(address, BigInt("20000", 16), read = false, write = false, pma = 3)
+                    dut.io.tlb.get.control.enabled.poke(enabled)
+                    dut.io.tlb.get.control.privilege.poke(privilege)
+
+                    d.presentLoad(0, address, 1)
+                    d.step()
+                    dut.io.load(0).req.valid.poke(false)
+                    var loadSeen = false
+                    for (_ <- 0 until 8) {
+                        dut.io.l2.req.valid.expect(false)
+                        if (dut.io.load(0).rsp.valid.peek().litToBoolean) {
+                            dut.io.load(0).rsp.bits.exception.expect(0)
+                            dut.io.load(0).rsp.bits.retry.expect(true)
+                            loadSeen = true
+                        }
+                        d.step()
+                    }
+                    assert(loadSeen, "direct load response was not produced")
+
+                    dut.io.storeTranslation.get.request.valid.poke(true)
+                    dut.io.storeTranslation.get.request.bits.vaddr.poke(address)
+                    dut.io.storeTranslation.get.request.bits.uncache.poke(false)
+                    dut.io.storeTranslation.get.request.bits.exception.poke(0)
+                    dut.io.storeTranslation.get.response.paddr.expect(address)
+                    dut.io.storeTranslation.get.response.uncache.expect(true)
+                    dut.io.storeTranslation.get.response.exception.expect(0)
+                    dut.io.storeTranslation.get.response.miss.expect(false)
+                }
+            }
         }
     }
 }

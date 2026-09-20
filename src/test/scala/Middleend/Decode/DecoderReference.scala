@@ -185,7 +185,7 @@ object DecoderReference {
                 "MRET" -> Control(9, 10),
                 "WFI" -> Control(9, 11),
                 "SRET" -> Control(9, 12),
-                "SFENCE_VMA" -> Control(9, 13, Seq(false, false)),
+                "SFENCE_VMA" -> Control(9, 13),
             )).toMap
 
     def decode(inst: BigInt): Option[(Encoding, Control)] = {

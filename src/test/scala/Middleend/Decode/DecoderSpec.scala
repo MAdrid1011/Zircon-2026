@@ -202,9 +202,9 @@ class DecoderSpec extends AnyFreeSpec with ChiselSim {
                 else DecodeUnit.None
                 val illegal = !fault && !prior && expectedFu == DecodeUnit.None
                 d.io.out.fu.expect(if (!fault && !prior) expectedFu else DecodeUnit.None)
-                d.io.out.exception.valid.expect(prior || illegal)
-                d.io.out.exception.cause.expect(if (illegal) 2 else cause)
-                d.io.out.exception.tval.expect(if (illegal) word else 0x87654321L)
+                d.io.out.exception.valid.expect(fault || prior || illegal)
+                d.io.out.exception.cause.expect(if (fault) 12 else if (illegal) 2 else cause)
+                d.io.out.exception.tval.expect(if (fault) 0x80001004L else if (illegal) word else 0x87654321L)
                 d.io.out.fault.expect(fault)
                 d.io.out.pc.expect(0x80001004L)
                 d.io.out.inst.expect(word)

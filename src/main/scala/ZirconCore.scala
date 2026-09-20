@@ -1,4 +1,5 @@
 import chisel3._
+import chisel3.util.Valid
 import ZirconConfig._
 
 class ZirconInterrupts extends Bundle {
@@ -44,17 +45,27 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
 
     /* Commit owns CSR state; the core shell supplies time, interrupts and cache-idle status. */
     val time = RegInit(0.U(64.W))
-    time := time + 1.U
+    val timeSubcycle = RegInit(0.U(4.W))
+    /* The platform exposes a 10 MHz timebase while the core runs at 100 MHz. */
+    when(timeSubcycle === 9.U) {
+        timeSubcycle := 0.U
+        time := time + 1.U
+    }.otherwise {
+        timeSubcycle := timeSubcycle + 1.U
+    }
     commit.io.csr.time := time
     commit.io.csr.interrupt.software := io.interrupts.msip
     commit.io.csr.interrupt.timer := io.interrupts.mtip
     commit.io.csr.interrupt.external := io.interrupts.meip
     commit.io.csr.interrupt.supervisorExternal := io.interrupts.seip
     commit.io.memoryIdle := backend.io.dcacheIdle && l2.io.idle
-    /* FENCE.I drains and invalidates both private caches in parallel. */
-    frontend.io.maintenance.request := commit.io.maintenance.request
+    /* FENCE.I invalidates both L1s; SFENCE.VMA cleans DCache for the L2-backed PTW. */
+    frontend.io.maintenance.request := commit.io.maintenance.request && commit.io.maintenance.invalidate
+    frontend.io.maintenance.invalidate := true.B
     backend.io.maintenance.request := commit.io.maintenance.request
-    commit.io.maintenance.done := frontend.io.maintenance.done && backend.io.maintenance.done
+    backend.io.maintenance.invalidate := commit.io.maintenance.invalidate
+    commit.io.maintenance.done := backend.io.maintenance.done &&
+        (!commit.io.maintenance.invalidate || frontend.io.maintenance.done)
 
     /* ITLB and DTLB use the same current address-space and privilege controls. */
     val translation = Wire(new AddressTranslationControl)
@@ -89,6 +100,7 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
         io.debug.get.robHeadValid := commit.io.debug.robHeadValid
         io.debug.get.robHeadComplete := commit.io.debug.robHeadComplete
         io.debug.get.robHeadPc := commit.io.debug.robHeadPc
+        io.debug.get.trap := commit.io.debug.trap
         io.debug.get.privilege := commit.io.csr.currentPrivilege
         io.debug.get.csr := commit.io.csr.state
         io.debug.get.performance.icacheVisit := frontend.io.observe.get.icache.visit
@@ -148,6 +160,9 @@ class ZirconCore(val simulationDebug: Boolean = false) extends Module {
         io.debug.get.performance.lowerMemoryReads := l2.io.performance.get.lowerMemoryReads
         io.debug.get.performance.lowerMemoryWrites := l2.io.performance.get.lowerMemoryWrites
         io.debug.get.performance.l2EngineBusyCycles := l2.io.performance.get.engineBusyCycles
+        io.debug.get.backend := backend.io.debug.get
+        io.debug.get.memoryIdle := commit.io.memoryIdle
+        io.debug.get.l2Idle := l2.io.idle
     }
 }
 
@@ -167,9 +182,13 @@ class ZirconDebugIO extends Bundle {
     val robHeadValid = Output(Bool())
     val robHeadComplete = Output(Bool())
     val robHeadPc = Output(UInt(32.W))
+    val trap = Output(Valid(new CommitTrapTrace))
     val privilege = Output(UInt(2.W))
     val csr = Output(new CSRState)
     val performance = Output(new ZirconPerformanceCounters)
+    val backend = Output(new BackendDebugIO)
+    val memoryIdle = Output(Bool())
+    val l2Idle = Output(Bool())
 }
 
 class ZirconPerformanceCounters extends Bundle {

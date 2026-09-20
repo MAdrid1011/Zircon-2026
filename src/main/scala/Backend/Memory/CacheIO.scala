@@ -40,12 +40,14 @@ class DLoadResponse(val p: DCacheParams = DCacheParams()) extends Bundle {
     val data = UInt(32.W)
     val exception = UInt(4.W)
     val retry = Bool()
+    val uncache = Bool()
 }
 
 class DLoadWBSelect(val p: DCacheParams = DCacheParams()) extends Bundle {
     val slot = UInt(p.slotWidth.W)
     val exception = UInt(4.W)
     val retry = Bool()
+    val uncache = Bool()
 }
 
 class DStoreRequest extends Bundle {
@@ -137,6 +139,23 @@ class DCacheIO(
     val idle = Output(Bool())
     val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new DCachePerformanceCounters)) else None
+    val debug = if (observe) Some(Output(new DCacheDebugIO)) else None
+}
+
+class DCacheDebugIO extends Bundle {
+    val requestBufferValid = UInt(2.W)
+    val lookupValid = UInt(2.W)
+    val lookupFresh = UInt(2.W)
+    val executeValid = UInt(2.W)
+    val responseValid = UInt(2.W)
+    val forwardQueryValid = Bool()
+    val forwardResultValid = Bool()
+    val lookupResponseMatch = Bool()
+    val lookupMove = Bool()
+    val executeRelease = Bool()
+    val missBusy = Bool()
+    val storeState = UInt(3.W)
+    val flush = Bool()
 }
 
 class DCachePerformanceCounters extends Bundle {
