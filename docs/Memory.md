@@ -54,4 +54,5 @@ Vivado 后端仍使用原有外部 Verilog BRAM 模板，不经过该 OpenRAM �
 
 PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
 属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和 uncached 请求绕过
-Cache line 分配，以 32 位事务送入下级接口。
+Cache line 分配，以单个 32 位访问放在 64 位 AXI 数据 beat 的对应 lane 中送入下级接口；
+Cache line refill/writeback 则按 64 位 beat 传输。
