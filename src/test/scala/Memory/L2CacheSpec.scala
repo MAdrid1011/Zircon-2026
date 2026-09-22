@@ -240,7 +240,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             DualPortRamBackend.OpenRAM -> "openram"
         )
     ) {
-        s"$name: biased-exclusive moves, dirty writeback, instruction quota, PTW and uncached traffic" in {
+        s"$name: biased-exclusive moves, dirty writeback, instruction borrowing, PTW and uncached traffic" in {
             val params = ZirconConfig.L2CacheParams(sets = 16)
             simulate(new L2Cache(backend, p = params)) { dut =>
                 val d = new L2CacheDriver(dut)
@@ -303,7 +303,17 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 icache(i3, token = 24)
                 icache(i1, token = 25)
                 icache(i2, token = 26)
-                assert(reads == quotaReads + 1, "instruction victims exceeded the two-way per-set quota")
+                assert(reads == quotaReads, "instruction victims did not borrow invalid ways")
+
+                val instructionVictims = (0 until 5).map(i => 0x38040L + i * setStride)
+                for ((address, index) <- instructionVictims.zipWithIndex) {
+                    icache(targets(index) + 0x40, Some((address, line(address))), token = 30 + index)
+                }
+                val fullSetReads = reads
+                for ((address, index) <- instructionVictims.zipWithIndex) {
+                    icache(address, token = 40 + index)
+                }
+                assert(reads == fullSetReads + 1, "instruction quota did not apply after the set became full")
 
                 val uncached = 0x41004L
                 val uncachedData = BigInt("88776655", 16)
