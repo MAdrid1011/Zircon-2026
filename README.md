@@ -66,7 +66,7 @@ flowchart LR
     end
 
     DCache["L1 DCache<br/>3-stage"]
-    L2["L2 Cache<br/>4 KiB"]
+    L2["L2 Cache<br/>8 KiB"]
     PTW["Shared Sv32 PTW"]
     AXI[("AXI4 Memory<br/>64-bit data")]
 
@@ -97,8 +97,8 @@ flowchart LR
 | FTQ / Fetch Queue | 16 / 8 项 |
 | 计算流水线 | 2 x `ArithBranch` + 1 x `MixArithPipeline` |
 | 访存流水线 | LS0 Load + LS1 Load/Store Address，Store Data 独立发射 |
-| L1 ICache / DCache | 各 1 KiB，2 路组相连，32 B Cache Line |
-| L2 Cache | 4 KiB，4 路组相连，32 B Cache Line |
+| L1 ICache / DCache | 各 2 KiB，2 路组相连，64 B Cache Line |
+| L2 Cache | 8 KiB，4 路组相连，64 B Cache Line |
 | 外部 AXI4 数据通路 | 64 位，8 B/beat |
 | ITLB / DTLB | 4 组 x 4 路，另含 4 项 4 MiB 大页表 |
 | 地址宽度 | 32 位虚拟地址，34 位物理地址 |
@@ -218,7 +218,7 @@ sbt "runMain Elaborate --simulation generated"
 | [提交与恢复](docs/Commit.md) | ROB、FTQ、SQ、Store Buffer、CSR 与异常恢复 |
 | [存储系统](docs/Memory.md) | L1、L2、TLB、PTW、PMA 与 RAM 后端 |
 
-完整入口见 [docs/README.md](docs/README.md)。这些页面只描述当前 RTL，不包含迁移记录和开发过程。
+完整入口见 [docs/README.md](docs/README.md)。
 
 ## 仓库结构
 

@@ -34,3 +34,7 @@ project/metals.sbt
 Zircon-2024/
 Zircon-ASIC/
 AGENTS.md
+
+# Local analysis outputs.
+artifacts/
+scripts/analyze_l2_line_lifetimes.py

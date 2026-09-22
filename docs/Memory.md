@@ -1,12 +1,12 @@
 # 存储系统
 
 Zircon-2026 的存储系统包含独立 ICache 与 DCache、ITLB 与 DTLB、共享 Sv32 PTW、偏非包含式
-L2 Cache，以及连接外部 AXI4 主接口的 `L2AXI4Bridge`。L1 与 L2 使用 32 B Cache Line，
+L2 Cache，以及连接外部 AXI4 主接口的 `L2AXI4Bridge`。L1 与 L2 使用 64 B Cache Line，
 物理地址宽度为 34 位。
 
 ## L1 Cache
 
-ICache 和 DCache 默认均为 2 路、16 set、32 B line，总容量各 1 KiB。ICache 提供四条指令的
+ICache 和 DCache 默认均为 2 路、16 set、64 B line，总容量各 2 KiB。ICache 提供四条指令的
 块读取；DCache 提供两个固定 Load 端口和一个已提交 Store 端口。两者都使用三级命中流水，
 并将 miss 状态保存在独立寄存器中，使状态机只读取末级请求。
 
@@ -28,13 +28,18 @@ I 侧和 D 侧查询通道。PTE 的 A/D 位必须已由软件设置，当前 PT
 
 ## L2 Cache
 
-L2 默认 4 路、32 set、32 B line，总容量 4 KiB。I 侧和 D 侧各有独立的 S1、S2、S3 命中
+L2 默认 4 路、32 set、64 B line，总容量 8 KiB。I 侧和 D 侧各有独立的 S1、S2、S3 命中
 流水；ICache 与 ITLB PTW 共享只读端口，DCache 与 DTLB PTW 共享读写端口。L1 请求具有首次
 优先级，deferred 标志保证持续 Cache 流量不会饿死 PTW。
 
 L2 主要保存 L1 替换出的 victim。L1 与 L2 同时 miss 时，外部填充直接返回 L1；只有 L1 victim
 进入 L2。L2 命中后通常将数据所有权交给请求方并使条目失效。ICache 读取 dirty 数据时，L2
-保留唯一 dirty 所有权。每个 set 最多使用两路保存指令 victim，剩余容量可由数据动态使用。
+保留唯一 dirty 所有权。
+
+Victim 安装优先选择可用的 invalid way，因此 I/D 两侧均可使用 set 中的空闲容量。set 已满时，
+指令请求在指令占用达到 `maxInstructionWays` 后优先替换指令 line，数据请求优先替换数据 line；
+候选集合使用 tree-PLRU 选择。这一规则是替换偏置，不对 way 进行静态划分。维护引擎还会排除
+当前请求命中的 way，以及另一通道尚未消费的同 set 命中 way。
 
 I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、uncached 访问和安装操作共享
 一个维护引擎及外部存储接口。L2 没有多项 MSHR；同一时刻只允许一个下级事务在途。

@@ -492,9 +492,18 @@ class L2Cache(
         is(engineVictimLookup) {
             assert(PopCount(engineLookupHit) <= 1.U, "L2Cache: multiple victim hits")
             val sameSet = index(engineVictimAddress) === index(enginePaddr)
-            val protectedWay = Mux(engineTargetHit && sameSet, engineTargetWay, 0.U)
+            val protectedTargetWay = Mux(engineTargetHit && sameSet, engineTargetWay, 0.U)
+            val oppositeTargetWaiting = Mux(engineSourceI, dWaiting && dS3Hit, iWaiting && iS3Hit)
+            val oppositeTargetAddress = Mux(engineSourceI, dS3.paddr, iS3.paddr)
+            val oppositeTargetWay = Mux(engineSourceI, dS3Way, iS3Way)
+            val protectedOppositeWay = Mux(
+                oppositeTargetWaiting && index(engineVictimAddress) === index(oppositeTargetAddress),
+                oppositeTargetWay,
+                0.U
+            )
+            val protectedWays = protectedTargetWay | protectedOppositeWay
             val allWays = ((BigInt(1) << p.ways) - 1).U(p.ways.W)
-            val allowedWays = allWays & ~protectedWay
+            val allowedWays = allWays & ~protectedWays
             val invalidWays = allowedWays & ~engineValidWays
             val plruWay = plruVictim(enginePlru)
             val fallbackWay = Mux((plruWay & allowedWays).orR, plruWay, PriorityEncoderOH(allowedWays))
@@ -514,12 +523,12 @@ class L2Cache(
                 PriorityEncoderOH(dataCandidates)
             )
             val replacementWay = Mux(
-                engineSourceI && instructionLimit && instructionCandidates.orR,
-                instructionWay,
+                invalidWays.orR,
+                PriorityEncoderOH(invalidWays),
                 Mux(
-                    !engineSourceI && !invalidWays.orR && dataCandidates.orR,
-                    dataWay,
-                    Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), fallbackWay)
+                    engineSourceI && instructionLimit && instructionCandidates.orR,
+                    instructionWay,
+                    Mux(!engineSourceI && dataCandidates.orR, dataWay, fallbackWay)
                 )
             )
             val selectedVictimWay = Mux(engineLookupHit.orR, engineLookupHit, replacementWay)
@@ -533,6 +542,12 @@ class L2Cache(
                 assert(
                     !(selectedVictimWay & engineTargetWay).orR,
                     "L2Cache: victim insertion selected the requested line"
+                )
+            }
+            when(!engineLookupHit.orR && protectedOppositeWay.orR) {
+                assert(
+                    !(replacementWay & protectedOppositeWay).orR,
+                    "L2Cache: victim insertion selected an in-flight opposite-channel hit"
                 )
             }
             when(replaceDirty) {

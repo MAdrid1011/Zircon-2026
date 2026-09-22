@@ -21,7 +21,7 @@ RAS 和推测历史。IF1 产生早期方向和目标，IF2 合并同步表结�
 
 ## ICache 与 ITLB
 
-ICache 为 2 路、16 set、32 B line，总容量 1 KiB。虚拟地址在 IF1 查询 ITLB；命中后使用
+ICache 为 2 路、16 set、64 B line，总容量 2 KiB。虚拟地址在 IF1 查询 ITLB；命中后使用
 34 位物理地址完成 Tag 比较。TLB miss 交给共享 `PageTableWalker`，Cache miss 通过 I 侧 L2
 接口处理。`FENCE.I` 维护请求会失效 ICache 内容。
 
