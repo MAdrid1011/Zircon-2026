@@ -130,7 +130,10 @@ class LoadPipeline(
     val validRF = RegInit(false.B)
     val indexRF = Reg(UInt(p.slotWidth.W))
     val heldRF = RegInit(false.B)
-    io.idle := !validRF
+    val storePkgD1 = Reg(new BackendPackage(p.backend))
+    val storeVaddrD1 = Reg(UInt(32.W))
+    val storeValidD1 = RegInit(false.B)
+    io.idle := !validRF && (if (withStore) !storeValidD1 else true.B)
 
     // Context includes the RF reservation, so a cache stall cannot change the request identity.
     val pending = Reg(Vec(p.entries, new BackendPackage(p.backend)))
@@ -147,7 +150,8 @@ class LoadPipeline(
             io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Atomic.U,
         io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Load.U,
     )
-    val addressFire = io.cache.req.fire || io.cmt.storeAddress.map(_.fire).getOrElse(false.B)
+    val storeRFAdvance = WireDefault(false.B)
+    val addressFire = io.cache.req.fire || storeRFAdvance
 
     val free = VecInit((0 until p.entries).map(i =>
         !valid(i) || killed(pending(i)) || (io.cache.rsp.valid && io.cache.rsp.bits.slot === i.U)
@@ -275,51 +279,65 @@ class LoadPipeline(
     when(reset.asBool) { instPkgRF.prj := 0.U }
 
     if (withStore) {
-        /* STA uses the same RF/AGU stage as LD and terminates at the external SQ. */
+        /* STA registers the AGU result before translation and SQ publication. */
         val addr = io.cmt.storeAddress.get
-        val atomicRF = instPkgRF.fu === ZirconConfig.DecodeUnit.Atomic.U
-        val lrRF = atomicRF && instPkgRF.op === 2.U
-        val misaligned = (instPkgRF.mtype === 1.U && agu.io.res(0)) ||
-            (instPkgRF.mtype === 2.U && agu.io.res(1, 0).orR)
+        val atomicD1 = storePkgD1.fu === ZirconConfig.DecodeUnit.Atomic.U
+        val lrD1 = atomicD1 && storePkgD1.op === 2.U
+        val misaligned = (storePkgD1.mtype === 1.U && storeVaddrD1(0)) ||
+            (storePkgD1.mtype === 2.U && storeVaddrD1(1, 0).orR)
         val translationReady = WireDefault(true.B)
-        val translatedPaddr = WireDefault(Cat(0.U(2.W), agu.io.res))
-        val translatedUncache = WireDefault(instPkgRF.uncache)
+        val translatedPaddr = WireDefault(Cat(0.U(2.W), storeVaddrD1))
+        val translatedUncache = WireDefault(storePkgD1.uncache)
         val translatedException = WireDefault(0.U(4.W))
         if (tlbEnabled) {
             val translation = io.cache.storeTranslation.get
-            translation.request.valid := validRF && storeRF && !killed(instPkgRF)
-            translation.request.bits.vaddr := agu.io.res
-            translation.request.bits.uncache := instPkgRF.uncache
+            translation.request.valid := storeValidD1 && !killed(storePkgD1)
+            translation.request.bits.vaddr := storeVaddrD1
+            translation.request.bits.uncache := storePkgD1.uncache
             translation.request.bits.exception :=
-                Mux(instPkgRF.exception.valid, instPkgRF.exception.cause(3, 0), 0.U)
-            translation.request.bits.atomic := atomicRF
-            translation.request.bits.lr := lrRF
+                Mux(storePkgD1.exception.valid, storePkgD1.exception.cause(3, 0), 0.U)
+            translation.request.bits.atomic := atomicD1
+            translation.request.bits.lr := lrD1
             translationReady := !translation.response.miss
             translatedPaddr := translation.response.paddr
             translatedUncache := translation.response.uncache
             translatedException := translation.response.exception
         }
-        addr.valid := validRF && storeRF && !killed(instPkgRF) && translationReady
-        addr.bits.sqIdx := instPkgRF.sqIdx
-        addr.bits.robIdx := instPkgRF.robIdx
-        addr.bits.vaddr := agu.io.res
+        addr.valid := storeValidD1 && !killed(storePkgD1) && translationReady
+        addr.bits.sqIdx := storePkgD1.sqIdx
+        addr.bits.robIdx := storePkgD1.robIdx
+        addr.bits.vaddr := storeVaddrD1
         addr.bits.paddr := translatedPaddr
-        addr.bits.size := instPkgRF.mtype(1, 0)
-        val baseMask = MuxLookup(instPkgRF.mtype, 0.U(4.W))(
+        addr.bits.size := storePkgD1.mtype(1, 0)
+        val baseMask = MuxLookup(storePkgD1.mtype, 0.U(4.W))(
             Seq(0.U -> 1.U, 1.U -> 3.U, 2.U -> 15.U)
         )
-        addr.bits.mask := MuxLookup(agu.io.res(1, 0), 0.U(4.W))(Seq(
+        addr.bits.mask := MuxLookup(storeVaddrD1(1, 0), 0.U(4.W))(Seq(
             0.U -> baseMask,
             1.U -> Cat(baseMask(2, 0), 0.U(1.W)),
             2.U -> Cat(baseMask(1, 0), 0.U(2.W)),
             3.U -> Cat(baseMask(0), 0.U(3.W)),
         ))
         addr.bits.exception := Mux(
-            instPkgRF.exception.valid,
-            instPkgRF.exception.cause(3, 0),
-            Mux(misaligned, Mux(lrRF, 4.U, 6.U), translatedException)
+            storePkgD1.exception.valid,
+            storePkgD1.exception.cause(3, 0),
+            Mux(misaligned, Mux(lrD1, 4.U, 6.U), translatedException)
         )
         addr.bits.uncache := translatedUncache
+
+        storeRFAdvance := validRF && storeRF && !killed(instPkgRF) && (!storeValidD1 || addr.fire)
+        when(io.cmt.flush) {
+            storeValidD1 := false.B
+        }.otherwise {
+            when(addr.fire) {
+                storeValidD1 := false.B
+            }
+            when(storeRFAdvance) {
+                storePkgD1 := instPkgRF
+                storeVaddrD1 := agu.io.res
+                storeValidD1 := true.B
+            }
+        }
 
         /* STD has an independent issue register and write-first PRF read ports. */
         val instDataRF = Reg(new BackendPackage(p.backend))

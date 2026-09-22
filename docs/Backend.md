@@ -20,7 +20,13 @@ Store Data 队列 6 项。队列按物理顺序保存年龄，支持每拍接收
 搬运与整数/浮点转换。CSR 指令也由该队列发射，并在获得 `Commit` 的按序授权后访问 CSR 状态。
 
 LS0 只执行 Load。LS1 执行 Load 和 Store Address，并从独立 Store Data 队列读取写数据。两条
+Load 通路在发射后先写入流水寄存器，下一拍读取 PRF 并由 AGU 生成虚拟地址。AGU 结果只写入
+DCache 请求寄存器和同步 RAM 读地址；随后 DTLB 地址翻译与 Tag/Data RAM 返回并行完成。两条
 Load 通路都查询 SQ 与 Store Buffer，按字节合并比 Cache 更新的 Store 数据。
+
+LS1 的 Store Address 使用相同的发射、PRF 和 AGU 边界，并在 AGU 后增加独立的 D1 寄存器。
+DTLB 查询、PMA 属性、对齐检查和 SQ 地址写入均使用该寄存器中的地址与任务信息。D1 支持在
+当前地址写入 SQ 的同时接收下一条 Store Address；DTLB miss 或 SQ 反压会保留当前内容。
 
 `AtomicUnit` 执行 `LR.W`、`SC.W` 和九条 `AMO.W`。地址与写数据仍经 LS1 的地址和数据任务写入
 SQ；指令到达 ROB 头且更早的存储访问排空后，原子单元复用 DCache 的 LS1 Load 端口与 Store

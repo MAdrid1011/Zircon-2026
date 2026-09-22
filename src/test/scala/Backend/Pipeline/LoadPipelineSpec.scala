@@ -4,6 +4,7 @@ import org.scalatest.freespec.AnyFreeSpec
 import java.nio.file.{Files, Paths}
 import scala.collection.mutable
 import scala.util.Random
+import ZirconConfig.Cache.{l1Line, l1Offset}
 
 class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.PeekPokeAPI {
     case class Forward(data: BigInt = 0, mask: Int = 0, blocked: Boolean = false, available: Int = 0)
@@ -28,7 +29,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
         def aligned: Boolean = (address & ((1 << (mtype & 3)) - 1)) == 0
         def fault: Int = if (exception != 0) exception
         else if (!aligned) 4
-        else if (errors(if (uncache) address else address & ~31L)) 5 else 0
+        else if (errors(if (uncache) address else address & ~(l1Line.toLong - 1))) 5 else 0
     }
     case class Transaction(id: Int, address: Long, data: BigInt, mask: Int, write: Boolean, due: Int, error: Boolean)
     case class Active(load: Load, cycle: Int, var requestCycle: Int = -1, var written: Boolean = false)
@@ -100,7 +101,8 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
         v | (BigInt(memory.getOrElse(a + i, initial(a + i))) << (i * 8))
     )
     def putLine(address: Long, data: BigInt): Unit =
-        for (b <- 0 until 32) memory((address & ~31L) + b) = ((data >> (8 * b)) & 255).toInt
+        for (b <- 0 until l1Line)
+            memory((address & ~(l1Line.toLong - 1)) + b) = ((data >> (8 * b)) & 255).toInt
     def value(x: Load): BigInt = {
         var word = bytes(x.address & ~3L, 4)
         if (!x.uncache) for (b <- 0 until 4) {
@@ -360,13 +362,13 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             val dirtyVictim = r.victimValid.peek().litToBoolean && r.victimDirty.peek().litToBoolean
             if (dirtyVictim) {
                 putLine(
-                    r.victimLine.peek().litValue.toLong << ZirconConfig.Cache.l1Offset,
+                    r.victimLine.peek().litValue.toLong << l1Offset,
                     r.victimData.peek().litValue
                 )
                 storeWrites += 1
             }
             val data = if (write) r.data.peek().litValue
-            else bytes(a, if (r.uncache.peek().litToBoolean) 1 << r.size.peek().litValue.toInt else 32)
+            else bytes(a, if (r.uncache.peek().litToBoolean) 1 << r.size.peek().litValue.toInt else l1Line)
             transaction = Some(Transaction(
                 0,
                 a,

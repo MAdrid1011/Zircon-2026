@@ -3,7 +3,7 @@ import chisel3.util.{log2Ceil, Valid}
 import ZirconConfig.Cache._
 import ZirconConfig.DCacheParams
 
-// Physical addresses and access checks are supplied with the S1 request.
+// The request carries the virtual address into S1; translated attributes are resolved before tag comparison.
 class DLoadRequest(val p: DCacheParams = DCacheParams()) extends Bundle {
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
