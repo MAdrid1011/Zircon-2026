@@ -58,9 +58,13 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
                 a.ready.expect(true); s.ready.expect(true)
                 dut.io.cache.req.valid.expect(false)
                 dut.clock.step()
-                dut.io.cmt.storeAddress.get.valid.expect(true)
-                dut.io.cmt.storeAddress.get.bits.sqIdx.expect(i)
-                dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * i)
+                if (i == 0) {
+                    dut.io.cmt.storeAddress.get.valid.expect(false)
+                } else {
+                    dut.io.cmt.storeAddress.get.valid.expect(true)
+                    dut.io.cmt.storeAddress.get.bits.sqIdx.expect(i - 1)
+                    dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * (i - 1))
+                }
                 dut.io.cmt.storeData.get.valid.expect(true)
                 dut.io.cmt.storeData.get.bits.sqIdx.expect(i)
                 dut.io.cmt.storeData.get.bits.data.expect(BigInt(if (i % 2 == 0) "89abcdef" else "7f800001", 16))
@@ -69,6 +73,9 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.rf.wr.valid.expect(false); dut.io.cmt.rob.valid.expect(false)
             }
             a.valid.poke(false); s.valid.poke(false); dut.clock.step()
+            dut.io.cmt.storeAddress.get.valid.expect(true)
+            dut.io.cmt.storeAddress.get.bits.sqIdx.expect(11)
+            dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * 11)
             a.bits.store.poke(false); a.bits.fu.poke(ZirconConfig.DecodeUnit.Load)
             a.bits.rdVld.poke(true); a.ready.expect(false)
             // Global recovery rejects new speculative work on its edge and frees every occupied load context.

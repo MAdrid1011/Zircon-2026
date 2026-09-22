@@ -10,6 +10,15 @@ ICache 和 DCache 默认均为 2 路、16 set、64 B line，总容量各 2 KiB�
 块读取；DCache 提供两个固定 Load 端口和一个已提交 Store 端口。两者都使用三级命中流水，
 并将 miss 状态保存在独立寄存器中，使状态机只读取末级请求。
 
+DCache 的 Load 请求首先以虚拟地址索引 Tag/Data RAM，并把请求信息写入 lookup 寄存器。下一拍
+RAM 数据返回时，DTLB 使用 lookup 中的虚拟地址产生物理地址，物理 Tag 与 RAM Tag 直接比较；
+命中信息和翻译结果随后写入 execute 寄存器。末级完成 SQ/Store Buffer 转发合并、Load 响应和
+miss 分配。DTLB miss、权限异常和对齐异常沿相同寄存边界返回，不会访问下级存储器。
+
+LS1 Load 与 Store Address 共享 DTLB lane 1。已进入 lookup 的 Load 先完成当拍翻译；Store Address
+等待翻译期间，DCache 不再用新的 Load 替换该 lookup，因而 Store 可在已有请求排空后取得 DTLB，
+年轻 Load 暂存在请求缓冲中。
+
 DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；Store miss 先取得整行
 再合并字节 mask。DCache 使用单项 miss 单元，支持无冲突命中的 hit-under-miss；同一资源冲突
 的 Load 返回 retry，由原发射队列表项重发。
