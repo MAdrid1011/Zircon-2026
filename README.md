@@ -29,66 +29,61 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 
 ```mermaid
 flowchart LR
-    AXI[(AXI4 Memory)]
-
-    subgraph Core[ZirconCore]
-        direction LR
-
-        subgraph FE[Frontend · 4-wide fetch]
-            BP[Branch Prediction]
-            IC[ICache + ITLB]
-            FQ[Fetch Queue]
-            BP --> IC --> FQ
-        end
-
-        subgraph ME[Middleend · 3-wide]
-            DEC[Decode]
-            REN[Rename]
-            DSP[Dispatch]
-            DEC --> REN --> DSP
-        end
-
-        subgraph BE[Backend · 5 pipelines]
-            A0[Arith0]
-            A1[Arith1]
-            MIX[Mul / Div / FP32 / CSR]
-            LS0[LS0 Load]
-            LS1[LS1 Load / Store]
-        end
-
-        subgraph CMT[Commit · 3-wide]
-            ROB[ROB]
-            FTQ[FTQ]
-            SQ[SQ + Store Buffer]
-            CSR[CSR / Trap]
-        end
-
-        MMU[Shared Sv32 PTW]
-        L2[L2 Cache · 4 KiB]
-
-        FQ --> DEC
-        DSP --> A0
-        DSP --> A1
-        DSP --> MIX
-        DSP --> LS0
-        DSP --> LS1
-        DSP --> ROB
-        A0 --> ROB
-        A1 --> ROB
-        MIX --> ROB
-        LS0 --> ROB
-        LS1 --> ROB
-        LS1 --> SQ
-        ROB --> CSR
-        CSR -. recovery .-> FQ
-        FTQ -. predictor training .-> BP
-        IC --> L2
-        LS0 --> L2
-        LS1 --> L2
-        MMU --> L2
+    subgraph FE[Frontend · 4-wide fetch]
+        PF["PF<br/>NPC select"] --> IF1["IF1<br/>early BP + ICache request"]
+        IF1 --> IF2["IF2<br/>ICache/BTB response"]
+        IF2 --> PD["PD<br/>predecode and repair"]
+        PD --> FQ["Fetch Queue<br/>8 entries"]
     end
 
+    subgraph ME[Middleend · 3-wide]
+        DR["Decode + Rename<br/>parallel combinational"]
+        RND["Rename-to-Dispatch<br/>register"]
+        DISP["ReadyBoard + Dispatch"]
+        DR --> RND --> DISP
+    end
+
+    subgraph BE[Backend · issue and execution]
+        IQ["Six issue queues"]
+        ARRF["Arith0/1 RF"] --> AREX["Arith0/1 EX"] --> ARWB["Arith0/1 WB"]
+        MIXRF["MixArith RF"] --> M1["EX1"] --> M2["EX2"] --> M3["EX3"] --> M4["EX4"] --> MIXWB["MixArith WB"]
+        LSRF["LS0/LS1 RF + AGU"] --> D1["D1<br/>SQ/SB forwarding"] --> D2["D2<br/>DCache select"] --> LSWB["Load WB"]
+        STD["Store Data RF"]
+        IQ --> ARRF
+        IQ --> MIXRF
+        IQ --> LSRF
+        IQ --> STD
+    end
+
+    subgraph CMT[Commit · 3-wide]
+        ROB["ROB / Commit"]
+        FTQ["FTQ"]
+        SQ["Store Queue"]
+        SB["Store Buffer"]
+        CSR["CSR / Trap"]
+        ROB --> CSR
+        SQ --> SB
+    end
+
+    DCache["L1 DCache<br/>3-stage"]
+    L2["L2 Cache<br/>4 KiB"]
+    PTW["Shared Sv32 PTW"]
+    AXI[("AXI4 Memory<br/>64-bit data")]
+
+    FQ --> DR
+    ARWB --> ROB
+    MIXWB --> ROB
+    LSWB --> ROB
+    STD --> SQ
+    DISP --> IQ
+    D2 --> DCache
+    DCache --> L2
+    IF2 -. ICache miss .-> L2
+    PTW --> L2
     L2 --> AXI
+    ROB -. recovery / flush .-> PF
+    ROB -. recovery / flush .-> FQ
+    FTQ -. predictor training .-> PF
 ```
 
 ### 默认配置
@@ -104,6 +99,7 @@ flowchart LR
 | 访存流水线 | LS0 Load + LS1 Load/Store Address，Store Data 独立发射 |
 | L1 ICache / DCache | 各 1 KiB，2 路组相连，32 B Cache Line |
 | L2 Cache | 4 KiB，4 路组相连，32 B Cache Line |
+| 外部 AXI4 数据通路 | 64 位，8 B/beat |
 | ITLB / DTLB | 4 组 x 4 路，另含 4 项 4 MiB 大页表 |
 | 地址宽度 | 32 位虚拟地址，34 位物理地址 |
 

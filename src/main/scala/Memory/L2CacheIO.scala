@@ -30,8 +30,8 @@ class L2PTWIO extends Bundle {
 }
 
 /** One complete lower-memory transaction. Cached traffic uses one complete cache line.
-  * Uncached writes use the low 32 data bits and four mask bits as address-aligned
-  * byte lanes; uncached reads return the requested value in the low response bits.
+  * Uncached writes use the low 64 data bits and eight byte strobes as AXI-aligned
+  * lanes; uncached reads return the requested value in the low response bits.
   */
 class L2MemoryRequest(p: L2CacheParams) extends Bundle {
     val paddr = UInt(34.W)
@@ -39,7 +39,7 @@ class L2MemoryRequest(p: L2CacheParams) extends Bundle {
     val uncache = Bool()
     val size = UInt(2.W)
     val data = UInt(p.lineBits.W)
-    val mask = UInt(4.W)
+    val mask = UInt(8.W)
 }
 
 class L2MemoryResponse(p: L2CacheParams) extends Bundle {

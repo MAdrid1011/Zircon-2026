@@ -86,7 +86,7 @@ class L2Cache(
     val engineUncache = Reg(Bool())
     val engineSize = Reg(UInt(2.W))
     val engineData = Reg(UInt(p.lineBits.W))
-    val engineMask = Reg(UInt(4.W))
+    val engineMask = Reg(UInt(8.W))
     val engineVictimValid = Reg(Bool())
     val engineVictimLine = Reg(UInt((34 - p.offsetBits).W))
     val engineVictimAddress = Cat(engineVictimLine, 0.U(p.offsetBits.W))
@@ -370,8 +370,17 @@ class L2Cache(
     val selectedWrite = !selectInstructionVictim && !selectI && dS3.write
     val selectedUncache = !selectInstructionVictim && Mux(selectI, iS3.uncache, dS3.uncache)
     val selectedSize = Mux(selectInstructionVictim || selectI, 2.U, dS3.size)
+    val selectedMask = Mux(
+        selectInstructionVictim || selectI,
+        0.U(8.W),
+        Mux(dS3.paddr(2), Cat(dS3.mask, 0.U(4.W)), Cat(0.U(4.W), dS3.mask))
+    )
+    val selectedRequestData = Mux(
+        selectInstructionVictim || selectI,
+        0.U,
+        Mux(dS3.paddr(2), dS3.data << 32, dS3.data)
+    )
     val selectedData = Mux(selectInstructionVictim || selectI, 0.U, dS3.data)
-    val selectedMask = Mux(selectInstructionVictim || selectI, 0.U, dS3.mask(3, 0))
     val selectedVictimValid = Mux(
         selectInstructionVictim,
         true.B,
@@ -414,7 +423,7 @@ class L2Cache(
         engineWrite := selectedWrite
         engineUncache := selectedUncache
         engineSize := selectedSize
-        engineData := selectedData
+        engineData := selectedRequestData
         engineMask := selectedMask
         engineVictimValid := selectedVictimValid
         engineVictimLine := selectedVictimPaddr(33, p.offsetBits)
@@ -471,7 +480,7 @@ class L2Cache(
     io.memory.req.bits.data := Mux(engineState === engineWritebackSend, engineWritebackData, engineData)
     io.memory.req.bits.mask := Mux(
         engineState === engineWritebackSend,
-        15.U,
+        255.U,
         engineMask
     )
     io.memory.rsp.ready := engineState === engineMemoryWait || engineState === engineWritebackWait
