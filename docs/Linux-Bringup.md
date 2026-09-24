@@ -29,6 +29,8 @@ macOS 通过 Docker 构建 Linux 软件镜像，Linux 主机直接使用本机�
 查找 `docker`，也可用 `DOCKER` make 变量指定其他兼容命令，不依赖开发者机器路径。
 正式仿真器的默认 PGO 构建需要 Clang/AppleClang 与匹配的 `llvm-profdata`；未设置 `CXX` 时，
 脚本会从 `PATH` 自动选择 `clang++`，并把实际编译器版本纳入 profile 指纹。
+Spike 开发库首先通过当前 `pkg-config` 搜索路径查找；若未找到，脚本会继续检查
+`SPIKE_PREFIX`、`RISCV`、`~/.local/opt/riscv-isa-sim` 和 `~/.local`。
 
 ## PGO 与增量构建
 
@@ -152,21 +154,20 @@ build/linux-sim/bin/zircon-sim \
 
 ## 已验证结果
 
-发布前的完整差分运行进入 shell，并成功执行：
+当前发布配置使用 Clang 23.1.2 构建 PGO 仿真器。完整差分运行通过用户空间自检、进入 shell，
+并成功执行：
 
 ```text
-~ # echo ZIRCON_INTERACTIVE_OK; uname -a; cat /proc/mounts; echo STATUS:$?
-ZIRCON_INTERACTIVE_OK
-Linux (none) 6.1.44 ... riscv32 GNU/Linux
-rootfs / rootfs ...
-devtmpfs /dev ...
-proc /proc ...
-sysfs /sys ...
-STATUS:0
+Zircon Linux validation: all checks passed
+ZIRCON_LINUX_BOOT_PASS
+Starting BusyBox shell on hvc0
+~ # whoami
+root
 ```
 
-该次运行在 3.2 亿周期保存最新检查点。稳定区间通常达到约 100k 至 112k cycles/s；启动至交互
-验证期间累计 IPC 约 0.32。
+启动标记在约 1.34 亿周期出现。验证主机上的稳定速度约为 126k 至 138k cycles/s；到
+1.42 亿周期时累计 IPC 约为 0.52。cycles/s 是主机、编译器和线程绑定相关的仿真吞吐，
+不属于处理器架构性能指标。
 
 ## 当前限制
 

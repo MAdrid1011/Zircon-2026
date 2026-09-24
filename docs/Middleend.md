@@ -7,8 +7,8 @@
 
 Fetch Queue 以压缩后的指令条目保存取指结果，并向中端提供全局最老的三条指令；同一组输出
 可以包含前一个 fetch packet 的尾部和后一个 packet 的头部。三份 `Decoder` 产生执行单元、
-操作码、源寄存器、目的寄存器、访存类型和系统操作字段。`packetStart`、`packetEnd` 与
-`fetchToken` 保留 packet 边界，确保跨 packet 派发时仍只为每个 packet 分配一次 FTQ 表项。
+操作码、源寄存器、目的寄存器、访存类型和系统操作字段。`packetStart` 与 `packetEnd`
+保留 packet 边界；跨派发组的 packet 通过已寄存的 FTQ 编号继续归属同一表项。
 
 ## Rename
 
@@ -21,8 +21,10 @@ Rename 输出进入一个三项宽的压缩段间寄存器。派发只能接受�
 
 ## ReadyBoard 与派发
 
-`ReadyBoard` 跟踪统一物理标签的可用状态。新目的寄存器在分配时标记为未就绪；后端的确定性
-唤醒和访存推测唤醒更新源状态。Load replay 会撤销对应的推测唤醒。
+`ReadyBoard` 跟踪统一物理标签的可用状态。查询只读取寄存状态，不把当拍后端 wakeup 组合
+旁路回派发；`IssueQueue` 在写入新表项时再次吸收当拍 wakeup。新目的寄存器在分配时标记为
+未就绪，且分配优先于同拍唤醒。确定性唤醒和访存推测唤醒更新寄存状态，Load replay 会撤销
+对应的推测唤醒。
 
 `Dispatcher` 将指令送入六个压缩式发射队列：两条整数/分支队列、`MixArith` 队列、LS0 Load
 队列、LS1 Load/Store Address 队列和 Store Data 队列。Store 同时生成地址和数据任务；只有
