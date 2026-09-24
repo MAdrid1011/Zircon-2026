@@ -10,18 +10,47 @@
     "voltage_v": 1.1,
     "temperature_c": 25
   },
-  "constraints": {
-    "driving_cell": "BUF_X1",
-    "loads_ff": [
-      1,
-      4,
-      16
+  "physical": {
+    "site": "FreePDK45_38x28_10R_NP_162NW_34O",
+    "lef_files": [
+      {
+        "file": "lef/NangateOpenCellLibrary.tech.lef",
+        "sha256": "834a79295054cd4209178d1bade67c353863c47bb4b3c22ee38b862b7cec37f2"
+      },
+      {
+        "file": "lef/NangateOpenCellLibrary.macro.lef",
+        "sha256": "840b01e500826096d1edcc752350834da647fdbf360798f243f8122b52b357c3"
+      },
+      {
+        "file": "lef/fakeram45_32x32.lef",
+        "sha256": "46220bf102a9fdf491a2a3c064c57693004a3309063fa3fcbf8b96ebd1c66509"
+      }
     ],
-    "input_arrival": "all zero",
-    "wire_load": "none",
-    "delay_target": "ABC default; no explicit -D"
+    "track_script": {
+      "file": "make_tracks.tcl",
+      "sha256": "8f8fbff8d8e0dfd232307058f6766973742e36f8f27bd1c717ea001e142cba99"
+    },
+    "rc_script": {
+      "file": "setRC.tcl",
+      "sha256": "521df813bf4da9d7400df33e3f680c9a328cc720830dbfca1188083741503fa5"
+    },
+    "placement_density": 0.3,
+    "macro_halo_um": [22.4, 15.12]
+  },
+  "constraints": {
+    "clock_period_ns": 1.0,
+    "target_sweep_ns": [
+      1.0
+    ],
+    "driving_cell": "BUF_X1",
+    "load_ff": 4,
+    "input_arrival_ns": 0.0,
+    "output_delay_ns": 0.0,
+    "wire_load": "placement-estimated RC",
+    "delay_target": "ABC -D set from target period"
   },
   "reference_tools": {
-    "yosys_version": "Yosys 0.43 (git sha1 ead4718e5, ccache clang 14.0.0-1ubuntu1.1 -Os -flto -flto)"
+    "yosys_version": "Yosys 0.68+post from the pinned ORFS image",
+    "openroad_image": "openroad/orfs@sha256:0f74b1bb4e3d7d290e0a0b989839cfdeebe85feca1df236a60f4087124827637"
   }
 }
