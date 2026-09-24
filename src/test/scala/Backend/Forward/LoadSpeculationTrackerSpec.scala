@@ -41,4 +41,36 @@ class LoadSpeculationTrackerSpec extends AnyFreeSpec with ChiselSim {
             dut.io.grant(1).expect(1)
         }
     }
+
+    "flush clears active tokens while publishing the coincident raw resolution" in {
+        simulate(new LoadSpeculationTracker) { dut =>
+            dut.io.request.foreach(_.poke(false))
+            dut.io.allocate.foreach(_.poke(false))
+            dut.io.result.foreach { result =>
+                result.valid.poke(false)
+                result.bits.mask.poke(0)
+                result.bits.failed.poke(false)
+            }
+            dut.io.flush.poke(false)
+            dut.reset.poke(true)
+            dut.clock.step(2)
+            dut.reset.poke(false)
+
+            dut.io.request(0).poke(true)
+            dut.io.allocate(0).poke(true)
+            dut.clock.step()
+            dut.io.active.expect(1)
+
+            dut.io.request(0).poke(false)
+            dut.io.allocate(0).poke(false)
+            dut.io.result(0).valid.poke(true)
+            dut.io.result(0).bits.mask.poke(1)
+            dut.io.result(0).bits.failed.poke(true)
+            dut.io.flush.poke(true)
+            dut.io.resolution.resolvedMask.expect(1)
+            dut.io.resolution.failedMask.expect(1)
+            dut.clock.step()
+            dut.io.active.expect(0)
+        }
+    }
 }

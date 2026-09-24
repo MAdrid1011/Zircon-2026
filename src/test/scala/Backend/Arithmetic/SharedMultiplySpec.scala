@@ -29,6 +29,13 @@ class SharedMultiplySpec extends AnyFreeSpec with ChiselSim {
                 dut.reset.poke(reset); dut.io.flush.poke(flush)
                 dut.io.in.valid.poke(input.nonEmpty); dut.io.out.ready.poke(ready)
                 dut.io.in.bits.src1.poke(x.a); dut.io.in.bits.src2.poke(x.b); dut.io.in.bits.src3.poke(x.c)
+                dut.io.in.bits.fpSrc1.poke(x.a); dut.io.in.bits.fpSrc2.poke(x.b); dut.io.in.bits.fpSrc3.poke(x.c)
+                dut.io.in.bits.fpExp1.poke((x.a >> 23) & 0xff)
+                dut.io.in.bits.fpExp2.poke((x.b >> 23) & 0xff)
+                dut.io.in.bits.fpExp3.poke((x.c >> 23) & 0xff)
+                dut.io.in.bits.fpZero1.poke((x.a & 0x7fffffffL) == 0)
+                dut.io.in.bits.fpZero2.poke((x.b & 0x7fffffffL) == 0)
+                dut.io.in.bits.fpZero3.poke((x.c & 0x7fffffffL) == 0)
                 dut.io.in.bits.op.poke(x.op); dut.io.in.bits.roundingMode.poke(x.rm); dut.io.in.bits.tag.poke(x.tag)
                 def check(): Unit = {
                     dut.io.in.ready.expect((!reset && !flush && (pipe(3).isEmpty || ready)).B, s"ready cycle $cycle")

@@ -133,6 +133,7 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
     io.complete.bits.response.exception := Mux(error, 5.U, 0.U)
     io.complete.bits.response.retry := false.B
     io.complete.bits.response.uncache := entry.uncache
+    io.complete.bits.response.atomic := entry.atomic
     io.complete.bits.storeResponse.exception := Mux(error, 7.U, 0.U)
     io.busy := state =/= idle
 

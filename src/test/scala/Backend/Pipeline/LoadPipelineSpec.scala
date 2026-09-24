@@ -266,8 +266,9 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
         }
 
         val wbValid = dut.io.wb.valid.peek().litToBoolean
-        dut.io.wk.wakeWB.valid.expect(wbValid)
+        dut.io.wk.wakeWB.specMask.expect(0)
         if (wbValid && cancel.isEmpty) {
+            dut.io.wk.wakeWB.prd.expect(dut.io.wb.bits.prd.peek().litValue)
             val prd = dut.io.wb.bits.prd.peek().litValue.toInt
             val a = active.values.find(_.load.prd == prd).get
             assert(a.load.rdVld && a.load.fault == 0 && !a.load.retry)
@@ -275,8 +276,9 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
         }
         if (cancel.nonEmpty) {
             dut.io.wb.valid.expect(false)
-            dut.io.wk.wakeWB.valid.expect(false)
             dut.io.cmt.rob.valid.expect(false)
+        } else if (!wbValid) {
+            dut.io.wk.wakeWB.prd.expect(0)
         }
         if (wbValid) {
             dut.io.cmt.rob.valid.expect(true)
@@ -285,7 +287,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             val a = active.values.find(a => a.load.prd == prd && !a.written).get
             assert(a.load.rdVld && a.load.fault == 0 && !a.load.retry)
             dut.io.wb.bits.data.expect(value(a.load), s"Result mismatch for ${a.load} at $cycles")
-            dut.io.wk.wakeWB.bits.expect(prd)
+            dut.io.wk.wakeWB.prd.expect(prd)
             dut.io.bypass.result.expect(value(a.load))
             if ((prd & (1 << dut.p.physWidth)) != 0) {
                 fpValues(prd & ((1 << dut.p.physWidth) - 1)) = value(a.load); count("fp_write")
@@ -432,7 +434,7 @@ class LoadPipelineSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
         if sys.env.get("ZIRCON_LOAD_BACKEND").forall(_ == name)
     ) {

@@ -16,7 +16,6 @@ class MixArithPipelineTestTop extends Module {
         val intWrite = Output(Valid(new MixArithLocalWrite(MixArithConstants.localPhysWidth)))
         val fpWrite = Output(Valid(new MixArithLocalWrite(MixArithConstants.fpPhysWidth)))
         val wakeup = Output(Valid(UInt(MixArithConstants.physTagWidth.W)))
-        val available = Output(Bool())
     })
 
     val pipeline = Module(new MixArithPipeline)
@@ -34,7 +33,10 @@ class MixArithPipelineTestTop extends Module {
     val bypass = Module(new Bypass(BypassParams(
         numProducers = 3,
         consumerSources = Seq(3),
-        consumerProducers = Seq(Seq(Seq(0, 1, 2), Seq(0, 1, 2), Seq(2))),
+        consumerProducers = Seq(
+            Seq(Seq(0, 1, 2), Seq(0, 1, 2), Seq(2)),
+        ),
+        captureConsumers = Set(0),
     )))
 
     pipeline.io.iq.valid := io.issue.valid
@@ -77,7 +79,6 @@ class MixArithPipelineTestTop extends Module {
     io.intWrite := pipeline.io.rf.intWrite
     io.fpWrite := pipeline.io.rf.fpWrite
     io.wakeup := pipeline.io.wakeup
-    io.available := pipeline.io.available
 }
 
 class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
@@ -161,6 +162,8 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
         for (producer <- dut.io.external) {
             producer.nextWb.valid.poke(false)
             producer.nextWb.bits.poke(1)
+            producer.nextResult.valid.poke(false)
+            producer.nextResult.bits.poke(0)
             producer.result.poke(0)
         }
         dut.reset.poke(true)
@@ -264,8 +267,11 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
     ): Unit = {
         dut.io.external(producer).nextWb.valid.poke(true)
         dut.io.external(producer).nextWb.bits.poke(tag)
+        dut.io.external(producer).nextResult.valid.poke(true)
+        dut.io.external(producer).nextResult.bits.poke(data & mask)
         tick(dut, results)
         dut.io.external(producer).nextWb.valid.poke(false)
+        dut.io.external(producer).nextResult.valid.poke(false)
         dut.io.external(producer).result.poke(data & mask)
         tick(dut, results)
     }

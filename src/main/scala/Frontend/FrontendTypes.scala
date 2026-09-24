@@ -78,7 +78,6 @@ class FrontendPredictInfo(p: FrontendParams) extends Bundle {
 }
 
 class FrontendPackage(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val ftqIdx = UInt(p.ftqBits.W)
     val startPc = UInt(32.W)
     val mask = UInt(p.fetchWidth.W)
@@ -89,7 +88,6 @@ class FrontendPackage(p: FrontendParams) extends Bundle {
 }
 
 class FetchQueueEntry(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val slot = UInt(p.slotBits.W)
     val packetStart = Bool()
     val packetEnd = Bool()
@@ -98,12 +96,10 @@ class FetchQueueEntry(p: FrontendParams) extends Bundle {
 }
 
 class FrontendFetchRequest(p: FrontendParams) extends Bundle {
-    val token = UInt(32.W)
     val pc = UInt(32.W)
 }
 
 class FrontendFetchResponse(p: FrontendParams) extends Bundle {
-    val token = UInt(32.W)
     val mask = UInt(p.fetchWidth.W)
     val inst = Vec(p.fetchWidth, UInt(32.W))
     val fault = UInt(p.fetchWidth.W)
@@ -120,7 +116,6 @@ class FrontendMiddleIO(p: FrontendParams, width: Int) extends Bundle {
 
 /** One in-order retired fetch packet; masks describe only actually executed slots. */
 class FrontendRetirement(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val ftqIdx = UInt(p.ftqBits.W)
     val mask = UInt(p.fetchWidth.W)
     val taken = UInt(p.fetchWidth.W)
@@ -134,7 +129,7 @@ class FrontendRedirect extends Bundle {
 
 class FrontendFtqIO(p: FrontendParams) extends Bundle {
     val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
-    val train = Flipped(Valid(new FrontendTraining(p)))
+    val train = Flipped(Decoupled(new FrontendTraining(p)))
     val used = if (p.observe) Some(Input(UInt(log2Ceil(p.ftqDepth + 1).W))) else None
 }
 

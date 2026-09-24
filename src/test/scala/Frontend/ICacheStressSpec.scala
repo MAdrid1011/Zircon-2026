@@ -191,7 +191,7 @@ class ICacheStressSpec extends AnyFreeSpec with ChiselSim {
                     e.outputReady = true
                     e.drain()
 
-                    // Redirect on the same edge as a held hit, replacing both older pipeline tokens.
+                    // Redirect on the same edge as a held hit, replacing both older pipeline requests.
                     e.outputReady = false
                     val heldHit = e.add(BigInt("61001000", 16))
                     val younger = e.add(BigInt("61002000", 16), delay = 127)
@@ -206,27 +206,17 @@ class ICacheStressSpec extends AnyFreeSpec with ChiselSim {
                     assert(e.accepted(redirect) == redirectCycle && e.completed.contains(redirect))
                     assert(!e.completed.contains(heldHit) && !e.completed.contains(younger))
 
-                    // Drain an old translation after a new redirect has already completed.
-                    e.outOfOrderTranslations = true
+                    // An untagged translation slot must drain its canceled response before reuse.
                     val stale = e.add(BigInt("62000000", 16), delay = 511)
                     e.until(e.accepted.contains(stale))
                     e.flush()
                     e.lowerDelay = 1
                     val fresh = e.add(BigInt("62001000", 16))
+                    val redirectQueued = e.cycle
                     e.until(e.completed.contains(fresh))
-                    assert(
-                        e.translations.exists(_._1.token == stale),
-                        "stale translation did not overlap the new stream"
-                    )
+                    assert(e.accepted(fresh) > redirectQueued, "translation owner was reused before stale response drained")
+                    e.cover("stale_translation_serialized")
                     e.drain()
-
-                    // Wrap the 32-bit transaction counter without reusing any live identity.
-                    e.serial = (BigInt(1) << 32) - 2
-                    for (_ <- 0 until 3) e.add(BigInt("62001000", 16))
-                    e.drain()
-                    assert(e.completed.contains(0) && e.completed.contains((BigInt(1) << 32) - 1))
-                    e.serial = e.history.keys.filter(_ < (BigInt(1) << 31)).max + 1
-                    e.cover("token_wrap_checked")
 
                     // Reset at a quiescent boundary invalidates all prior tags/data.
                     for (set <- 0 until sets; way <- 0 until 2)
@@ -342,7 +332,7 @@ class ICacheStressSpec extends AnyFreeSpec with ChiselSim {
                         "redirect_accepted_with_flush",
                         "long_lower_delay",
                         "one_cycle_lower",
-                        "token_wrap_checked"
+                        "stale_translation_serialized"
                     )
                     val out = Paths.get(sys.env.getOrElse("ICACHE_STRESS_OUTPUT", "build/icache-stress/results"))
                     Files.createDirectories(out)

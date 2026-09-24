@@ -17,17 +17,24 @@ class LoadSpeculationTracker(val p: BackendParams = BackendParams()) extends Mod
     val io = IO(new LoadSpeculationTrackerIO(p))
 
     val active = RegInit(0.U(p.specWidth.W))
-    val free = ~active
+    val rawResolvedMask = io.result.map(result => Mux(result.valid, result.bits.mask, 0.U)).reduce(_ | _)
+    val rawFailedMask = io.result.map(result =>
+        Mux(result.valid && result.bits.failed, result.bits.mask, 0.U)
+    ).reduce(_ | _)
+    // IQ failure maintenance consumes a failed token one cycle after the execute
+    // boundary kills it. Prevent that token from being reassigned in between.
+    val failedQuarantine = RegNext(Mux(io.flush, 0.U(p.specWidth.W), rawFailedMask), 0.U(p.specWidth.W))
+    val free = (~(active | failedQuarantine))(p.specWidth - 1, 0)
     val lane0Grant = PriorityEncoderOH(free)
     val remaining = free & ~Mux(io.request(0), lane0Grant, 0.U)
     val lane1Grant = PriorityEncoderOH(remaining)
     io.grant(0) := Mux(io.request(0), lane0Grant, 0.U)
     io.grant(1) := Mux(io.request(1), lane1Grant, 0.U)
 
-    val resolvedMask = io.result.map(result => Mux(result.valid, result.bits.mask, 0.U)).reduce(_ | _)
-    val failedMask = io.result.map(result =>
-        Mux(result.valid && result.bits.failed, result.bits.mask, 0.U)
-    ).reduce(_ | _)
+    // Queue and ReadyBoard flush priority makes a same-cycle resolution
+    // unobservable; keep flush out of their speculation update cones.
+    val resolvedMask = rawResolvedMask
+    val failedMask = rawFailedMask
     val allocatedMask = io.allocate.zip(io.grant).map { case (allocate, grant) =>
         Mux(allocate, grant, 0.U)
     }.reduce(_ | _)
@@ -44,12 +51,13 @@ class LoadSpeculationTracker(val p: BackendParams = BackendParams()) extends Mod
 
     assert((failedMask & ~resolvedMask) === 0.U)
     assert((allocatedMask & active) === 0.U, "Load speculation token was allocated twice")
+    assert((allocatedMask & failedQuarantine) === 0.U, "A failed speculation token was reused too early")
     assert(!(io.allocate(0) && io.allocate(1)) || !(io.grant(0) & io.grant(1)).orR)
     for (lane <- 0 until 2) {
         when(io.allocate(lane)) {
             assert(io.grant(lane).orR, "A speculative Load allocation requires a free token")
         }
-        when(io.result(lane).valid) {
+        when(io.result(lane).valid && !io.flush) {
             assert(io.result(lane).bits.mask.orR)
             assert((io.result(lane).bits.mask & active).orR, "Load resolved an inactive speculation token")
         }

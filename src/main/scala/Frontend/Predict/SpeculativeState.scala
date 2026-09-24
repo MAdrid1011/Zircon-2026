@@ -38,11 +38,17 @@ class SpeculativeState(p: FrontendParams) extends Module {
     val speculative = RegInit(0.U.asTypeOf(new FrontendStateSnapshot(p)))
     val committed = RegInit(0.U.asTypeOf(new FrontendStateSnapshot(p)))
 
-    /* One Block's State Transition */
-    def advance(before: FrontendStateSnapshot, event: FrontendStateEvent): FrontendStateSnapshot = {
+    /* One Block's RAS Transition */
+    def advanceRas(
+        before: FrontendStateSnapshot,
+        event: FrontendStateEvent,
+        taken: UInt,
+        pointerOH: UInt,
+        previousTop: UInt,
+    ): FrontendStateSnapshot = {
         val next = WireDefault(before)
         val prediction = event.prediction
-        val selected = prediction.taken.asBools
+        val selected = taken.asBools
         val pc = Cat(event.pcWord, 0.U(2.W))
 
         // Decode each slot before selecting the RAS operation.
@@ -60,21 +66,30 @@ class SpeculativeState(p: FrontendParams) extends Module {
         // Coroutines pop first, then push. Empty pops and full pushes do not wrap the count.
         val pushOnly = push && !pop
         val popOnly = pop && !push
-        val previousTop = FrontendMath.read(before.ras.toSeq, (before.pointer - 2.U)(p.rasBits - 1, 0))
         next.top := Mux(push, returnPc, Mux(pop, Mux(before.count > 1.U, previousTop, 0.U), before.top))
         when(pushOnly) { next.pointer := before.pointer + 1.U }
         when(popOnly) { next.pointer := before.pointer - 1.U }
         when(pushOnly && before.count < p.rasDepth.U) { next.count := before.count + 1.U }
         when(popOnly) { next.count := before.count - 1.U }
         for (i <- 0 until p.rasDepth) {
-            // Decode both positions before the prediction arrives; a coroutine replaces the top.
-            val pushHere = pushOnly && before.pointer === i.U
-            val replaceHere = push && pop && before.pointer === ((i + 1) % p.rasDepth).U
+            val pushHere = pushOnly && pointerOH(i)
+            val replaceHere = push && pop && pointerOH((i + 1) % p.rasDepth)
             when(pushHere || replaceHere) { next.ras(i) := returnPc }
         }
+        next
+    }
 
+    /* One Block's History Transition */
+    def advanceHistory(before: FrontendStateSnapshot, event: FrontendStateEvent, taken: UInt): FrontendStateSnapshot = {
+        val next = WireDefault(before)
+        val prediction = event.prediction
+        val pc = Cat(event.pcWord, 0.U(2.W))
         // Update the full history and its incremental folds from the same block signature.
-        val signature = FrontendMath.signature(pc, prediction, p)
+        val control = VecInit(prediction.kinds.zipWithIndex.map { case (kind, i) =>
+            kind =/= 0.U && prediction.mask(i)
+        }).asUInt
+        val signature = FrontendMath.fold(pc(31, 2), p.historyStep) ^
+            control.pad(p.historyStep) ^ taken.pad(p.historyStep)
         next.history := FrontendMath.append(before.history, signature, p)
         def rotate(value: UInt, shift: Int): UInt = {
             val amount = shift % p.hashBits
@@ -90,27 +105,61 @@ class SpeculativeState(p: FrontendParams) extends Module {
         next
     }
 
+    /* One Block's State Transition */
+    def advance(before: FrontendStateSnapshot, event: FrontendStateEvent): FrontendStateSnapshot = {
+        val pointerOH = UIntToOH(before.pointer, p.rasDepth)
+        val previousTop = Mux1H((0 until p.rasDepth).map(i =>
+            pointerOH((i + 2) % p.rasDepth) -> before.ras(i)
+        ))
+        val rasNext = advanceRas(before, event, event.prediction.taken, pointerOH, previousTop)
+        val historyNext = advanceHistory(before, event, event.prediction.taken)
+        val next = WireDefault(rasNext)
+        next.history := historyNext.history
+        next.folds := historyNext.folds
+        next
+    }
+
+    /* Early Prediction Transition */
+    // TAGE arrives late. Build every legal RAS result first, then use taken only in the final one-hot selection.
+    def advanceEarly(before: FrontendStateSnapshot, event: FrontendStateEvent): FrontendStateSnapshot = {
+        val taken = event.prediction.taken
+        val pointerOH = UIntToOH(before.pointer, p.rasDepth)
+        val previousTop = Mux1H((0 until p.rasDepth).map(i =>
+            pointerOH((i + 2) % p.rasDepth) -> before.ras(i)
+        ))
+        val selectors = !taken.orR +: taken.asBools
+        val candidates = (0 to p.fetchWidth).map { candidate =>
+            val selected = if (candidate == 0) 0.U(p.fetchWidth.W) else (1 << (candidate - 1)).U(p.fetchWidth.W)
+            advanceRas(before, event, selected, pointerOH, previousTop)
+        }
+        val next = advanceHistory(before, event, taken)
+        next.ras := Mux1H(selectors, candidates.map(_.ras))
+        next.top := Mux1H(selectors, candidates.map(_.top))
+        next.pointer := Mux1H(selectors, candidates.map(_.pointer))
+        next.count := Mux1H(selectors, candidates.map(_.count))
+        next
+    }
+
     /* Commit and Recovery Priority */
     // A global flush includes this cycle's retirement; PD repair overrides younger speculation.
     var committedNext = committed
     for (port <- 0 until 3) {
         committedNext = Mux(io.retire(port).valid, advance(committedNext, io.retire(port).bits), committedNext)
     }
-    val repair = io.repair.valid && !io.flush
-    val early = io.early.valid && !io.repair.valid && !io.flush
-    val hold = !io.early.valid && !io.repair.valid && !io.flush
-    // Select complete candidate states in parallel; recovery must not traverse chained data muxes.
-    val speculativeNext = Mux1H(Seq(
-        hold -> speculative,
-        early -> advance(speculative, io.early.bits),
-        repair -> advance(io.repair.bits.before, io.repair.bits.event),
-        io.flush -> committedNext
-    ))
+    // Keep flush as the final selector. It must not be decoded through every
+    // normal speculative candidate before reaching the state registers.
+    val nonFlushNext = Mux(
+        io.repair.valid,
+        advance(io.repair.bits.before, io.repair.bits.event),
+        Mux(io.early.valid, advanceEarly(speculative, io.early.bits), speculative)
+    )
+    val speculativeNext = Mux(io.flush, committedNext, nonFlushNext)
     when(VecInit(io.retire.map(_.valid)).asUInt.orR) { committed := committedNext }
     speculative := speculativeNext
 
     /* Current Prediction State */
     io.snapshot := speculative
     io.folds := speculative.folds
+    when(io.early.valid) { assert(PopCount(io.early.bits.prediction.taken) <= 1.U) }
     assert(speculative.count <= p.rasDepth.U && committed.count <= p.rasDepth.U)
 }

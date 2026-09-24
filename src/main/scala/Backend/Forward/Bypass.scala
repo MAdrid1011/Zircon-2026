@@ -21,15 +21,40 @@ class Bypass(val p: BypassParams = BypassParams()) extends Module {
         val selected = RegInit(0.U(producers.size.W))
         selected := 0.U
         when(io.consumer(consumer).advance) {
-            selected := nextHit.asUInt
+            val selectedHit = if (p.captureConsumers.contains(consumer)) {
+                nextHit.zip(producers).zip(producerIds).map { case ((hit, producer), producerId) =>
+                    if (p.guaranteedCaptureProducers.contains(producerId)) false.B
+                    else hit && !producer.nextResult.valid
+                }
+            } else nextHit
+            selected := VecInit(selectedHit).asUInt
         }
 
+        val captureHit = nextHit.zip(producers).map { case (hit, producer) =>
+            hit && producer.nextResult.valid
+        }
+        io.consumer(consumer).capture(source).valid :=
+            io.consumer(consumer).advance && VecInit(captureHit).asUInt.orR
+        io.consumer(consumer).capture(source).bits :=
+            Mux1H(captureHit, producers.map(_.nextResult.bits))
+        // Reduce each candidate before the one-hot mux so FP zero detection does
+        // not extend the selected 32-bit bypass-data cone at the consumer.
+        io.consumer(consumer).captureFpZero(source) :=
+            Mux1H(captureHit, producers.map(producer => !producer.nextResult.bits(30, 0).orR))
         io.consumer(consumer).value(source).valid := selected.orR
         io.consumer(consumer).value(source).bits := Mux1H(selected.asBools, producers.map(_.result))
+        io.consumer(consumer).valueFpZero(source) :=
+            Mux1H(selected.asBools, producers.map(producer => !producer.result(30, 0).orR))
         assert(PopCount(nextHit) <= 1.U, "One RF source cannot match multiple promised WB producers")
         when(selected.orR) {
             assert(PopCount(selected) === 1.U, "One EX source must select exactly one WB producer")
         }
+    }
+    for (producer <- p.guaranteedCaptureProducers) {
+        assert(
+            !io.producer(producer).nextWb.valid || io.producer(producer).nextResult.valid,
+            "Guaranteed-capture producer must publish its result with its WB tag",
+        )
     }
     for (i <- 0 until p.numProducers; j <- 0 until i) {
         assert(

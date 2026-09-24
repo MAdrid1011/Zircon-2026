@@ -58,6 +58,15 @@ object SRT4Logic {
         Mux(shift >= width.U, Cat(0.U((width - 1).W), x.orR), value)
     }
 
+    def integerWindow(data: UInt, shift: UInt): UInt = {
+        val stages = (0 until 6).foldLeft(data) { case (value, bit) =>
+            val amount = 1 << bit
+            val shifted = Cat(0.U(amount.W), value(Width - 1, amount))
+            Mux(shift(bit), shifted, value)
+        }
+        stages(31, 0)
+    }
+
     /** Round an already normalized 27-bit significand window with a sticky LSB. */
     def round(windowIn: UInt, exponent: SInt, sign: Bool, rm: UInt): (UInt, UInt) = {
         val distance = (-126).S(11.W) - exponent
@@ -402,16 +411,7 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
 
     // -- EX4: round FP once, restore integer scale/sign, and register every response --
     val (floatResult, floatFlags) = round(r3.data(26, 0), r3.exponent, r3.meta.sign, r3.meta.roundingMode)
-    val unsignedInteger = MuxLookup(r3.integerShift, 0.U(32.W))(
-        (0 until Width).map { shift =>
-            val shifted = if (shift <= Width - 32) {
-                r3.data(shift + 31, shift)
-            } else {
-                Cat(0.U((shift - (Width - 32)).W), r3.data(Width - 1, shift))
-            }
-            shift.U -> shifted
-        }
-    )
+    val unsignedInteger = SRT4Logic.integerWindow(r3.data, r3.integerShift)
     val integerResult = Mux(r3.meta.sign, -unsignedInteger, unsignedInteger)
     val s4 = Wire(new DivideResponse(tagWidth))
     val floatOperation = r3.meta.op === FDIV.U || r3.meta.op === FSQRT.U

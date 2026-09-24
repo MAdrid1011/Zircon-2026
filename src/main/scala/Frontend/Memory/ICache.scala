@@ -6,13 +6,11 @@ import ZirconConfig.{FrontendParams, ICacheParams}
 class IStage1Signal extends Bundle {
     val rreq = Bool()
     val vaddr = UInt(32.W)
-    val token = UInt(32.W)
 }
 
 class IStage2Signal(p: FrontendParams, c: ICacheParams) extends Bundle {
     val rreq = Bool()
     val vaddrWord = UInt((c.indexBits + c.offsetBits - 2).W)
-    val token = UInt(32.W)
     val rdata = Vec(c.ways, UInt((32 * p.fetchWidth).W))
     val victimWay = UInt(c.ways.W)
     val victimData = UInt(c.lineBits.W)
@@ -82,7 +80,6 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val c1s1 = Wire(new IStage1Signal)
     c1s1.rreq := io.pp.request.fire
     c1s1.vaddr := io.pp.request.bits.pc
-    c1s1.token := io.pp.request.bits.token
 
     /* Stage 2: RAM Output, Translation and Hit Check / IF1 */
     val c1s2 = RegInit(0.U.asTypeOf(new IStage1Signal))
@@ -91,9 +88,9 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         c1s2.rreq := false.B
         c1s3.rreq := false.B
     }
-    val responseMatches = c1s2.rreq && io.mmu.response.bits.token === c1s2.token
+    val directPaddr = Cat(0.U(2.W), c1s2.vaddr)
     val localTranslation = WireDefault(false.B)
-    val translationValid = WireDefault(io.mmu.response.valid && responseMatches)
+    val translationValid = WireDefault(io.mmu.response.valid)
     val translatedBlock = WireDefault(io.mmu.response.bits.paddr(33, p.blockBits))
     val translatedUncache = WireDefault(io.mmu.response.bits.uncache)
     val translatedFault = WireDefault(io.mmu.response.bits.fault)
@@ -120,41 +117,45 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
             activeAsid := manage.control.asid
         }
         localTranslation := direct || tlbHit
-        translationValid := localTranslation || (io.mmu.response.valid && responseMatches)
+        translationValid := c1s2.rreq && localTranslation
         translatedBlock := Mux(
             direct,
-            Cat(0.U(2.W), c1s2.vaddr)(33, p.blockBits),
-            Mux(
-                tlbHit,
-                itlb.io.response(0).paddr,
-                io.mmu.response.bits.paddr(33, p.blockBits),
-            )
+            directPaddr(33, p.blockBits),
+            itlb.io.response(0).paddr,
         )
         translatedUncache := Mux(
             direct,
-            PMA.attribute(Cat(0.U(2.W), c1s2.vaddr)) =/= PMAAttribute.cached,
-            Mux(tlbHit, itlb.io.response(0).pma =/= PMAAttribute.cached, io.mmu.response.bits.uncache)
+            PMA.attribute(directPaddr) =/= PMAAttribute.cached,
+            itlb.io.response(0).pma =/= PMAAttribute.cached,
         )
         translatedFault := Mux(
             direct,
-            !PMA.executable(Cat(0.U(2.W), c1s2.vaddr)),
-            Mux(
-                tlbHit,
-                !MMUPermission.instruction(itlb.io.response(0), manage.control) ||
-                    itlb.io.response(0).pma === PMAAttribute.invalid,
-                io.mmu.response.bits.fault
-            )
+            !PMA.executable(directPaddr),
+            !MMUPermission.instruction(itlb.io.response(0), manage.control) ||
+                itlb.io.response(0).pma === PMAAttribute.invalid,
         )
     }
-    val c1s2Go = c1s2.rreq && translationValid &&
-        !missC1 && fsm.io.cc.ready && (!c1s3.rreq || io.pp.response.fire) && !io.flush
+    val c1s2MayRelease = c1s2.rreq && translationValid && !missC1 && fsm.io.cc.ready &&
+        (!c1s3.rreq || (!missC1 && io.pp.response.ready))
+    val c1s2Go = c1s2MayRelease && !io.flush
+    val translationDrain = if (c.tlbEnabled) None else Some(RegInit(false.B))
+    val translationSlotAvailable = translationDrain.map(drain => !drain).getOrElse(true.B)
+    val flushCanReplaceTranslation = if (c.tlbEnabled) io.flush else
+        io.flush && (!c1s2.rreq || io.mmu.response.valid)
     io.pp.request.ready := !reset.asBool && !io.maintenance.request && !invalidateActive && !missC1 && fsm.io.cc.ready &&
-        (!c1s2.rreq || c1s2Go || io.flush)
+        translationSlotAvailable && (!c1s2.rreq || c1s2Go || flushCanReplaceTranslation)
     io.mmu.request.valid := c1s2.rreq && !localTranslation && !io.flush
     io.mmu.request.bits.pc := c1s2.vaddr
-    io.mmu.request.bits.token := c1s2.token
-    // A response to a flushed token is drained without using its address or permissions.
-    io.mmu.response.ready := !responseMatches || c1s2Go || io.flush
+    io.mmu.response.ready := (if (c.tlbEnabled) true.B else
+        translationDrain.get || c1s2Go || (io.flush && c1s2.rreq))
+    if (!c.tlbEnabled) {
+        when(io.flush && c1s2.rreq && !io.mmu.response.valid) {
+            translationDrain.get := true.B
+        }
+        when(translationDrain.get && io.mmu.response.fire) {
+            translationDrain.get := false.B
+        }
+    }
     val faultC1s2 = translatedFault || c1s2.vaddr(1, 0).orR
     val hitC1s2 = VecInit(tagTab.zip(vldTab).map { case (t, v) =>
         t.dataOut === tag(Cat(translatedBlock, 0.U(p.blockBits.W))) && v.rdata(0)
@@ -162,7 +163,6 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val c1s3In = Wire(new IStage2Signal(p, c))
     c1s3In.rreq := c1s2.rreq
     c1s3In.vaddrWord := c1s2.vaddr(c.indexBits + c.offsetBits - 1, 2)
-    c1s3In.token := c1s2.token
     c1s3In.paddrBlock := translatedBlock
     c1s3In.uncache := translatedUncache
     c1s3In.fault := faultC1s2
@@ -186,7 +186,6 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     }
     val rline = Mux1H(fsm.io.cc.r1H, Seq(Mux1H(c1s3.hit, c1s3.rdata), dbuf.asUInt))
     io.pp.response.valid := c1s3.rreq && !missC1 && !io.flush
-    io.pp.response.bits.token := c1s3.token
     io.pp.response.bits.mask := FrontendMath.range(c1s3Vaddr, p)
     io.pp.response.bits.inst := rline.asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
     io.pp.response.bits.fault := Mux(
@@ -208,7 +207,6 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     fsm.io.cc.hit := c1s3.hit
     fsm.io.cc.lru := c1s3.victimWay
     fsm.io.cc.flush := io.flush
-    fsm.io.cc.stall := !io.pp.request.fire
     fsm.io.cc.consumed := io.pp.response.fire
     fsm.io.cc.responseReady := io.pp.response.ready
     fsm.io.l2.ready := io.l2.request.ready
@@ -221,11 +219,16 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     lruTab.wen(0) := fsm.io.cc.lruUpd.orR
     lruTab.waddr(0) := index(c1s3Vaddr)
     lruTab.wdata(0) := fsm.io.cc.lruUpd
-    val arrayAddress = Mux1H(fsm.io.cc.addrOH, Seq(index(c1s1.vaddr), index(c1s2.vaddr), index(c1s3Vaddr)))
-    val arrayEnable = Mux1H(
-        fsm.io.cc.addrOH,
-        Seq(c1s1.rreq, c1s2.rreq, (c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR)
+    val recoveryAddress = Mux(fsm.io.cc.addrOH(2), index(c1s3Vaddr), index(c1s2.vaddr))
+    // Normal fetch is the late input; addrOH is asserted one-hot by ICacheFSM.
+    val arrayAddress = Mux(fsm.io.cc.addrOH(0), index(c1s1.vaddr), recoveryAddress)
+    val recoveryEnable = Mux(
+        fsm.io.cc.addrOH(1),
+        c1s2.rreq,
+        (c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR,
     )
+    // A flush may replace an occupied S2 with the redirect PC in this cycle.
+    val arrayEnable = Mux(fsm.io.cc.addrOH(0), io.pp.request.ready, recoveryEnable)
     for (way <- 0 until c.ways) {
         tagTab(way).clock := clock
         tagTab(way).address := arrayAddress
@@ -247,7 +250,6 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
 
     /* Lower Request and Return Buffers */
     io.l2.request.valid := fsm.io.l2.rreq
-    io.l2.request.bits.token := c1s3.token
     io.l2.request.bits.uncache := c1s3.uncache
     io.l2.request.bits.victimValid := !c1s3.uncache && c1s3.victimValid
     io.l2.request.bits.victimLine := Cat(
@@ -267,7 +269,7 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         dbufFault := 0.U
     }
     when(io.l2.response.fire) {
-        val responseError = io.l2.response.bits.error || io.l2.response.bits.token =/= c1s3.token
+        val responseError = io.l2.response.bits.error
         when(c1s3.uncache) {
             if (p.fetchWidth == 1) dbuf(0) := io.l2.response.bits.data(31, 0)
             else dbuf(readSlot) := io.l2.response.bits.data(31, 0)

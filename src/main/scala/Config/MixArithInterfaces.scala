@@ -139,6 +139,5 @@ class MixArithPipelineIO extends Bundle {
     val wakeEX2 = Output(Valid(UInt(MixArithConstants.physTagWidth.W)))
     val wakeEX3 = Output(Valid(UInt(MixArithConstants.physTagWidth.W)))
     val wakeup = Output(Valid(UInt(MixArithConstants.physTagWidth.W)))
-    val available = Output(Bool())
     val divideBusy = Output(Bool())
 }

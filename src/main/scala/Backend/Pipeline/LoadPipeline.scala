@@ -66,6 +66,12 @@ class LoadDataResponse(p: LoadPipelineParams) extends Bundle {
     val data = UInt(32.W)
 }
 
+class StoreAddressStage(p: LoadPipelineParams) extends Bundle {
+    val item = new BackendPackage(p.backend)
+    val vaddr = UInt(32.W)
+    val permission = new DCachePermissionContext
+}
+
 class LoadCacheIO(p: LoadPipelineParams, withStore: Boolean = false, tlbEnabled: Boolean = false) extends Bundle {
     val req = Decoupled(new DLoadRequest(DCacheParams(p.entries)))
     val fixedLatency = Input(Bool())
@@ -82,7 +88,7 @@ class LoadWakeupIO(p: LoadPipelineParams) extends Bundle {
     val wakeD1 = Output(new BackendWakeup(p.backend))
     val wakeD2 = Output(new BackendWakeup(p.backend))
     val result = Output(Valid(new LoadSpeculationResult(p.backend)))
-    val wakeWB = Valid(UInt(p.tagWidth.W))
+    val wakeWB = Output(new BackendWakeup(p.backend))
     val replay = Output(Valid(new BackendPackage(p.backend)))
 }
 
@@ -95,6 +101,7 @@ class LoadPipelineIO(p: LoadPipelineParams, withStore: Boolean = false, tlbEnabl
     val bypass = new BypassProducerPort(p.backend)
     val blockIssue = Input(Bool())
     val idle = Output(Bool())
+    val translationControl = if (withStore && tlbEnabled) Some(Input(new AddressTranslationControl)) else None
 }
 
 /** RF/AGU share a cycle; the external DCache owns the D1, D2 and WB registers. */
@@ -130,10 +137,8 @@ class LoadPipeline(
     val validRF = RegInit(false.B)
     val indexRF = Reg(UInt(p.slotWidth.W))
     val heldRF = RegInit(false.B)
-    val storePkgD1 = Reg(new BackendPackage(p.backend))
-    val storeVaddrD1 = Reg(UInt(32.W))
-    val storeValidD1 = RegInit(false.B)
-    io.idle := !validRF && (if (withStore) !storeValidD1 else true.B)
+    val storeAddressIdle = WireDefault(true.B)
+    io.idle := !validRF && storeAddressIdle
 
     // Context includes the RF reservation, so a cache stall cannot change the request identity.
     val pending = Reg(Vec(p.entries, new BackendPackage(p.backend)))
@@ -150,15 +155,15 @@ class LoadPipeline(
             io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Atomic.U,
         io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Load.U,
     )
-    val storeRFAdvance = WireDefault(false.B)
-    val addressFire = io.cache.req.fire || storeRFAdvance
+    val storeAddressAccept = WireDefault(false.B)
+    val addressAccept = io.cache.req.fire || storeAddressAccept
 
     val free = VecInit((0 until p.entries).map(i =>
-        !valid(i) || killed(pending(i)) || (io.cache.rsp.valid && io.cache.rsp.bits.slot === i.U)
+        !valid(i) || (io.cache.rsp.valid && io.cache.rsp.bits.slot === i.U)
     )).asUInt
     val indexIS = PriorityEncoder(free)
     io.iq.instPkg.ready := acceptedUnit && !io.blockIssue && (storeIS || free.orR) &&
-        (!validRF || killed(instPkgRF) || addressFire) && !killed(io.iq.instPkg.bits)
+        (!validRF || addressAccept)
 
     io.rf.rd.prj := Mux(instPkgRF.prj(p.physWidth), 0.U, instPkgRF.prj(p.intWidth - 1, 0))
     io.rf.rd.hold := heldRF
@@ -174,6 +179,7 @@ class LoadPipeline(
     io.cache.req.bits.ioAuthorized := instPkgRF.ioAuthorized
     io.cache.req.bits.exception := Mux(instPkgRF.exception.valid, instPkgRF.exception.cause(3, 0), 0.U)
     io.cache.req.bits.translationMiss := false.B
+    io.cache.req.bits.atomic := false.B
 
     io.wk.request := io.cache.req.valid && io.cache.fixedLatency && instPkgRF.rdVld &&
         !instPkgRF.exception.valid && !instPkgRF.uncache
@@ -183,13 +189,13 @@ class LoadPipeline(
     val wakeD1Valid = RegNext(speculateRF, false.B)
     val wakeD1Prd = RegEnable(instPkgRF.prd, speculateRF)
     val wakeD1Mask = RegEnable(io.wk.grant, speculateRF)
-    io.wk.wakeD1.prd := Mux(wakeD1Valid && !io.cmt.flush, wakeD1Prd, 0.U)
-    io.wk.wakeD1.specMask := Mux(wakeD1Valid && !io.cmt.flush, wakeD1Mask, 0.U)
+    io.wk.wakeD1.prd := Mux(wakeD1Valid, wakeD1Prd, 0.U)
+    io.wk.wakeD1.specMask := Mux(wakeD1Valid, wakeD1Mask, 0.U)
     val wakeD2Valid = RegNext(wakeD1Valid, false.B)
     val wakeD2Prd = RegEnable(wakeD1Prd, wakeD1Valid)
     val wakeD2Mask = RegEnable(wakeD1Mask, wakeD1Valid)
-    io.wk.wakeD2.prd := Mux(wakeD2Valid && !io.cmt.flush, wakeD2Prd, 0.U)
-    io.wk.wakeD2.specMask := Mux(wakeD2Valid && !io.cmt.flush, wakeD2Mask, 0.U)
+    io.wk.wakeD2.prd := Mux(wakeD2Valid, wakeD2Prd, 0.U)
+    io.wk.wakeD2.specMask := Mux(wakeD2Valid, wakeD2Mask, 0.U)
 
     val expectedValid = RegInit(VecInit.fill(4)(false.B))
     val expectedSlot = Reg(Vec(4, UInt(p.slotWidth.W)))
@@ -227,14 +233,14 @@ class LoadPipeline(
         io.cache.wbSelect.bits.slot === expectedSlot(1) && !io.cache.wbSelect.bits.retry &&
         io.cache.wbSelect.bits.exception === 0.U
     val predictionMatchesWB = RegNext(predictionMatchesD2, false.B)
-    io.wk.result.valid := expectedValid(2) && !io.cmt.flush
+    io.wk.result.valid := expectedValid(2)
     io.wk.result.bits.mask := expectedMask(2)
     io.wk.result.bits.failed := !predictionMatchesWB
 
-    when(validRF && !killed(instPkgRF) && !addressFire && !heldRF) {
+    when(validRF && !killed(instPkgRF) && !addressAccept && !heldRF) {
         heldRF := true.B
     }
-    when(addressFire || (validRF && killed(instPkgRF))) {
+    when(addressAccept || (validRF && killed(instPkgRF))) {
         validRF := false.B
         heldRF := false.B
     }
@@ -279,64 +285,102 @@ class LoadPipeline(
     when(reset.asBool) { instPkgRF.prj := 0.U }
 
     if (withStore) {
-        /* STA registers the AGU result before translation and SQ publication. */
+        /* STA captures the AGU result before translation so DTLB/SQ backpressure
+         * cannot return through the RF datapath to IssueQueue. Two entries sustain
+         * one accepted address per cycle without a combinational dequeue bypass. */
+        val addressStages = Reg(Vec(2, new StoreAddressStage(p)))
+        val addressStageCount = RegInit(0.U(2.W))
+        val addressStageValid = addressStageCount =/= 0.U
+        val addressStageFull = addressStageCount === 2.U
+        storeAddressIdle := !addressStageValid
+        val addressInput = Wire(new StoreAddressStage(p))
+        addressInput.item := instPkgRF
+        addressInput.vaddr := agu.io.res
+        addressInput.permission := 0.U.asTypeOf(new DCachePermissionContext)
+        if (tlbEnabled) {
+            val control = io.translationControl.get
+            addressInput.permission.direct := !control.enabled || control.privilege === 3.U
+            addressInput.permission.privilege := control.privilege
+            addressInput.permission.mxr := control.mxr
+            addressInput.permission.sum := control.sum
+        } else {
+            addressInput.permission.direct := true.B
+        }
+        storeAddressAccept := validRF && storeRF && !killed(instPkgRF) && !addressStageFull
+
+        val addressItem = addressStages(0).item
+        val addressVaddr = addressStages(0).vaddr
         val addr = io.cmt.storeAddress.get
-        val atomicD1 = storePkgD1.fu === ZirconConfig.DecodeUnit.Atomic.U
-        val lrD1 = atomicD1 && storePkgD1.op === 2.U
-        val misaligned = (storePkgD1.mtype === 1.U && storeVaddrD1(0)) ||
-            (storePkgD1.mtype === 2.U && storeVaddrD1(1, 0).orR)
+        val atomicAddress = addressItem.fu === ZirconConfig.DecodeUnit.Atomic.U
+        val lrAddress = atomicAddress && addressItem.op === 2.U
+        val misaligned = (addressItem.mtype === 1.U && addressVaddr(0)) ||
+            (addressItem.mtype === 2.U && addressVaddr(1, 0).orR)
         val translationReady = WireDefault(true.B)
-        val translatedPaddr = WireDefault(Cat(0.U(2.W), storeVaddrD1))
-        val translatedUncache = WireDefault(storePkgD1.uncache)
+        val translatedPaddr = WireDefault(Cat(0.U(2.W), addressVaddr))
+        val translatedUncache = WireDefault(addressItem.uncache)
         val translatedException = WireDefault(0.U(4.W))
         if (tlbEnabled) {
             val translation = io.cache.storeTranslation.get
-            translation.request.valid := storeValidD1 && !killed(storePkgD1)
-            translation.request.bits.vaddr := storeVaddrD1
-            translation.request.bits.uncache := storePkgD1.uncache
+            translation.request.valid := addressStageValid && !io.cmt.flush
+            translation.request.bits.vaddr := addressVaddr
+            translation.request.bits.uncache := addressItem.uncache
             translation.request.bits.exception :=
-                Mux(storePkgD1.exception.valid, storePkgD1.exception.cause(3, 0), 0.U)
-            translation.request.bits.atomic := atomicD1
-            translation.request.bits.lr := lrD1
+                Mux(addressItem.exception.valid, addressItem.exception.cause(3, 0), 0.U)
+            translation.request.bits.atomic := atomicAddress
+            translation.request.bits.lr := lrAddress
+            translation.request.bits.permission := addressStages(0).permission
             translationReady := !translation.response.miss
             translatedPaddr := translation.response.paddr
             translatedUncache := translation.response.uncache
             translatedException := translation.response.exception
         }
-        addr.valid := storeValidD1 && !killed(storePkgD1) && translationReady
-        addr.bits.sqIdx := storePkgD1.sqIdx
-        addr.bits.robIdx := storePkgD1.robIdx
-        addr.bits.vaddr := storeVaddrD1
+        addr.valid := addressStageValid && !io.cmt.flush && translationReady
+        addr.bits.sqIdx := addressItem.sqIdx
+        addr.bits.robIdx := addressItem.robIdx
+        addr.bits.vaddr := addressVaddr
         addr.bits.paddr := translatedPaddr
-        addr.bits.size := storePkgD1.mtype(1, 0)
-        val baseMask = MuxLookup(storePkgD1.mtype, 0.U(4.W))(
+        addr.bits.size := addressItem.mtype(1, 0)
+        val baseMask = MuxLookup(addressItem.mtype, 0.U(4.W))(
             Seq(0.U -> 1.U, 1.U -> 3.U, 2.U -> 15.U)
         )
-        addr.bits.mask := MuxLookup(storeVaddrD1(1, 0), 0.U(4.W))(Seq(
+        addr.bits.mask := MuxLookup(addressVaddr(1, 0), 0.U(4.W))(Seq(
             0.U -> baseMask,
             1.U -> Cat(baseMask(2, 0), 0.U(1.W)),
             2.U -> Cat(baseMask(1, 0), 0.U(2.W)),
             3.U -> Cat(baseMask(0), 0.U(3.W)),
         ))
         addr.bits.exception := Mux(
-            storePkgD1.exception.valid,
-            storePkgD1.exception.cause(3, 0),
-            Mux(misaligned, Mux(lrD1, 4.U, 6.U), translatedException)
+            addressItem.exception.valid,
+            addressItem.exception.cause(3, 0),
+            Mux(misaligned, Mux(lrAddress, 4.U, 6.U), translatedException)
         )
         addr.bits.uncache := translatedUncache
 
-        storeRFAdvance := validRF && storeRF && !killed(instPkgRF) && (!storeValidD1 || addr.fire)
+        val addressStageRemove = addr.fire
         when(io.cmt.flush) {
-            storeValidD1 := false.B
+            addressStageCount := 0.U
         }.otherwise {
-            when(addr.fire) {
-                storeValidD1 := false.B
+            when(storeAddressAccept && addressStageRemove) {
+                assert(addressStageCount === 1.U)
+                addressStages(0) := addressInput
+            }.elsewhen(storeAddressAccept) {
+                when(addressStageCount === 0.U) {
+                    addressStages(0) := addressInput
+                }.otherwise {
+                    addressStages(1) := addressInput
+                }
+                addressStageCount := addressStageCount + 1.U
+            }.elsewhen(addressStageRemove) {
+                when(addressStageCount === 2.U) {
+                    addressStages(0) := addressStages(1)
+                }
+                addressStageCount := addressStageCount - 1.U
             }
-            when(storeRFAdvance) {
-                storePkgD1 := instPkgRF
-                storeVaddrD1 := agu.io.res
-                storeValidD1 := true.B
-            }
+        }
+        assert(addressStageCount <= 2.U)
+        when(storeAddressAccept) {
+            assert(storeRF && (instPkgRF.fu === ZirconConfig.DecodeUnit.Store.U ||
+                instPkgRF.fu === ZirconConfig.DecodeUnit.Atomic.U))
         }
 
         /* STD has an independent issue register and write-first PRF read ports. */
@@ -349,7 +393,7 @@ class LoadPipeline(
         val data = io.cmt.storeData.get
         val storeDataUnit = std.bits.fu === ZirconConfig.DecodeUnit.Store.U ||
             std.bits.fu === ZirconConfig.DecodeUnit.Atomic.U
-        std.ready := storeDataUnit && !io.blockIssue && (!validDataRF || killedDataRF || data.fire) && !io.cmt.flush
+        std.ready := storeDataUnit && !io.blockIssue && (!validDataRF || data.fire)
         rf.intAddr := Mux(instDataRF.prs(0)(p.physWidth), 0.U, instDataRF.prs(0)(p.physWidth - 1, 0))
         rf.fpAddr := Mux(instDataRF.prs(0)(p.physWidth), instDataRF.prs(0)(p.physWidth - 1, 0), 0.U)
         rf.hold := heldDataRF
@@ -440,12 +484,17 @@ class LoadPipeline(
     io.wk.replay.bits.uncache := instPkgWB.uncache || uncacheWB
     io.wk.replay.bits.ioAuthorized := false.B
 
-    io.wk.wakeWB.valid := io.rf.wr.valid
-    io.wk.wakeWB.bits := instPkgWB.prd
+    // Queue and ReadyBoard flush priority discards a coincident wakeup, so the
+    // event does not need the RF/ROB flush and context-valid guards.
+    io.wk.wakeWB.prd := Mux(io.cache.rsp.valid && writeResultWB, instPkgWB.prd, 0.U)
+    io.wk.wakeWB.specMask := 0.U
     // The speculative RF wake predicts a fixed response cycle. A miss or retry kills
     // dependent consumers through the same token instead of extending this timing path.
     io.bypass.nextWb.valid := expectedValid(1) && !io.cmt.flush
     io.bypass.nextWb.bits := expectedPrd(1)
+    // Load data does not exist in the nextWb announcement cycle.
+    io.bypass.nextResult.valid := false.B
+    io.bypass.nextResult.bits := 0.U
     io.bypass.result := io.cache.rsp.bits.data
 
     when(io.cache.rsp.valid && !killed(instPkgWB)) {

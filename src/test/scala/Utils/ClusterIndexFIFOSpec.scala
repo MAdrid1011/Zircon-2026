@@ -228,6 +228,35 @@ class ClusterIndexFIFOSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "payload writes can be isolated from an occupancy flush" in {
+        simulate(new ClusterIndexFIFO(
+            UInt(8.W),
+            4,
+            2,
+            2,
+            2,
+            1,
+            writePayloadOnFlush = true,
+        )) { d =>
+            init(d)
+            d.io.flush.poke(true)
+            d.io.enq(0).valid.poke(true)
+            d.io.enq(0).bits.poke(55)
+            d.io.wen(0).poke(true)
+            index(d.io.widx(0), 2, 2)
+            d.io.wdata(0).poke(77)
+            d.clock.step()
+            d.io.flush.poke(false)
+            d.io.enq(0).valid.poke(false)
+            d.io.wen(0).poke(false)
+            d.io.deq(0).valid.expect(false)
+            index(d.io.ridx(0), 0, 2)
+            index(d.io.ridx(1), 2, 2)
+            d.io.rdata(0).expect(55)
+            d.io.rdata(1).expect(77)
+        }
+    }
+
     for (violation <- Seq("enqueue", "dequeue", "duplicate writes", "write bank", "write offset")) {
         s"contract assertions reject $violation" in {
             val error = intercept[AssertionFailed] {

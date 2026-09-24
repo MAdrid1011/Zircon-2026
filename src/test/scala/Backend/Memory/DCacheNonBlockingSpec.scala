@@ -12,7 +12,7 @@ class DCacheNonBlockingSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
     ) {
         s"$name: hits continue while one miss is outstanding and a second miss replays" in {

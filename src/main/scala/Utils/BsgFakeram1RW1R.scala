@@ -1,7 +1,7 @@
 import chisel3._
 import chisel3.util._
 
-class OpenRam1RW1RIO(width: Int) extends Bundle {
+class BsgFakeram1RW1RIO(width: Int) extends Bundle {
     val clock = Input(Clock())
     val csb0 = Input(Bool())
     val csb1 = Input(Bool())
@@ -14,11 +14,11 @@ class OpenRam1RW1RIO(width: Int) extends Bundle {
     val dout1 = Output(UInt(width.W))
 }
 
-/** Cycle-accurate model for the OpenRAM 1RW+1R macro interface. */
-class OpenRam1RW1R(width: Int) extends RawModule {
+/** Cycle-accurate model for the BSG-derived 1RW+1R logic-only SRAM interface. */
+class BsgFakeram1RW1R(width: Int) extends RawModule {
     require(width == 25 || width == 32)
-    override def desiredName = s"OpenRam1RW1R_$width"
-    val io = FlatIO(new OpenRam1RW1RIO(width))
+    override def desiredName = s"BsgFakeram1RW1R_$width"
+    val io = FlatIO(new BsgFakeram1RW1RIO(width))
 
     private val lanes = if (width == 32) 4 else 1
     private val laneBits = if (width == 32) 8 else 25
@@ -37,9 +37,9 @@ class OpenRam1RW1R(width: Int) extends RawModule {
     }
 }
 
-/** FreePDK45 macro binding. EDA flows provide the wrapper and generated macro sources. */
-class OpenRam1RW1RMacro(width: Int) extends ExtModule {
+/** Nangate45 logic-only binding. The EDA flow supplies the BSG-derived timing model. */
+class BsgFakeram1RW1RMacro(width: Int) extends ExtModule {
     require(width == 25 || width == 32)
-    override def desiredName = s"OpenRam1RW1R_$width"
-    val io = FlatIO(new OpenRam1RW1RIO(width))
+    override def desiredName = s"BsgFakeram1RW1R_$width"
+    val io = FlatIO(new BsgFakeram1RW1RIO(width))
 }

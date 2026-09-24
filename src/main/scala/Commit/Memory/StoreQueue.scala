@@ -236,15 +236,29 @@ class StoreQueue(
     val headEntry = storage(slot(head))
     val requestedAtomic = io.atomic.sqIdx.valid && headEntry.valid && headEntry.atomic &&
         headEntry.identity === io.atomic.sqIdx.bits
-    io.atomic.request.valid := requestedAtomic && headEntry.addressValid && headEntry.dataValid
-    io.atomic.request.bits.robIdx := headEntry.robIdx
-    io.atomic.request.bits.prd := headEntry.prd
-    io.atomic.request.bits.vaddr := headEntry.vaddr
-    io.atomic.request.bits.paddr := headEntry.paddr
-    io.atomic.request.bits.data := headEntry.data
-    io.atomic.request.bits.op := headEntry.atomicOp
-    io.atomic.request.bits.uncache := headEntry.uncache
-    io.atomic.request.bits.exception := headEntry.exception
+    val atomicReady = requestedAtomic && headEntry.addressValid && headEntry.dataValid
+    val pendingAtomic = Reg(new PendingAtomic(bp))
+    val pendingAtomicIdentity = Reg(UInt(bp.sqWidth.W))
+    val pendingAtomicValid = RegInit(false.B)
+    when(io.flush || !io.atomic.sqIdx.valid) {
+        pendingAtomicValid := false.B
+    }.elsewhen(atomicReady) {
+        pendingAtomicValid := true.B
+        pendingAtomicIdentity := headEntry.identity
+        pendingAtomic.robIdx := headEntry.robIdx
+        pendingAtomic.prd := headEntry.prd
+        pendingAtomic.vaddr := headEntry.vaddr
+        pendingAtomic.paddr := headEntry.paddr
+        pendingAtomic.data := headEntry.data
+        pendingAtomic.op := headEntry.atomicOp
+        pendingAtomic.uncache := headEntry.uncache
+        pendingAtomic.exception := headEntry.exception
+    }.elsewhen(pendingAtomicIdentity =/= io.atomic.sqIdx.bits) {
+        pendingAtomicValid := false.B
+    }
+    io.atomic.request.valid := pendingAtomicValid && io.atomic.sqIdx.valid &&
+        pendingAtomicIdentity === io.atomic.sqIdx.bits
+    io.atomic.request.bits := pendingAtomic
     io.drain.valid := headEntry.valid && !headEntry.atomic && headEntry.committed &&
         headEntry.addressValid && headEntry.dataValid &&
         !headEntry.exception.orR

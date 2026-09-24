@@ -11,6 +11,16 @@ class MultiplyRequest(val tagWidth: Int) extends Bundle {
     val src1 = UInt(32.W)
     val src2 = UInt(32.W)
     val src3 = UInt(32.W)
+    // FP-only views exclude integer-only bypass producers from exponent alignment.
+    val fpSrc1 = UInt(32.W)
+    val fpSrc2 = UInt(32.W)
+    val fpSrc3 = UInt(32.W)
+    val fpExp1 = UInt(8.W)
+    val fpExp2 = UInt(8.W)
+    val fpExp3 = UInt(8.W)
+    val fpZero1 = Bool()
+    val fpZero2 = Bool()
+    val fpZero3 = Bool()
     val op = UInt(4.W)
     // Already resolved by issue: RNE=0, RTZ=1, RDN=2, RUP=3, RMM=4.
     val roundingMode = UInt(3.W)
@@ -35,7 +45,6 @@ class MultiplyIO(tagWidth: Int) extends Bundle {
 class MulFpDecoded extends Bundle {
     val sign = Bool()
     val sig = UInt(24.W)
-    val exp = SInt(11.W) // Finite value = (-1)^sign * sig * 2^exp; exp weights sig bit 0.
     val zero = Bool()
     val inf = Bool()
     val nan = Bool()
@@ -108,7 +117,6 @@ object SharedMultiplyLogic {
         val raw = Cat(ef.orR, frac)
         d.sign := bits(31)
         d.sig := raw
-        d.exp := Mux(ef === 0.U, (-149).S(11.W), ef.zext - 150.S)
         d.zero := !raw.orR
         d.inf := ef.andR && !frac.orR
         d.nan := ef.andR && frac.orR
@@ -350,26 +358,31 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val fma = op >= FMADD
     val negProduct = op === FNMSUB || op === FNMADD
     val negAddend = op === FMSUB || op === FNMADD
-    val a = decode(req.src1); val b = decode(req.src2); val c = decode(req.src3)
+    val a = decode(req.fpSrc1); val b = decode(req.fpSrc2); val c = decode(req.fpSrc3)
+    // Encoded exponent zero represents the subnormal exponent field one. Keep
+    // this compact scale through alignment; the common -150 bias cancels.
+    val aExp = Cat(0.U(1.W), Mux(req.fpExp1.orR, req.fpExp1, 1.U(8.W)))
+    val bExp = Cat(0.U(1.W), Mux(req.fpExp2.orR, req.fpExp2, 1.U(8.W)))
+    val cExp = Cat(0.U(1.W), Mux(req.fpExp3.orR, req.fpExp3, 1.U(8.W)))
     val bs = b.sign ^ (op === FSUB)
     val ps = a.sign ^ b.sign ^ negProduct
     val cs = c.sign ^ negAddend
-    val pzero = a.zero || b.zero
-    val pe = a.exp + b.exp
+    val pzero = req.fpZero1 || req.fpZero2
+    val peRaw = aExp +& bExp
 
     // 2. FMA normally uses a product-relative window. When C is too far above the product,
     //    switch to a C-relative window and retain a nonzero small product as a sticky unit
     //    with its original effective sign. delta compares C's leading-bit exponent with
     //    the highest possible leading-bit exponent of the product.
     // Share the exponent difference with addend alignment; fold 23 - 47 into -24.
-    val expDifference = c.exp - pe
-    val delta = expDifference - 24.S
-    val far = fma && !c.zero && (pzero || delta > 27.S)
+    val far = fma && !req.fpZero3 && (pzero || (cExp +& 99.U) > peRaw)
 
     // 3. FADD/FSUB order terms by exponent, without comparing significands on equal exponents.
     //    EX3 resolves the sign of the difference. Fusion represents signs relative to baseSign.
-    val bLarge = !b.zero && (a.zero || b.exp > a.exp)
+    val bLarge = !req.fpZero2 && (req.fpZero1 || bExp > aExp)
     val large = Mux(bLarge, b, a); val small = Mux(bLarge, a, b)
+    val largeExp = Mux(bLarge, bExp, aExp)
+    val smallExp = Mux(bLarge, aExp, bExp)
     val largeSign = Mux(bLarge, bs, a.sign); val smallSign = Mux(bLarge, a.sign, bs)
     val baseSign = Mux(add, largeSign, ps)
     val otherSign = Mux(add, smallSign, cs)
@@ -402,11 +415,25 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     s1.other := Mux(add, small.sig, Mux(fma, c.sig, 0.U))
     // Plain integer and FP multiplies have no aligned addend. Keeping their
     // shift at zero removes unused FP exponent alignment from the EX1 data cone.
-    val shiftC = Mux(hasOther, Mux(add, 27.S - (large.exp - small.exp),
-        Mux(far, 54.S, expDifference + 3.S)), 0.S)
-    val (alignShift, alignRight) = shiftControl(shiftC)
+    // Keep the no-addend integer/FP-multiply case off the exponent-alignment
+    // arithmetic. The old form fed a wide zero-select Mux through shiftControl,
+    // allowing operand exponent and bypass data to reach the R1 shift register
+    // even though that result is unused for these operations.
+    val addDistance = largeExp - smallExp
+    val shiftCWithOther = Mux(
+        add,
+        27.S(11.W) - addDistance.zext,
+        Mux(far, 54.S(11.W), cExp.zext - peRaw.zext + 153.S(11.W)),
+    )
+    val (alignShiftWithOther, alignRightWithOther) = shiftControl(shiftCWithOther)
+    val alignShift = Mux(hasOther, alignShiftWithOther, 0.U(7.W))
+    val alignRight = Mux(hasOther, alignRightWithOther, false.B)
     s1.shift := alignShift; s1.right := alignRight
-    s1.exp := Mux(add, large.exp - 27.S, Mux(far, c.exp - 54.S, pe - 3.S))
+    s1.exp := Mux(
+        add,
+        largeExp.zext - 177.S(11.W),
+        Mux(far, cExp.zext - 204.S(11.W), peRaw.zext - 303.S(11.W)),
+    )
 
     // 6. Opposite effective signs select main - aligned; preserve the exact-zero sign separately.
     s1.baseSign := baseSign
@@ -418,7 +445,7 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     // 7. Special-value bypass: carry NaN/Inf/invalid decisions in meta to override EX4's result.
     //    Only FMA consumes src3; FADD/FSUB use addition's invalid rules, not the 0 * Inf rule.
     val nan = a.nan || b.nan || (fma && c.nan)
-    val invalidProduct = (a.inf && b.zero) || (b.inf && a.zero)
+    val invalidProduct = (a.inf && req.fpZero2) || (b.inf && req.fpZero1)
     val invalid = a.snan || b.snan || (fma && c.snan) ||
         Mux(
             add,

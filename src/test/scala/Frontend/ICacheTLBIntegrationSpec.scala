@@ -8,16 +8,13 @@ class ICacheTLBIntegrationDriver(val dut: ICache) extends chisel3.simulator.Peek
         dut.io.flush.poke(false)
         dut.io.pp.request.valid.poke(false)
         dut.io.pp.request.bits.pc.poke(0)
-        dut.io.pp.request.bits.token.poke(0)
         dut.io.pp.response.ready.poke(true)
         dut.io.mmu.response.valid.poke(false)
-        dut.io.mmu.response.bits.token.poke(0)
         dut.io.mmu.response.bits.paddr.poke(0)
         dut.io.mmu.response.bits.uncache.poke(false)
         dut.io.mmu.response.bits.fault.poke(false)
         dut.io.l2.request.ready.poke(false)
         dut.io.l2.response.valid.poke(false)
-        dut.io.l2.response.bits.token.poke(0)
         dut.io.l2.response.bits.data.poke(0)
         dut.io.l2.response.bits.error.poke(false)
         dut.io.tlb.get.control.enabled.poke(true)
@@ -63,10 +60,9 @@ class ICacheTLBIntegrationDriver(val dut: ICache) extends chisel3.simulator.Peek
         dut.io.tlb.get.refill.valid.poke(false)
     }
 
-    def accept(pc: BigInt, token: BigInt): Unit = {
+    def accept(pc: BigInt): Unit = {
         dut.io.pp.request.valid.poke(true)
         dut.io.pp.request.bits.pc.poke(pc)
-        dut.io.pp.request.bits.token.poke(token)
         dut.io.pp.request.ready.expect(true)
         dut.clock.step()
         dut.io.pp.request.valid.poke(false)
@@ -82,14 +78,13 @@ class ICacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             val va = BigInt("81234000", 16)
             val ppn = BigInt("31234", 16)
             d.refill(va, ppn)
-            d.accept(va, 7)
+            d.accept(va)
 
             var lowerSeen = false
             for (_ <- 0 until 10 if !lowerSeen) {
                 dut.io.mmu.request.valid.expect(false)
                 if (dut.io.l2.request.valid.peek().litToBoolean) {
                     dut.io.l2.request.bits.paddr.expect((ppn << 12) & ~BigInt(c.lineBytes - 1))
-                    dut.io.l2.request.bits.token.expect(7)
                     lowerSeen = true
                 }
                 dut.clock.step()
@@ -104,10 +99,9 @@ class ICacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             val d = new ICacheTLBIntegrationDriver(dut)
             d.initialize()
             val missVa = BigInt("82345000", 16)
-            d.accept(missVa, 9)
+            d.accept(missVa)
             dut.io.mmu.request.valid.expect(true)
             dut.io.mmu.request.bits.pc.expect(missVa)
-            dut.io.mmu.request.bits.token.expect(9)
             dut.io.l2.request.valid.expect(false)
 
             dut.io.flush.poke(true)
@@ -115,13 +109,12 @@ class ICacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             dut.io.flush.poke(false)
             val deniedVa = BigInt("83456000", 16)
             d.refill(deniedVa, BigInt("24567", 16), execute = false)
-            d.accept(deniedVa, 10)
+            d.accept(deniedVa)
             var faultSeen = false
             for (_ <- 0 until 8) {
                 dut.io.mmu.request.valid.expect(false)
                 dut.io.l2.request.valid.expect(false)
                 if (dut.io.pp.response.valid.peek().litToBoolean) {
-                    dut.io.pp.response.bits.token.expect(10)
                     dut.io.pp.response.bits.fault.expect(15)
                     faultSeen = true
                 }
@@ -138,7 +131,7 @@ class ICacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             d.initialize()
             val bare = BigInt("80001000", 16)
             dut.io.tlb.get.control.enabled.poke(false)
-            d.accept(bare, 11)
+            d.accept(bare)
             var bareSeen = false
             for (_ <- 0 until 10 if !bareSeen) {
                 dut.io.mmu.request.valid.expect(false)
@@ -158,7 +151,7 @@ class ICacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             val va = BigInt("84567000", 16)
             val ppn = BigInt("25678", 16)
             d.refill(va, ppn, pma = 2)
-            d.accept(va, 12)
+            d.accept(va)
             var deviceSeen = false
             for (_ <- 0 until 10 if !deviceSeen) {
                 dut.io.mmu.request.valid.expect(false)

@@ -5,7 +5,6 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig._
 
 class MiddleendTestInput(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val ftqIdx = UInt(p.ftqBits.W)
     val mask = UInt(p.fetchWidth.W)
     val pc = UInt(32.W)
@@ -36,7 +35,6 @@ class MiddleendTestHarness(
     val middleend = Module(new Middleend(fp, bp, issue))
     val fetchQueue = Module(new FetchQueue(fp, issue.dispatchWidth))
     val packet = WireDefault(0.U.asTypeOf(new FrontendPackage(fp)))
-    packet.fetchToken := io.in.bits.fetchToken
     packet.ftqIdx := io.in.bits.ftqIdx
     packet.startPc := io.in.bits.pc
     packet.mask := io.in.bits.mask
@@ -54,7 +52,6 @@ class MiddleendTestHarness(
         val earlier = if (slot == 0) false.B else packet.mask(slot - 1, 0).orR
         val later = if (slot + 1 == fp.fetchWidth) false.B else packet.mask(fp.fetchWidth - 1, slot + 1).orR
         fetchQueue.io.enq(slot).valid := io.in.valid && packet.mask(slot)
-        fetchQueue.io.enq(slot).bits.fetchToken := packet.fetchToken
         fetchQueue.io.enq(slot).bits.slot := slot.U
         fetchQueue.io.enq(slot).bits.packetStart := !earlier
         fetchQueue.io.enq(slot).bits.packetEnd := !later
@@ -103,7 +100,6 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
 
     private def initialize(dut: MiddleendTestHarness): Unit = {
         dut.io.in.valid.poke(false)
-        dut.io.in.bits.fetchToken.poke(0)
         dut.io.in.bits.ftqIdx.poke(0)
         dut.io.in.bits.mask.poke(0)
         dut.io.in.bits.pc.poke(0)
@@ -124,11 +120,10 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
         dut.reset.poke(false)
     }
 
-    private def offer(dut: MiddleendTestHarness, token: Int, words: Seq[BigInt], mask: Int = 15): Unit = {
-        dut.io.in.bits.fetchToken.poke(token)
-        dut.io.in.bits.ftqIdx.poke(token & 15)
+    private def offer(dut: MiddleendTestHarness, packetId: Int, words: Seq[BigInt], mask: Int = 15): Unit = {
+        dut.io.in.bits.ftqIdx.poke(packetId & 15)
         dut.io.in.bits.mask.poke(mask)
-        dut.io.in.bits.pc.poke(0x80000000L + token * 16L)
+        dut.io.in.bits.pc.poke(0x80000000L + packetId * 16L)
         dut.io.in.bits.instructions.zip(words.padTo(dut.fp.fetchWidth, BigInt(0))).foreach { case (port, word) =>
             port.poke(word)
         }
@@ -146,7 +141,6 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
     "Rename and Dispatch are separated by a registered pipeline boundary" in {
         simulate(new MiddleendTestHarness) { dut =>
             initialize(dut)
-            dut.io.in.bits.fetchToken.poke(6)
             dut.io.in.bits.ftqIdx.poke(6)
             dut.io.in.bits.mask.poke(3)
             dut.io.in.bits.pc.poke(0x80000060L)
@@ -163,8 +157,6 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
 
             dut.clock.step()
             dut.io.enqueue.valid.expect(3)
-            dut.io.enqueue.entries(0).context.fetchToken.expect(6)
-            dut.io.enqueue.entries(1).context.fetchToken.expect(6)
         }
     }
 
@@ -209,7 +201,6 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
             val seen = scala.collection.mutable.ArrayBuffer.empty[Int]
             for (_ <- 0 until 8) {
                 for (lane <- 0 until dut.issue.dispatchWidth if dut.io.enqueue.valid.peek().litValue.testBit(lane)) {
-                    dut.io.enqueue.entries(lane).context.fetchToken.expect(7)
                     seen += dut.io.enqueue.entries(lane).context.instruction.inst.peek().litValue.toInt
                 }
                 dut.clock.step()
@@ -384,6 +375,15 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.enqueue.valid.expect(0)
                 dut.clock.step()
             }
+
+            offer(dut, 15, Seq(addi(12)), mask = 1)
+            var waited = 0
+            while (dut.io.enqueue.valid.peek().litValue == 0 && waited < 6) {
+                dut.clock.step()
+                waited += 1
+            }
+            dut.io.enqueue.valid.expect(1)
+            dut.io.enqueue.entries(0).context.instruction.inst.expect(addi(12))
         }
     }
 }

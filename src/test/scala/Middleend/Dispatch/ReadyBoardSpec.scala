@@ -42,8 +42,8 @@ class ReadyBoardSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.wakeup(0).prd.poke(integer)
             dut.io.wakeup(0).specMask.poke(4)
-            dut.io.state(0).ready(0).expect(true)
-            dut.io.state(0).specMask(0).expect(4)
+            dut.io.state(0).ready(0).expect(false)
+            dut.io.state(0).specMask(0).expect(0)
             dut.clock.step()
             dut.io.wakeup(0).prd.poke(0)
             dut.io.wakeup(0).specMask.poke(0)
@@ -59,9 +59,19 @@ class ReadyBoardSpec extends AnyFreeSpec with ChiselSim {
             dut.io.speculation.failedMask.poke(0)
             dut.io.state(0).ready(0).expect(false)
 
+            // Flush has final state priority over a coincident wakeup and failed
+            // speculation result, so producers need not mask either event.
+            dut.io.wakeup(0).prd.poke(integer)
+            dut.io.wakeup(0).specMask.poke(8)
+            dut.io.speculation.resolvedMask.poke(8)
+            dut.io.speculation.failedMask.poke(8)
             dut.io.flush.poke(true)
             dut.clock.step()
             dut.io.flush.poke(false)
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.wakeup(0).specMask.poke(0)
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.speculation.failedMask.poke(0)
             dut.io.state(0).ready(0).expect(true)
             dut.io.state(0).specMask(0).expect(0)
 
@@ -76,7 +86,7 @@ class ReadyBoardSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "same-cycle wakeup is visible before the clock edge" in {
+    "wakeup updates the registered query state at the clock edge" in {
         simulate(new ReadyBoard) { dut =>
             initialize(dut)
             val physical = tag(isFp = true, 39)
@@ -88,6 +98,8 @@ class ReadyBoardSpec extends AnyFreeSpec with ChiselSim {
             dut.io.allocate(1).valid.poke(false)
             dut.io.state(1).ready(2).expect(false)
             dut.io.wakeup(6).prd.poke(physical)
+            dut.io.state(1).ready(2).expect(false)
+            dut.clock.step()
             dut.io.state(1).ready(2).expect(true)
         }
     }

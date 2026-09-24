@@ -33,6 +33,7 @@ class StoreBuffer(
     val valid = RegInit(VecInit.fill(entries)(false.B))
     val head = RegInit(0.U(indexWidth.W))
     val tail = RegInit(0.U(indexWidth.W))
+    val newestOH = RegInit(1.U(entries.W))
     val count = RegInit(0.U(log2Ceil(entries + 1).W))
     val outstanding = RegInit(false.B)
 
@@ -61,6 +62,7 @@ class StoreBuffer(
     when(io.enqueue.fire) {
         storage(tail) := io.enqueue.bits
         valid(tail) := true.B
+        newestOH := UIntToOH(tail, entries)
         tail := next(tail)
     }
 
@@ -74,26 +76,26 @@ class StoreBuffer(
     for (port <- 0 until 2) {
         val query = io.query(port).request
         val matches = Wire(Vec(entries, Bool()))
-        val ages = Wire(Vec(entries, UInt(indexWidth.W)))
         for (position <- 0 until entries) {
             matches(position) := valid(position) && storage(position).paddr(33, 2) === query.bits.wordAddress
-            ages(position) := Mux(position.U >= head, position.U - head, position.U + entries.U - head)
         }
         val bytes = Wire(Vec(4, UInt(8.W)))
         val mask = Wire(Vec(4, Bool()))
+        val newestToOldest = Seq.tabulate(entries) { distance =>
+            FIFOUtil.rotate(newestOH, (entries - distance) % entries)
+        }
         for (byte <- 0 until 4) {
-            var found = false.B
-            var bestAge = 0.U(indexWidth.W)
-            var bestData = 0.U(8.W)
-            for (position <- 0 until entries) {
-                val hit = matches(position) && storage(position).mask(byte) && query.bits.mask(byte)
-                val newer = hit && (!found || ages(position) > bestAge)
-                bestData = Mux(newer, storage(position).data(8 * byte + 7, 8 * byte), bestData)
-                bestAge = Mux(newer, ages(position), bestAge)
-                found = found || hit
-            }
-            bytes(byte) := bestData
-            mask(byte) := found
+            val hitMask = VecInit.tabulate(entries) { position =>
+                matches(position) && storage(position).mask(byte) && query.bits.mask(byte)
+            }.asUInt
+            val orderedHits = VecInit(newestToOldest.map(positionOH => (positionOH & hitMask).orR)).asUInt
+            val selectedRankOH = PriorityEncoderOH(orderedHits)
+            val selectedPositionOH = Mux1H(selectedRankOH, newestToOldest)
+            bytes(byte) := Mux1H(
+                selectedPositionOH,
+                storage.map(_.data(8 * byte + 7, 8 * byte)),
+            )
+            mask(byte) := orderedHits.orR
         }
         val resultValid = RegNext(query.valid, false.B)
         val resultSlot = RegEnable(query.bits.slot, query.valid)
@@ -107,5 +109,6 @@ class StoreBuffer(
     }
 
     assert(count <= entries.U)
+    assert(PopCount(newestOH) === 1.U)
     when(outstanding) { assert(valid(head)) }
 }

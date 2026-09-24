@@ -3,7 +3,6 @@ import chisel3.util._
 import ZirconConfig._
 
 class MiddleendInstruction(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val ftqIdx = UInt(p.ftqBits.W)
     val slot = UInt(p.slotBits.W)
     val packetStart = Bool()
@@ -21,6 +20,7 @@ class MiddleendPhysicalInfo(p: BackendParams) extends Bundle {
 class MiddleendRenameEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val context = new MiddleendInstruction(fp)
     val physical = new MiddleendPhysicalInfo(bp)
+    val dispatchClass = new DispatchClass
 }
 
 class MiddleendCommitDestination(p: BackendParams) extends Bundle {
@@ -145,11 +145,8 @@ class Middleend(
     }
 
     /* Commit reserves ROB, SQ and FTQ resources for the same ordered prefix Dispatch may accept. */
-    io.commit.request.valid := Mux(io.commit.flush, 0.U, renameStageValid)
-    io.commit.request.store := VecInit(renameStageEntries.map(
-        entry => entry.context.instruction.fu === DecodeUnit.Store.U ||
-            entry.context.instruction.fu === DecodeUnit.Atomic.U
-    )).asUInt
+    io.commit.request.valid := renameStageValid
+    io.commit.request.store := VecInit(renameStageEntries.map(_.dispatchClass.storeOrAtomic)).asUInt
     io.commit.request.packetStart := VecInit(renameStageEntries.map(_.context.packetStart)).asUInt
     FIFOUtil.assertPrefix(io.commit.resourcePrefix.asBools, "Commit resource permission must be a prefix")
 
@@ -188,7 +185,6 @@ class Middleend(
         val instruction = instructions(lane)
         val intInfo = integerRename.io.pinfo(lane)
         val fpInfo = floatingRename.io.pinfo(lane)
-        renameIncoming(lane).context.fetchToken := io.frontend.out(lane).bits.fetchToken
         renameIncoming(lane).context.ftqIdx := 0.U
         renameIncoming(lane).context.slot := io.frontend.out(lane).bits.slot
         renameIncoming(lane).context.packetStart := io.frontend.out(lane).bits.packetStart
@@ -205,6 +201,18 @@ class Middleend(
             decoded.exception.tval := decoded.inst
         }
         renameIncoming(lane).context.instruction := decoded
+        val system = decoded.fu === DecodeUnit.System.U
+        val csr = system && decoded.op >= SystemOp.CSRRW.U && decoded.op <= SystemOp.CSRRCI.U
+        val commitSystem = system && (decoded.op <= SystemOp.FENCE_I.U || decoded.op >= SystemOp.ECALL.U)
+        renameIncoming(lane).dispatchClass.shortArith :=
+            decoded.fu === DecodeUnit.ALU.U || decoded.fu === DecodeUnit.Branch.U
+        renameIncoming(lane).dispatchClass.mixArith :=
+            decoded.fu === DecodeUnit.Multiply.U || decoded.fu === DecodeUnit.Divide.U ||
+                decoded.fu === DecodeUnit.FpMisc.U || csr
+        renameIncoming(lane).dispatchClass.load := decoded.fu === DecodeUnit.Load.U
+        renameIncoming(lane).dispatchClass.storeOrAtomic :=
+            decoded.fu === DecodeUnit.Store.U || decoded.fu === DecodeUnit.Atomic.U
+        renameIncoming(lane).dispatchClass.noIssue := decoded.exception.valid || commitSystem
         for (source <- 0 until 3) {
             val operand = instruction.rinfo.src(source)
             renameIncoming(lane).physical.prs(source) := Mux(
@@ -290,6 +298,7 @@ class Middleend(
     /* Dispatch sees complete backend packages and emits one indexed group per issue queue. */
     val dispatcher = Module(new Dispatcher(backendParams, issueParams))
     dispatcher.io.in.valid := renameStageValid
+    dispatcher.io.dispatchClass := VecInit(renameStageEntries.map(_.dispatchClass))
     for (lane <- 0 until width) {
         dispatcher.io.in.entries(lane) := BackendPackage.fromFrontend(
             renameStageEntries(lane).context.instruction,
@@ -304,10 +313,9 @@ class Middleend(
             backendParams,
         )
     }
-    dispatcher.io.resourcePrefix := io.commit.resourcePrefix &
-        Fill(width, !io.commit.flush && !io.commit.restore)
+    dispatcher.io.resourcePrefix := io.commit.resourcePrefix
     dispatcher.io.freeCount := io.backend.freeCount
-    dispatcher.io.flush := io.commit.flush || io.commit.restore
+    dispatcher.io.clearPreference := io.commit.flush
     io.backend.enqueue := dispatcher.io.enqueue
 
     /* A fetch packet may span dispatch groups, so continuation lanes reuse its allocated FTQ index. */
@@ -337,7 +345,6 @@ class Middleend(
         io.commit.enqueue.entries(lane).allocation := io.commit.allocation(lane)
         io.commit.ftqAllocate(lane).valid := accepted(lane) && renameStageEntries(lane).context.packetStart &&
             !io.commit.flush
-        io.commit.ftqAllocate(lane).bits.fetchToken := renameStageEntries(lane).context.fetchToken
         io.commit.ftqAllocate(lane).bits.record := renameStageEntries(lane).context.ftqRecord
     }
     io.commit.enqueue.valid := accepted

@@ -41,9 +41,6 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             grant.valid.poke(false)
             grant.bits.robIdx.poke(0)
         }
-        dut.io.mixAvailable.foreach { available =>
-            available.poke(true)
-        }
         dut.io.completed.foreach { feedback =>
             feedback.valid.poke(false)
             feedback.bits.robIdx.poke(0)
@@ -155,33 +152,75 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "commit flush clears every queued instruction" in {
-        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
+    "a locked instruction is blocked when delayed queue maintenance observes a failed token" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.enq.valid.poke(1)
+            packageEntry(
+                dut.io.enq.entries(0),
+                12,
+                DecodeUnit.ALU,
+                sourceTag = Some(5),
+                sourceReady = true,
+                sourceSpecMask = 1,
+            )
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(12)
+            dut.clock.step()
+
+            dut.io.speculation.failedMask.poke(1)
+            // The execution boundary consumes and kills this presentation. The
+            // IQ maintenance view observes the failure on the following cycle.
+            dut.io.issue.valid.expect(true)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+
+            dut.io.speculation.failedMask.poke(0)
+            dut.io.wakeup(0).prd.poke(5)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.issue.valid.expect(true)
+        }
+    }
+
+    "commit flush clears every queued instruction even with a coincident enqueue" in {
+        val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
         simulate(new IssueQueue(backend, q)) { dut =>
             initialize(dut)
             enqueue(
                 dut,
                 Seq(
-                    (20, DecodeUnit.ALU, 0, None, true),
-                    (21, DecodeUnit.ALU, 0, None, true)
+                    (20, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt, None, true),
+                    (21, DecodeUnit.Divide, DivideOp.DIV, None, true)
                 )
             )
             enqueue(
                 dut,
                 Seq(
-                    (22, DecodeUnit.ALU, 0, None, true),
-                    (23, DecodeUnit.ALU, 0, None, true)
+                    (22, DecodeUnit.Multiply, MultiplyOp.MULH.litValue.toInt, None, true),
+                    (23, DecodeUnit.Divide, DivideOp.DIVU, None, true)
                 )
             )
+            dut.io.enq.valid.poke(3)
+            packageEntry(dut.io.enq.entries(0), 24, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
+            packageEntry(dut.io.enq.entries(1), 25, DecodeUnit.Divide, DivideOp.REM)
             dut.io.flush.poke(true)
             dut.clock.step()
+            dut.io.enq.valid.poke(0)
             dut.io.flush.poke(false)
             dut.io.occupancy.expect(0)
             dut.io.issue.valid.expect(false)
+
+            enqueue(dut, Seq((26, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt, None, true)))
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(26)
         }
     }
 
-    "CSR authorization gates only CSR entries and names the exact instruction" in {
+    "CSR authorization preserves older order and names the exact instruction" in {
         val q = IssueQueueParams(6, IssueQueueProfile.MixArith, wakeupPorts = 1)
         simulate(new IssueQueue(backend, q)) { dut =>
             initialize(dut)
@@ -199,34 +238,15 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.csrGrant.get.bits.robIdx.poke(29)
             dut.io.issue.valid.expect(false)
             dut.io.csrGrant.get.bits.robIdx.poke(30)
+            // Authorization terminates at a per-entry register before it can
+            // participate in selection and compact-queue removal.
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(30)
             dut.clock.step()
-            dut.io.csrGrant.get.valid.poke(false)
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(31)
-        }
-    }
-
-    "MixArith applies one availability state to its shared execution lane" in {
-        val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
-        simulate(new IssueQueue(backend, q)) { dut =>
-            initialize(dut)
-            dut.io.mixAvailable.get.poke(false)
-            enqueue(
-                dut,
-                Seq(
-                    (40, DecodeUnit.Divide, DivideOp.DIV, None, true),
-                    (41, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt, None, true)
-                )
-            )
-            dut.io.issue.ready.poke(true)
-            dut.io.issue.valid.expect(false)
-            dut.io.mixAvailable.get.poke(true)
-            dut.io.issue.valid.expect(true)
-            dut.io.issue.bits.robIdx.expect(40)
-            dut.clock.step()
-            dut.io.issue.bits.robIdx.expect(41)
         }
     }
 
@@ -254,6 +274,38 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.speculation.resolvedMask.poke(0)
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(42)
+        }
+    }
+
+    "MixArith keeps a failed speculative operand blocked until a certain wakeup" in {
+        val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.issue.ready.poke(true)
+            dut.io.enq.valid.poke(1)
+            packageEntry(
+                dut.io.enq.entries(0),
+                43,
+                DecodeUnit.Multiply,
+                MultiplyOp.MUL.litValue.toInt,
+                sourceTag = Some(7),
+                sourceReady = true,
+                sourceSpecMask = 1,
+            )
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.speculation.failedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.failedMask.poke(0)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.wakeup(0).prd.poke(7)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(43)
         }
     }
 
@@ -317,9 +369,62 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.loadGrant.get.bits.robIdx.poke(51)
             dut.io.issue.valid.expect(false)
             dut.io.loadGrant.get.bits.robIdx.poke(52)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(52)
             dut.io.issue.bits.ioAuthorized.expect(true)
+        }
+    }
+
+    "LS1 compacts two holes using only the next two adjacent entries" in {
+        val q = IssueQueueParams(8, IssueQueueProfile.LoadStoreAddress, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            enqueue(
+                dut,
+                Seq(
+                    (52, DecodeUnit.Load, 2, None, true),
+                    (53, DecodeUnit.Store, 0, Some(5), false),
+                ),
+            )
+            enqueue(
+                dut,
+                Seq(
+                    (54, DecodeUnit.Store, 0, None, true),
+                    (55, DecodeUnit.Store, 0, None, true),
+                ),
+            )
+
+            dut.io.issue.ready.poke(true)
+            dut.io.issue.bits.robIdx.expect(52)
+            dut.clock.step()
+            dut.io.occupancy.expect(4)
+            dut.io.issue.bits.robIdx.expect(54)
+
+            dut.io.completed.get.valid.poke(true)
+            dut.io.completed.get.bits.robIdx.poke(52)
+            dut.io.enq.valid.poke(3)
+            packageEntry(dut.io.enq.entries(0), 56, DecodeUnit.Store)
+            packageEntry(dut.io.enq.entries(1), 57, DecodeUnit.Store)
+            dut.clock.step()
+            dut.io.completed.get.valid.poke(false)
+            dut.io.enq.valid.poke(0)
+
+            dut.io.occupancy.expect(4)
+            dut.io.issue.bits.robIdx.expect(55)
+            dut.clock.step()
+            dut.io.issue.bits.robIdx.expect(56)
+            dut.clock.step()
+            dut.io.issue.bits.robIdx.expect(57)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+
+            dut.io.wakeup(0).prd.poke(5)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(53)
         }
     }
 
@@ -373,6 +478,102 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "a replay selected with a newly failed token remains available for recovery" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.issue.ready.poke(true)
+
+            enqueue(dut, Seq((19, DecodeUnit.ALU, 0, Some(7), false)))
+            dut.io.wakeup(0).prd.poke(7)
+            dut.io.wakeup(0).specMask.poke(1)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.wakeup(0).specMask.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(1)
+
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.io.speculation.failedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.speculation.failedMask.poke(0)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+            dut.io.replayOccupancy.expect(1)
+
+            dut.io.wakeup(0).prd.poke(7)
+            dut.io.wakeup(0).specMask.poke(2)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.wakeup(0).specMask.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(19)
+
+            // The execution boundary kills this presentation using the raw
+            // failure. Delayed IQ maintenance must retain the replay entry.
+            dut.io.speculation.resolvedMask.poke(2)
+            dut.io.speculation.failedMask.poke(2)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.speculation.failedMask.poke(0)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+            dut.io.replayOccupancy.expect(1)
+
+            dut.io.wakeup(0).prd.poke(7)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(19)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(0)
+        }
+    }
+
+    "a certain wakeup wins when checkpoint creation sees a delayed failure" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.issue.ready.poke(true)
+            dut.io.enq.valid.poke(3)
+            packageEntry(dut.io.enq.entries(0), 20, DecodeUnit.ALU)
+            packageEntry(
+                dut.io.enq.entries(1),
+                21,
+                DecodeUnit.ALU,
+                sourceTag = Some(7),
+                sourceReady = true,
+                sourceSpecMask = 1,
+            )
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+
+            // The older instruction occupies the raw-failure cycle. The target
+            // reaches issue one cycle later when queue maintenance sees failure.
+            dut.io.issue.bits.robIdx.expect(20)
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.io.speculation.failedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.speculation.failedMask.poke(0)
+            dut.io.wakeup(0).prd.poke(7)
+            dut.io.wakeup(0).specMask.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(21)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+
+            dut.io.occupancy.expect(0)
+            dut.io.replayOccupancy.expect(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(21)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(0)
+        }
+    }
+
     "one successful token releases several replay checkpoints without compacting the main queue" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 4)
         simulate(new IssueQueue(backend, q)) { dut =>
@@ -381,8 +582,8 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             enqueue(
                 dut,
                 Seq(
-                    (52, DecodeUnit.ALU, 0, Some(9), false),
-                    (53, DecodeUnit.Branch, 0, Some(9), false),
+                    (6, DecodeUnit.ALU, 0, Some(9), false),
+                    (7, DecodeUnit.Branch, 0, Some(9), false),
                 ),
             )
             dut.io.wakeup(0).prd.poke(9)
@@ -391,9 +592,9 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.wakeup(0).prd.poke(0)
             dut.io.wakeup(0).specMask.poke(0)
 
-            dut.io.issue.bits.robIdx.expect(52)
+            dut.io.issue.bits.robIdx.expect(6)
             dut.clock.step()
-            dut.io.issue.bits.robIdx.expect(53)
+            dut.io.issue.bits.robIdx.expect(7)
             dut.clock.step()
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(2)
@@ -413,14 +614,14 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enq.valid.poke(3)
             packageEntry(
                 dut.io.enq.entries(0),
-                54,
+                16,
                 DecodeUnit.ALU,
                 sourceTag = Some(10),
                 sourceSpecMask = 1,
             )
             packageEntry(
                 dut.io.enq.entries(1),
-                55,
+                17,
                 DecodeUnit.ALU,
                 sourceTag = Some(11),
                 sourceSpecMask = 2,
@@ -428,7 +629,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.enq.valid.poke(0)
 
-            dut.io.issue.bits.robIdx.expect(54)
+            dut.io.issue.bits.robIdx.expect(16)
             dut.clock.step()
             dut.io.occupancy.expect(1)
             dut.io.replayOccupancy.expect(1)
@@ -438,10 +639,54 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.speculation.resolvedMask.poke(0)
             dut.io.issue.valid.expect(true)
-            dut.io.issue.bits.robIdx.expect(55)
+            dut.io.issue.bits.robIdx.expect(17)
             dut.clock.step()
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(1)
+        }
+    }
+
+    "a full replay queue skips an older speculative entry for a younger certain entry" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.issue.ready.poke(true)
+
+            dut.io.enq.valid.poke(1)
+            packageEntry(
+                dut.io.enq.entries(0),
+                54,
+                DecodeUnit.ALU,
+                sourceTag = Some(10),
+                sourceSpecMask = 1,
+            )
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(1)
+
+            dut.io.enq.valid.poke(3)
+            packageEntry(
+                dut.io.enq.entries(0),
+                55,
+                DecodeUnit.ALU,
+                sourceTag = Some(11),
+                sourceSpecMask = 2,
+            )
+            packageEntry(dut.io.enq.entries(1), 56, DecodeUnit.ALU)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(56)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(55)
         }
     }
 

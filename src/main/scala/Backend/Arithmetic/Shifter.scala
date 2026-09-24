@@ -11,12 +11,13 @@ object Shifter {
 
     class Shifter extends Module {
         val io = IO(new ShifterIO(32))
-        // 桶形移位器，实现右移
-        val candidates = Wire(Vec(32, UInt(32.W)))
-        for (i <- 0 until 32) {
-            candidates(i) := VecInit.fill(i)(Mux(io.sgn, io.src(31), 0.U(1.W))).asUInt ## io.src(31, i)
+        val fill = io.sgn && io.src(31)
+        val stages = (0 until 5).foldLeft(io.src) { case (value, bit) =>
+            val amount = 1 << bit
+            val shifted = Cat(Fill(amount, fill), value(31, amount))
+            Mux(io.shf(bit), shifted, value)
         }
-        io.res := candidates(io.shf)
+        io.res := stages
     }
 
     object Shifter {

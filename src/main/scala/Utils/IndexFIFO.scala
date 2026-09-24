@@ -18,13 +18,15 @@ object FIFOUtil {
         fires.indices.drop(1).foreach(i => assert(!fires(i) || fires(i - 1), message))
 }
 
-class IndexFIFOIO[T <: Data](gen: T, n: Int, rw: Int, ww: Int) extends Bundle {
+class IndexFIFOIO[T <: Data](gen: T, n: Int, rw: Int, ww: Int, registeredDeq: Boolean) extends Bundle {
     val enq = Flipped(Decoupled(gen))
     val enqIdx = Output(UInt(n.W))
     val enqHigh = Output(Bool())
     val deq = Decoupled(gen)
     val deqIdx = Output(UInt(n.W))
     val deqHigh = Output(Bool())
+    val deqCandidates = if (registeredDeq) Some(Output(Vec(2, Valid(gen)))) else None
+    val deqCandidateIdx = if (registeredDeq) Some(Output(Vec(2, UInt(n.W)))) else None
     val ridx = Input(Vec(rw, UInt(n.W)))
     val rdata = Output(Vec(rw, gen))
     val widx = Input(Vec(ww, UInt(n.W)))
@@ -41,11 +43,13 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     ww: Int,
     isFlst: Boolean = false,
     rstVal: Option[Seq[T]] = None,
+    writePayloadOnFlush: Boolean = false,
+    registeredDeq: Boolean = false,
 ) extends Module {
     require(n > 0, "IndexFIFO depth must be positive")
     require(rw >= 0 && ww >= 0, "IndexFIFO random port counts must be nonnegative")
     require(rstVal.forall(_.size == n), "IndexFIFO reset contents must match depth")
-    val io = IO(new IndexFIFOIO(gen, n, rw, ww))
+    val io = IO(new IndexFIFOIO(gen, n, rw, ww, registeredDeq))
 
     // Keep the 2024 field-update hooks for ROBEntry/BDBEntry migration.
     private def hasMethod(name: String): Boolean = {
@@ -54,6 +58,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     }
     private val hasEnqueue = hasMethod("enqueue")
     private val hasWrite = hasMethod("write")
+    private val payloadWriteAllowed = if (writePayloadOnFlush) true.B else !io.flush
     private val q = RegInit(if (isFlst && rstVal.isDefined) VecInit(rstVal.get)
     else VecInit.fill(n)(0.U.asTypeOf(gen)))
     private val head = RegInit(1.U(n.W))
@@ -108,28 +113,49 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     io.rdata.zip(io.ridx).foreach { case (data, idx) => data := Mux1H(idx, q) }
 
     for (port <- 0 until ww) {
-        when(io.wen(port) && !io.flush) {
+        when(io.wen(port) && payloadWriteAllowed) {
             assert(PopCount(io.widx(port)) === 1.U, "IndexFIFO write offset must be one-hot")
         }
     }
     q.zipWithIndex.foreach { case (entry, row) =>
-        // A FreeList accepts committed returns on its recovery edge. An ordinary
-        // queue discards enqueue and random writes on its clear edge.
-        when(push && tail(row) && (if (isFlst) true.B else !io.flush)) {
+        // FreeLists accept returns on recovery. ROB payload may also take
+        // unobservable writes while flush independently clears its occupancy.
+        when(push && tail(row) && (if (isFlst) true.B else payloadWriteAllowed)) {
             if (hasEnqueue) entry.asInstanceOf[{ def enqueue(data: T): Unit }].enqueue(io.enq.bits)
             else entry := io.enq.bits
         }
         if (ww > 0) {
             val hits = io.wen.zip(io.widx).map { case (wen, idx) => wen && idx(row) }
-            when(!io.flush) {
+            when(payloadWriteAllowed) {
                 assert(PopCount(hits) <= 1.U, "IndexFIFO simultaneous random writes must target distinct entries")
             }
-            when(VecInit(hits).asUInt.orR && !io.flush) {
+            when(VecInit(hits).asUInt.orR && payloadWriteAllowed) {
                 val data = Mux1H(hits, io.wdata)
                 // Preserve field-level precedence over enqueue on the same row.
                 if (hasWrite) entry.asInstanceOf[{ def write(data: T): Unit }].write(data)
                 else entry := data
             }
+        }
+    }
+
+    if (registeredDeq) {
+        require(!isFlst, "Registered dequeue payload is only used by ordinary queues")
+        for (candidatePop <- 0 to 1) {
+            val popCandidate = candidatePop.B
+            val selectedHead = if (candidatePop == 0) head else FIFOUtil.rotate(head, 1)
+            val candidateData = WireDefault(Mux1H(selectedHead, q))
+            val pushHead = push && (tail & selectedHead).orR && payloadWriteAllowed
+            when(pushHead) {
+                if (hasEnqueue) candidateData.asInstanceOf[{ def enqueue(data: T): Unit }].enqueue(io.enq.bits)
+                else candidateData := io.enq.bits
+            }
+            io.deqCandidates.get(candidatePop).bits := candidateData
+            io.deqCandidates.get(candidatePop).valid := !Mux(
+                push =/= popCandidate,
+                popCandidate && selectedHead === tailNext,
+                empty,
+            )
+            io.deqCandidateIdx.get(candidatePop) := selectedHead
         }
     }
 }

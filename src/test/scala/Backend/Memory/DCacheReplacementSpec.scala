@@ -12,7 +12,7 @@ class DCacheReplacementSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
     ) {
         s"$name: write back dirty victims and write allocate store misses" in {

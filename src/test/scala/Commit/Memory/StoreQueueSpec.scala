@@ -182,6 +182,8 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.atomic.sqIdx.valid.poke(true)
             dut.io.atomic.sqIdx.bits.poke(sqIdx)
+            dut.io.atomic.request.valid.expect(false)
+            dut.clock.step()
             dut.io.atomic.request.valid.expect(true)
             dut.io.atomic.request.bits.robIdx.expect(13)
             dut.io.atomic.request.bits.prd.expect(11)

@@ -7,9 +7,16 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         dut.io.in.valid.poke(0)
         dut.io.in.entries.foreach(BackendPackageTestUtils.clear)
         dut.io.memoryEntries.foreach(BackendPackageTestUtils.clear)
+        dut.io.dispatchClass.foreach { route =>
+            route.shortArith.poke(false)
+            route.mixArith.poke(false)
+            route.load.poke(false)
+            route.storeOrAtomic.poke(false)
+            route.noIssue.poke(false)
+        }
         dut.io.resourcePrefix.poke((BigInt(1) << dut.issue.dispatchWidth) - 1)
         dut.io.freeCount.zip(dut.issue.queueParams).foreach { case (count, queue) => count.poke(queue.entries) }
-        dut.io.flush.poke(false)
+        dut.io.clearPreference.poke(false)
         dut.reset.poke(true)
         dut.clock.step(2)
         dut.reset.poke(false)
@@ -26,6 +33,15 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         memoryItem.robIdx.poke(rob)
         memoryItem.fu.poke(fu)
         memoryItem.op.poke(op)
+        val route = dut.io.dispatchClass(lane)
+        route.shortArith.poke(fu == DecodeUnit.ALU || fu == DecodeUnit.Branch)
+        route.mixArith.poke(
+            fu == DecodeUnit.Multiply || fu == DecodeUnit.Divide || fu == DecodeUnit.FpMisc ||
+                (fu == DecodeUnit.System && op >= SystemOp.CSRRW && op <= SystemOp.CSRRCI)
+        )
+        route.load.poke(fu == DecodeUnit.Load)
+        route.storeOrAtomic.poke(fu == DecodeUnit.Store || fu == DecodeUnit.Atomic)
+        route.noIssue.poke(false)
     }
 
     "two ordinary ALUs use both low-latency pipelines while their queues are empty" in {
@@ -281,6 +297,7 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             dut.io.in.valid.poke(1)
             instruction(dut, 0, 90, DecodeUnit.None)
             dut.io.in.entries(0).exception.valid.poke(true)
+            dut.io.dispatchClass(0).noIssue.poke(true)
 
             dut.io.accepted.expect(1)
             dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(0)
