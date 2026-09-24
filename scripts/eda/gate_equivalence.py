@@ -1,13 +1,45 @@
 """Check a mapped design at its actual register and memory boundaries."""
 
 import copy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 import hashlib
 import json
 from pathlib import Path
 import re
 
 from eda.adder_mapping import quote
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def flatten_design(source, top, output, run, yosys):
+    source, output = Path(source), Path(output)
+    if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', top) is None:
+        raise ValueError(f'Unsupported top-module identifier: {top}')
+    script = output.with_suffix('.ys')
+    script.write_text(f'''read_json {quote(source)}
+hierarchy -check -top {top}
+flatten
+write_json {quote(output)}
+''')
+    inputs = {
+        'source': file_sha256(source),
+        'script': file_sha256(script),
+    }
+    cache = output.with_suffix('.cache.json')
+    if cache.exists() and output.exists():
+        saved = json.loads(cache.read_text())
+        if saved.get('inputs') == inputs and saved.get('output') == file_sha256(output):
+            return output
+    run([yosys, '-Q', '-T', '-s', str(script)], output.with_suffix('.log'))
+    cache.write_text(json.dumps({'inputs': inputs, 'output': file_sha256(output)}, indent=4) + '\n')
+    return output
 
 
 def boundaries(module):
@@ -22,7 +54,7 @@ def boundaries(module):
             if clock != module['ports']['clock']['bits']:
                 raise ValueError('Expected one ungated positive-edge clock')
             registers[cell['connections']['Q'][0]] = (name, cell['connections']['D'][0])
-        elif kind.startswith('fakeram45_'):
+        elif kind.startswith(('fakeram45_', 'openram45_')):
             memories[name] = cell
         elif 'DFF' in kind or 'LATCH' in kind:
             raise ValueError(f'Unsupported state: {name} {kind}')
@@ -197,18 +229,28 @@ def partition(directory, width=512):
     return groups
 
 
-def prove(reference, mapped, top, library, directory, run, yosys, partition_width=None):
+def prove(reference, mapped, top, library, directory, run, yosys, partition_width=None, workers=4):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+    reference = flatten_design(reference, top, directory / 'gold-flat.json', run, yosys)
+    mapped = flatten_design(mapped, top, directory / 'gate-flat.json', run, yosys)
     cut = make_cuts(reference, mapped, top, directory)
     if partition_width is not None and partition_width <= 0:
         raise ValueError('Proof partition width must be positive')
+    if workers <= 0:
+        raise ValueError('Proof worker count must be positive')
     if cut['register_bits'] > 4096 or partition_width is not None:
         groups = partition(directory, partition_width or 512)
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(prove_cut, directory / group['directory'], library, run, yosys) for group in groups]
-            for future in futures:
-                future.result()
+        pool = ThreadPoolExecutor(max_workers=workers)
+        futures = [pool.submit(prove_cut, directory / group['directory'], library, run, yosys) for group in groups]
+        done, pending = wait(futures, return_when=FIRST_EXCEPTION)
+        failure = next((future.exception() for future in done if future.exception() is not None), None)
+        if failure is not None:
+            for future in pending:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise failure
+        pool.shutdown(wait=True)
         lines = []
         for group in groups:
             log = directory / group['directory'] / 'equivalence.log'

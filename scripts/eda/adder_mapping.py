@@ -43,19 +43,23 @@ class AdderMapping:
             return ''
         return 'setattr -mod -unset keep_hierarchy ' + ' '.join(modules) + '\nflatten\ndelete t:$scopeinfo'
 
-    def commands(self, library, constraint, directory, additional_modules=()):
+    def commands(self, library, constraint, directory, additional_modules=(), stage='all'):
+        if stage not in ('all', 'pre_flatten', 'post_flatten'):
+            raise ValueError('Mapping stage must be all, pre_flatten or post_flatten')
         delay = '' if self.delay_ps is None else f' -D {self.delay_ps:g}'
         command = f'abc -liberty {quote(library)} -constr {quote(constraint)}'
         result = []
-        if self.mode == 'direct' and self.modules:
-            script = Path(directory) / 'adder.abc'
-            script.write_text(
-                f'strash; &get -n; &nf{delay}; &put; buffer; upsize{delay}; dnsize{delay}; stime -p\n'
-            )
-            result.append(f'{command} -script {quote(script)} ' + ' '.join(self.modules))
-        for module in additional_modules:
-            result.append(command + delay + ' ' + module)
-        result.append(command + delay)
+        if stage in ('all', 'pre_flatten'):
+            if self.mode == 'direct' and self.modules:
+                script = Path(directory) / 'adder.abc'
+                script.write_text(
+                    f'strash; &get -n; &nf{delay}; &put; buffer; upsize{delay}; dnsize{delay}; stime -p\n'
+                )
+                result.append(f'{command} -script {quote(script)} ' + ' '.join(self.modules))
+            for module in additional_modules:
+                result.append(command + delay + ' ' + module)
+        if stage in ('all', 'post_flatten'):
+            result.append(command + delay)
         return '\n'.join(result)
 
     def manifest(self, additional_modules=()):
