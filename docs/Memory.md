@@ -55,16 +55,14 @@ I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、un
 
 ## RAM 后端与 PMA
 
-Cache RAM 通过统一封装选择寄存器、Vivado 双口 BRAM 或 OpenRAM `1RW+1R` 实现。Vivado
-配置保留两个可读写物理端口；ASIC 分析配置将 I 侧绑定到只读端口，将 D 侧和安装写绑定到
-读写端口。
+Cache RAM 通过统一封装选择寄存器、Vivado 双口 BRAM 或 ASIC `1RW+1R` 接口。Vivado 配置
+保留两个可读写物理端口；ASIC 分析配置将 I 侧绑定到只读端口，将 D 侧和安装写绑定到读写端口。
 
-日常 Chisel 与 Verilator 回归默认使用与 OpenRAM 接口同周期的 Chisel 模型，因此不依赖宏文件，
-也不会把第三方生成模型的 warning 混入项目 RTL。设置 `ZIRCON_USE_EXTERNAL_OPENRAM=true` 后，
-elaboration 改为生成外部宏壳。此时 EDA 流程必须同时提供
-`src/main/resources/OpenRam1RW1R_25.sv`、`src/main/resources/OpenRam1RW1R_32.sv`，以及
-`eda/platforms/nangate45/memory/openram-1rw1r/` 下对应的两个 Verilog 宏模型、Liberty 和 LEF。
-Vivado 后端仍使用原有外部 Verilog BRAM 模板，不经过该 OpenRAM 选择路径。
+日常 Chisel 与 Verilator 回归使用同周期的 Chisel 行为模型，因此不依赖宏文件。Nangate45
+logic-only 综合把所有 Cache 和 Predictor SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
+拆分到固定版本 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
+都是上升沿 clock-to-Q；活动综合和 STA 输入不再包含 OpenRAM Liberty 或 LEF。Vivado 后端仍
+使用原有外部 Verilog BRAM 模板，不经过该 ASIC 绑定路径。
 
 PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
 属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和 uncached 请求绕过

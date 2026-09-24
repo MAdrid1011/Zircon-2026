@@ -18,12 +18,13 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 流水线，以及两条访存流水线。存储系统由独立 L1 ICache/DCache、Sv32 ITLB/DTLB、硬件页表
 遍历器和一颗偏 victim 组织的共享 L2 Cache 构成。
 
-项目同时面向两类实现环境：Vivado 路径使用可推断双口 BRAM，ASIC 静态分析路径提供寄存器
-模型和 OpenRAM `1RW+1R` 接口。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
+项目同时面向两类实现环境：Vivado 路径使用可推断双口 BRAM，ASIC 静态分析路径将全部 SRAM
+统一绑定到 BSG Fakeram 时序模型。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
 
 > [!NOTE]
 > 当前版本已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
-> 输入、文件系统挂载和定时器路径验证。PMP 与更广泛的特权架构一致性验证仍在后续范围内。
+> 输入、文件系统挂载和定时器路径验证；Nangate45 BSG logic-only STA 达到约 528.7 MHz
+> 的最大逻辑频率。PMP 与更广泛的特权架构一致性验证仍在后续范围内。
 
 ## 架构概览
 
@@ -195,16 +196,29 @@ sbt "runMain Elaborate generated"
 sbt "runMain Elaborate --simulation generated"
 ```
 
+使用 BSG Fakeram-only 配置生成 Nangate45 纯逻辑时序结果：
+
+```sh
+python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0
+```
+
+脚本会生成外部宏版 RTL，再运行 Yosys 标准单元映射。该配置将 Cache、BTB 和 Predictor
+阵列全部映射到固定版本的 `fakeram45` 估算模型，并将 L2 配置为 16 sets；其中项目需要的
+`1RW+1R` 端口使用匹配深度 BSG 模型派生的 logic-only 双读口时序抽象。普通 RTL 与仿真生成
+仍使用默认的 32-set L2。去掉 `--logic-only` 后，流程还会执行 placement-based RC 估算和
+标准 OpenROAD Resizer 修复；该路径同样不等同于布局布线 signoff。
+
 ## 验证状态
 
 | 验证层级 | 当前状态 |
 | --- | --- |
-| CoreMark + Spike 提交级差分 | 通过 |
+| CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.445，CoreMark/MHz 5.590 |
 | RISC-V Architecture Test 149 项 + Spike 提交级差分 | 通过 |
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
 | Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
+| Nangate45 BSG logic-only STA | 最大逻辑频率约 528.7 MHz（最长数据到达 1.891587 ns） |
 | PMP 与完整特权架构一致性验证 | 尚未完成 |
 
 ## 模块文档

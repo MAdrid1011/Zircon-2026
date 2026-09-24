@@ -11,13 +11,17 @@ ICache 和预测表结果。PD 对返回指令执行预译码，校验控制流�
 `FetchQueue`。
 
 每一级都使用有效位和接受条件保存请求。下游反压时，当前级保持载荷；提交恢复会取消所有
-年轻请求。ICache 响应携带 fetch token，前端只消费与当前 IF2 请求匹配的响应。
+年轻请求。阻塞式 ICache 按顺序返回请求，前端由 IF1/IF2 有效位保持响应归属。
 
 ## 分支预测
 
 `Predict` 包含基础 PHT、六张带标签历史表、Tagged Corrector、小 BTB、两路同步主 BTB、
 RAS 和推测历史。IF1 产生早期方向和目标，IF2 合并同步表结果。PD 发现预测范围或目标错误时
 产生局部修正；提交阶段通过 FTQ 提供最终训练信息。
+
+PHT、带标签历史表、Tagged Corrector、Loop Predictor 和间接目标表通过 `PredictorTableRam`
+实现。每张表提供一个预测读口和一个流水化训练读改写通路；Vivado 配置可推断 BRAM，
+Nangate45 配置绑定对应深度和宽度的 BSG Fakeram。
 
 ## ICache 与 ITLB
 
