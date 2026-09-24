@@ -15,25 +15,24 @@ class NPC(p: FrontendParams) extends Module {
     val io = IO(new NPCIO(p))
     val pendingPc = RegInit(p.resetPc.U(32.W))
     val pendingValid = RegInit(true.B)
-    val token = RegInit(0.U(32.W))
     val pending = Wire(Valid(new FrontendRedirect))
     pending.valid := pendingValid
     pending.bits.pc := pendingPc
-    val sources = Seq(io.cmt, io.pd, pending, io.pr)
     val selected = Wire(Valid(new FrontendRedirect))
-    selected.valid := sources.map(_.valid).reduce(_ || _)
-    // Decode priority before the late prediction address arrives.
-    val grants = sources.indices.map(i => sources(i).valid && !sources.take(i).map(_.valid).foldLeft(false.B)(_ || _))
-    selected.bits := Mux1H(grants, sources.map(_.bits))
+    val overrideValid = io.cmt.valid || io.pd.valid || pending.valid
+    val overrideBits = Mux(
+        io.cmt.valid,
+        io.cmt.bits,
+        Mux(io.pd.valid, io.pd.bits, pending.bits),
+    )
+    selected.valid := overrideValid || io.pr.valid
+    // Prediction arrives late; keep it behind only the final redirect override mux.
+    selected.bits := Mux(overrideValid, overrideBits, io.pr.bits)
     io.request.valid := io.space && selected.valid
     io.request.bits.pc := selected.bits.pc
-    io.request.bits.token := token
     when(selected.valid) {
         pendingValid := !io.request.fire
         pendingPc := selected.bits.pc
     }
-    when(io.request.fire) {
-        token := token + 1.U
-        assert(io.request.bits.pc(1, 0) === 0.U, "Fetch requests require IALIGN=32")
-    }
+    when(io.request.fire) { assert(io.request.bits.pc(1, 0) === 0.U, "Fetch requests require IALIGN=32") }
 }

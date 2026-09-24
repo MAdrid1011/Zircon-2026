@@ -34,7 +34,6 @@ class PageTableWalkerSpec extends AnyFreeSpec with ChiselSim {
         dut.io.rootPpn.poke(BigInt("80000", 16))
         dut.io.flush.poke(false)
         dut.io.instruction.miss.valid.poke(false)
-        dut.io.instruction.miss.bits.token.poke(0)
         dut.io.instruction.miss.bits.pc.poke(0)
         dut.io.data.miss.foreach { miss =>
             miss.valid.poke(false)

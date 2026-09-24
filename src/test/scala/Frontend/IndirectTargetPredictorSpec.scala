@@ -25,6 +25,8 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
             def clearTrain(): Unit = {
                 d.io.train.valid.poke(false)
                 d.io.train.bits.poke(0.U.asTypeOf(new FrontendTraining(p)))
+                d.io.trainRead.valid.poke(false)
+                d.io.trainRead.bits.poke(0.U.asTypeOf(new FrontendTraining(p)))
             }
 
             def lookup(history: BigInt): Lookup = {
@@ -68,6 +70,10 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
                     )
                     d.io.train.bits.meta.ittage.predictedTargets(i).poke(if (i == 0) predicted else BigInt(0))
                 }
+                d.io.trainRead.bits.poke(d.io.train.bits.peek())
+                d.io.trainRead.valid.poke(true)
+                d.clock.step()
+                d.io.trainRead.valid.poke(false)
                 d.io.train.valid.poke(true)
                 d.clock.step()
                 clearTrain()

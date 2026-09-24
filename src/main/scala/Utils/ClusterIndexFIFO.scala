@@ -55,6 +55,8 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     rstVal: Option[Seq[T]] = None,
     compactEnq: Boolean = false,
     exposeDeqIndex: Boolean = false,
+    writePayloadOnFlush: Boolean = false,
+    registeredDeq: Boolean = false,
 ) extends Module {
     require(num > 0 && ew > 0 && dw > 0, "ClusterIndexFIFO depth and transfer widths must be positive")
     require(rw >= 0 && ww >= 0, "ClusterIndexFIFO random port counts must be nonnegative")
@@ -65,10 +67,26 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     val io = IO(new ClusterIndexFIFOIO(gen, n, len, ew, dw, rw, ww, exposeDeqIndex))
 
     private val banks = Seq.tabulate(n) { bank =>
-        Module(new IndexFIFO(gen, len, rw, ww, isFlst, rstVal.map(_.slice(bank * len, (bank + 1) * len)))).io
+        Module(new IndexFIFO(
+            gen,
+            len,
+            rw,
+            ww,
+            isFlst,
+            rstVal.map(_.slice(bank * len, (bank + 1) * len)),
+            writePayloadOnFlush,
+            registeredDeq,
+        )).io
     }
     private val enqBase = RegInit(1.U(n.W))
     private val deqBase = RegInit(1.U(n.W))
+    private val deqData = if (registeredDeq) Some(Reg(Vec(dw, gen))) else None
+    private val deqValid = if (registeredDeq) Some(RegInit(VecInit.fill(dw)(false.B))) else None
+    private def hasMethod(name: String): Boolean = {
+        val member = typeOf[T].member(TermName(name))
+        member != NoSymbol && member.isMethod
+    }
+    private val hasWrite = hasMethod("write")
     private val allEnqReady = banks.map(_.enq.ready).reduce(_ && _)
     private val allDeqValid = if (isFlst) banks.map(_.deq.valid).reduce(_ && _) else true.B
 
@@ -108,8 +126,10 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     private val deqSelect = Seq.tabulate(dw)(lane => FIFOUtil.rotate(deqBase, lane))
     for (lane <- 0 until dw) {
         val select = deqSelect(lane)
-        io.deq(lane).valid := Mux1H(select, banks.map(_.deq.valid)) && allDeqValid
-        io.deq(lane).bits := Mux1H(select, banks.map(_.deq.bits))
+        io.deq(lane).valid := deqValid.map(_(lane)).getOrElse(
+            Mux1H(select, banks.map(_.deq.valid)) && allDeqValid
+        )
+        io.deq(lane).bits := deqData.map(_(lane)).getOrElse(Mux1H(select, banks.map(_.deq.bits)))
         if (exposeDeqIndex) {
             io.deqIdx.get(lane).qidx := select
             io.deqIdx.get(lane).offset := Mux1H(select, banks.map(_.deqIdx))
@@ -124,6 +144,59 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         FIFOUtil.assertPrefix(io.deq.map(_.fire).toSeq, "ClusterIndexFIFO dequeue transfers must be a prefix")
     }
     private val deqBaseNext = FIFOUtil.advance(deqBase, PopCount(io.deq.map(_.fire)), dw)
+    if (registeredDeq) {
+        val popCount = PopCount(io.deq.map(_.fire))
+        val popCountOH = VecInit.tabulate(dw + 1)(count => popCount === count.U)
+        for (lane <- 0 until dw) {
+            val candidates = (0 to dw).map { candidateCount =>
+                val candidateBase = FIFOUtil.rotate(deqBase, candidateCount)
+                val select = FIFOUtil.rotate(candidateBase, lane)
+                val poppedBanks = if (candidateCount == 0) 0.U(n.W) else
+                    (0 until candidateCount).map(offset => FIFOUtil.rotate(deqBase, offset)).reduce(_ | _)
+                val bankPopped = (poppedBanks & select).orR
+                val candidateData = WireDefault(Mux1H(select, banks.map { bank =>
+                    Mux(
+                        bankPopped,
+                        bank.deqCandidates.get(1).bits,
+                        bank.deqCandidates.get(0).bits,
+                    )
+                }))
+                if (ww > 0) {
+                    val candidateOffset = Mux1H(select, banks.map { bank =>
+                        Mux(
+                            bankPopped,
+                            bank.deqCandidateIdx.get(1),
+                            bank.deqCandidateIdx.get(0),
+                        )
+                    })
+                    val writeHits = io.wen.indices.map { port =>
+                        io.wen(port) && (io.widx(port).qidx & select).orR &&
+                            (io.widx(port).offset & candidateOffset).orR
+                    }
+                    assert(PopCount(writeHits) <= 1.U, "Registered dequeue entry cannot receive multiple writes")
+                    when(VecInit(writeHits).asUInt.orR) {
+                        val update = Mux1H(writeHits, io.wdata)
+                        if (hasWrite) candidateData.asInstanceOf[{ def write(data: T): Unit }].write(update)
+                        else candidateData := update
+                    }
+                }
+                val candidateValid = Mux1H(select, banks.map { bank =>
+                    Mux(
+                        bankPopped,
+                        bank.deqCandidates.get(1).valid,
+                        bank.deqCandidates.get(0).valid,
+                    )
+                })
+                candidateValid -> candidateData
+            }
+            when(io.flush) {
+                deqValid.get(lane) := false.B
+            }.otherwise {
+                deqValid.get(lane) := Mux1H(popCountOH, candidates.map(_._1))
+                deqData.get(lane) := Mux1H(popCountOH, candidates.map(_._2))
+            }
+        }
+    }
     when(io.flush) {
         if (isFlst) {
             enqBase := enqBaseNext

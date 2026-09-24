@@ -5,12 +5,12 @@ sealed trait DualPortRamBackend
 object DualPortRamBackend {
     case object Vivado extends DualPortRamBackend
     case object Registers extends DualPortRamBackend
-    case object OpenRAM extends DualPortRamBackend
+    case object BSG extends DualPortRamBackend
 
     def parse(name: String): DualPortRamBackend = name match {
         case "vivado" => Vivado
         case "registers" => Registers
-        case "openram" => OpenRAM
+        case "bsg" => BSG
         case _ => throw new IllegalArgumentException(s"Unknown dual-port RAM backend: $name")
     }
 }
@@ -30,8 +30,7 @@ class DualPortMaskedRamIO(depth: Int, lanes: Int, laneBits: Int) extends Bundle 
     val doutb = Output(UInt((lanes * laneBits).W))
 }
 
-/** Vivado and Registers preserve the 2024 registered-address contract and live held outputs.
-  * OpenRAM only guarantees enabled reads until the next sampling edge; consumers must snapshot or reread.
+/** All backends preserve the registered-address contract and live held outputs.
   * Reads of uninitialized register storage are unspecified. Consumers use separate valid bits.
   * Overlapping writes to the same lane are forbidden; legal accesses have exactly two ports.
   */
@@ -53,7 +52,7 @@ class DualPortMaskedRam(
     }
 
     effectiveBackend match {
-        case DualPortRamBackend.OpenRAM =>
+        case DualPortRamBackend.BSG =>
             require(depth == 16 && (lanes == 1 && laneBits <= 25 || lanes % 4 == 0 && laneBits == 8))
             require(readWritePort == 0 || readWritePort == 1)
             val address = Seq(io.addra, io.addrb)
@@ -64,9 +63,9 @@ class DualPortMaskedRam(
             val logicalWidth = lanes * laneBits
             val macroWidth = ((logicalWidth + width - 1) / width) * width
             val paddedData = data.map(_.pad(macroWidth))
-            val useMacro = sys.env.get("ZIRCON_USE_EXTERNAL_OPENRAM").contains("true")
+            val useMacro = sys.env.get("ZIRCON_USE_EXTERNAL_BSG_RAM").contains("true")
             val ram = Seq.fill(macroWidth / width) {
-                if (useMacro) Module(new OpenRam1RW1RMacro(width)).io else Module(new OpenRam1RW1R(width)).io
+                if (useMacro) Module(new BsgFakeram1RW1RMacro(width)).io else Module(new BsgFakeram1RW1R(width)).io
             }
             for ((r, i) <- ram.zipWithIndex) {
                 r.clock := io.clka
@@ -85,7 +84,7 @@ class DualPortMaskedRam(
             io.douta := outputA(logicalWidth - 1, 0)
             io.doutb := outputB(logicalWidth - 1, 0)
             withClockAndReset(io.clka, false.B) {
-                assert(!enable(1 - readWritePort) || !mask(1 - readWritePort).orR, "OpenRAM: write on read-only port")
+                assert(!enable(1 - readWritePort) || !mask(1 - readWritePort).orR, "BSG SRAM: write on read-only port")
             }
         case DualPortRamBackend.Vivado if lanes == 1 =>
             val ram = Module(new XilinxTrueDualPortReadFirst1ClockRam(laneBits, depth))

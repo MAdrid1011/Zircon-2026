@@ -46,7 +46,8 @@ class PreDecoders(p: FrontendParams) extends RawModule {
         decoder.io.inst := io.in.instructions(i).inst
         decoder.io.fields := fields
         val pc = FrontendMath.slotPc(io.in.startPc, i, p)
-        val kind = Mux(io.in.instructions(i).fault, 0.U, decoder.io.kind)
+        val decodedKind = decoder.io.kind
+        val kind = Mux(io.in.instructions(i).fault, 0.U, decodedKind)
 
         // Direct targets use PC; returns use the saved RAS top plus the JALR offset.
         val directTarget = addWithoutCarry(pc, fields.immediate)
@@ -56,12 +57,14 @@ class PreDecoders(p: FrontendParams) extends RawModule {
             FrontendMath.rasTop(predInfo.before)(31, 1) + returnOffset(31, 1),
             0.U(1.W),
         )
-        val sameKind = predInfo.main.kinds(i) === kind
+        val sameKind = predInfo.main.kinds(i) === decodedKind
         val isDirect = fields.cfiClass === FrontendCfiClass.Branch.U || fields.cfiClass === FrontendCfiClass.Jal.U
-        val useRas = FrontendCfi.pop(kind) && predInfo.before.count =/= 0.U
-        finalSelect.io.kinds(i) := kind
-        finalSelect.io.control(i) := fields.cfiClass =/= FrontendCfiClass.None.U && !io.in.instructions(i).fault
-        finalSelect.io.conditional(i) := fields.cfiClass === FrontendCfiClass.Branch.U && !io.in.instructions(i).fault
+        val useRas = FrontendCfi.pop(decodedKind) && predInfo.before.count =/= 0.U
+        // Prediction repair is independent of fetch faults. Faulting instructions retain
+        // kind=0 below, while Commit owns the eventual architectural redirect.
+        finalSelect.io.kinds(i) := decodedKind
+        finalSelect.io.control(i) := fields.cfiClass =/= FrontendCfiClass.None.U
+        finalSelect.io.conditional(i) := fields.cfiClass === FrontendCfiClass.Branch.U
         finalSelect.io.targets(i) := Mux(
             isDirect,
             directTarget,
@@ -105,10 +108,11 @@ class PreDecoders(p: FrontendParams) extends RawModule {
         (instPkgOut.mask(i) || predInfo.early.mask(i)) && finalSelect.io.kinds(i) =/= predInfo.early.kinds(i)
     }.reduce(_ || _)
     val targetChanged = (finalSelect.io.prediction.taken & targetMismatch.asUInt).orR
-    io.changed := targetChanged ||
+    val predictionChanged = targetChanged ||
         ((finalSelect.io.prediction.backward ^ predInfo.early.backward) & finalSelect.io.prediction.taken).orR ||
         instPkgOut.mask =/= predInfo.early.mask ||
         finalSelect.io.prediction.taken =/= predInfo.early.taken || kindChanged
+    io.changed := predictionChanged
     io.out := instPkgOut
     io.prediction := finalSelect.io.prediction
 
@@ -121,7 +125,7 @@ class PreDecoders(p: FrontendParams) extends RawModule {
     io.record.nextPc := instPkgOut.nextPc
     io.record.train.pcWord := io.in.startPc(31, 2)
     io.record.train.mask := instPkgOut.mask
-    io.record.train.kinds := finalSelect.io.kinds
+    io.record.train.kinds := VecInit(instPkgOut.instructions.map(_.kind))
     io.record.train.taken := finalSelect.io.prediction.taken
     io.record.train.meta.tageIndices := predInfo.meta.tageIndices
     io.record.train.meta.tageTags := predInfo.meta.tageTags

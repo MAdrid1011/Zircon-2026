@@ -60,7 +60,8 @@ class MixArithPipeline extends Module {
 
     io.cmt.rob.readIdx := packageRF.robIdx
 
-    io.iq.ready := !flush && (!validRF || advanceRF)
+    val issueReady = Wire(Bool())
+    io.iq.ready := issueReady
     when(flush) {
         validRF := false.B
     }.elsewhen(io.iq.fire) {
@@ -73,6 +74,8 @@ class MixArithPipeline extends Module {
     /* EX1 stage ------------------------------------------------------------------ */
     val packageEX1 = Reg(new MixArithIssue) // RF/EX1 boundary
     val sourceEX1 = Reg(Vec(MixArithConstants.numSources, UInt(32.W)))
+    val fpExponentEX1 = Reg(Vec(MixArithConstants.numSources, UInt(8.W)))
+    val fpZeroEX1 = Reg(Vec(MixArithConstants.numSources, Bool()))
     val validEX1 = RegInit(false.B)
 
     val selectCSR = packageEX1.fu === DecodeUnit.System.U &&
@@ -110,7 +113,8 @@ class MixArithPipeline extends Module {
 
     // Cover the cycle in which a new Divide moves from its private EX1 register into EX2.
     val divideEnteringEX2 = RegInit(false.B)
-    val canLaunchEX1 = !divideEnteringEX2 && !divide.io.divBusy
+    val lateBypass = io.bypass.consumer.value.map(_.valid).reduce(_ || _)
+    val canLaunchEX1 = !divideEnteringEX2 && !divide.io.divBusy && !lateBypass
     val selectedReady = Mux1H(Seq(
         selectCSR -> true.B,
         selectMultiply -> multiply.io.in.ready,
@@ -123,6 +127,10 @@ class MixArithPipeline extends Module {
     val fireEX1 = launchEX1 && selectedReady
     val readyEX1 = !validEX1 || fireEX1
     advanceRF := liveRF && readyEX1
+    // Report ordinary pipeline capacity even during flush. The IQ suppresses
+    // valid in that cycle, and this keeps flush out of compacted IQ payloads.
+    val readyEX1WithoutFlush = !validEX1 || (validEX1 && canLaunchEX1 && selectedReady)
+    issueReady := !validRF || readyEX1WithoutFlush
 
     // A fixed-latency result can wake compute consumers two cycles before WB and
     // memory consumers one cycle before WB. Divide uses its actual WB because EX2
@@ -148,27 +156,40 @@ class MixArithPipeline extends Module {
     }
     io.bypass.consumer.advance := advanceRF
 
-    val sourceValue = Wire(Vec(MixArithConstants.numSources, UInt(32.W)))
-    for (source <- 0 until MixArithConstants.numSources) {
-        sourceValue(source) := Mux(
-            io.bypass.consumer.value(source).valid,
-            io.bypass.consumer.value(source).bits,
-            sourceEX1(source),
-        )
-    }
+    // Late WB values terminate at the existing RF/EX1 operand registers. The
+    // execution units only consume their Q outputs on the following cycle.
+    val sourceValue = sourceEX1
     when(flush) {
         validEX1 := false.B
     }.elsewhen(advanceRF) {
         packageEX1 := packageRF
-        sourceEX1 := regfileValue
+        for (source <- 0 until MixArithConstants.numSources) {
+            val captureValid = io.bypass.consumer.capture(source).valid
+            val captureBits = io.bypass.consumer.capture(source).bits
+            val captured = Mux(
+                captureValid,
+                captureBits,
+                regfileValue(source),
+            )
+            sourceEX1(source) := captured
+            fpExponentEX1(source) := captured(30, 23)
+            fpZeroEX1(source) := Mux(
+                captureValid,
+                io.bypass.consumer.captureFpZero(source),
+                !regfileValue(source)(30, 0).orR,
+            )
+        }
         validEX1 := true.B
     }.elsewhen(fireEX1) {
         validEX1 := false.B
     }.elsewhen(liveEX1) {
         // Fold a transient WB value into the held package so the next cycle needs only one source mux.
         for (source <- 0 until MixArithConstants.numSources) {
-            when(io.bypass.consumer.value(source).valid) {
-                sourceEX1(source) := sourceValue(source)
+            val bypassValid = io.bypass.consumer.value(source).valid
+            when(bypassValid) {
+                sourceEX1(source) := io.bypass.consumer.value(source).bits
+                fpExponentEX1(source) := io.bypass.consumer.value(source).bits(30, 23)
+                fpZeroEX1(source) := io.bypass.consumer.valueFpZero(source)
             }
         }
     }
@@ -216,6 +237,15 @@ class MixArithPipeline extends Module {
     multiply.io.in.bits.src1 := sourceValue(0)
     multiply.io.in.bits.src2 := sourceValue(1)
     multiply.io.in.bits.src3 := sourceValue(2)
+    multiply.io.in.bits.fpSrc1 := sourceValue(0)
+    multiply.io.in.bits.fpSrc2 := sourceValue(1)
+    multiply.io.in.bits.fpSrc3 := sourceValue(2)
+    multiply.io.in.bits.fpExp1 := fpExponentEX1(0)
+    multiply.io.in.bits.fpExp2 := fpExponentEX1(1)
+    multiply.io.in.bits.fpExp3 := fpExponentEX1(2)
+    multiply.io.in.bits.fpZero1 := fpZeroEX1(0)
+    multiply.io.in.bits.fpZero2 := fpZeroEX1(1)
+    multiply.io.in.bits.fpZero3 := fpZeroEX1(2)
     multiply.io.in.bits.op := packageEX1.op(3, 0)
     multiply.io.in.bits.roundingMode := roundingMode
     multiply.io.in.bits.tag := resultTag(executionPackage).asUInt
@@ -349,7 +379,7 @@ class MixArithPipeline extends Module {
     io.cmt.rob.complete.bits.robIdx := packageWB.tag.robIdx
     io.cmt.rob.complete.bits.exception := packageWB.tag.exception
 
-    io.wakeup.valid := successfulWrite
+    io.wakeup.valid := wbPresent.asUInt.orR && packageWB.tag.rdValid && !packageWB.tag.exception.valid
     io.wakeup.bits := packageWB.tag.prd
     val divideWake = divide.io.out.valid && packageDivideWB.tag.rdValid && !packageDivideWB.tag.exception.valid
     io.wakeEX2.valid := earlyWakeValid(1) || divideWake
@@ -385,10 +415,11 @@ class MixArithPipeline extends Module {
     io.bypass.producer.nextWb.valid := !flush && bypassInputValid.asUInt.orR && bypassTag.rdValid &&
         !bypassTag.exceptionValid
     io.bypass.producer.nextWb.bits := bypassTag.prd
+    // Short operations are available early enough to capture at RF/EX1. Multiply
+    // and divide use the registered WB value so their late result cones end at WB.
+    io.bypass.producer.nextResult.valid := io.bypass.producer.nextWb.valid && shortValid.asUInt.orR
+    io.bypass.producer.nextResult.bits := shortPackage.data
     assert(flush || PopCount(bypassInputValid) <= 1.U, "MixArith permits only one WB input per cycle")
-
-    // Keep the IQ path off the combinational ready chain.
-    io.available := RegNext(io.iq.ready, false.B)
 
     when(io.iq.fire) {
         val csr = io.iq.bits.fu === DecodeUnit.System.U &&

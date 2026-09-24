@@ -14,7 +14,7 @@ class DCacheStressEventsSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         ) if sys.env.get("ZIRCON_DCACHE_STRESS_BACKEND").forall(_ == name)
     ) {
         s"$name: cancel, refill, committed write and fixed WB responses at adjacent edges" in {

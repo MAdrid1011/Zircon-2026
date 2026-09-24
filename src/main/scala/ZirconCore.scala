@@ -16,18 +16,22 @@ class ZirconCoreIO(simulationDebug: Boolean) extends Bundle {
 }
 
 /** Integration top level. Architectural behavior belongs to the instantiated blocks. */
-class ZirconCore(val simulationDebug: Boolean = false) extends Module {
+class ZirconCore(
+    val simulationDebug: Boolean = false,
+    val ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
+    val l2Params: L2CacheParams = L2CacheParams(),
+) extends Module {
     override val desiredName = "ZirconCore"
     val io = IO(new ZirconCoreIO(simulationDebug))
 
     private val frontendParams = FrontendParams(observe = simulationDebug)
     private val issueParams = IssueParams()
-    val frontend = Module(new Frontend(p = frontendParams, issue = issueParams))
+    val frontend = Module(new Frontend(p = frontendParams, issue = issueParams, ramBackend = ramBackend))
     val middleend = Module(new Middleend(frontendParams = frontendParams, issueParams = issueParams))
-    val backend = Module(new Backend(issueParams = issueParams, observe = simulationDebug))
+    val backend = Module(new Backend(issueParams = issueParams, ramBackend = ramBackend, observe = simulationDebug))
     val commit = Module(new Commit(fp = frontendParams, issue = issueParams, simulationDebug = simulationDebug))
     val ptw = Module(new PageTableWalker)
-    val l2 = Module(new L2Cache(observe = simulationDebug))
+    val l2 = Module(new L2Cache(ramBackend = ramBackend, p = l2Params, observe = simulationDebug))
     val bridge = Module(new L2AXI4Bridge)
 
     /* Major pipeline blocks exchange one owned interface per module boundary. */

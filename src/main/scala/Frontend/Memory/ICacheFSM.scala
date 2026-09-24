@@ -9,7 +9,6 @@ class ICacheFSMCacheIO extends Bundle {
     val hit = Input(UInt(2.W))
     val lru = Input(UInt(2.W))
     val flush = Input(Bool())
-    val stall = Input(Bool())
     val consumed = Input(Bool())
     val responseReady = Input(Bool())
     val cmiss = Output(Bool())
@@ -50,7 +49,8 @@ class ICacheFSM extends Module {
     io.cc.cmiss := false.B
     io.cc.tagvWe := 0.U
     io.cc.memWe := 0.U
-    io.cc.addrOH := Mux(io.cc.stall, 2.U, 1.U)
+    // Normal requests always launch S1. A disabled SRAM port retains its last result.
+    io.cc.addrOH := 1.U
     io.cc.r1H := Mux(mState === mWait, 2.U, 1.U)
     io.cc.lruUpd := 0.U
     io.cc.start := false.B
@@ -95,11 +95,12 @@ class ICacheFSM extends Module {
             }
         }
         is(mWait) {
-            // Restore the held IF1 address before releasing miss. Hold the IF2 result until consumed.
+            // Restore the held IF1 address once after refill; later disabled cycles retain the result.
             io.cc.cmiss := !waited
             io.cc.ready := waited && (!io.cc.rreq || io.cc.responseReady || io.cc.flush)
-            io.cc.addrOH := Mux(io.cc.ready && !io.cc.stall, 1.U, 2.U)
+            when(!waited) { io.cc.addrOH := 2.U }
             when(io.cc.ready) { mState := mIdle }
         }
     }
+    assert(PopCount(io.cc.addrOH) === 1.U, "ICache array address source must be one-hot")
 }

@@ -106,7 +106,6 @@ class Backend(
     mixArithIQ.io.csrGrant.get := io.commit.csrGrant
     loadIQ.io.loadGrant.get := io.commit.loadGrant
     loadStoreAddressIQ.io.loadGrant.get := io.commit.loadGrant
-    mixArithIQ.io.mixAvailable.get := mixArith.io.available
 
     /* Queue issue ports map directly to their owning execution resources. */
     arith0.io.iq <> arith0IQ.io.issue
@@ -137,7 +136,7 @@ class Backend(
     wakeupRouter.io.mixWB := certainWake(mixArith.io.wakeup.valid, mixArith.io.wakeup.bits)
     Seq(ls0, ls1).zipWithIndex.foreach { case (pipe, lane) =>
         wakeupRouter.io.loadD1(lane) := pipe.io.wk.wakeD1
-        wakeupRouter.io.loadWB(lane) := certainWake(pipe.io.wk.wakeWB.valid, pipe.io.wk.wakeWB.bits)
+        wakeupRouter.io.loadWB(lane) := pipe.io.wk.wakeWB
     }
 
     Seq(arith0IQ, arith1IQ, mixArithIQ).foreach(_.io.wakeup := wakeupRouter.io.compute)
@@ -275,15 +274,17 @@ class Backend(
     dcache.io.load(1).req.bits := Mux(atomic.io.busy, atomic.io.load.request.bits, ls1.io.cache.req.bits)
     atomic.io.load.request.ready := atomic.io.busy && dcache.io.load(1).req.ready
     ls1.io.cache.req.ready := !atomic.io.busy && dcache.io.load(1).req.ready
-    ls1.io.cache.wbSelect.valid := !atomic.io.busy && dcache.io.load(1).wbSelect.valid
+    ls1.io.cache.wbSelect.valid := !dcache.io.load(1).wbSelect.bits.atomic && dcache.io.load(1).wbSelect.valid
     ls1.io.cache.wbSelect.bits := dcache.io.load(1).wbSelect.bits
-    atomic.io.load.response.valid := atomic.io.busy && dcache.io.load(1).rsp.valid
+    atomic.io.load.response.valid := dcache.io.load(1).rsp.bits.atomic && dcache.io.load(1).rsp.valid
     atomic.io.load.response.bits.data := dcache.io.load(1).rsp.bits.data
     atomic.io.load.response.bits.exception := dcache.io.load(1).rsp.bits.exception
     atomic.io.load.response.bits.retry := dcache.io.load(1).rsp.bits.retry
-    ls1.io.cache.rsp.valid := !atomic.io.busy && dcache.io.load(1).rsp.valid
+    ls1.io.cache.rsp.valid := !dcache.io.load(1).rsp.bits.atomic && dcache.io.load(1).rsp.valid
     ls1.io.cache.rsp.bits := dcache.io.load(1).rsp.bits
-    ls1.io.cache.fixedLatency := !atomic.io.busy && dcache.io.load(1).fixedLatency
+    // Request ready already excludes Atomic ownership, so fixed-latency
+    // qualification need not feed Atomic state into speculative wakeup.
+    ls1.io.cache.fixedLatency := dcache.io.load(1).fixedLatency
     atomic.io.load.forwardQuery.valid := atomic.io.busy && dcache.io.forward(1).query.valid
     atomic.io.load.forwardQuery.bits := dcache.io.forward(1).query.bits
     ls1.io.cache.forward.query.valid := !atomic.io.busy && dcache.io.forward(1).query.valid
@@ -301,6 +302,7 @@ class Backend(
     if (tlbEnabled) {
         dcache.io.storeTranslation.get.request := ls1.io.cache.storeTranslation.get.request
         ls1.io.cache.storeTranslation.get.response := dcache.io.storeTranslation.get.response
+        ls1.io.translationControl.get := io.dtlb.get.control
     }
     dcache.io.flush := io.commit.flush
     if (tlbEnabled) {
@@ -317,6 +319,12 @@ class Backend(
     dcache.io.store.req <> sharedStore.io.cacheRequest
     sharedStore.io.cacheResponse <> dcache.io.store.rsp
     atomic.io.clearReservation := sharedStore.io.committedRequest.fire
+    when(dcache.io.load(1).rsp.valid) {
+        assert(
+            atomic.io.load.response.valid ^ ls1.io.cache.rsp.valid,
+            "DCache lane 1 response must have exactly one owner",
+        )
+    }
     atomic.io.request <> io.commit.atomic.request
     io.commit.atomic.response <> atomic.io.response
     when(io.commit.flush) {

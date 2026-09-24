@@ -4,6 +4,7 @@ import ZirconConfig.FrontendParams
 
 class PredictFetchIO(p: FrontendParams) extends Bundle {
     val instPkg = Input(new FrontendPackage(p))
+    val prefetch = Flipped(Valid(UInt(30.W)))
     val out = Output(new FrontendPackage(p))
 }
 
@@ -16,7 +17,7 @@ class PredictLookupIO(p: FrontendParams) extends Bundle {
 }
 
 class PredictCommitIO(p: FrontendParams) extends Bundle {
-    val train = Flipped(Valid(new FrontendTraining(p)))
+    val train = Flipped(Decoupled(new FrontendTraining(p)))
     val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
     val flush = Input(Bool())
 }
@@ -36,17 +37,18 @@ class PredictIO(p: FrontendParams) extends Bundle {
 }
 
 /** Direction/target prediction and speculative state, with lookup latency exposed at the frontend boundary. */
-class Predict(p: FrontendParams) extends Module {
+class Predict(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado) extends Module {
     val io = IO(new PredictIO(p))
 
     /* Modules */
     val state = Module(new SpeculativeState(p))
-    val direction = Module(new MorslDirection(p))
-    val indirect = Module(new IndirectTargetPredictor(p))
+    val direction = Module(new MorslDirection(p, ramBackend))
+    val indirect = Module(new IndirectTargetPredictor(p, ramBackend))
     val fastBtb = Module(new BlockBTB(p, p.fastBtbSets, 1))
     val mainBtb = Module(new MainBTB(p))
     val fastLookup = Module(new BlockBTBLookup(p, p.fastBtbSets, 1))
-    val earlySelect = Module(new FrontendPredictionSelect(p))
+    // Fast-BTB and RAS targets are word aligned, so IF1 does not need a post-selection alignment check.
+    val earlySelect = Module(new FrontendPredictionSelect(p, assumeAlignedTargets = true))
     val mainLookup = Module(new BlockBTBLookup(p, p.btbSets, p.btbWays))
     val corrector = Module(new StatisticalCorrector(p))
 
@@ -59,6 +61,8 @@ class Predict(p: FrontendParams) extends Module {
     fastLookup.io.tag := currentPc(31, p.blockBits + log2Ceil(p.fastBtbSets))
     fastLookup.io.raw := fastBtb.io.raw
     direction.io.query.pcWord := currentPc(31, 2)
+    direction.io.query.prefetchPcWord := io.fc.prefetch.bits
+    direction.io.query.prefetch := io.fc.prefetch.valid
     direction.io.query.folds := state.io.folds
     indirect.io.query.pcWord := currentPc(31, 2)
     indirect.io.query.folds := state.io.folds
@@ -96,7 +100,8 @@ class Predict(p: FrontendParams) extends Module {
     io.fc.out.predict.early := earlySelect.io.prediction
     io.fc.out.predict.earlyDirections := direction.io.directions
     io.fc.out.predict.meta := direction.io.meta
-    io.fc.out.predict.meta.ittage := indirect.io.meta
+    // ITTAGE's wide target selection is completed after the IF1/IF2 boundary.
+    io.fc.out.predict.meta.ittage := 0.U.asTypeOf(new FrontendIndirectMeta(p))
     io.fc.out.predict.scRead := direction.io.scRead
     io.fc.out.predict.before := state.io.snapshot
 
@@ -108,6 +113,7 @@ class Predict(p: FrontendParams) extends Module {
     mainLookup.io.tag := io.lookup.mainTag
     mainLookup.io.raw := mainBtb.io.raw
     val lookupMeta = WireDefault(io.lookup.in.predict.meta)
+    lookupMeta.ittage := indirect.io.lookupMeta
     val mainKinds = Wire(Vec(p.fetchWidth, UInt(3.W)))
     val mainTargets = Wire(Vec(p.fetchWidth, UInt(32.W)))
     lookupMeta.scPredictions := corrector.io.scPredictions
@@ -118,7 +124,7 @@ class Predict(p: FrontendParams) extends Module {
         val kind = Mux(mainHit, mainLookup.io.line.kinds(i), io.lookup.in.predict.early.kinds(i))
         mainKinds(i) := kind
         val baseTarget = Mux(mainHit, Cat(mainLookup.io.line.targets(i), 0.U(2.W)), io.lookup.in.predict.early.targets(i))
-        val ittage = io.lookup.in.predict.meta.ittage
+        val ittage = indirect.io.lookupMeta
         val providerValid = ittage.aheadValid && ittage.providers(i) =/= 0.U
         val alternateTarget = Mux(ittage.alternateValid(i), ittage.alternateTargets(i), baseTarget)
         val ittageTarget = Mux(ittage.providerConfidence(i) =/= 0.U, ittage.providerTargets(i), alternateTarget)
@@ -151,24 +157,42 @@ class Predict(p: FrontendParams) extends Module {
     state.io.flush := io.cmt.flush
 
     /* Commit Training */
-    direction.io.train.valid := io.cmt.train.valid
-    direction.io.train.bits.pcWord := io.cmt.train.bits.pcWord
-    direction.io.train.bits.mask := io.cmt.train.bits.mask
-    direction.io.train.bits.kinds := io.cmt.train.bits.kinds
-    direction.io.train.bits.taken := io.cmt.train.bits.taken
-    direction.io.train.bits.meta := io.cmt.train.bits.meta
-    direction.io.train.bits.earlyDirections := io.cmt.train.bits.earlyDirections
-    for (slot <- 0 until p.fetchWidth) {
-        direction.io.train.bits.targetLow(slot) := io.cmt.train.bits.targets(slot)(12, 0)
+    val trainValid = RegNext(io.cmt.train.fire, false.B)
+    val pendingTrain = Reg(new FrontendTraining(p))
+    io.cmt.train.ready := true.B
+    val acceptTrain = io.cmt.train.fire
+    when(acceptTrain) {
+        pendingTrain := io.cmt.train.bits
     }
-    indirect.io.train <> io.cmt.train
+    direction.io.trainRead.valid := acceptTrain
+    direction.io.trainRead.bits.pcWord := io.cmt.train.bits.pcWord
+    direction.io.trainRead.bits.mask := io.cmt.train.bits.mask
+    direction.io.trainRead.bits.kinds := io.cmt.train.bits.kinds
+    direction.io.trainRead.bits.taken := io.cmt.train.bits.taken
+    direction.io.trainRead.bits.meta := io.cmt.train.bits.meta
+    direction.io.trainRead.bits.earlyDirections := io.cmt.train.bits.earlyDirections
+    direction.io.train.valid := trainValid
+    direction.io.train.bits.pcWord := pendingTrain.pcWord
+    direction.io.train.bits.mask := pendingTrain.mask
+    direction.io.train.bits.kinds := pendingTrain.kinds
+    direction.io.train.bits.taken := pendingTrain.taken
+    direction.io.train.bits.meta := pendingTrain.meta
+    direction.io.train.bits.earlyDirections := pendingTrain.earlyDirections
+    for (slot <- 0 until p.fetchWidth) {
+        direction.io.trainRead.bits.targetLow(slot) := io.cmt.train.bits.targets(slot)(12, 0)
+        direction.io.train.bits.targetLow(slot) := pendingTrain.targets(slot)(12, 0)
+    }
+    indirect.io.trainRead.valid := acceptTrain
+    indirect.io.trainRead.bits := io.cmt.train.bits
+    indirect.io.train.valid := trainValid
+    indirect.io.train.bits := pendingTrain
     for (train <- Seq(fastBtb.io.train, mainBtb.io.train)) {
-        train.valid := io.cmt.train.valid
-        train.bits.pcBlock := io.cmt.train.bits.pcWord(29, p.blockBits - 2)
-        train.bits.mask := io.cmt.train.bits.mask
-        train.bits.kinds := io.cmt.train.bits.kinds
+        train.valid := trainValid
+        train.bits.pcBlock := pendingTrain.pcWord(29, p.blockBits - 2)
+        train.bits.mask := pendingTrain.mask
+        train.bits.kinds := pendingTrain.kinds
         for (slot <- 0 until p.fetchWidth) {
-            train.bits.targetWords(slot) := io.cmt.train.bits.targets(slot)(31, 2)
+            train.bits.targetWords(slot) := pendingTrain.targets(slot)(31, 2)
         }
     }
 

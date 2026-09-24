@@ -8,12 +8,10 @@ class FrontendFtqRecord(p: FrontendParams) extends Bundle {
 }
 
 class FrontendFtqAllocation(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val record = new FrontendFtqRecord(p)
 }
 
 class FrontendFtqEntry(p: FrontendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val record = new FrontendFtqRecord(p)
     val resolved = UInt(p.fetchWidth.W)
     val taken = UInt(p.fetchWidth.W)
@@ -22,7 +20,6 @@ class FrontendFtqEntry(p: FrontendParams) extends Bundle {
 
     def enqueue(data: Data): Unit = {
         val incoming = data.asInstanceOf[FrontendFtqEntry]
-        fetchToken := incoming.fetchToken
         record := incoming.record
         resolved := 0.U
         taken := 0.U
@@ -55,6 +52,9 @@ class FtqCommitIO(p: FrontendParams, width: Int) extends Bundle {
     val flush = Input(Bool())
     val branch = Flipped(Vec(2, Valid(new FtqBranchUpdate(p))))
     val pop = Input(UInt(width.W))
+    /** Direct packet reads indexed by the ftqIdx retained in each ROB entry. */
+    val readIdx = Input(Vec(width, UInt(p.ftqBits.W)))
+    val read = Output(Vec(width, new FrontendFtqEntry(p)))
     val head = Output(Vec(width, Valid(new FrontendFtqEntry(p))))
     val headIdx = Output(Vec(width, UInt(p.ftqBits.W)))
 }
@@ -72,6 +72,7 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
 
     val entries = RegInit(VecInit.fill(p.ftqDepth)(0.U.asTypeOf(new FrontendFtqEntry(p))))
     val head = RegInit(0.U(p.ftqBits.W))
+    val headOH = RegInit(1.U(p.ftqDepth.W))
     val tail = RegInit(0.U(p.ftqBits.W))
     val used = RegInit(0.U(log2Ceil(p.ftqDepth + 1).W))
     val flush = io.commit.flush
@@ -84,7 +85,6 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
         val rank = if (lane == 0) 0.U else PopCount(io.allocate.take(lane).map(_.valid))
         val index = (tail + rank)(p.ftqBits - 1, 0)
         val allocation = WireDefault(0.U.asTypeOf(new FrontendFtqEntry(p)))
-        allocation.fetchToken := io.allocate(lane).bits.fetchToken
         allocation.record := io.allocate(lane).bits.record
         io.allocateIdx(lane) := index
         when(io.allocate(lane).valid && !flush) {
@@ -94,13 +94,16 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
 
     for (port <- 0 until commitWidth) {
         val index = (head + port.U)(p.ftqBits - 1, 0)
+        val select = FIFOUtil.rotate(headOH, port)
         io.commit.head(port).valid := used > port.U
-        io.commit.head(port).bits := entries(index)
+        io.commit.head(port).bits := Mux1H(select.asBools, entries)
         io.commit.headIdx(port) := index
+        io.commit.read(port) := entries(io.commit.readIdx(port))
     }
 
     when(flush) {
         head := 0.U
+        headOH := 1.U
         tail := 0.U
         used := 0.U
     }.otherwise {
@@ -109,6 +112,7 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
         }
         when(popCount.orR) {
             head := head + popCount
+            headOH := FIFOUtil.advance(headOH, popCount, commitWidth)
         }
         when(pushCount.orR || popCount.orR) {
             used := used + pushCount - popCount
@@ -141,6 +145,7 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
 
     FIFOUtil.assertPrefix(io.commit.pop.asBools, "FTQ releases must be an ordered prefix")
     when(!flush) {
+        assert(PopCount(headOH) === 1.U)
         assert(popCount <= used, "FTQ cannot release more packets than it contains")
         assert(used + pushCount <= p.ftqDepth.U, "FTQ allocation exceeded available capacity")
     }

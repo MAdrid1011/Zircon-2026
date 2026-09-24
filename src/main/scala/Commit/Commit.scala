@@ -194,11 +194,15 @@ class Commit(
     io.backend.store <> sb.io.store
     /* Retirement stops at the first recovery event and delays its global redirect by one cycle. */
     val delayedRecovery = RegInit(false.B)
+    // Keep the high-fanout queue clear domains on independent register outputs.
+    val delayedBackendRecovery = RegInit(false.B)
+    val delayedMiddleendRecovery = RegInit(false.B)
+    val delayedMiddleendRestore = RegInit(false.B)
     val trainQueue = Module(new ClusterIndexFIFO(new FrontendTraining(fp), 6, cp.width, 1, 0, 0))
     val pendingRecoveryTrain = Reg(new FrontendTraining(fp))
     val pendingRecoveryTrainValid = RegInit(false.B)
     trainQueue.io.flush := false.B
-    trainQueue.io.deq(0).ready := true.B
+    trainQueue.io.deq(0).ready := io.frontend.ftq.train.ready
     io.frontend.ftq.train.valid := trainQueue.io.deq(0).valid
     io.frontend.ftq.train.bits := trainQueue.io.deq(0).bits
     val trainingSpace = trainQueue.io.enq(0).ready && !pendingRecoveryTrainValid
@@ -234,35 +238,52 @@ class Commit(
     }
     io.maintenance.request := cacheMaintenance && maintenanceStarted && !delayedRecovery
     io.maintenance.invalidate := fenceI
-    val systemReady = !headSystem || Mux(
+    val systemReadyNow = Mux(
         cacheMaintenance,
         maintenanceStarted && io.maintenance.done,
         Mux(fence, memoryDrained, true.B),
     )
-    /* Each ROB head must identify one of the ordered FTQ heads before it can retire. */
-    val headMatchesFtq = VecInit((0 until cp.width).map { lane =>
-        VecInit((0 until cp.width).map { packet =>
-            rob.io.head(lane).valid && ftq.io.commit.head(packet).valid &&
-                rob.io.head(lane).bits.fetchToken === ftq.io.commit.head(packet).bits.fetchToken &&
-                rob.io.head(lane).bits.ftqIdx === ftq.io.commit.headIdx(packet)
-        })
-    })
+    val systemReadyValid = RegInit(false.B)
+    val systemReadyRobIdx = Reg(UInt(bp.robWidth.W))
+    when(delayedRecovery || !headSystem) {
+        systemReadyValid := false.B
+    }.otherwise {
+        systemReadyValid := systemReadyNow
+        when(systemReadyNow) { systemReadyRobIdx := rob.io.head(0).bits.robIdx }
+    }
+    val systemReady = !headSystem ||
+        (systemReadyValid && systemReadyRobIdx === rob.io.head(0).bits.robIdx)
+    /* The ordered ROB window maps to the FTQ head window by prior packet ends. */
     val selectedFtq = Wire(Vec(cp.width, new FrontendFtqEntry(fp)))
     val selectedFtqIdx = Wire(Vec(cp.width, UInt(fp.ftqBits.W)))
+    val selectedFtqValid = Wire(Vec(cp.width, Bool()))
+    val headMatchesFtq = Wire(Vec(cp.width, Bool()))
     for (lane <- 0 until cp.width) {
-        selectedFtq(lane) := Mux1H(headMatchesFtq(lane), ftq.io.commit.head.map(_.bits))
-        selectedFtqIdx(lane) := Mux1H(headMatchesFtq(lane), ftq.io.commit.headIdx)
+        // The random-read ports remain available for isolated FTQ tests; Commit
+        // uses the ordered head window so ROB identity cannot enter recovery PC.
+        ftq.io.commit.readIdx(lane) := 0.U
+        val packetRank = if (lane == 0) 0.U else PopCount((0 until lane).map { previous =>
+            rob.io.head(previous).valid && rob.io.head(previous).bits.packetEnd
+        })
+        val hits = (0 until cp.width).map(packet => packetRank === packet.U)
+        selectedFtq(lane) := Mux1H(hits, ftq.io.commit.head.map(_.bits))
+        selectedFtqIdx(lane) := Mux1H(hits, ftq.io.commit.headIdx)
+        selectedFtqValid(lane) := Mux1H(hits, ftq.io.commit.head.map(_.valid))
+        headMatchesFtq(lane) := selectedFtqValid(lane) &&
+            selectedFtqIdx(lane) === rob.io.head(lane).bits.ftqIdx
     }
     val retire = Wire(Vec(cp.width, Bool()))
     val recovery = Wire(Vec(cp.width, Bool()))
+    val recoveryCandidate = Wire(Vec(cp.width, Bool()))
     val packetEnd = Wire(Vec(cp.width, Bool()))
-    def writesSatp(entry: ROBEntry): Bool = {
-        val unconditional = entry.systemOp === SystemOp.CSRRW.U || entry.systemOp === SystemOp.CSRRWI.U
-        val conditional = entry.systemOp === SystemOp.CSRRS.U || entry.systemOp === SystemOp.CSRRC.U ||
-            entry.systemOp === SystemOp.CSRRSI.U || entry.systemOp === SystemOp.CSRRCI.U
-        entry.isSystem && entry.instruction(31, 20) === CSRAddress.satp.U &&
-            (unconditional || (conditional && entry.instruction(19, 15).orR))
+    def writesSatpFields(isSystem: Bool, systemOp: UInt, instruction: UInt): Bool = {
+        val unconditional = systemOp === SystemOp.CSRRW.U || systemOp === SystemOp.CSRRWI.U
+        val conditional = systemOp === SystemOp.CSRRS.U || systemOp === SystemOp.CSRRC.U ||
+            systemOp === SystemOp.CSRRSI.U || systemOp === SystemOp.CSRRCI.U
+        isSystem && instruction(31, 20) === CSRAddress.satp.U &&
+            (unconditional || (conditional && instruction(19, 15).orR))
     }
+    def writesSatp(entry: ROBEntry): Bool = writesSatpFields(entry.isSystem, entry.systemOp, entry.instruction)
     def writesExecutionState(entry: ROBEntry): Bool = {
         val unconditional = entry.systemOp === SystemOp.CSRRW.U || entry.systemOp === SystemOp.CSRRWI.U
         val conditional = entry.systemOp === SystemOp.CSRRS.U || entry.systemOp === SystemOp.CSRRC.U ||
@@ -289,13 +310,13 @@ class Commit(
         val sretIllegal = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
         val systemException = ecall || ebreak || mretIllegal || sretIllegal
-        val recoveryCandidate = entry.exception.valid || mispredicted || commitSystem || writesExecutionState(entry) ||
-            entry.isAtomic || systemException
-        val needsFeedback = entry.packetEnd || recoveryCandidate
-        val completed = rob.io.head(lane).valid && entry.complete && headMatchesFtq(lane).asUInt.orR &&
+        recoveryCandidate(lane) := entry.exception.valid || mispredicted || commitSystem ||
+            writesExecutionState(entry) || entry.isAtomic || systemException
+        val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
+        val completed = rob.io.head(lane).valid && headMatchesFtq(lane) && entry.complete &&
             (if (lane == 0) systemReady else !headSystem && !entry.isSystem) &&
             (!needsFeedback || trainingSpace)
-        val recover = completed && recoveryCandidate
+        val recover = completed && recoveryCandidate(lane)
         packetEnd(lane) := completed && entry.packetEnd
         recovery(lane) := continue && recover
         retire(lane) := continue && completed && !entry.exception.valid && !systemException
@@ -318,22 +339,47 @@ class Commit(
             machineInterruptEnabled && !delegated,
         )
     })
+    // Interrupts are already excluded while a System instruction is at the
+    // head. Recompute the non-System recovery window without Fence/atomic drain
+    // readiness so those mutually exclusive conditions cannot select payload.
+    val interruptRecovery = Wire(Vec(cp.width, Bool()))
+    var interruptContinue = true.B
+    for (lane <- 0 until cp.width) {
+        val entry = rob.io.head(lane).bits
+        val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
+        val completed = rob.io.head(lane).valid && selectedFtqValid(lane) && entry.complete &&
+            !entry.isSystem && (!needsFeedback || trainingSpace)
+        val recover = completed && recoveryCandidate(lane)
+        interruptRecovery(lane) := interruptContinue && recover
+        interruptContinue = interruptContinue && completed && !recover && !entry.isAtomic
+    }
     takeInterrupt := interruptEligible.asUInt.orR && rob.io.head(0).valid &&
-        !recovery.asUInt.orR && !delayedRecovery && !headSystem && !headAtomic
+        !interruptRecovery.asUInt.orR && !delayedRecovery && !headSystem && !headAtomic
     val interruptCause = Mux1H(interruptEligible, interruptCandidates.map(_.U(5.W)))
     val recoveryValid = (recovery.asUInt.orR || takeInterrupt) && !delayedRecovery
-    val recoveryEntry = Mux1H(recovery, rob.io.head.map(_.bits))
-    val recoveryFtq = Mux1H(recovery, selectedFtq)
-    val recoveryFtqIdx = Mux1H(recovery, selectedFtqIdx)
-    val recoverySlotOH = UIntToOH(recoveryEntry.slot, fp.fetchWidth)
+    // Payload selection is independent of readiness. recoveryValid qualifies its
+    // use, so memory drain and atomic state need not enter every recovery data bit.
+    val recoveryPayloadSelect = PriorityEncoderOH(
+        recoveryCandidate.asUInt & VecInit(rob.io.head.map(_.valid)).asUInt
+    )
+    val recoverySlot = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.slot))
+    val recoveryPc = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.pc))
+    val recoveryIsSystem = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.isSystem))
+    val recoverySystemOp = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.systemOp))
+    val recoveryInstruction = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.instruction))
+    val recoveryExceptionValid = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.exception.valid))
+    val recoveryExceptionCause = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.exception.cause))
+    val recoveryExceptionTval = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.exception.tval))
+    val recoveryFtq = Mux1H(recoveryPayloadSelect, selectedFtq)
+    val recoverySelectedFtqIdx = Mux1H(recoveryPayloadSelect, selectedFtqIdx)
+    val recoverySlotOH = UIntToOH(recoverySlot, fp.fetchWidth)
     val recoveryTaken = (recoveryFtq.taken & recoverySlotOH).orR
     val recoveryTarget = Mux1H(recoverySlotOH, recoveryFtq.targets)
     val recoveryRetirement = Wire(new FrontendRetirement(fp))
     val recoveryMask = recoveryFtq.record.train.mask & VecInit.tabulate(fp.fetchWidth) { slot =>
-        slot.U <= recoveryEntry.slot
+        slot.U <= recoverySlot
     }.asUInt
-    recoveryRetirement.fetchToken := recoveryFtq.fetchToken
-    recoveryRetirement.ftqIdx := recoveryFtqIdx
+    recoveryRetirement.ftqIdx := recoverySelectedFtqIdx
     recoveryRetirement.mask := recoveryMask
     recoveryRetirement.taken := recoveryFtq.taken & recoveryMask
     for (slot <- 0 until fp.fetchWidth) {
@@ -350,11 +396,17 @@ class Commit(
     val delayedRecoveryAddFour = Reg(Bool())
     val delayedRetirement = Reg(new FrontendRetirement(fp))
     val delayedFtq = Reg(new FrontendFtqEntry(fp))
-    val selectedEntry = Mux(takeInterrupt, rob.io.head(0).bits, recoveryEntry)
-    val selectedEcall = selectedEntry.isSystem && selectedEntry.systemOp === SystemOp.ECALL.U
-    val selectedEbreak = selectedEntry.isSystem && selectedEntry.systemOp === SystemOp.EBREAK.U
-    val selectedMret = selectedEntry.isSystem && selectedEntry.systemOp === SystemOp.MRET.U
-    val selectedSret = selectedEntry.isSystem && selectedEntry.systemOp === SystemOp.SRET.U
+    val selectedPc = Mux(takeInterrupt, rob.io.head(0).bits.pc, recoveryPc)
+    val selectedIsSystem = Mux(takeInterrupt, rob.io.head(0).bits.isSystem, recoveryIsSystem)
+    val selectedSystemOp = Mux(takeInterrupt, rob.io.head(0).bits.systemOp, recoverySystemOp)
+    val selectedInstruction = Mux(takeInterrupt, rob.io.head(0).bits.instruction, recoveryInstruction)
+    val selectedExceptionValid = Mux(takeInterrupt, rob.io.head(0).bits.exception.valid, recoveryExceptionValid)
+    val selectedExceptionCause = Mux(takeInterrupt, rob.io.head(0).bits.exception.cause, recoveryExceptionCause)
+    val selectedExceptionTval = Mux(takeInterrupt, rob.io.head(0).bits.exception.tval, recoveryExceptionTval)
+    val selectedEcall = selectedIsSystem && selectedSystemOp === SystemOp.ECALL.U
+    val selectedEbreak = selectedIsSystem && selectedSystemOp === SystemOp.EBREAK.U
+    val selectedMret = selectedIsSystem && selectedSystemOp === SystemOp.MRET.U
+    val selectedSret = selectedIsSystem && selectedSystemOp === SystemOp.SRET.U
     val selectedMretIllegal = selectedMret && privilege =/= 3.U
     val selectedSretIllegal = selectedSret &&
         !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
@@ -365,10 +417,10 @@ class Commit(
         Mux(
             selectedEcall,
             Mux(privilege === 0.U, 8.U, Mux(privilege === 1.U, 9.U, 11.U)),
-            Mux(selectedEbreak, 3.U, Mux(selectedMretIllegal || selectedSretIllegal, 2.U, selectedEntry.exception.cause)),
+            Mux(selectedEbreak, 3.U, Mux(selectedMretIllegal || selectedSretIllegal, 2.U, selectedExceptionCause)),
         ),
     )
-    val trap = takeInterrupt || selectedEntry.exception.valid || selectedSystemException
+    val trap = takeInterrupt || selectedExceptionValid || selectedSystemException
     val delegatedInterrupt = Mux1H(
         VecInit.tabulate(32)(cause => interruptCause === cause.U),
         csr.io.state.mideleg.asBools,
@@ -385,27 +437,29 @@ class Commit(
     val returnTarget = Mux(selectedSret, csr.io.state.sepc, csr.io.state.mepc)
 
     delayedRecovery := recoveryValid
+    delayedBackendRecovery := recoveryValid
+    delayedMiddleendRecovery := recoveryValid
+    // Rename restoration follows the global clear so it sees the committed map
+    // and free-list tail after the final registered retirement update.
+    delayedMiddleendRestore := delayedMiddleendRecovery
     delayedRetireFtq := recoveryValid && !trap && !takeInterrupt
-    when(recoveryValid) {
-        delayedRecoveryBase := Mux(
-            trap,
-            trapTarget,
-            Mux(
-                selectedMret || selectedSret,
-                returnTarget,
-                Mux(recoveryTaken, recoveryTarget, selectedEntry.pc),
-            ),
-        )
-        delayedRecoveryAddFour := !trap && !selectedMret && !selectedSret && !recoveryTaken
-        delayedRetirement := recoveryRetirement
-        delayedFtq := recoveryFtq
-    }
+    delayedRecoveryBase := Mux(
+        trap,
+        trapTarget,
+        Mux(
+            selectedMret || selectedSret,
+            returnTarget,
+            Mux(recoveryTaken, recoveryTarget, selectedPc),
+        ),
+    )
+    delayedRecoveryAddFour := !trap && !selectedMret && !selectedSret && !recoveryTaken
+    delayedRetirement := recoveryRetirement
+    delayedFtq := recoveryFtq
     val delayedSequentialPc = BLevelPAdder32.sum(delayedRecoveryBase, 4.U, 0.U)
     val delayedRecoveryPc = Mux(delayedRecoveryAddFour, delayedSequentialPc, delayedRecoveryBase)
 
-    /* Completed FTQ packets generate normal feedback; recovery feedback is delayed with redirect. */
-    val completedPackets = Wire(Vec(cp.width, Bool()))
-    val recoveryPackets = Wire(Vec(cp.width, Bool()))
+    /* Completed packets use their ROB-owned FTQ index; predictor feedback crosses a register boundary. */
+    val normalPacketEnd = Wire(Vec(cp.width, Bool()))
     val normalRetirements = Wire(Vec(cp.width, new FrontendRetirement(fp)))
     val ftqPop = Wire(Vec(cp.width, Bool()))
     val normalFeedback = Seq.fill(cp.width)(Module(new CommitRecovery(fp)))
@@ -425,34 +479,29 @@ class Commit(
         feedback.io.record.meta := entry.record.train.meta
         feedback.io.record.earlyDirections := entry.record.train.earlyDirections
     }
-    for (packet <- 0 until cp.width) {
-        val ftqEntry = ftq.io.commit.head(packet).bits
-        completedPackets(packet) := VecInit((0 until cp.width).map { lane =>
-            retireFire(lane) && packetEnd(lane) && headMatchesFtq(lane)(packet)
-        }).asUInt.orR
-        recoveryPackets(packet) := VecInit((0 until cp.width).map { lane =>
-            recovery(lane) && headMatchesFtq(lane)(packet)
-        }).asUInt.orR
-        normalRetirements(packet).fetchToken := ftqEntry.fetchToken
-        normalRetirements(packet).ftqIdx := ftq.io.commit.headIdx(packet)
-        normalRetirements(packet).mask := ftqEntry.record.train.mask
-        normalRetirements(packet).taken := ftqEntry.taken & normalRetirements(packet).mask
-        normalRetirements(packet).nextPc := ftqEntry.record.nextPc
+    for (lane <- 0 until cp.width) {
+        val ftqEntry = selectedFtq(lane)
+        normalPacketEnd(lane) := retireFire(lane) && packetEnd(lane) && !recovery(lane)
+        normalRetirements(lane).ftqIdx := selectedFtqIdx(lane)
+        normalRetirements(lane).mask := ftqEntry.record.train.mask
+        normalRetirements(lane).taken := ftqEntry.taken & normalRetirements(lane).mask
+        normalRetirements(lane).nextPc := ftqEntry.record.nextPc
         for (slot <- 0 until fp.fetchWidth) {
-            normalRetirements(packet).targets(slot) := Mux(
+            normalRetirements(lane).targets(slot) := Mux(
                 ftqEntry.resolved(slot),
                 ftqEntry.targets(slot),
                 0.U,
             )
         }
         connectFeedback(
-            normalFeedback(packet),
-            completedPackets(packet) && !recoveryPackets(packet),
-            normalRetirements(packet),
+            normalFeedback(lane),
+            normalPacketEnd(lane),
+            normalRetirements(lane),
             ftqEntry,
         )
-        ftqPop(packet) := completedPackets(packet) && !recoveryPackets(packet)
     }
+    val ftqPopCount = PopCount(normalPacketEnd)
+    for (packet <- 0 until cp.width) { ftqPop(packet) := ftqPopCount > packet.U }
     ftq.io.commit.pop := ftqPop.asUInt
 
     val delayedFeedback = Module(new CommitRecovery(fp))
@@ -465,31 +514,58 @@ class Commit(
         delayedFtq,
     )
 
+    /* Normal events register here; recovery data already crosses delayedFtq. */
+    val delayedNormalStateValid = RegInit(0.U(cp.width.W))
+    val delayedNormalState = Reg(Vec(cp.width, new FrontendStateEvent(fp)))
+    delayedNormalStateValid := VecInit(normalFeedback.map(_.io.state.valid)).asUInt
+    val delayedNormalCount = PopCount(delayedNormalStateValid)
+    val delayedNormalCompact = Wire(Vec(cp.width, Valid(new FrontendStateEvent(fp))))
     for (port <- 0 until cp.width) {
-        io.frontend.ftq.retire(port).valid := Mux(
-            delayedRecovery,
-            if (port == 0) delayedFeedback.io.state.valid else false.B,
-            normalFeedback(port).io.state.valid,
-        )
+        val hits = (0 until cp.width).map { lane =>
+            val rank = if (lane == 0) 0.U else PopCount(delayedNormalStateValid.take(lane))
+            delayedNormalStateValid(lane) && rank === port.U
+        }
+        delayedNormalCompact(port).valid := VecInit(hits).asUInt.orR
+        delayedNormalCompact(port).bits := Mux1H(hits, delayedNormalState)
+    }
+    for (port <- 0 until cp.width) {
+        when(normalFeedback(port).io.state.valid) {
+            delayedNormalState(port) := normalFeedback(port).io.state.bits
+        }
+        val recoveryHere = delayedRecovery && delayedFeedback.io.state.valid && delayedNormalCount === port.U
+        io.frontend.ftq.retire(port).valid := delayedNormalCompact(port).valid || recoveryHere
         io.frontend.ftq.retire(port).bits := Mux(
-            delayedRecovery,
-            if (port == 0) delayedFeedback.io.state.bits else 0.U.asTypeOf(new FrontendStateEvent(fp)),
-            normalFeedback(port).io.state.bits,
+            recoveryHere,
+            delayedFeedback.io.state.bits,
+            delayedNormalCompact(port).bits,
         )
+    }
+    when(delayedRecovery) {
+        assert(delayedNormalCount + delayedFeedback.io.state.valid <= cp.width.U)
     }
 
     val recoveryTrain = delayedFeedback.io.train.valid
+    val normalTrainValid = VecInit(normalFeedback.map(_.io.train.valid))
+    val compactNormalTrain = Wire(Vec(cp.width, Valid(new FrontendTraining(fp))))
+    for (port <- 0 until cp.width) {
+        val hits = (0 until cp.width).map { lane =>
+            val rank = if (lane == 0) 0.U else PopCount(normalTrainValid.take(lane))
+            normalTrainValid(lane) && rank === port.U
+        }
+        compactNormalTrain(port).valid := VecInit(hits).asUInt.orR
+        compactNormalTrain(port).bits := Mux1H(hits, normalFeedback.map(_.io.train.bits))
+    }
     val enqueuePendingTrain = pendingRecoveryTrainValid && trainQueue.io.enq(0).ready
     for (port <- 0 until cp.width) {
         trainQueue.io.enq(port).valid := Mux(
             pendingRecoveryTrainValid,
             if (port == 0) true.B else false.B,
-            Mux(recoveryTrain, if (port == 0) true.B else false.B, normalFeedback(port).io.train.valid),
+            Mux(recoveryTrain, if (port == 0) true.B else false.B, compactNormalTrain(port).valid),
         )
         trainQueue.io.enq(port).bits := Mux(
             pendingRecoveryTrainValid,
             pendingRecoveryTrain,
-            Mux(recoveryTrain, delayedFeedback.io.train.bits, normalFeedback(port).io.train.bits),
+            Mux(recoveryTrain, delayedFeedback.io.train.bits, compactNormalTrain(port).bits),
         )
     }
     when(enqueuePendingTrain) {
@@ -518,9 +594,9 @@ class Commit(
 
     rob.io.clear := delayedRecovery
     sq.io.flush := delayedRecovery
-    io.middleend.flush := delayedRecovery
-    io.middleend.restore := delayedRecovery
-    io.backend.flush := delayedRecovery
+    io.middleend.flush := delayedMiddleendRecovery
+    io.middleend.restore := delayedMiddleendRestore
+    io.backend.flush := delayedBackendRecovery
 
     /* CSR execution is serialized at the ROB head; architectural CSR effects commit here. */
     val csrGrantValid = RegNext(
@@ -555,15 +631,15 @@ class Commit(
     csr.io.fp.bits.dirty := csr.io.fp.valid
     csr.io.trap.valid := recoveryValid && trap
     csr.io.trap.bits.supervisor := delegatedTrap
-    csr.io.trap.bits.pcWord := selectedEntry.pc(31, 2)
+    csr.io.trap.bits.pcWord := selectedPc(31, 2)
     csr.io.trap.bits.cause := trapCause
     csr.io.trap.bits.tval := Mux(
         takeInterrupt || selectedEcall,
         0.U,
         Mux(
             selectedEbreak,
-            selectedEntry.pc,
-            Mux(selectedMretIllegal || selectedSretIllegal, selectedEntry.instruction, selectedEntry.exception.tval),
+            selectedPc,
+            Mux(selectedMretIllegal || selectedSretIllegal, selectedInstruction, selectedExceptionTval),
         ),
     )
     csr.io.xret.valid := recoveryValid && !trap && (selectedMret || selectedSret)
@@ -579,7 +655,8 @@ class Commit(
     }
     // SATP changes become visible only after all younger work is discarded and the
     // frontend redirects to the next instruction under the new translation regime.
-    io.csr.tlbFlush := recoveryValid && (sfence || (writesSatp(selectedEntry) && !trap))
+    io.csr.tlbFlush := recoveryValid &&
+        (sfence || (writesSatpFields(selectedIsSystem, selectedSystemOp, selectedInstruction) && !trap))
     io.csr.currentPrivilege := privilege
     io.csr.state := csr.io.state
 
@@ -591,10 +668,9 @@ class Commit(
     }
     for (lane <- 0 until cp.width) {
         when(retireFire(lane) || recovery(lane)) {
-            assert(headMatchesFtq(lane).asUInt.orR, "ROB and FTQ retirement order must match")
+            assert(headMatchesFtq(lane), "ROB and FTQ retirement order must match")
         }
     }
-
     /* Simulation trace and performance counters stay after all retirement logic. */
     val branchCount = RegInit(0.U(64.W))
     val branchFailCount = RegInit(0.U(64.W))

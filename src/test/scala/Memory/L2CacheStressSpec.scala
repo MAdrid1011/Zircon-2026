@@ -14,11 +14,15 @@ class L2CacheStressSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
     ) {
         s"$name: randomized 34-bit target, clean-victim and PTW traffic" in {
-            val params = ZirconConfig.L2CacheParams(sets = 16)
+            val params = if (backend == DualPortRamBackend.BSG) {
+                ZirconConfig.L2CacheParams(sets = 16)
+            } else {
+                ZirconConfig.L2CacheParams()
+            }
             simulate(new L2Cache(backend, p = params)) { dut =>
                 val d = new L2CacheDriver(dut)
                 val random = new Random(20260916L)
@@ -45,7 +49,7 @@ class L2CacheStressSpec extends AnyFreeSpec with ChiselSim {
                                 s"clean-only test received dirty ownership at iteration $iteration"
                             )
                         case 2 | 3 =>
-                            val (data, error) = icache(target, victim, token = iteration + 1)
+                            val (data, error) = icache(target, victim)
                             assert(!error && data == line(target), s"ICache data mismatch at iteration $iteration")
                         case _ =>
                             val wordAddress = target + random.nextInt(params.lineBytes / 4) * 4

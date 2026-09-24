@@ -35,6 +35,7 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
             dut.io.cache.wbSelect.bits.exception.poke(0)
             dut.io.cache.wbSelect.bits.retry.poke(false)
             dut.io.cache.wbSelect.bits.uncache.poke(false)
+            dut.io.cache.wbSelect.bits.atomic.poke(false)
             dut.io.cache.rsp.valid.poke(false)
             dut.io.cache.rsp.bits.slot.poke(0)
             dut.io.cache.rsp.bits.data.poke(0)
@@ -58,10 +59,8 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
                 a.ready.expect(true); s.ready.expect(true)
                 dut.io.cache.req.valid.expect(false)
                 dut.clock.step()
-                if (i == 0) {
-                    dut.io.cmt.storeAddress.get.valid.expect(false)
-                } else {
-                    dut.io.cmt.storeAddress.get.valid.expect(true)
+                dut.io.cmt.storeAddress.get.valid.expect(i > 0)
+                if (i > 0) {
                     dut.io.cmt.storeAddress.get.bits.sqIdx.expect(i - 1)
                     dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * (i - 1))
                 }
@@ -78,10 +77,12 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
             dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * 11)
             a.bits.store.poke(false); a.bits.fu.poke(ZirconConfig.DecodeUnit.Load)
             a.bits.rdVld.poke(true); a.ready.expect(false)
-            // Global recovery rejects new speculative work on its edge and frees every occupied load context.
-            dut.io.cmt.flush.poke(true); a.valid.poke(true)
-            a.ready.expect(false); dut.clock.step()
+            // The upstream IQ suppresses valid during recovery. This consumer may
+            // expose ordinary capacity while flush clears every occupied context.
+            dut.io.cmt.flush.poke(true); a.valid.poke(false)
+            dut.clock.step()
             dut.io.cmt.flush.poke(false)
+            a.valid.poke(true)
             a.ready.expect(true); dut.clock.step()
             a.valid.poke(false)
             dut.io.cache.req.valid.expect(true)

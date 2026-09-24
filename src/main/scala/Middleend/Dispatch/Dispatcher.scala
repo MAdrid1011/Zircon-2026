@@ -2,13 +2,25 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig._
 
+/** Registered route predicates carried beside one Rename-to-Dispatch entry. */
+class DispatchClass extends Bundle {
+    val shortArith = Bool()
+    val mixArith = Bool()
+    val load = Bool()
+    val storeOrAtomic = Bool()
+    val noIssue = Bool()
+
+    def recognized: Bool = shortArith || mixArith || load || storeOrAtomic || noIssue
+}
+
 class DispatcherIO(p: BackendParams, issue: IssueParams) extends Bundle {
     val in = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
     val memoryEntries = Input(Vec(issue.dispatchWidth, new BackendPackage(p)))
+    val dispatchClass = Input(Vec(issue.dispatchWidth, new DispatchClass))
     // Bit n permits the ordered prefix through instruction n.
     val resourcePrefix = Input(UInt(issue.dispatchWidth.W))
     val freeCount = Input(Vec(IssueQueueIndex.Count, UInt(issue.countWidth.W)))
-    val flush = Input(Bool())
+    val clearPreference = Input(Bool())
 
     val accepted = Output(UInt(issue.dispatchWidth.W))
     val enqueue = Output(Vec(IssueQueueIndex.Count, new IssueEnqueueGroup(p, issue.dispatchWidth)))
@@ -33,32 +45,14 @@ class Dispatcher(
     val preferArith = RegInit(false.B)
     val preferLoadStore = RegInit(false.B)
 
-    /* Classify every lane once; later planning operates only on these route classes. */
-    val alu = VecInit(io.in.entries.map(_.fu === DecodeUnit.ALU.U))
-    val branch = VecInit(io.in.entries.map(_.fu === DecodeUnit.Branch.U))
-    val multiply = VecInit(io.in.entries.map(_.fu === DecodeUnit.Multiply.U))
-    val divide = VecInit(io.in.entries.map(_.fu === DecodeUnit.Divide.U))
-    val fpMisc = VecInit(io.in.entries.map(_.fu === DecodeUnit.FpMisc.U))
-    val load = VecInit(io.in.entries.map(_.fu === DecodeUnit.Load.U))
-    val store = VecInit(io.in.entries.map(_.fu === DecodeUnit.Store.U))
-    val atomic = VecInit(io.in.entries.map(_.fu === DecodeUnit.Atomic.U))
-    val csr = VecInit(io.in.entries.map(item =>
-        item.fu === DecodeUnit.System.U && item.op >= SystemOp.CSRRW.U && item.op <= SystemOp.CSRRCI.U
-    ))
-    val commitSystem = VecInit(io.in.entries.map(item =>
-        item.fu === DecodeUnit.System.U &&
-            (item.op <= SystemOp.FENCE_I.U || item.op >= SystemOp.ECALL.U)
-    ))
-    val nativeMix = VecInit((0 until width).map(lane => multiply(lane) || divide(lane) || fpMisc(lane)))
-    val shortArith = VecInit((0 until width).map(lane => alu(lane) || branch(lane)))
-
-    val noIssue = VecInit((0 until width).map { lane =>
-        io.in.entries(lane).exception.valid || commitSystem(lane)
-    })
-    val recognized = VecInit((0 until width).map { lane =>
-        alu(lane) || branch(lane) || nativeMix(lane) || load(lane) || store(lane) || atomic(lane) || csr(lane) ||
-            noIssue(lane)
-    })
+    // Rename stores these predicates with the payload, keeping FU/op decode out
+    // of capacity planning and every downstream enqueue write enable.
+    val shortArith = VecInit(io.dispatchClass.map(_.shortArith))
+    val mixArith = VecInit(io.dispatchClass.map(_.mixArith))
+    val load = VecInit(io.dispatchClass.map(_.load))
+    val storeOrAtomic = VecInit(io.dispatchClass.map(_.storeOrAtomic))
+    val noIssue = VecInit(io.dispatchClass.map(_.noIssue))
+    val recognized = VecInit(io.dispatchClass.map(_.recognized))
 
     private def arithQueue(index: UInt): UInt =
         Mux(index(0), queue(IssueQueueIndex.Arith1), queue(IssueQueueIndex.Arith0))
@@ -86,9 +80,8 @@ class Dispatcher(
         for (lane <- 0 until width) {
             val loadStoreFirst = preferLoadStore ^ (lane == 1).B
             val fixed = MuxCase(0.U(queueCount.W), Seq(
-                csr(lane) -> queue(IssueQueueIndex.MixArith),
-                nativeMix(lane) -> queue(IssueQueueIndex.MixArith),
-                (store(lane) || atomic(lane)) ->
+                mixArith(lane) -> queue(IssueQueueIndex.MixArith),
+                storeOrAtomic(lane) ->
                     (queue(IssueQueueIndex.LoadStoreAddress) | queue(IssueQueueIndex.StoreData)),
                 noIssue(lane) -> 0.U(queueCount.W),
             ))
@@ -174,8 +167,8 @@ class Dispatcher(
                         MuxCase(0.U(queueCount.W), Seq(
                             noIssue(lane) -> 0.U(queueCount.W),
                             shortArith(lane) -> arithQueue(arithIndex),
-                            (csr(lane) || nativeMix(lane)) -> queue(IssueQueueIndex.MixArith),
-                            (store(lane) || atomic(lane)) ->
+                            mixArith(lane) -> queue(IssueQueueIndex.MixArith),
+                            storeOrAtomic(lane) ->
                                 (queue(IssueQueueIndex.LoadStoreAddress) | queue(IssueQueueIndex.StoreData)),
                             load(lane) -> Mux(
                                 loadToAddress,
@@ -202,7 +195,7 @@ class Dispatcher(
 
     /* Select the longest prefix permitted by both Commit resources and IQ capacity. */
     val eligiblePrefix = VecInit((1 to width).map { count =>
-        !io.flush && io.resourcePrefix(count - 1) && prefixPlans(count - 1)._1
+        io.resourcePrefix(count - 1) && prefixPlans(count - 1)._1
     }).asUInt
     val selectedPrefix = VecInit((1 to width).map { count =>
         val larger = if (count == width) false.B else eligiblePrefix(width - 1, count).orR
@@ -242,7 +235,7 @@ class Dispatcher(
     }
 
     /* Rotate equal-cost choices only after a matching instruction is actually accepted. */
-    when(io.flush) {
+    when(io.clearPreference) {
         preferArith := false.B
         preferLoadStore := false.B
     }.otherwise {

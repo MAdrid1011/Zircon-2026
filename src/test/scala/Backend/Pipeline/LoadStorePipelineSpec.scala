@@ -214,7 +214,7 @@ class LoadStorePipelineSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
         if sys.env.get("ZIRCON_LOAD_BACKEND").forall(_ == name)
     ) {

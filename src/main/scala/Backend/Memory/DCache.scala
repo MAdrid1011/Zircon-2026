@@ -19,16 +19,9 @@ class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
     val forwardBlocked = Bool()
 }
 
-class DCacheLookupStage(p: DCacheParams) extends Bundle {
+class DCacheLookupStage(p: DCacheParams) extends DLoadRequest(p) {
     val cacheIndex = UInt(l1Index.W)
-    val vaddr = UInt(32.W)
-    val paddr = UInt(34.W)
-    val slot = UInt(p.slotWidth.W)
-    val mtype = UInt(3.W)
-    val uncache = Bool()
-    val ioAuthorized = Bool()
-    val exception = UInt(4.W)
-    val translationMiss = Bool()
+    val permission = new DCachePermissionContext
     val forwardValid = Bool()
     val forwardData = UInt(32.W)
     val forwardMask = UInt(4.W)
@@ -53,10 +46,19 @@ class DCache(
     val io = IO(new DCacheIO(p, tlbEnabled, observe))
     require(l1Way == 2)
 
+    // Permission state travels with the request across the existing lookup
+    // boundary. Trap/xRET clears ordinary requests before this context can age.
+    val currentPermission = WireDefault(0.U.asTypeOf(new DCachePermissionContext))
+    currentPermission.direct := true.B
+
     val dtlb = if (tlbEnabled) Some(Module(new DataTLB)) else None
     if (tlbEnabled) {
         val manage = io.tlb.get
         val translation = dtlb.get
+        currentPermission.direct := !manage.control.enabled || manage.control.privilege === 3.U
+        currentPermission.privilege := manage.control.privilege
+        currentPermission.mxr := manage.control.mxr
+        currentPermission.sum := manage.control.sum
         val activeAsid = RegInit(0.U(9.W))
         val asidChanged = activeAsid =/= manage.control.asid
         translation.io.refill := manage.refill
@@ -148,9 +150,10 @@ class DCache(
     val lookup = Reg(Vec(2, new DCacheLookupStage(p)))
     val lookupValid = RegInit(VecInit.fill(2)(false.B))
     val lookupFresh = RegInit(VecInit.fill(2)(false.B))
-    val translatedLookup = Wire(Vec(2, new DCacheLookupStage(p)))
+    val resolvedLookup = Wire(Vec(2, new DLoadRequest(p)))
     for (lane <- 0 until 2) {
-        translatedLookup(lane) := lookup(lane)
+        resolvedLookup(lane) := 0.U.asTypeOf(new DLoadRequest(p))
+        InheritFields(resolvedLookup(lane), lookup(lane))
     }
 
     // S3 owns forwarding, hit completion, retry generation and MSHR allocation.
@@ -165,7 +168,7 @@ class DCache(
     for (lane <- 0 until 2) {
         hitNow(lane) := VecInit((0 until l1Way).map { way =>
             val ramTag = if (lane == 0) tagTab(way).douta else tagTab(way).doutb
-            ramTag === tag(translatedLookup(lane).paddr) && validTab(way).rdata(lane)
+            ramTag === tag(resolvedLookup(lane).paddr) && validTab(way).rdata(lane)
         }).asUInt
         linesNow(lane) := VecInit(dataTab.map(ram => if (lane == 0) ram.douta else ram.doutb))
         tagsNow(lane) := VecInit(tagTab.map(ram => if (lane == 0) ram.douta else ram.doutb))
@@ -316,11 +319,11 @@ class DCache(
     lruTab.raddr(2) := Mux(maintenanceActive, maintenanceSet, index(storeRequest.paddr))
 
     // ==================== S3 forwarding and completion ====================
-    val executeResponseMatch = VecInit((0 until 2).map { lane =>
+    val executeForwardMatch = VecInit((0 until 2).map { lane =>
         io.forward(lane).result.valid && io.forward(lane).result.bits.slot === execute(lane).slot
     })
     val effectiveForwardValid = VecInit((0 until 2).map { lane =>
-        execute(lane).forwardValid || executeResponseMatch(lane)
+        execute(lane).forwardValid || (executeValid(lane) && executeForwardMatch(lane))
     })
     val effectiveForwardData = Wire(Vec(2, UInt(32.W)))
     val effectiveForwardMask = Wire(Vec(2, UInt(4.W)))
@@ -329,17 +332,17 @@ class DCache(
         effectiveForwardData(lane) := Mux(
             execute(lane).forwardValid,
             execute(lane).forwardData,
-            io.forward(lane).result.bits.data
+            io.forward(lane).result.bits.data,
         )
         effectiveForwardMask(lane) := Mux(
             execute(lane).forwardValid,
             execute(lane).forwardMask,
-            io.forward(lane).result.bits.mask
+            io.forward(lane).result.bits.mask,
         )
         effectiveForwardBlocked(lane) := Mux(
             execute(lane).forwardValid,
             execute(lane).forwardBlocked,
-            io.forward(lane).result.bits.blocked
+            io.forward(lane).result.bits.blocked,
         )
     }
     val forwardComplete = VecInit((0 until 2).map(lane => executeValid(lane) && effectiveForwardValid(lane)))
@@ -458,6 +461,7 @@ class DCache(
                 (execute(lane).uncache && !execute(lane).ioAuthorized) ||
                 requiresMemory(lane) || staleLookup(lane))
         localResponse(lane).uncache := execute(lane).uncache && !execute(lane).translationMiss
+        localResponse(lane).atomic := execute(lane).atomic
 
         responseInputValid(lane) := missCompletionForLane(lane) || localResponseValid(lane)
         responseInput(lane) := localResponse(lane)
@@ -465,8 +469,11 @@ class DCache(
             responseInput(lane) := missUnit.io.complete.bits.response
         }
         localResponseFire(lane) := localResponseValid(lane) && !missCompletionForLane(lane)
-        executeRelease(lane) := localResponseFire(lane) ||
-            (offerMiss && missUnit.io.allocate.fire && selectedMissLane === (lane == 1).B)
+        // A miss offer implies an idle MissUnit, hence allocate.ready. Completion
+        // is only valid in the non-idle respond state, so the two events cannot
+        // overlap. Every completed forwarding query therefore releases S3 unless
+        // an older completion for the same lane owns this cycle's WB slot.
+        executeRelease(lane) := forwardComplete(lane) && !io.flush && !missCompletionForLane(lane)
     }
     missUnit.io.complete.ready := !io.flush
 
@@ -477,6 +484,7 @@ class DCache(
         io.load(lane).wbSelect.bits.exception := responseInput(lane).exception
         io.load(lane).wbSelect.bits.retry := responseInput(lane).retry
         io.load(lane).wbSelect.bits.uncache := responseInput(lane).uncache
+        io.load(lane).wbSelect.bits.atomic := responseInput(lane).atomic
     }
 
     // Each lane has one fixed WB register. Its current response is consumed every
@@ -502,16 +510,25 @@ class DCache(
 
     // ==================== Load input and RAM scheduling ====================
     val executeAvailable = VecInit((0 until 2).map(lane => !executeValid(lane) || executeRelease(lane)))
+    val lookupResponseMatch = VecInit((0 until 2).map { lane =>
+        io.forward(lane).result.valid && io.forward(lane).result.bits.slot === lookup(lane).slot
+    })
+    // A fresh Load already resident in lane 1 D1 owns the shared DTLB lookup.
+    // This ownership must not depend on execute release: that late result comes
+    // from StoreBuffer forwarding and would otherwise precede the DTLB lookup.
+    val lane1LoadOwnsTranslation = lookupValid(1) && lookupFresh(1) && !io.flush
+    val storeTranslationBlocksLoad = WireDefault(false.B)
     val lookupMove = VecInit((0 until 2).map { lane =>
-        lookupValid(lane) && lookupFresh(lane) && executeAvailable(lane) && !io.flush
+        lookupValid(lane) && lookupFresh(lane) && executeAvailable(lane) &&
+            !(if (lane == 1) storeTranslationBlocksLoad else false.B) && !io.flush
     })
     val lookupAvailable = VecInit((0 until 2).map(lane => !lookupValid(lane) || lookupMove(lane)))
     val inputFire = VecInit((0 until 2).map(lane => io.load(lane).req.fire))
     val candidateValid = Wire(Vec(2, Bool()))
     val rawCandidate = Wire(Vec(2, new DLoadRequest(p)))
-    val candidate = Wire(Vec(2, new DLoadRequest(p)))
     val arrayBlocked = Wire(Vec(2, Bool()))
     val lookupReissue = Wire(Vec(2, Bool()))
+    val lookupNeedsRead = Wire(Vec(2, Bool()))
     val loadIssue = Wire(Vec(2, Bool()))
     val arrayRead = Wire(Vec(2, Bool()))
     val arrayAddress = Wire(Vec(2, UInt(34.W)))
@@ -522,10 +539,10 @@ class DCache(
     for (lane <- 0 until 2) {
         candidateValid(lane) := requestBufferValid(lane) || inputFire(lane)
         rawCandidate(lane) := Mux(requestBufferValid(lane), requestBuffer(lane), io.load(lane).req.bits)
-        candidate(lane) := rawCandidate(lane)
         arrayBlocked(lane) := maintenanceActive || installActive || storeArrayWrite ||
             (if (lane == 1) storeLookupIssue else false.B)
-        lookupReissue(lane) := lookupValid(lane) && !lookupFresh(lane) && executeAvailable(lane) &&
+        lookupNeedsRead(lane) := lookupValid(lane) && !lookupFresh(lane)
+        lookupReissue(lane) := lookupNeedsRead(lane) && executeAvailable(lane) &&
             !arrayBlocked(lane) && !io.flush
         val storeTranslationBlocksIssue = if (lane == 1) storeTranslationPending else false.B
         loadIssue(lane) := candidateValid(lane) && lookupAvailable(lane) && !arrayBlocked(lane) &&
@@ -534,9 +551,9 @@ class DCache(
             !arrayBlocked(lane) && !io.flush
         arrayRead(lane) := loadIssue(lane) || lookupReissue(lane)
         arrayAddress(lane) := Mux(
-            lookupReissue(lane),
+            lookupNeedsRead(lane),
             Cat(lookup(lane).cacheIndex, 0.U(l1Offset.W)),
-            lookupAddress(candidate(lane))
+            lookupAddress(rawCandidate(lane))
         )
     }
 
@@ -544,28 +561,39 @@ class DCache(
         val manage = io.tlb.get
         val translation = dtlb.get
         val asidChanged = translation.io.scopeUpdate.valid
-        val direct = !manage.control.enabled || manage.control.privilege === 3.U
-        val storeRequestValid = io.storeTranslation.get.request.valid && !lookupMove(1)
+        val storeRequestValid = io.storeTranslation.get.request.valid && !lane1LoadOwnsTranslation
+        val storePermission = io.storeTranslation.get.request.bits.permission
+        val storeDirect = storePermission.direct
+        val storeUsesDTLB = storeRequestValid && !storeDirect
+        storeTranslationBlocksLoad := storeUsesDTLB
 
         for (lane <- 0 until 2) {
-            translation.io.lookup(lane).valid := lookupMove(lane)
+            val permission = lookup(lane).permission
+            val direct = permission.direct
+            translation.io.lookup(lane).valid := lookupValid(lane) && lookupFresh(lane) &&
+                !(if (lane == 1) storeUsesDTLB else false.B)
             translation.io.lookup(lane).bits.vaddr := lookup(lane).vaddr
             val hit = translation.io.response(lane).hit && !asidChanged && !manage.flush
             val miss = lookup(lane).exception === 0.U && !direct && !hit
-            val permissionFault = !direct && hit &&
-                !MMUPermission.data(translation.io.response(lane), manage.control, false.B)
+            val permissionFault = !direct && hit && !MMUPermission.data(
+                translation.io.response(lane),
+                permission.privilege,
+                permission.mxr,
+                permission.sum,
+                false.B,
+            )
             val accessFault = !direct && hit && translation.io.response(lane).pma === PMAAttribute.invalid
-            translatedLookup(lane).paddr := Mux(
+            resolvedLookup(lane).paddr := Mux(
                 direct,
                 Cat(0.U(2.W), lookup(lane).vaddr),
                 translation.io.response(lane).paddr
             )
-            translatedLookup(lane).uncache := Mux(
+            resolvedLookup(lane).uncache := Mux(
                 direct,
                 PMA.attribute(Cat(0.U(2.W), lookup(lane).vaddr)) =/= PMAAttribute.cached,
                 translation.io.response(lane).pma =/= PMAAttribute.cached
             )
-            translatedLookup(lane).exception := Mux(
+            resolvedLookup(lane).exception := Mux(
                 lookup(lane).exception =/= 0.U,
                 lookup(lane).exception,
                 Mux(
@@ -574,24 +602,38 @@ class DCache(
                     Mux(permissionFault, 13.U, Mux(accessFault, 5.U, 0.U)),
                 )
             )
-            translatedLookup(lane).translationMiss := miss
-            io.tlbMiss.get(lane).valid := lookupMove(lane) && miss
+            resolvedLookup(lane).translationMiss := miss
+            io.tlbMiss.get(lane).valid := translation.io.lookup(lane).valid && miss
             io.tlbMiss.get(lane).bits.vaddr := lookup(lane).vaddr
         }
 
         when(storeRequestValid) {
-            translation.io.lookup(1).valid := true.B
-            translation.io.lookup(1).bits.vaddr := io.storeTranslation.get.request.bits.vaddr
+            when(storeUsesDTLB) {
+                translation.io.lookup(1).valid := true.B
+                translation.io.lookup(1).bits.vaddr := io.storeTranslation.get.request.bits.vaddr
+            }
             val hit = translation.io.response(1).hit && !asidChanged && !manage.flush
-            val miss = io.storeTranslation.get.request.bits.exception === 0.U && !direct && !hit
-            val readPermitted = MMUPermission.data(translation.io.response(1), manage.control, false.B)
-            val writePermitted = MMUPermission.data(translation.io.response(1), manage.control, true.B)
-            val permissionFault = !direct && hit && Mux(
+            val miss = io.storeTranslation.get.request.bits.exception === 0.U && !storeDirect && !hit
+            val readPermitted = MMUPermission.data(
+                translation.io.response(1),
+                storePermission.privilege,
+                storePermission.mxr,
+                storePermission.sum,
+                false.B,
+            )
+            val writePermitted = MMUPermission.data(
+                translation.io.response(1),
+                storePermission.privilege,
+                storePermission.mxr,
+                storePermission.sum,
+                true.B,
+            )
+            val permissionFault = !storeDirect && hit && Mux(
                 io.storeTranslation.get.request.bits.atomic,
                 !readPermitted || (!io.storeTranslation.get.request.bits.lr && !writePermitted),
                 !writePermitted,
             )
-            val accessFault = !direct && hit && translation.io.response(1).pma === PMAAttribute.invalid
+            val accessFault = !storeDirect && hit && translation.io.response(1).pma === PMAAttribute.invalid
             val directAccessFault = Mux(
                 io.storeTranslation.get.request.bits.atomic,
                 !PMA.readable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) ||
@@ -602,12 +644,12 @@ class DCache(
             val faultCause = Mux(io.storeTranslation.get.request.bits.lr, 5.U, 7.U)
             val pageFaultCause = Mux(io.storeTranslation.get.request.bits.lr, 13.U, 15.U)
             io.storeTranslation.get.response.paddr := Mux(
-                direct,
+                storeDirect,
                 Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr),
                 translation.io.response(1).paddr
             )
             io.storeTranslation.get.response.uncache := Mux(
-                direct,
+                storeDirect,
                 PMA.attribute(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) =/=
                     PMAAttribute.cached,
                 translation.io.response(1).pma =/= PMAAttribute.cached
@@ -616,7 +658,7 @@ class DCache(
                 io.storeTranslation.get.request.bits.exception =/= 0.U,
                 io.storeTranslation.get.request.bits.exception,
                 Mux(
-                    direct && directAccessFault,
+                    storeDirect && directAccessFault,
                     faultCause,
                     Mux(permissionFault, pageFaultCause, Mux(accessFault, faultCause, 0.U)),
                 )
@@ -629,24 +671,19 @@ class DCache(
     }
 
     for (lane <- 0 until 2) {
-        val needsForward = !translatedLookup(lane).translationMiss && !translatedLookup(lane).uncache &&
-            translatedLookup(lane).exception === 0.U &&
-            !misaligned(translatedLookup(lane).paddr, translatedLookup(lane).mtype(1, 0))
-        translatedLookup(lane).forwardValid := !needsForward
-        translatedLookup(lane).forwardData := 0.U
-        translatedLookup(lane).forwardMask := 0.U
-        translatedLookup(lane).forwardBlocked := false.B
-        io.forward(lane).query.valid := lookupMove(lane) && needsForward
-        io.forward(lane).query.bits.wordAddress := translatedLookup(lane).paddr(33, 2)
-        io.forward(lane).query.bits.slot := translatedLookup(lane).slot
-        io.forward(lane).query.bits.mask := shiftMaskLeft(
-            byteMask(translatedLookup(lane).mtype(1, 0)),
-            translatedLookup(lane).paddr(1, 0)
-        )
+        val needsForward = !resolvedLookup(lane).translationMiss && !resolvedLookup(lane).uncache &&
+            resolvedLookup(lane).exception === 0.U &&
+            !misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))
+        io.forward(lane).query.valid := lookupValid(lane) && lookupFresh(lane) &&
+            !lookup(lane).forwardValid && needsForward
+        io.forward(lane).query.bits.wordAddress := resolvedLookup(lane).paddr(33, 2)
+        io.forward(lane).query.bits.slot := resolvedLookup(lane).slot
+        io.forward(lane).query.bits.mask := accessMask(resolvedLookup(lane))
         when(io.forward(lane).result.valid && !io.flush) {
             assert(
-                executeValid(lane) && io.forward(lane).result.bits.slot === execute(lane).slot,
-                "Forwarding response must match the active DCache execute stage"
+                (lookupValid(lane) && io.forward(lane).result.bits.slot === lookup(lane).slot) ||
+                    (executeValid(lane) && io.forward(lane).result.bits.slot === execute(lane).slot),
+                "Forwarding response must match an active DCache stage"
             )
         }
     }
@@ -683,27 +720,30 @@ class DCache(
 
             when(lookupMove(lane)) {
                 execute(lane) := 0.U.asTypeOf(new DCacheExecuteStage(p))
-                InheritFields(execute(lane), translatedLookup(lane))
+                InheritFields(execute(lane), resolvedLookup(lane))
                 execute(lane).hit := hitNow(lane)
                 execute(lane).tags := tagsNow(lane)
                 execute(lane).lines := linesNow(lane)
                 execute(lane).validWays := validWaysNow(lane)
                 execute(lane).dirtyWays := dirtyWaysNow(lane)
                 execute(lane).lruWay := lruTab.rdata(lane)
-                execute(lane).generation := cacheGeneration(index(translatedLookup(lane).paddr))
-                execute(lane).forwardValid := translatedLookup(lane).forwardValid
-                execute(lane).forwardData := translatedLookup(lane).forwardData
-                execute(lane).forwardMask := translatedLookup(lane).forwardMask
-                execute(lane).forwardBlocked := translatedLookup(lane).forwardBlocked
-                when(translatedLookup(lane).exception === 0.U &&
-                    misaligned(translatedLookup(lane).paddr, translatedLookup(lane).mtype(1, 0))) {
+                execute(lane).generation := cacheGeneration(index(resolvedLookup(lane).paddr))
+                val noForward = resolvedLookup(lane).translationMiss || resolvedLookup(lane).uncache ||
+                    resolvedLookup(lane).exception =/= 0.U ||
+                    misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))
+                execute(lane).forwardValid := lookup(lane).forwardValid || noForward
+                execute(lane).forwardData := lookup(lane).forwardData
+                execute(lane).forwardMask := lookup(lane).forwardMask
+                execute(lane).forwardBlocked := lookup(lane).forwardBlocked
+                when(resolvedLookup(lane).exception === 0.U &&
+                    misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))) {
                     execute(lane).exception := 4.U
                 }
                 executeValid(lane) := true.B
             }.elsewhen(executeRelease(lane)) {
                 executeValid(lane) := false.B
             }
-            when(executeResponseMatch(lane) && !executeRelease(lane) && !lookupMove(lane)) {
+            when(executeForwardMatch(lane) && !lookupMove(lane) && !executeRelease(lane)) {
                 execute(lane).forwardValid := true.B
                 execute(lane).forwardData := io.forward(lane).result.bits.data
                 execute(lane).forwardMask := io.forward(lane).result.bits.mask
@@ -712,8 +752,9 @@ class DCache(
 
             when(loadIssue(lane)) {
                 lookup(lane) := 0.U.asTypeOf(new DCacheLookupStage(p))
-                InheritFields(lookup(lane), candidate(lane))
-                lookup(lane).cacheIndex := index(lookupAddress(candidate(lane)))
+                InheritFields(lookup(lane), rawCandidate(lane))
+                lookup(lane).cacheIndex := index(lookupAddress(rawCandidate(lane)))
+                lookup(lane).permission := currentPermission
                 lookup(lane).forwardValid := false.B
                 lookupValid(lane) := true.B
                 lookupFresh(lane) := true.B
@@ -722,7 +763,8 @@ class DCache(
                 lookupFresh(lane) := false.B
             }.elsewhen(lookupReissue(lane)) {
                 lookupFresh(lane) := true.B
-            }.elsewhen(lookupValid(lane) && lookupFresh(lane)) {
+            }.elsewhen(lookupValid(lane) && lookupFresh(lane) &&
+                !(if (lane == 1) storeTranslationBlocksLoad else false.B)) {
                 lookupFresh(lane) := false.B
             }
         }
@@ -730,10 +772,10 @@ class DCache(
 
     if (tlbEnabled) {
         for (lane <- 0 until 2) {
-            when(lookupMove(lane) && !translatedLookup(lane).translationMiss) {
+            when(lookupMove(lane) && !resolvedLookup(lane).translationMiss) {
                 assert(
-                    translatedLookup(lane).paddr(l1Offset + l1Index - 1, 0) ===
-                        translatedLookup(lane).vaddr(l1Offset + l1Index - 1, 0),
+                    resolvedLookup(lane).paddr(l1Offset + l1Index - 1, 0) ===
+                        resolvedLookup(lane).vaddr(l1Offset + l1Index - 1, 0),
                     "DCache: translation changed VIPT page-offset index bits"
                 )
             }
@@ -900,6 +942,7 @@ class DCache(
 
     assert(!(installFire && storeArrayWrite), "DCache: refill and committed store write overlap")
     for (lane <- 0 until 2) {
+        assert(!(loadIssue(lane) && lookupReissue(lane)), "DCache: new lookup and reread overlap")
         when(lookupMove(lane)) {
             assert(PopCount(hitNow(lane)) <= 1.U, "DCache: multiple hits")
         }
@@ -923,8 +966,8 @@ class DCache(
         val storeMisses = RegInit(0.U(64.W))
         val missBusyCycles = RegInit(0.U(64.W))
         for (lane <- 0 until 2) {
-            val cachedLookup = lookupMove(lane) && translatedLookup(lane).exception === 0.U &&
-                !translatedLookup(lane).translationMiss && !translatedLookup(lane).uncache
+            val cachedLookup = lookupMove(lane) && resolvedLookup(lane).exception === 0.U &&
+                !resolvedLookup(lane).translationMiss && !resolvedLookup(lane).uncache
             when(cachedLookup) {
                 loadVisits(lane) := loadVisits(lane) + 1.U
                 when(hitNow(lane).orR) { loadHits(lane) := loadHits(lane) + 1.U }
@@ -983,7 +1026,7 @@ class DCache(
         io.debug.get.responseValid := responseValid.asUInt
         io.debug.get.forwardQueryValid := io.forward(1).query.valid
         io.debug.get.forwardResultValid := io.forward(1).result.valid
-        io.debug.get.lookupResponseMatch := executeResponseMatch(1)
+        io.debug.get.lookupResponseMatch := lookupResponseMatch(1)
         io.debug.get.lookupMove := lookupMove(1)
         io.debug.get.executeRelease := executeRelease(1)
         io.debug.get.missBusy := missUnit.io.busy

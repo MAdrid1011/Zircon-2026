@@ -2,6 +2,15 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
+class DivideIntegerWindowProbe extends Module {
+    val io = IO(new Bundle {
+        val data = Input(UInt(SRT4Logic.Width.W))
+        val shift = Input(UInt(6.W))
+        val out = Output(UInt(32.W))
+    })
+    io.out := SRT4Logic.integerWindow(io.data, io.shift)
+}
+
 class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
     case class Sample(op: Int, rm: Int, a: BigInt, b: BigInt, result: BigInt, flags: Int, tag: Int)
 
@@ -31,6 +40,34 @@ class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
             val overflow = x.op % 2 == 0 && x.a == 0x80000000L && x.b == 0xffffffffL
             if (b == 0 || a == 0 || a < b || overflow) 0
             else (a.bitLength - b.bitLength + 1) / 2 + 1
+        }
+    }
+
+    "EX4 integer-window barrel selection matches every legacy shift encoding" in {
+        simulate(new DivideIntegerWindowProbe) { dut =>
+            val dataMask = (BigInt(1) << SRT4Logic.Width) - 1
+            val wordMask = (BigInt(1) << 32) - 1
+            val patterns = Seq(
+                BigInt(0),
+                BigInt(1),
+                BigInt(1) << 35,
+                BigInt("89abcdef0", 16),
+                dataMask,
+            )
+            for (shift <- 0 until 64; pattern <- patterns) {
+                val data = pattern & dataMask
+                val expected = if (shift >= SRT4Logic.Width) {
+                    BigInt(0)
+                } else if (shift <= SRT4Logic.Width - 32) {
+                    (data >> shift) & wordMask
+                } else {
+                    val selectedWidth = SRT4Logic.Width - shift
+                    (data >> shift) & ((BigInt(1) << selectedWidth) - 1)
+                }
+                dut.io.data.poke(data)
+                dut.io.shift.poke(shift)
+                dut.io.out.expect(expected, s"shift=$shift data=0x${data.toString(16)}")
+            }
         }
     }
 

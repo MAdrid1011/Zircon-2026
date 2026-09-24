@@ -28,10 +28,19 @@ object MMUPermission {
         entry.permissions.execute && entry.permissions.accessed &&
             userAllowed(entry.permissions.user, control.privilege, control.sum, execute = true)
 
-    def data(entry: TLBLookupResponse, control: AddressTranslationControl, store: Bool): Bool = {
-        val readable = entry.permissions.read || (control.mxr && entry.permissions.execute)
+    def data(
+        entry: TLBLookupResponse,
+        privilege: UInt,
+        mxr: Bool,
+        sum: Bool,
+        store: Bool,
+    ): Bool = {
+        val readable = entry.permissions.read || (mxr && entry.permissions.execute)
         val access = Mux(store, entry.permissions.write && entry.permissions.dirty, readable)
         access && entry.permissions.accessed &&
-            userAllowed(entry.permissions.user, control.privilege, control.sum, execute = false)
+            userAllowed(entry.permissions.user, privilege, sum, execute = false)
     }
+
+    def data(entry: TLBLookupResponse, control: AddressTranslationControl, store: Bool): Bool =
+        data(entry, control.privilege, control.mxr, control.sum, store)
 }

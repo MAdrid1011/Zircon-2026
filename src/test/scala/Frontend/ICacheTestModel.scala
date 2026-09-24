@@ -38,8 +38,8 @@ object ICacheTestModel {
         var canceled = 0
         var heldOutput: Option[Seq[BigInt]] = None
         var heldLower: Option[Seq[BigInt]] = None
+        var heldLowerOwner: Option[BigInt] = None
         var heldTranslation: Option[(Fetch, Int)] = None
-        var outOfOrderTranslations = false
         var context = "baseline"
         var memorySalt = BigInt(0)
         val fullMask = (BigInt(1) << width) - 1
@@ -72,12 +72,10 @@ object ICacheTestModel {
             f.token
         }
         private def output: Seq[BigInt] = Seq(
-            d.io.pp.response.bits.token.peek().litValue,
             d.io.pp.response.bits.mask.peek().litValue,
             d.io.pp.response.bits.fault.peek().litValue
         ) ++ (0 until width).map(i => d.io.pp.response.bits.inst(i).peek().litValue)
         private def lower: Seq[BigInt] = Seq(
-            d.io.l2.request.bits.token.peek().litValue,
             d.io.l2.request.bits.paddr.peek().litValue,
             d.io.l2.request.bits.uncache.peek().litValue,
             d.io.l2.request.bits.victimValid.peek().litValue,
@@ -92,13 +90,10 @@ object ICacheTestModel {
             d.io.l2.request.ready.poke(lowerReady)
             d.io.pp.request.valid.poke(queued.nonEmpty)
             d.io.pp.request.bits.pc.poke(queued.headOption.map(_.pc).getOrElse(BigInt(0)))
-            d.io.pp.request.bits.token.poke(queued.headOption.map(_.token).getOrElse(BigInt(0)))
-            val eligible = if (outOfOrderTranslations) translations.find(_._2 <= cycle)
-            else translations.headOption.filter(_._2 <= cycle)
+            val eligible = translations.headOption.filter(_._2 <= cycle)
             val translationItem = heldTranslation.orElse(eligible)
             val translation = translationItem.map(_._1)
             d.io.mmu.response.valid.poke(translation.nonEmpty)
-            d.io.mmu.response.bits.token.poke(translation.map(_.token).getOrElse(BigInt(0)))
             d.io.mmu.response.bits.paddr.poke(translation.map(_.pa).getOrElse(BigInt(0)))
             d.io.mmu.response.bits.uncache.poke(translation.exists(_.uncached))
             d.io.mmu.response.bits.fault.poke(translation.exists(_.fault))
@@ -108,9 +103,9 @@ object ICacheTestModel {
                 else (0 until lineBytes / 4).foldLeft(BigInt(0))((bits, i) => bits | (word(r.pa + 4 * i) << (32 * i)))
             }.getOrElse(BigInt(0))
             d.io.l2.response.valid.poke(returning.nonEmpty)
-            d.io.l2.response.bits.token.poke(returning.map(_.token).getOrElse(BigInt(0)))
             d.io.l2.response.bits.data.poke(data)
             d.io.l2.response.bits.error.poke(returning.exists(_.error))
+            val lowerOwner = heldLowerOwner.orElse(active.headOption.map(_._1))
 
             if (flush) {
                 cover("flush")
@@ -126,27 +121,22 @@ object ICacheTestModel {
                 d.io.pp.response.valid.expect(false)
             }
             if (d.io.mmu.request.valid.peek().litToBoolean) {
-                val token = d.io.mmu.request.bits.token.peek().litValue
-                assert(active.contains(token), s"translation query has no accepted request: $token")
-                d.io.mmu.request.bits.pc.expect(active(token).pc)
+                val pc = d.io.mmu.request.bits.pc.peek().litValue
+                assert(active.values.exists(_.pc == pc), s"translation query has no accepted request for PC $pc")
             }
             if (d.io.pp.response.valid.peek().litToBoolean) {
                 val values = output
                 heldOutput.foreach(old => assert(old == values, s"response changed under backpressure at $cycle"))
-                val token = values.head
-                assert(
-                    active.headOption.exists(_._1 == token),
-                    s"unexpected/out-of-order response $token at $cycle, active=${active.keys}"
-                )
-                val f = active(token)
+                assert(active.nonEmpty, s"response has no active in-order request at $cycle")
+                val (token, f) = active.head
                 val expectedFault = if (f.fault || (f.pc & 3) != 0) mask(f) else faults(token) & mask(f)
-                assert(values(1) == mask(f), s"incorrect slot mask for PC ${f.pc.toString(16)}")
-                assert(values(2) == expectedFault, s"fault mismatch for token $token at $cycle")
+                assert(values(0) == mask(f), s"incorrect slot mask for PC ${f.pc.toString(16)}")
+                assert(values(1) == expectedFault, s"fault mismatch for request $token at $cycle")
                 for (i <- 0 until width if mask(f).testBit(i) && !expectedFault.testBit(i)) {
                     val expected = word((f.pa & ~BigInt(width * 4 - 1)) + 4 * i)
                     assert(
-                        values(i + 3) == expected,
-                        s"data mismatch token=$token pc=${f.pc.toString(16)} slot=$i cycle=$cycle"
+                        values(i + 2) == expected,
+                        s"data mismatch request=$token pc=${f.pc.toString(16)} slot=$i cycle=$cycle"
                     )
                 }
                 if (outputReady) {
@@ -166,32 +156,32 @@ object ICacheTestModel {
             if (d.io.l2.request.valid.peek().litToBoolean) {
                 val values = lower
                 heldLower.foreach(old => assert(old == values, s"lower request changed under backpressure at $cycle"))
-                val token = values.head
+                val token = lowerOwner.getOrElse(throw new AssertionError(s"unowned lower request at $cycle"))
                 assert(history.contains(token), s"unowned lower request $token at $cycle")
                 val f = history(token)
                 assert(!f.fault && (f.pc & 3) == 0, "faulting fetch accessed lower memory")
                 assert(active.contains(token) || heldLower.nonEmpty, "canceled fetch issued a new lower request")
-                assert((values(2) != 0) == f.uncached, "lower memory attributes changed")
+                assert((values(1) != 0) == f.uncached, "lower memory attributes changed")
                 val ordinal = nextWord.getOrElse(token, 0)
                 val expectedAddress = if (f.uncached) f.pa + ordinal * 4 else f.pa & ~BigInt(lineBytes - 1)
-                assert(values(1) == expectedAddress, s"$context: wrong lower address for $token at $cycle")
+                assert(values(0) == expectedAddress, s"$context: wrong lower address for $token at $cycle")
                 assert(ordinal < (if (f.uncached) mask(f).bitCount else 1), "duplicate or excess lower read")
                 if (lowerReady) {
-                    val victimValid = values(3) != 0
+                    val victimValid = values(2) != 0
                     assert(!victimValid || !f.uncached, "uncached request carried an ICache victim")
                     if (victimValid) {
-                        val victimAddress = values(4)
+                        val victimAddress = values(3)
                         val expectedVictim = (0 until lineBytes / 4).foldLeft(BigInt(0)) { (bits, i) =>
                             bits | (word(victimAddress + 4 * i) << (32 * i))
                         }
                         assert(victimAddress % lineBytes == 0, "misaligned ICache victim")
-                        assert(values(5) == expectedVictim, s"incorrect ICache victim data at $cycle")
+                        assert(values(4) == expectedVictim, s"incorrect ICache victim data at $cycle")
                         cover("clean_victim")
                     }
                     assert(pending.isEmpty, "more than one lower request is outstanding")
-                    val error = if (f.uncached) f.errors.testBit((values(1) % (width * 4)).toInt / 4)
+                    val error = if (f.uncached) f.errors.testBit((values(0) % (width * 4)).toInt / 4)
                     else f.errors != 0
-                    val r = Lower(token, values(1), f.uncached, cycle + lowerDelay, error || failing(values(1)))
+                    val r = Lower(token, values(0), f.uncached, cycle + lowerDelay, error || failing(values(0)))
                     assert((r.pa % (if (r.uncached) 4 else lineBytes)) == 0, "misaligned lower request")
                     pending = Some(r)
                     requests += r
@@ -201,9 +191,11 @@ object ICacheTestModel {
                     if (lowerDelay == 1) cover("one_cycle_lower")
                     if (lowerDelay >= 128) cover("long_lower_delay")
                     heldLower = None
+                    heldLowerOwner = None
                 } else {
                     cover("lower_backpressure")
                     heldLower = Some(values)
+                    heldLowerOwner = Some(token)
                 }
             } else assert(heldLower.isEmpty, s"lower valid withdrawn at $cycle")
             if (returning.nonEmpty && d.io.l2.response.ready.peek().litToBoolean) {

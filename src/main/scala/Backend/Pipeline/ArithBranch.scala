@@ -24,30 +24,39 @@ class ArithBranch extends Module {
     val alu = Module(new ALU)
     val branch = Module(new Branch)
 
+    val delayedFailedMask = RegNext(
+        Mux(io.cmt.flush, 0.U(io.speculation.failedMask.getWidth.W), io.speculation.failedMask),
+        0.U(io.speculation.failedMask.getWidth.W),
+    )
     def specFailed(x: BackendPackage): Bool =
-        (x.sourceSpecMask.reduce(_ | _) & io.speculation.failedMask).orR
+        (x.sourceSpecMask.reduce(_ | _) & (io.speculation.failedMask | delayedFailedMask)).orR
     def killed(x: BackendPackage): Bool = io.cmt.flush || specFailed(x)
 
     /* Issue and RF stage --------------------------------------------------------- */
     val packageRF = RegInit(0.U.asTypeOf(new BackendPackage)) // Issue/RF boundary
     val validRF = RegInit(false.B)
     val liveRF = validRF && !killed(packageRF)
-    val inputKilled = io.cmt.flush || specFailed(io.iq.bits)
+    val inputKilled = specFailed(io.iq.bits)
 
-    io.iq.ready := !inputKilled
+    // A failed speculative input is consumed from the IQ because its replay
+    // checkpoint owns recovery. Do not turn the Load result into IQ backpressure.
+    io.iq.ready := true.B
     io.rf.read(0).addr := packageRF.prj(ArithConstants.physWidth - 1, 0)
     io.rf.read(1).addr := packageRF.prk(ArithConstants.physWidth - 1, 0)
     io.cmt.rob.readIdx := packageRF.robIdx
 
-    val issueProduces = io.iq.fire && io.iq.bits.rdValid && !io.iq.bits.exception.valid
+    // Flush clears every wakeup consumer with final priority. Use the ordinary
+    // handshake capacity here so flush does not feed back through wakeup into IQ.
+    val issueProduces = io.iq.valid && !inputKilled && io.iq.bits.rdValid && !io.iq.bits.exception.valid
     io.wakeup.wakeIssue.prd := Mux(issueProduces, io.iq.bits.prd, 0.U)
     io.wakeup.wakeIssue.specMask := Mux(issueProduces, io.iq.bits.sourceSpecMask.reduce(_ | _), 0.U)
-    val rfProduces = liveRF && packageRF.rdValid && !packageRF.exception.valid
+    val rfProduces = validRF && !specFailed(packageRF) && packageRF.rdValid && !packageRF.exception.valid
     io.wakeup.wakeRF.prd := Mux(rfProduces, packageRF.prd, 0.U)
     io.wakeup.wakeRF.specMask := Mux(rfProduces, packageRF.sourceSpecMask.reduce(_ | _), 0.U)
 
-    validRF := io.iq.fire
-    when(io.iq.fire) {
+    val acceptedLiveInput = io.iq.fire && !inputKilled
+    validRF := acceptedLiveInput
+    when(acceptedLiveInput) {
         packageRF := io.iq.bits
         for (source <- 0 until 3) {
             packageRF.sourceSpecMask(source) := io.iq.bits.sourceSpecMask(source) &
@@ -147,7 +156,12 @@ class ArithBranch extends Module {
         }
     }
 
-    val successfulWrite = liveWB && packageWB.rdValid && !packageWB.prd(ArithConstants.tagWidth - 1) &&
+    // A failed speculative result remains unobservable: ReadyBoard clears its
+    // destination and the IQ checkpoint replays its producer before any consumer
+    // can issue. Allow the physical write so failure resolution does not feed the
+    // PRF's same-cycle write-to-read bypass; wakeup and completion stay killed.
+    val successfulWrite = validWB && !io.cmt.flush && packageWB.rdValid &&
+        !packageWB.prd(ArithConstants.tagWidth - 1) &&
         !packageWB.exception.valid
     io.rf.write.valid := successfulWrite
     io.rf.write.bits.prd := packageWB.prd(ArithConstants.physWidth - 1, 0)
@@ -156,7 +170,11 @@ class ArithBranch extends Module {
     io.bypass.producer.result := bypassDataWB
     io.bypass.producer.nextWb.valid := liveEX && packageAfterEX.rdValid && !packageAfterEX.exception.valid
     io.bypass.producer.nextWb.bits := packageAfterEX.prd
-    io.wakeup.wakeWB.prd := Mux(successfulWrite, packageWB.prd, 0.U)
+    io.bypass.producer.nextResult.valid := io.bypass.producer.nextWb.valid
+    io.bypass.producer.nextResult.bits := packageAfterEX.result
+    val wbProduces = validWB && !specFailed(packageWB) && packageWB.rdValid &&
+        !packageWB.prd(ArithConstants.tagWidth - 1) && !packageWB.exception.valid
+    io.wakeup.wakeWB.prd := Mux(wbProduces, packageWB.prd, 0.U)
     io.wakeup.wakeWB.specMask := 0.U
 
     io.cmt.rob.complete.valid := liveWB

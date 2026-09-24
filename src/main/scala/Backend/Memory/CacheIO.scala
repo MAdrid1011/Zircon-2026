@@ -13,6 +13,14 @@ class DLoadRequest(val p: DCacheParams = DCacheParams()) extends Bundle {
     val ioAuthorized = Bool()
     val exception = UInt(4.W)
     val translationMiss = Bool()
+    val atomic = Bool()
+}
+
+class DCachePermissionContext extends Bundle {
+    val direct = Bool()
+    val privilege = UInt(2.W)
+    val mxr = Bool()
+    val sum = Bool()
 }
 
 class DStoreTranslationRequest extends Bundle {
@@ -21,6 +29,7 @@ class DStoreTranslationRequest extends Bundle {
     val exception = UInt(4.W)
     val atomic = Bool()
     val lr = Bool()
+    val permission = new DCachePermissionContext
 }
 
 class DStoreTranslationResponse extends Bundle {
@@ -41,6 +50,7 @@ class DLoadResponse(val p: DCacheParams = DCacheParams()) extends Bundle {
     val exception = UInt(4.W)
     val retry = Bool()
     val uncache = Bool()
+    val atomic = Bool()
 }
 
 class DLoadWBSelect(val p: DCacheParams = DCacheParams()) extends Bundle {
@@ -48,6 +58,7 @@ class DLoadWBSelect(val p: DCacheParams = DCacheParams()) extends Bundle {
     val exception = UInt(4.W)
     val retry = Bool()
     val uncache = Bool()
+    val atomic = Bool()
 }
 
 class DStoreRequest extends Bundle {

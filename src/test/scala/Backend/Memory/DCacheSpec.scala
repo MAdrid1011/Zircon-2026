@@ -365,7 +365,7 @@ class DCacheSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
     ) {
         s"dual DCache $name: data, ports, miss, forwarding, fixed WB and cancellation" in {

@@ -106,6 +106,7 @@ class AtomicUnit(
     io.load.request.bits.uncache := request.uncache
     io.load.request.bits.ioAuthorized := false.B
     io.load.request.bits.exception := request.exception
+    io.load.request.bits.atomic := true.B
     val forwardValid = RegNext(io.load.forwardQuery.valid, false.B)
     val forwardSlot = RegEnable(io.load.forwardQuery.bits.slot, io.load.forwardQuery.valid)
     io.load.forwardResult.valid := forwardValid

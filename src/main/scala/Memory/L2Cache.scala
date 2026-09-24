@@ -4,7 +4,6 @@ import ZirconConfig.{ICacheParams, L2CacheParams}
 
 class L2InstructionStageRequest(c: ICacheParams) extends Bundle {
     val ptw = Bool()
-    val token = UInt(32.W)
     val paddr = UInt(34.W)
     val uncache = Bool()
     val victimValid = Bool()
@@ -44,7 +43,7 @@ class L2Cache(
 ) extends Module {
     val io = IO(new L2CacheIO(c, p, observe))
     require(c.lineBytes == p.lineBytes)
-    if (ramBackend == DualPortRamBackend.OpenRAM) {
+    if (ramBackend == DualPortRamBackend.BSG) {
         require(p.sets == 16 && p.tagBits <= 25)
     }
 
@@ -157,7 +156,6 @@ class L2Cache(
     val dS3Error = RegInit(false.B)
 
     io.icache.response.valid := iS3Valid && iS3Done && !iS3.ptw
-    io.icache.response.bits.token := iS3.token
     val iS3SelectedData = Mux1H(iS3Way, iS3Lines)
     def selectPteBits(line: UInt, address: UInt): UInt = Mux1H(
         VecInit.tabulate(p.lineBytes / 4)(word => address(p.offsetBits - 1, 2) === word.U),
@@ -223,7 +221,6 @@ class L2Cache(
     val iInput = WireDefault(0.U.asTypeOf(new L2InstructionStageRequest(c)))
     when(io.icache.request.fire) {
         iInput.ptw := false.B
-        iInput.token := io.icache.request.bits.token
         iInput.paddr := io.icache.request.bits.paddr
         iInput.uncache := io.icache.request.bits.uncache
         iInput.victimValid := io.icache.request.bits.victimValid

@@ -16,14 +16,21 @@ object CommitIndex {
         addressWidth(entries)
     }
 
-    def encode(index: ClusterEntry, entries: Int, banks: Int, width: Int): UInt = {
+    def encode(
+        index: ClusterEntry,
+        entries: Int,
+        banks: Int,
+        width: Int,
+        simulationLint: Boolean = false,
+    ): UInt = {
         val rows = entries / banks
         require(width >= compactWidth(entries, banks))
         def oneHotIndex(value: UInt, count: Int): UInt = {
+            assert(PopCount(value) === 1.U, "Commit queue index must remain one-hot")
             val encoded = Mux1H(value.asBools.zipWithIndex.map { case (selected, position) =>
                 selected -> position.U(log2Ceil(count).W)
             })
-            Mux(value(0), 0.U, encoded)
+            if (simulationLint) Mux(value(0), 0.U, encoded) else encoded
         }
         val bank = oneHotIndex(index.qidx, banks)
         val row = oneHotIndex(index.offset, rows)

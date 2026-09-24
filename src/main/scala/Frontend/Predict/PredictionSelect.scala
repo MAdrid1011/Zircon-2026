@@ -15,13 +15,11 @@ class FrontendPredictionSelectIO(p: FrontendParams) extends Bundle {
 }
 
 /** Select the earliest taken CFI while retaining the untruncated slot descriptions. */
-class FrontendPredictionSelect(p: FrontendParams) extends RawModule {
+class FrontendPredictionSelect(p: FrontendParams, assumeAlignedTargets: Boolean = false) extends RawModule {
     val io = IO(new FrontendPredictionSelectIO(p))
     /* Conditional Rank to Instruction Slot */
     // Only an in-range conditional branch consumes a direction bit.
     val candidates = Wire(Vec(p.fetchWidth, Bool()))
-    val taken = Wire(Vec(p.fetchWidth, Bool()))
-    val mask = Wire(Vec(p.fetchWidth, Bool()))
     for (i <- 0 until p.fetchWidth) {
         // Decode the rank independently; a late PHT result crosses only one selection level.
         val direction = if (i == 0) io.directions(0)
@@ -30,22 +28,31 @@ class FrontendPredictionSelect(p: FrontendParams) extends RawModule {
             Mux1H((0 to i).map(value => (rank === value.U) -> io.directions(value)))
         }
         candidates(i) := io.range(i) && io.control(i) && (!io.conditional(i) || direction)
-        // Include the first taken slot and discard its suffix.
-        mask(i) := io.range(i) && (if (i == 0) true.B else !candidates.take(i).reduce(_ || _))
-        taken(i) := mask(i) && candidates(i)
     }
+    // A parallel prefix OR includes the first taken slot and discards its suffix.
+    var seen = candidates.asUInt
+    var distance = 1
+    while (distance < p.fetchWidth) {
+        seen = seen | (seen << distance)(p.fetchWidth - 1, 0)
+        distance *= 2
+    }
+    val prior = if (p.fetchWidth == 1) 0.U(1.W) else Cat(seen(p.fetchWidth - 2, 0), false.B)
+    val mask = io.range & ~prior
+    val taken = mask & candidates.asUInt
 
     /* Block Prediction */
     io.prediction.kinds := io.kinds
     io.prediction.targets := io.targets
-    io.prediction.taken := taken.asUInt
-    io.prediction.mask := mask.asUInt
+    io.prediction.taken := taken
+    io.prediction.mask := mask
     io.prediction.backward := io.backward & io.conditional.asUInt
-    val target = Mux1H(taken, io.targets)
+    val target = Mux1H(taken.asBools, io.targets)
+    val sequential = Cat(io.pcBlock + 1.U, 0.U(p.blockBits.W))
     // Execution handles an actually taken misaligned target; do not issue an unaligned speculative fetch.
-    io.prediction.nextPc := Mux(
-        taken.asUInt.orR && target(1, 0) === 0.U,
-        target,
-        Cat(io.pcBlock + 1.U, 0.U(p.blockBits.W)),
-    )
+    io.prediction.nextPc := (if (assumeAlignedTargets) {
+        Mux1H(taken.asBools :+ !taken.orR, io.targets :+ sequential)
+    } else {
+        val useTarget = taken.orR && target(1, 0) === 0.U
+        Mux(useTarget, target, sequential)
+    })
 }

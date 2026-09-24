@@ -4,7 +4,6 @@ import ZirconConfig._
 
 /** Static instruction state retained until architectural retirement. */
 class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
-    val fetchToken = UInt(32.W)
     val ftqIdx = UInt(fp.ftqBits.W)
     val slot = UInt(fp.slotBits.W)
     val packetEnd = Bool()
@@ -26,7 +25,6 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
 
     def enqueue(data: Data): Unit = {
         val incoming = data.asInstanceOf[ROBEntry]
-        fetchToken := incoming.fetchToken
         ftqIdx := incoming.ftqIdx
         slot := incoming.slot
         packetEnd := incoming.packetEnd
@@ -109,14 +107,15 @@ class ReorderBuffer(
         cp.width,
         cp.robReadPorts,
         cp.completionPorts,
+        writePayloadOnFlush = true,
+        registeredDeq = true,
     ))
 
-    val ready = queue.io.enq(0).ready && !io.clear
+    val ready = queue.io.enq(0).ready
     io.availablePrefix := Fill(dispatchWidth, ready)
     for (lane <- 0 until dispatchWidth) {
         val incoming = io.enqueue.entries(lane)
         val entry = WireDefault(0.U.asTypeOf(new ROBEntry(fp, bp)))
-        entry.fetchToken := incoming.context.fetchToken
         entry.ftqIdx := incoming.context.ftqIdx
         entry.slot := incoming.context.slot
         entry.packetEnd := incoming.context.packetEnd
@@ -150,9 +149,15 @@ class ReorderBuffer(
             incoming.context.instruction.exception.cause(3, 0),
         )
         entry.exception.tval := incoming.context.instruction.exception.tval
-        queue.io.enq(lane).valid := io.enqueue.valid(lane) && !io.clear
+        queue.io.enq(lane).valid := io.enqueue.valid(lane)
         queue.io.enq(lane).bits := entry
-        io.allocation(lane) := CommitIndex.encode(queue.io.enqIdx(lane), cp.robEntries, banks, bp.robWidth)
+        io.allocation(lane) := CommitIndex.encode(
+            queue.io.enqIdx(lane),
+            cp.robEntries,
+            banks,
+            bp.robWidth,
+            simulationDebug,
+        )
     }
     when(!io.clear) {
         assert((io.enqueue.valid & ~io.availablePrefix) === 0.U, "ROB enqueue exceeded available capacity")
@@ -165,7 +170,7 @@ class ReorderBuffer(
         update.exception := completion.bits.exception
         update.fflags := completion.bits.fflags
         update.fpFlagsValid := completion.bits.fpFlagsValid
-        queue.io.wen(port) := completion.valid && !io.clear
+        queue.io.wen(port) := completion.valid
         queue.io.widx(port) := CommitIndex.decodeAddress(completion.bits.address, cp.robEntries, banks)
         queue.io.wdata(port) := update
     }

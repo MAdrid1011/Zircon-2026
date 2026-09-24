@@ -68,7 +68,6 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         dut.io.dcache.req.bits.victimData.poke(0)
         dut.io.dcache.req.bits.victimDirty.poke(false)
         dut.io.icache.request.valid.poke(false)
-        dut.io.icache.request.bits.token.poke(0)
         dut.io.icache.request.bits.paddr.poke(0)
         dut.io.icache.request.bits.uncache.poke(false)
         dut.io.icache.request.bits.victimValid.poke(false)
@@ -174,10 +173,8 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         address: Long,
         victim: Option[(Long, BigInt)] = None,
         uncache: Boolean = false,
-        token: Int = 1,
     ): (BigInt, Boolean) = {
         dut.io.icache.request.valid.poke(true)
-        dut.io.icache.request.bits.token.poke(token)
         dut.io.icache.request.bits.paddr.poke(address)
         dut.io.icache.request.bits.uncache.poke(uncache)
         dut.io.icache.request.bits.victimValid.poke(victim.nonEmpty)
@@ -187,7 +184,6 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         tick()
         dut.io.icache.request.valid.poke(false)
         waitFor(dut.io.icache.response.valid.peek().litToBoolean)
-        dut.io.icache.response.bits.token.expect(token)
         val result = dut.io.icache.response.bits.data.peek().litValue
         val error = dut.io.icache.response.bits.error.peek().litToBoolean
         tick()
@@ -237,7 +233,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
     ) {
         s"$name: biased-exclusive moves, dirty writeback, instruction borrowing, PTW and uncached traffic" in {
@@ -261,7 +257,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 val (target0, target0Error) = dcache(targets(0), Some((a, aFromMemory, false)))
                 assert(!target0Error && target0 == line(targets(0)) && reads == 2)
                 val beforeL2Hit = reads
-                val (aFromL2, aL2Error) = icache(a, token = 11)
+                val (aFromL2, aL2Error) = icache(a)
                 assert(!aL2Error && aFromL2 == line(a) && reads == beforeL2Hit, "clean victim did not move through L2")
 
                 val dirtyTransferAddress = 0x18080L
@@ -288,30 +284,30 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                     !pteError && pte == (bytes(g + 4, 4) & ~BigInt(0x300)) && reads == ptwReads,
                     "IPTW did not retain an L2 hit"
                 )
-                val (gFromL2, gError) = icache(g, token = 12)
+                val (gFromL2, gError) = icache(g)
                 assert(!gError && gFromL2 == line(g) && reads == ptwReads, "ICache did not consume the retained line")
-                icache(g, token = 13)
+                icache(g)
                 assert(reads == ptwReads + 1, "clean L2 hit was not removed after transfer to L1")
 
                 val i1 = 0x30040L
                 val i2 = i1 + setStride
                 val i3 = i1 + 2 * setStride
-                icache(targets(0) + 0x40, Some((i1, line(i1))), token = 21)
-                icache(targets(1) + 0x40, Some((i2, line(i2))), token = 22)
-                icache(targets(2) + 0x40, Some((i3, line(i3))), token = 23)
+                icache(targets(0) + 0x40, Some((i1, line(i1))))
+                icache(targets(1) + 0x40, Some((i2, line(i2))))
+                icache(targets(2) + 0x40, Some((i3, line(i3))))
                 val quotaReads = reads
-                icache(i3, token = 24)
-                icache(i1, token = 25)
-                icache(i2, token = 26)
+                icache(i3)
+                icache(i1)
+                icache(i2)
                 assert(reads == quotaReads, "instruction victims did not borrow invalid ways")
 
                 val instructionVictims = (0 until 5).map(i => 0x38040L + i * setStride)
                 for ((address, index) <- instructionVictims.zipWithIndex) {
-                    icache(targets(index) + 0x40, Some((address, line(address))), token = 30 + index)
+                    icache(targets(index) + 0x40, Some((address, line(address))))
                 }
                 val fullSetReads = reads
-                for ((address, index) <- instructionVictims.zipWithIndex) {
-                    icache(address, token = 40 + index)
+                for (address <- instructionVictims) {
+                    icache(address)
                 }
                 assert(reads == fullSetReads + 1, "instruction quota did not apply after the set became full")
 
@@ -348,7 +344,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 assert(failedTargetError)
                 failing.clear()
                 val failedVictimReads = reads
-                val (victimAfterFailure, victimAfterFailureError) = icache(retainedVictim, token = 31)
+                val (victimAfterFailure, victimAfterFailureError) = icache(retainedVictim)
                 assert(!victimAfterFailureError && victimAfterFailure == line(retainedVictim))
                 assert(reads == failedVictimReads + 1, "L2 accepted a victim before the target fill succeeded")
 
@@ -399,7 +395,6 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.dcache.req.valid.poke(false)
 
                 dut.io.icache.request.valid.poke(true)
-                dut.io.icache.request.bits.token.poke(201)
                 dut.io.icache.request.bits.paddr.poke(source)
                 dut.io.icache.request.bits.uncache.poke(false)
                 dut.io.icache.request.bits.victimValid.poke(true)
@@ -409,7 +404,6 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 tick()
                 dut.io.icache.request.valid.poke(false)
                 while (!dut.io.icache.response.valid.peek().litToBoolean) tick()
-                dut.io.icache.response.bits.token.expect(201)
                 dut.io.icache.response.bits.data.expect(line(source))
                 tick()
 
@@ -420,14 +414,12 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 tick()
                 val readsBeforeTarget = reads
                 dut.io.icache.request.valid.poke(true)
-                dut.io.icache.request.bits.token.poke(202)
                 dut.io.icache.request.bits.paddr.poke(target)
                 dut.io.icache.request.bits.victimValid.poke(false)
                 assert(dut.io.icache.request.ready.peek().litToBoolean)
                 tick()
                 dut.io.icache.request.valid.poke(false)
                 while (!dut.io.icache.response.valid.peek().litToBoolean) tick()
-                dut.io.icache.response.bits.token.expect(202)
                 dut.io.icache.response.bits.data.expect(line(target))
                 assert(!dut.io.icache.response.bits.error.peek().litToBoolean)
                 tick()
@@ -457,9 +449,8 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.dcache.req.bits.victimDirty.poke(false)
             }
 
-            def driveI(address: Long, token: Int): Unit = {
+            def driveI(address: Long): Unit = {
                 dut.io.icache.request.valid.poke(true)
-                dut.io.icache.request.bits.token.poke(token)
                 dut.io.icache.request.bits.paddr.poke(address)
                 dut.io.icache.request.bits.uncache.poke(false)
                 dut.io.icache.request.bits.victimValid.poke(false)
@@ -480,11 +471,11 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             val dAddress = 0x71000L
             val iAddress = 0x72020L
             dcache(0x73040L, Some((dAddress, line(dAddress), false)))
-            icache(0x74060L, Some((iAddress, line(iAddress))), token = 70)
+            icache(0x74060L, Some((iAddress, line(iAddress))))
             val hitReads = reads
 
             driveD(dAddress)
-            driveI(iAddress, 77)
+            driveI(iAddress)
             assert(dut.io.dcache.req.ready.peek().litToBoolean)
             assert(dut.io.icache.request.ready.peek().litToBoolean)
             val issueCycle = cycle
@@ -500,7 +491,6 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                     dResponseCycle = cycle
                 }
                 if (dut.io.icache.response.valid.peek().litToBoolean) {
-                    dut.io.icache.response.bits.token.expect(77)
                     dut.io.icache.response.bits.data.expect(line(iAddress))
                     iResponseCycle = cycle
                 }
@@ -517,15 +507,14 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 dcache(0x90000L + i * dut.p.lineBytes, Some((dBurst(i), line(dBurst(i)), false)))
                 icache(
                     0x91080L + i * dut.p.lineBytes,
-                    Some((iBurst(i), line(iBurst(i)))),
-                    token = 80 + i
+                    Some((iBurst(i), line(iBurst(i))))
                 )
             }
             val burstReads = reads
             val burstIssueCycle = cycle
             for (i <- dBurst.indices) {
                 driveD(dBurst(i))
-                driveI(iBurst(i), 100 + i)
+                driveI(iBurst(i))
                 assert(dut.io.dcache.req.ready.peek().litToBoolean)
                 assert(dut.io.icache.request.ready.peek().litToBoolean)
                 tick()
@@ -536,7 +525,6 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 assert(dut.io.dcache.rsp.valid.peek().litToBoolean)
                 assert(dut.io.icache.response.valid.peek().litToBoolean)
                 dut.io.dcache.rsp.bits.data.expect(line(dBurst(i)))
-                dut.io.icache.response.bits.token.expect(100 + i)
                 dut.io.icache.response.bits.data.expect(line(iBurst(i)))
                 assert(cycle == burstIssueCycle + 3 + i)
                 tick()
@@ -584,7 +572,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             dcache(0x7c0a0L, Some((priorityI, line(priorityI), false)))
             dcache(0x7d0e0L, Some((priorityIPtw, line(priorityIPtw), false)))
             val iPriorityReads = reads
-            driveI(priorityI, 122)
+            driveI(priorityI)
             driveIPtw(priorityIPtw + 8)
             assert(dut.io.icache.request.ready.peek().litToBoolean)
             assert(!dut.io.iptw.req.ready.peek().litToBoolean)
@@ -602,7 +590,6 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             var sawIPtw = false
             while (!sawI || !sawIPtw) {
                 if (dut.io.icache.response.valid.peek().litToBoolean) {
-                    dut.io.icache.response.bits.token.expect(122)
                     dut.io.icache.response.bits.data.expect(line(priorityI))
                     sawI = true
                 }

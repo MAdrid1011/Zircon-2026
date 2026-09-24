@@ -21,10 +21,11 @@ class Frontend(
     c: ICacheParams = ICacheParams(),
     tlbEnabled: Boolean = true,
     issue: IssueParams = IssueParams(),
+    ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
 ) extends Module {
     val io = IO(new FrontendIO(p, c, tlbEnabled, issue.dispatchWidth))
     val npc = Module(new NPC(p))
-    val pr = Module(new Predict(p))
+    val pr = Module(new Predict(p, ramBackend))
     val ic = Module(new ICache(p, c.copy(tlbEnabled = tlbEnabled)))
     val fields = Seq.fill(p.fetchWidth)(Module(new PredecodeFields))
     val pd = Module(new PreDecoders(p))
@@ -57,7 +58,6 @@ class Frontend(
     npc.io.pr.bits.pc := pr.io.fc.out.predict.early.nextPc
     npc.io.space := !validIF1 || if1Fire || flushYounger
     ic.io.pp.request <> npc.io.request
-    instPkgPF.fetchToken := npc.io.request.bits.token
     instPkgPF.startPc := npc.io.request.bits.pc
     when(if1Fire || flushYounger) { validIF1 := false.B }
     when(ic.io.pp.request.fire) {
@@ -67,6 +67,8 @@ class Frontend(
 
     /* Fetch Stage 1 */
     pr.io.fc.instPkg := instPkgIF1
+    pr.io.fc.prefetch.valid := ic.io.pp.request.fire
+    pr.io.fc.prefetch.bits := npc.io.request.bits.pc(31, 2)
     pr.io.fte.accept := if1Fire
     pr.io.fte.flush := flushYounger
     val instPkgIF2 = Reg(new FrontendPackage(p))
@@ -93,9 +95,10 @@ class Frontend(
     val instPkgPD = Reg(new FrontendPackage(p))
     val validPD = RegInit(false.B)
     val pdRepairApplied = RegInit(false.B)
-    val responseMatches = validIF2 && ic.io.pp.response.bits.token === instPkgIF2.fetchToken
-    val responseEarly = validIF1 && ic.io.pp.response.bits.token === instPkgIF1.fetchToken
-    // IF1 responses wait for IF2; cancelled or already consumed tokens are discarded.
+    val pdRepairAllowed = RegInit(false.B)
+    val responseMatches = validIF2
+    val responseEarly = validIF1
+    // In-order IF1 responses wait until the matching frontend package reaches IF2.
     ic.io.pp.response.ready := !(responseMatches || responseEarly) ||
         (responseMatches && (!validPD || pdFire) && !flushYounger)
     if2Fire := ic.io.pp.response.fire && responseMatches && !flushYounger
@@ -105,15 +108,24 @@ class Frontend(
             "Fetch response must provide every requested slot, using fault bits for exceptions"
         )
     }
-    when(pdFire || cmtFlush || io.maintenance.request) { validPD := false.B; pdRepairApplied := false.B }
-    when(if2Fire) { instPkgPD := instPkgPDIn; validPD := true.B; pdRepairApplied := false.B }
+    when(pdFire || cmtFlush || io.maintenance.request) {
+        validPD := false.B
+        pdRepairApplied := false.B
+        pdRepairAllowed := false.B
+    }
+    when(if2Fire) {
+        instPkgPD := instPkgPDIn
+        validPD := true.B
+        pdRepairApplied := false.B
+        pdRepairAllowed := !ic.io.pp.response.bits.fault.orR
+    }
 
     /* Previous Decode Stage */
     val instPkgFQIn = WireDefault(instPkgPD)
     pd.io.in := instPkgPD
     instPkgFQIn := pd.io.out
     instPkgFQIn.ftqIdx := 0.U
-    pdFlush := validPD && pd.io.changed && !pdRepairApplied && !cmtFlush
+    pdFlush := validPD && pdRepairAllowed && pd.io.changed && !pdRepairApplied && !cmtFlush
     pr.io.pd.valid := pdFlush
     pr.io.pd.bits := pd.io.repair
     when(pdFlush && !pdFire) { pdRepairApplied := true.B }
@@ -121,7 +133,6 @@ class Frontend(
         val earlier = if (slot == 0) false.B else instPkgFQIn.mask(slot - 1, 0).orR
         val later = if (slot + 1 == p.fetchWidth) false.B else instPkgFQIn.mask(p.fetchWidth - 1, slot + 1).orR
         fq.io.enq(slot).valid := validPD && instPkgFQIn.mask(slot) && !cmtFlush && !io.maintenance.request
-        fq.io.enq(slot).bits.fetchToken := instPkgFQIn.fetchToken
         fq.io.enq(slot).bits.slot := slot.U
         fq.io.enq(slot).bits.packetStart := !earlier
         fq.io.enq(slot).bits.packetEnd := !later

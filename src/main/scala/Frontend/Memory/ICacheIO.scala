@@ -3,13 +3,12 @@ import chisel3.util._
 import ZirconConfig.{FrontendParams, ICacheParams}
 
 class ICacheTranslation extends Bundle {
-    val token = UInt(32.W)
     val paddr = UInt(34.W)
     val uncache = Bool()
     val fault = Bool()
 }
 
-/** IF1 translation query stays valid until its matching response is consumed or flushed. */
+/** IF1 translation misses stay valid until their in-order response, ITLB refill or flush. */
 class IMMUIO(p: FrontendParams) extends Bundle {
     val request = Valid(new FrontendFetchRequest(p))
     val response = Flipped(Decoupled(new ICacheTranslation))
@@ -17,7 +16,6 @@ class IMMUIO(p: FrontendParams) extends Bundle {
 
 /** Cached reads return one aligned line; uncached reads return one word in the low 32 bits. */
 class ICacheLineRequest(c: ICacheParams) extends Bundle {
-    val token = UInt(32.W)
     val paddr = UInt(34.W)
     val uncache = Bool()
     val victimValid = Bool()
@@ -26,7 +24,6 @@ class ICacheLineRequest(c: ICacheParams) extends Bundle {
 }
 
 class ICacheLineResponse(c: ICacheParams) extends Bundle {
-    val token = UInt(32.W)
     val data = UInt(c.lineBits.W)
     val error = Bool()
 }

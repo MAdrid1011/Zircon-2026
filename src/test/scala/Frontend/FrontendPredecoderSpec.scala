@@ -71,9 +71,9 @@ class FrontendPredecoderSpec extends AnyFreeSpec with ChiselSim {
                 d.io.faults.poke(if (fault) 1 << slot else 0)
                 d.io.instructions.zipWithIndex.foreach { case (word, i) => word.poke(if (i == slot) inst else 0x13) }
                 val target = if (valid) (top + offset) & 0xfffffffeL else pc + slot * 4 + 4
-                val finalMask = if (fault) 15 else (1 << (slot + 1)) - 1
-                val finalTaken = if (fault) 0 else 1 << slot
-                val finalNext = if (fault || (target & 3) != 0) pc + 16 else target
+                val finalMask = (1 << (slot + 1)) - 1
+                val finalTaken = 1 << slot
+                val finalNext = if ((target & 3) != 0) pc + 16 else target
                 val earlyTaken = if (rng.nextBoolean()) 1 << slot else 0
                 val earlyMask = if (earlyTaken != 0) (1 << (slot + 1)) - 1 else 15
                 val earlyKind = if (earlyTaken != 0) { if (rng.nextBoolean()) 6 else 4 }
@@ -86,8 +86,8 @@ class FrontendPredecoderSpec extends AnyFreeSpec with ChiselSim {
                 d.io.out.mask.expect(finalMask)
                 d.io.prediction.taken.expect(finalTaken)
                 d.io.out.nextPc.expect(finalNext)
-                d.io.changed.expect(finalNext != earlyNext || finalMask != earlyMask || finalTaken != earlyTaken ||
-                    earlyKind != (if (fault) 0 else 6))
+                d.io.changed.expect(finalNext != earlyNext || finalMask != earlyMask ||
+                    finalTaken != earlyTaken || earlyKind != 6)
                 d.io.out.instructions(slot).kind.expect(if (fault) 0 else 6)
                 d.io.out.instructions(slot).rinfo.src(0).valid.expect(!fault)
                 if (!fault) d.io.out.instructions(slot).predictedValue.expect(target)

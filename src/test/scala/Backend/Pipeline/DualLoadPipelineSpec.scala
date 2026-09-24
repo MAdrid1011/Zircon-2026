@@ -13,7 +13,7 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
         (backend, name) <- Seq(
             DualPortRamBackend.Registers -> "registers",
             DualPortRamBackend.Vivado -> "vivado",
-            DualPortRamBackend.OpenRAM -> "openram"
+            DualPortRamBackend.BSG -> "bsg"
         )
     ) {
         s"$name: real LS0/LS1 and PRFs share fixed DCache ports under dual loads and SB traffic" in {
