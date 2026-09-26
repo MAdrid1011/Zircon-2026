@@ -403,7 +403,6 @@ class Commit(
     val recoveryInstruction = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.instruction))
     val recoveryExceptionValid = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.exception.valid))
     val recoveryExceptionCause = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.exception.cause))
-    val recoveryExceptionTval = Mux1H(recoveryPayloadSelect, rob.io.head.map(_.bits.exception.tval))
     val recoveryFtq = Mux1H(recoveryPayloadSelect, selectedFtq)
     val recoverySelectedFtqIdx = Mux1H(recoveryPayloadSelect, selectedFtqIdx)
     val recoverySlotOH = UIntToOH(recoverySlot, fp.fetchWidth)
@@ -443,7 +442,6 @@ class Commit(
     val selectedInstruction = Mux(takeInterrupt, rob.io.head(0).bits.instruction, recoveryInstruction)
     val selectedExceptionValid = Mux(takeInterrupt, rob.io.head(0).bits.exception.valid, recoveryExceptionValid)
     val selectedExceptionCause = Mux(takeInterrupt, rob.io.head(0).bits.exception.cause, recoveryExceptionCause)
-    val selectedExceptionTval = Mux(takeInterrupt, rob.io.head(0).bits.exception.tval, recoveryExceptionTval)
     def selectedSystemKind(op: UInt): Bool = Mux(
         takeInterrupt,
         rob.io.head(0).bits.isSystem && rob.io.head(0).bits.systemOp === op,
@@ -478,10 +476,22 @@ class Commit(
         csr.io.state.medeleg.asBools,
     )
     val delegatedTrap = privilege =/= 3.U && Mux(takeInterrupt, delegatedInterrupt, delegatedException)
-    val trapVector = Mux(delegatedTrap, csr.io.state.stvec, csr.io.state.mtvec)
-    val vectorBase = Cat(trapVector(31, 2), 0.U(2.W))
-    val vectorOffset = Cat(0.U(25.W), trapCause(4, 0), 0.U(2.W))
-    val trapTarget = Mux(takeInterrupt && trapVector(1, 0) === 1.U, vectorBase + vectorOffset, vectorBase)
+    val vectorOffset = Cat(0.U(25.W), interruptCause, 0.U(2.W))
+    def interruptVectorTarget(vector: UInt): UInt = {
+        val base = Cat(vector(31, 2), 0.U(2.W))
+        Mux(vector(1, 0) === 1.U, base + vectorOffset, base)
+    }
+    val interruptTarget = Mux(
+        privilege =/= 3.U && delegatedInterrupt,
+        interruptVectorTarget(csr.io.state.stvec),
+        interruptVectorTarget(csr.io.state.mtvec),
+    )
+    val exceptionVector = Mux(
+        privilege =/= 3.U && delegatedException,
+        csr.io.state.stvec,
+        csr.io.state.mtvec,
+    )
+    val trapTarget = Mux(takeInterrupt, interruptTarget, Cat(exceptionVector(31, 2), 0.U(2.W)))
     val returnTarget = Mux(selectedSret, csr.io.state.sepc, csr.io.state.mepc)
 
     delayedRecovery := recoveryValid
@@ -674,15 +684,17 @@ class Commit(
     csr.io.trap.bits.supervisor := delegatedTrap
     csr.io.trap.bits.pcWord := selectedPc(31, 2)
     csr.io.trap.bits.cause := trapCause
-    csr.io.trap.bits.tval := Mux(
-        takeInterrupt || selectedEcall,
-        0.U,
-        Mux(
-            selectedEbreak,
-            selectedPc,
-            Mux(selectedMretIllegal || selectedSretIllegal, selectedInstruction, selectedExceptionTval),
-        ),
-    )
+    val candidateTrapTval = rob.io.head.map { head =>
+        val entry = head.bits
+        val ecall = entry.isSystem && entry.systemOp === SystemOp.ECALL.U
+        val ebreak = entry.isSystem && entry.systemOp === SystemOp.EBREAK.U
+        val illegalMret = entry.isSystem && entry.systemOp === SystemOp.MRET.U && privilege =/= 3.U
+        val illegalSret = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
+            !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
+        Mux(ecall, 0.U, Mux(ebreak, entry.pc,
+            Mux(illegalMret || illegalSret, entry.instruction, entry.exception.tval)))
+    }
+    csr.io.trap.bits.tval := Mux(takeInterrupt, 0.U, Mux1H(recoveryPayloadSelect, candidateTrapTval))
     csr.io.xret.valid := recoveryValid && !trap && (selectedMret || selectedSret)
     csr.io.xret.bits := selectedSret
     when(csr.io.trap.valid) {
