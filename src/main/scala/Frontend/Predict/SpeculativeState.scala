@@ -232,7 +232,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
                 )
             )
             val writeAny = VecInit(writeSlots).asUInt.orR
-            next.ras(row) := Mux1H((!writeAny -> before.ras(row)) +: writeSlots.zip(returnPcs))
+            next.ras(row) := Mux(writeAny, Mux1H(writeSlots, returnPcs), before.ras(row))
         }
         next.top := Mux1H(selectors, candidates.map(_.top))
         next.pointer := Mux1H(selectors, candidates.map(_.pointer))

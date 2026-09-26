@@ -366,9 +366,16 @@ class DCache(
     val selectedMissLane = Mux(bothNeedMiss, missRoundRobin, needsMiss(1))
     val selectedExecute = Mux(selectedMissLane, execute(1), execute(0))
     val selectedValidWays = Mux(selectedMissLane, execute(1).validWays, execute(0).validWays)
-    val selectedLruWay = Mux(selectedMissLane, execute(1).lruWay, execute(0).lruWay)
-    val invalidWays = ~selectedValidWays & ((BigInt(1) << l1Way) - 1).U(l1Way.W)
-    val victimWay = Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), selectedLruWay)
+    val laneVictimWay = VecInit((0 until 2).map { lane =>
+        val invalidWays = ~execute(lane).validWays & ((BigInt(1) << l1Way) - 1).U(l1Way.W)
+        Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), execute(lane).lruWay)
+    })
+    val victimWay = Mux(selectedMissLane, laneVictimWay(1), laneVictimWay(0))
+    val laneVictimTag = VecInit((0 until 2).map(lane => Mux1H(laneVictimWay(lane), execute(lane).tags)))
+    val laneVictimData = VecInit((0 until 2).map(lane => Mux1H(laneVictimWay(lane), execute(lane).lines)))
+    val laneVictimDirty = VecInit((0 until 2).map(lane =>
+        Mux1H(laneVictimWay(lane), execute(lane).dirtyWays.asBools)
+    ))
     val storeResolveHit = storeState === storeResolve && storeException === 0.U &&
         !storeRequest.uncache && storeLookupResult.hit.orR
     storeArrayWrite := storeResolveHit
@@ -391,9 +398,9 @@ class DCache(
         Mux(selectedMissLane, effectiveForwardMask(1), effectiveForwardMask(0)) & accessMask(selectedExecute)
     missUnit.io.allocate.bits.victimValid := (victimWay & selectedValidWays).orR && !selectedExecute.uncache
     missUnit.io.allocate.bits.victimLine :=
-        Cat(Mux1H(victimWay, selectedExecute.tags), index(selectedExecute.paddr))
-    missUnit.io.allocate.bits.victimData := Mux1H(victimWay, selectedExecute.lines)
-    missUnit.io.allocate.bits.victimDirty := Mux1H(victimWay, selectedExecute.dirtyWays.asBools)
+        Cat(Mux(selectedMissLane, laneVictimTag(1), laneVictimTag(0)), index(selectedExecute.paddr))
+    missUnit.io.allocate.bits.victimData := Mux(selectedMissLane, laneVictimData(1), laneVictimData(0))
+    missUnit.io.allocate.bits.victimDirty := Mux(selectedMissLane, laneVictimDirty(1), laneVictimDirty(0))
 
     val storeNeedsMiss = storeState === storeResolve && storeException === 0.U &&
         (storeRequest.uncache || !storeLookupResult.hit.orR)
