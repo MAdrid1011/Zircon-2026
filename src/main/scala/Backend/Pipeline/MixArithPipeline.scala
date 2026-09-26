@@ -412,6 +412,7 @@ class MixArithPipeline extends Module {
         divide.io.out.bits.fflags,
     )
     val bypassDataWB = Reg(UInt(32.W))
+    val wakeupWB = RegInit(0.U.asTypeOf(Valid(UInt(MixArithConstants.physTagWidth.W))))
 
     // WB presence comes only from registered stage-valid bits. Flush gates architectural
     // effects separately so it cannot enter the global Bypass data-selection cone.
@@ -460,8 +461,7 @@ class MixArithPipeline extends Module {
     io.cmt.rob.complete.bits.robIdx := packageWB.tag.robIdx
     io.cmt.rob.complete.bits.exception := packageWB.tag.exception
 
-    io.wakeup.valid := packageWB.tag.rdValid && !packageWB.tag.exception.valid
-    io.wakeup.bits := packageWB.tag.prd
+    io.wakeup := wakeupWB
     val divideWake = divide.io.out.valid && packageDivideWB.tag.rdValid && !packageDivideWB.tag.exception.valid
     io.wakeEX2.valid := earlyWakeValid(1) || divideWake
     io.wakeEX2.bits := Mux(earlyWakeValid(1), earlyWakeTag(1), packageDivideWB.tag.prd)
@@ -490,6 +490,19 @@ class MixArithPipeline extends Module {
         when(bypassInputValid.asUInt.orR) {
             bypassDataWB := bypassInput
         }
+    }
+    when(flush) {
+        wakeupWB.valid := false.B
+    }.otherwise {
+        wakeupWB.valid := bypassInputValid.asUInt.orR && bypassTag.rdValid && !bypassTag.exceptionValid
+        when(bypassInputValid.asUInt.orR) {
+            wakeupWB.bits := bypassTag.prd
+        }
+    }
+    val expectedWakeValid = packageWB.tag.rdValid && !packageWB.tag.exception.valid
+    assert(wakeupWB.valid === expectedWakeValid, "MixArith WB wakeup must match the current result")
+    when(wakeupWB.valid) {
+        assert(wakeupWB.bits === packageWB.tag.prd, "MixArith WB wakeup must keep the destination tag")
     }
     when(validWB) {
         assert(bypassDataWB === packageWB.data, "MixArith WB data must match the registered bypass result")
