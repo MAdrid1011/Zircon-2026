@@ -14,27 +14,63 @@ class MainBTBComparison(p: FrontendParams) extends Module {
             val targets = Vec(p.fetchWidth, UInt(32.W))
         }))
         val equal = Output(Bool())
+        val parallelHitEqual = Output(Bool())
         val readSkipped = Output(Bool())
     })
     val dut = Module(new MainBTB(p))
     val reference = Module(new BlockBTB(p, p.btbSets, p.btbWays))
     dut.io.query.valid := io.query.valid
     dut.io.query.bits := io.query.bits(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
-    reference.io.index := io.query.bits(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
-    val train = WireDefault(0.U.asTypeOf(new FrontendTraining(p)))
-    train.pcWord := io.train.bits.pc(31, 2)
-    train.mask := io.train.bits.mask
-    train.kinds := io.train.bits.kinds
-    train.targets := io.train.bits.targets
-    dut.io.train.valid := io.train.valid
-    reference.io.train.valid := io.train.valid
-    for (btbTrain <- Seq(dut.io.train, reference.io.train)) {
-        btbTrain.bits.pcBlock := train.pcWord(29, p.blockBits - 2)
-        btbTrain.bits.mask := train.mask
-        btbTrain.bits.kinds := train.kinds
-        btbTrain.bits.targetWords := VecInit(train.targets.map(_(31, 2)))
+    dut.io.queryTag := io.query.bits(31, p.blockBits + log2Ceil(p.btbSets))
+    reference.io.indexOH := UIntToOH(
+        io.query.bits(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits),
+        p.btbSets,
+    )
+    reference.io.lookupTag := io.query.bits(31, p.blockBits + log2Ceil(p.btbSets))
+    io.parallelHitEqual := (0 until p.btbWays).map { way =>
+        reference.io.hits(way) ===
+            (reference.io.raw.lines(way).valid.orR &&
+                reference.io.raw.tags(way) === reference.io.lookupTag)
+    }.reduce(_ && _)
+    val stagedTrain = RegEnable(io.train.bits, io.train.valid)
+    val stagedValid = RegNext(io.train.valid, false.B)
+    val tagGroups = Reg(Vec(math.min(8, p.btbSets), UInt((32 - p.blockBits - log2Ceil(p.btbSets)).W)))
+    val rowsPerGroup = p.btbSets / tagGroups.length
+    val incomingIndex = io.train.bits.pc(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
+    for (group <- 0 until tagGroups.length) {
+        when(io.train.valid && incomingIndex >= (group * rowsPerGroup).U &&
+            incomingIndex < ((group + 1) * rowsPerGroup).U) {
+            tagGroups(group) := io.train.bits.pc(31, p.blockBits + log2Ceil(p.btbSets))
+        }
     }
+    dut.io.train.valid := stagedValid
+    reference.io.train.valid := stagedValid
+    val pc = stagedTrain.pc
+    for ((btbTrain, sets) <- Seq(dut.io.train -> p.btbSets, reference.io.train -> p.btbSets)) {
+        val index = pc(p.blockBits + log2Ceil(sets) - 1, p.blockBits)
+        btbTrain.bits.index := index
+        btbTrain.bits.indexOH := UIntToOH(index, sets)
+        btbTrain.bits.tag := pc(31, p.blockBits + log2Ceil(sets))
+        btbTrain.bits.mask := stagedTrain.mask
+        btbTrain.bits.cfi := VecInit((0 until p.fetchWidth).map(slot =>
+            stagedTrain.mask(slot) && stagedTrain.kinds(slot) =/= 0.U
+        )).asUInt
+        btbTrain.bits.kinds := stagedTrain.kinds
+        for (slot <- 0 until p.fetchWidth) {
+            btbTrain.bits.targetWords(slot) := stagedTrain.targets(slot)(31, 2)
+        }
+        btbTrain.bits.backward := VecInit((0 until p.fetchWidth).map(slot =>
+            FrontendCfi.conditional(stagedTrain.kinds(slot)) &&
+                FrontendMath.backwardBranch(
+                    FrontendMath.slotPc(pc, slot, p),
+                    stagedTrain.targets(slot),
+                )
+        )).asUInt
+    }
+    dut.io.trainTagGroups := tagGroups
+    reference.io.trainTagGroups.foreach(_ := reference.io.train.bits.tag)
     val expected = Reg(new FrontendBtbRaw(p, p.btbSets, p.btbWays))
+    val expectedTag = RegEnable(io.query.bits(31, p.blockBits + log2Ceil(p.btbSets)), io.query.valid)
     when(io.query.valid) {
         expected := reference.io.raw
         when(dut.io.readSkipped.get) { expected.lines.foreach(_.valid := 0.U) }
@@ -45,6 +81,8 @@ class MainBTBComparison(p: FrontendParams) extends Module {
     io.equal := !valid || (0 until p.btbWays).map { w =>
         val result = dut.io.raw.lines(w)
         val old = expected.lines(w)
+        val expectedHit = old.valid.orR && expected.tags(w) === expectedTag
+        dut.io.hits(w) === expectedHit &&
         result.valid === old.valid && (!old.valid.orR || dut.io.raw.tags(w) === expected.tags(w)) &&
         (0 until p.fetchWidth).map(i =>
             !old.valid(i) || (
@@ -84,6 +122,7 @@ class MainBTBSpec extends AnyFreeSpec with ChiselSim {
                     d.io.query.valid.poke(requesting)
                     d.io.query.bits.poke(query)
                     d.io.equal.expect(true)
+                    d.io.parallelHitEqual.expect(true)
                     if (requesting) {
                         accepted += 1
                         query = pc(if (cycle < 80) 0 else random.nextInt(sets), random.nextInt(4))
@@ -91,6 +130,7 @@ class MainBTBSpec extends AnyFreeSpec with ChiselSim {
                     if (d.io.readSkipped.peek().litToBoolean) collisions += 1
                     d.clock.step()
                     d.io.equal.expect(true)
+                    d.io.parallelHitEqual.expect(true)
                 }
                 assert(collisions > 0 && accepted > 0)
             }

@@ -15,7 +15,7 @@
     "lef_files": [
       {
         "file": "lef/NangateOpenCellLibrary.tech.lef",
-        "sha256": "834a79295054cd4209178d1bade67c353863c47bb4b3c22ee38b862b7cec37f2"
+        "sha256": "d20f54fac917b04ed5d8450a6b7b2d55c80e560bd4f76f95bd0fbf6a166f7b81"
       },
       {
         "file": "lef/NangateOpenCellLibrary.macro.lef",

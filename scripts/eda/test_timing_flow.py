@@ -8,6 +8,8 @@ import unittest
 
 from adder_mapping import AdderMapping
 from eda.gate_equivalence import boundaries, file_sha256, prove
+from logic_path_audit import parse_full_paths
+from logic_path_closure import summarize as summarize_logic_path_closure
 from logic_only_sta import _violating_endpoint_count, _worst_data_arrival
 from nangate_memories import DUAL_PORT_MACROS, generate as generate_nangate_memories
 from openroad_resizer import (
@@ -23,10 +25,12 @@ from synthesize_core import (
     validate_no_simulation_debug,
 )
 from timing_reports import (
+    build_path_clusters,
     classify_endpoint_modules,
     count_violations,
     parse_dff_registers,
     parse_endpoint_inventory,
+    parse_path_inventory,
     parse_repair_counts,
     parse_ram_edge_paths,
     require_electrically_clean,
@@ -35,6 +39,68 @@ from timing_reports import (
 
 
 class TimingFlowTests(unittest.TestCase):
+    def test_closure_gate_counts_only_scoped_family_changes(self):
+        audit = {
+            "family_count": 3,
+            "path_count": 9,
+            "families": [
+                {"name": "src -> payload_a", "count": 5},
+                {"name": "src -> state_b", "count": 3},
+                {"name": "other -> ram/addr0", "count": 1},
+            ],
+        }
+        claims = {
+            "source_groups": [{
+                "source": "src", "endpoint_prefixes": ["payload_"],
+                "status": "modified", "evidence": "old and new emitted RTL differ",
+            }],
+            "families": [{
+                "name": "src -> state_b", "status": "unverified",
+                "counts_as_modified": False, "evidence": "endpoint migration is not yet proven",
+            }],
+        }
+        result = summarize_logic_path_closure(audit, claims)
+        self.assertEqual((result["modified_families"], result["modified_endpoints"]), (1, 5))
+        self.assertEqual((result["open_families"], result["open_endpoints"]), (2, 4))
+
+    def test_closure_gate_rejects_overlapping_claims(self):
+        audit = {"family_count": 1, "path_count": 1,
+                 "families": [{"name": "src -> payload", "count": 1}]}
+        claims = {"source_groups": [
+            {"source": "src", "evidence": "first"},
+            {"source": "src", "evidence": "second"},
+        ]}
+        with self.assertRaisesRegex(ValueError, "Overlapping claims"):
+            summarize_logic_path_closure(audit, claims)
+
+    def test_closure_gate_rejects_duplicate_audit_families(self):
+        audit = {"family_count": 2, "path_count": 2,
+                 "families": [{"name": "src -> payload", "count": 1}] * 2}
+        with self.assertRaisesRegex(ValueError, "incomplete or duplicated"):
+            summarize_logic_path_closure(audit, {})
+
+    def test_full_path_parser_uses_data_pins_for_macro_paths(self):
+        report = """Startpoint: macro.ram (rising edge-triggered flip-flop clocked by core_clock)
+Endpoint: _2_ (rising edge-triggered flip-flop clocked by core_clock)
+               0.000000    0.000000 ^ macro.ram/clock (fakeram45_32x32)
+               0.080000    0.080000 ^ macro.ram/dout1[3] (fakeram45_32x32)
+   1.000000    0.040000    0.120000 ^ _1_/Z (BUF_X1)
+               0.000000    0.120000 ^ _2_/D (DFF_X1)
+                           0.120000   data arrival time
+                           1.000000 ^ _2_/CK (DFF_X1)
+                          -0.100000   slack (VIOLATED)
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "full.rpt"
+            path.write_text(report)
+            paths = list(parse_full_paths(path))
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0]["slack_ns"], -0.1)
+        self.assertEqual([stage["pin"] for stage in paths[0]["stages"]], [
+            "macro.ram/dout1[3]", "_1_/Z", "_2_/D",
+        ])
+
     def test_every_external_ram_binding_uses_bsg_rising_edge_models(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -44,6 +110,9 @@ class TimingFlowTests(unittest.TestCase):
                 "module SinglePortMaskedRam_16_1_25(input clock, enable, write, "
                 "input [3:0] address, input [24:0] dataIn, output [24:0] dataOut); "
                 "endmodule\n"
+            )
+            (rtl / "PredictorTableRam.sv").write_text(
+                "module PredictorTableRam; PredictorBsgFakeram_512_17 memory(); endmodule\n"
             )
 
             result = generate_nangate_memories(rtl, root / "memory")
@@ -62,6 +131,12 @@ class TimingFlowTests(unittest.TestCase):
                 self.assertTrue(name.startswith("fakeram45_1rw1r_"))
                 self.assertIn(f"MACRO {name}", lef)
                 self.assertIn("PIN clock", lef)
+
+            predictor = result["libraries"]["fakeram45_1rw1r_512x17"]
+            self.assertEqual(predictor["width"], 17)
+            generated_wrappers = (root / "memory" / "wrappers.sv").read_text()
+            self.assertIn("module PredictorBsgFakeram_512_17", generated_wrappers)
+            self.assertIn("fakeram45_1rw1r_512x17 ram", generated_wrappers)
 
             resources = Path(__file__).parents[2] / "src/main/resources"
             wrappers = [
@@ -260,6 +335,8 @@ class TimingFlowTests(unittest.TestCase):
         self.assertNotIn("estimate_parasitics", tcl)
         self.assertIn("logic-only-violating-paths-summary.rpt", tcl)
         self.assertIn("-format summary", tcl)
+        self.assertIn("logic-only-violating-paths-full.rpt", tcl)
+        self.assertIn("-format full_clock_expanded", tcl)
 
         runner = (Path(__file__).parent / "synthesize_core.py").read_text()
         self.assertIn("run_logic_only_sta", runner)
@@ -368,6 +445,32 @@ _c_/Q (DFF_X1)                       _d_/D (DFF_X1)                          -0.
         self.assertEqual(endpoints[0]["startpoint"], "_a_/Q")
         self.assertEqual(endpoints[0]["endpoint"], "_b_/D")
         self.assertAlmostEqual(endpoints[0]["slack_ns"], -0.125)
+
+    def test_path_clusters_account_for_every_endpoint_in_every_dimension(self):
+        report = """Startpoint                           Endpoint                                  Slack
+-----------------------------------------------------------------------------------
+_a_/Q (DFF_X1)                       _b_/D (DFF_X1)                          -0.12500
+_c_/QN (DFF_X1)                      _d_/D (DFF_X1)                          -0.02500
+_e_/Q (DFF_X1)                       _f_/D (DFF_X1)                           0.00000
+"""
+        paths = parse_path_inventory(report)
+        clusters = build_path_clusters(paths, {
+            "_a_": "frontend.pr.pendingTrain_pcWord[3]",
+            "_b_": "frontend.pr.direction.tageValid_0_7",
+            "_c_": "commit.rob.queue.deqData_0_ftqIdx[1]",
+            "_d_": "commit.trainQueue.IndexFIFO_1.q_3_targets_2[7]",
+        })
+
+        self.assertEqual(clusters["path_count"], 2)
+        self.assertEqual(clusters["unique_endpoint_count"], 2)
+        self.assertEqual(clusters["mapped_source_count"], 2)
+        self.assertEqual(clusters["mapped_endpoint_count"], 2)
+        for dimension in ("source_blocks", "endpoint_blocks", "block_pairs", "family_pairs"):
+            self.assertEqual(sum(item["count"] for item in clusters[dimension]), 2)
+        self.assertEqual(
+            clusters["family_pairs"][0]["name"],
+            "frontend.pr.pendingTrain_pcWord[B] -> frontend.pr.direction.tageValid_N_N",
+        )
 
     def test_endpoint_inventory_parses_openroad_end_format(self):
         report = """max_delay/setup group core_clock

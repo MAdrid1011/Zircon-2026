@@ -116,21 +116,34 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
         else Cat(request.bits.vaddr, 0.U(paddrLowBits.W))
         val index = setIndex(vaddr)
         normalLookupSet(port) := index
+        val setSelect = UIntToOH(index, p.sets)
+        val normalMatches = VecInit((0 until p.sets).map { set =>
+            VecInit((0 until p.ways).map { way =>
+                setSelect(set) && normal(set)(way).inScope &&
+                    normal(set)(way).tag === normalTag(vaddr)
+            })
+        })
         for (way <- 0 until p.ways) {
-            normalLookupHit(port)(way) := request.valid && normal(index)(way).inScope &&
-                normal(index)(way).tag === normalTag(vaddr)
+            normalLookupHit(port)(way) := VecInit((0 until p.sets).map(set =>
+                normalMatches(set)(way))).asUInt.orR
         }
         for (entry <- 0 until p.superEntries) {
-            superLookupHit(port)(entry) := request.valid && superpage(entry).inScope &&
+            superLookupHit(port)(entry) := superpage(entry).inScope &&
                 superpage(entry).vpn1 === vaddr(31, 22)
         }
 
         val normalHit = normalLookupHit(port).asUInt.orR
         val superHit = superLookupHit(port).asUInt.orR
-        val normalPayload = Mux1H(normalLookupHit(port), normal(index))
+        val normalPayload = Mux1H(for {
+            set <- 0 until p.sets
+            way <- 0 until p.ways
+        } yield normalMatches(set)(way) -> normal(set)(way))
         val superPayload = Mux1H(superLookupHit(port), superpage)
         val response = io.response(port)
-        response.hit := normalHit || superHit
+        val matched = normalHit || superHit
+        // The response is a side-effect-free combinational probe. Callers use
+        // request.valid to qualify consumption and replacement-state updates.
+        response.hit := matched
         response.superpage := superHit
         val physicalAddress = Mux(
             superHit,
@@ -140,11 +153,12 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
         response.paddr := physicalAddress(p.paddrBits - 1, paddrLowBits)
         response.pma := Mux(superHit, superPayload.pma, normalPayload.pma)
         response.permissions := Mux(superHit, superPayload.permissions, normalPayload.permissions)
-        when(!response.hit) {
+        // Payload is meaningful only when hit is asserted. Keep request.valid out
+        // of the translated payload so downstream invalid data can be sampled freely.
+        when(!matched) {
             response.paddr := 0.U
             response.pma := 0.U
             response.permissions := 0.U.asTypeOf(new TLBPermissions)
-            response.superpage := false.B
         }
 
         when(request.valid) {
@@ -154,36 +168,83 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
         }
     }
 
-    val refill = io.refill.bits
-    val refillSet = refill.vpn(p.setBits - 1, 0)
-    val refillTag = refill.vpn(19, p.setBits)
+    val incomingRefill = io.refill.bits
+    val incomingRefillSet = incomingRefill.vpn(p.setBits - 1, 0)
+    val incomingRefillTag = incomingRefill.vpn(19, p.setBits)
+    val incomingSetSelect = UIntToOH(incomingRefillSet, p.sets)
     val activeAsid = Mux(io.scopeUpdate.valid, io.scopeUpdate.bits.asid, currentAsid)
-    val normalRefillMatches = VecInit((0 until p.ways).map(way =>
-        normal(refillSet)(way).valid && normal(refillSet)(way).tag === refillTag &&
-            sameAddressSpace(normal(refillSet)(way).global, normal(refillSet)(way).asid, refill.global, refill.asid)
+    val incomingNormalMatches = VecInit((0 until p.sets).map { set =>
+        VecInit((0 until p.ways).map { way =>
+            val entry = normal(set)(way)
+            entry.valid && entry.tag === incomingRefillTag &&
+                sameAddressSpace(entry.global, entry.asid, incomingRefill.global, incomingRefill.asid)
+        })
+    })
+    val incomingNormalWay = VecInit((0 until p.sets).map { set =>
+        val matches = incomingNormalMatches(set)
+        val invalid = VecInit(normal(set).map(entry => !entry.valid))
+        Mux(matches.asUInt.orR, PriorityEncoder(matches),
+            Mux(invalid.asUInt.orR, PriorityEncoder(invalid), plruVictim(normalPlru(set))))
+    })
+    val incomingSuperMatches = VecInit((0 until p.superEntries).map(entry =>
+        superpage(entry).valid && superpage(entry).vpn1 === incomingRefill.vpn(19, 10) &&
+            sameAddressSpace(
+                superpage(entry).global,
+                superpage(entry).asid,
+                incomingRefill.global,
+                incomingRefill.asid,
+            )
     ))
-    val normalInvalid = VecInit((0 until p.ways).map(way => !normal(refillSet)(way).valid))
-    val normalRefillWay = Mux(
-        normalRefillMatches.asUInt.orR,
-        PriorityEncoder(normalRefillMatches),
-        Mux(normalInvalid.asUInt.orR, PriorityEncoder(normalInvalid), plruVictim(normalPlru(refillSet)))
+    val incomingSuperInvalid = VecInit((0 until p.superEntries).map(entry => !superpage(entry).valid))
+    val incomingSuperEntry = Mux(
+        incomingSuperMatches.asUInt.orR,
+        PriorityEncoder(incomingSuperMatches),
+        Mux(incomingSuperInvalid.asUInt.orR, PriorityEncoder(incomingSuperInvalid), superReplace)
     )
-    val superRefillMatches = VecInit((0 until p.superEntries).map(entry =>
-        superpage(entry).valid && superpage(entry).vpn1 === refill.vpn(19, 10) &&
-            sameAddressSpace(superpage(entry).global, superpage(entry).asid, refill.global, refill.asid)
-    ))
-    val superInvalid = VecInit((0 until p.superEntries).map(entry => !superpage(entry).valid))
-    val superRefillEntry = Mux(
-        superRefillMatches.asUInt.orR,
-        PriorityEncoder(superRefillMatches),
-        Mux(superInvalid.asUInt.orR, PriorityEncoder(superInvalid), superReplace)
-    )
+
+    // Refill selection is isolated from the wide TLB state update. The PTW
+    // produces one refill pulse, this stage records its destinations and the
+    // following edge installs the payload without re-running address compares.
+    private val normalEntryCount = p.sets * p.ways
+    val refillStageValid = RegInit(false.B)
+    val refillStage = Reg(new TLBRefill(p))
+    val refillNormalWrite = Reg(UInt(normalEntryCount.W))
+    val refillNormalInvalidate = Reg(UInt(normalEntryCount.W))
+    val refillNormalPlruWrite = Reg(UInt(p.sets.W))
+    val refillNormalPlruValue = Reg(UInt(3.W))
+    val refillSuperWrite = Reg(UInt(p.superEntries.W))
+    val refillSuperInvalidate = Reg(UInt(p.superEntries.W))
+    val refillSuperReplaceValue = Reg(UInt(p.superIndexBits.W))
+
+    val incomingNormalWrite = VecInit.tabulate(p.sets, p.ways) { (set, way) =>
+        incomingSetSelect(set) && incomingNormalWay(set) === way.U
+    }.asUInt
+    val incomingNormalInvalidate = VecInit.tabulate(p.sets, p.ways) { (set, way) =>
+        val entry = normal(set)(way)
+        Mux(
+            incomingRefill.superpage,
+            entry.valid && entry.tag(p.normalTagBits - 1, 10 - p.setBits) === incomingRefill.vpn(19, 10) &&
+                sameAddressSpace(entry.global, entry.asid, incomingRefill.global, incomingRefill.asid),
+            incomingSetSelect(set) && incomingNormalMatches(set)(way) && incomingNormalWay(set) =/= way.U,
+        )
+    }.asUInt
+    val incomingSuperWrite = UIntToOH(incomingSuperEntry, p.superEntries)
+    val incomingSuperInvalidate = VecInit.tabulate(p.superEntries) { entryIndex =>
+        val entry = superpage(entryIndex)
+        Mux(
+            incomingRefill.superpage,
+            incomingSuperMatches(entryIndex) && incomingSuperEntry =/= entryIndex.U,
+            entry.valid && entry.vpn1 === incomingRefill.vpn(19, 10) &&
+                sameAddressSpace(entry.global, entry.asid, incomingRefill.global, incomingRefill.asid),
+        )
+    }.asUInt
 
     when(io.scopeUpdate.valid) {
         currentAsid := io.scopeUpdate.bits.asid
     }
 
     when(reset.asBool || io.flush) {
+        refillStageValid := false.B
         normal.foreach(_.foreach { entry =>
             entry.valid := false.B
             entry.inScope := false.B
@@ -195,6 +256,19 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
         normalPlru.foreach(_ := 0.U)
         superReplace := 0.U
     }.otherwise {
+        refillStageValid := io.refill.valid
+        when(io.refill.valid) {
+            refillStage := incomingRefill
+            refillNormalWrite := incomingNormalWrite
+            refillNormalInvalidate := incomingNormalInvalidate
+            refillNormalPlruWrite := incomingSetSelect
+            refillNormalPlruValue := Mux1H(incomingSetSelect.asBools,
+                (0 until p.sets).map(set => plruAfter(normalPlru(set), incomingNormalWay(set))))
+            refillSuperWrite := incomingSuperWrite
+            refillSuperInvalidate := incomingSuperInvalidate
+            refillSuperReplaceValue := incomingSuperEntry + 1.U
+        }
+
         when(io.scopeUpdate.valid) {
             for (set <- 0 until p.sets; way <- 0 until p.ways) {
                 normal(set)(way).inScope := normal(set)(way).valid &&
@@ -214,65 +288,71 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
                 Mux1H((0 until p.sets).map(set => (normalLookupSet(port) === set.U) -> normalPlru(set)(1))),
                 0.U(1.W),
             )
-            when(normalLookupHit(port).asUInt.orR) {
+            when(io.lookup(port).valid && normalLookupHit(port).asUInt.orR) {
                 normalPlru(normalLookupSet(port)) :=
                     plruAfter(lookupPlru, PriorityEncoder(normalLookupHit(port)))
             }
         }
 
-        when(io.refill.valid) {
-            when(refill.superpage) {
-                assert(refill.ppn(9, 0) === 0.U, "TLB: a 4 MiB Sv32 leaf requires PPN[0] = 0")
+        when(refillStageValid) {
+            when(refillStage.superpage) {
                 // A new superpage supersedes every overlapping small-page translation in the same address space.
                 for (set <- 0 until p.sets; way <- 0 until p.ways) {
-                    when(normal(set)(way).valid && normal(set)(way).tag(p.normalTagBits - 1, 10 - p.setBits) ===
-                        refill.vpn(19, 10) &&
-                        sameAddressSpace(normal(set)(way).global, normal(set)(way).asid, refill.global, refill.asid)) {
+                    when(refillNormalInvalidate(set * p.ways + way)) {
                         normal(set)(way).valid := false.B
                         normal(set)(way).inScope := false.B
                     }
                 }
                 for (entry <- 0 until p.superEntries) {
-                    when(superRefillMatches(entry) && superRefillEntry =/= entry.U) {
+                    when(refillSuperInvalidate(entry)) {
                         superpage(entry).valid := false.B
                         superpage(entry).inScope := false.B
                     }
+                    when(refillSuperWrite(entry)) {
+                        superpage(entry).vpn1 := refillStage.vpn(19, 10)
+                        superpage(entry).asid := refillStage.asid
+                        superpage(entry).global := refillStage.global
+                        superpage(entry).ppn1 := refillStage.ppn(p.ppnBits - 1, 10)
+                        superpage(entry).pma := refillStage.pma
+                        superpage(entry).permissions := refillStage.permissions
+                        superpage(entry).valid := true.B
+                        superpage(entry).inScope := refillStage.global || refillStage.asid === activeAsid
+                    }
                 }
-                superpage(superRefillEntry).vpn1 := refill.vpn(19, 10)
-                superpage(superRefillEntry).asid := refill.asid
-                superpage(superRefillEntry).global := refill.global
-                superpage(superRefillEntry).ppn1 := refill.ppn(p.ppnBits - 1, 10)
-                superpage(superRefillEntry).pma := refill.pma
-                superpage(superRefillEntry).permissions := refill.permissions
-                superpage(superRefillEntry).valid := true.B
-                superpage(superRefillEntry).inScope := refill.global || refill.asid === activeAsid
-                superReplace := superRefillEntry + 1.U
+                superReplace := refillSuperReplaceValue
             }.otherwise {
                 // A small-page refill removes an overlapping superpage for the affected address space.
                 for (entry <- 0 until p.superEntries) {
-                    when(superpage(entry).valid && superpage(entry).vpn1 === refill.vpn(19, 10) &&
-                        sameAddressSpace(superpage(entry).global, superpage(entry).asid, refill.global, refill.asid)) {
+                    when(refillSuperInvalidate(entry)) {
                         superpage(entry).valid := false.B
                         superpage(entry).inScope := false.B
                     }
                 }
-                for (way <- 0 until p.ways) {
-                    when(normalRefillMatches(way) && normalRefillWay =/= way.U) {
-                        normal(refillSet)(way).valid := false.B
-                        normal(refillSet)(way).inScope := false.B
+                for (set <- 0 until p.sets; way <- 0 until p.ways) {
+                    when(refillNormalInvalidate(set * p.ways + way)) {
+                        normal(set)(way).valid := false.B
+                        normal(set)(way).inScope := false.B
+                    }
+                    when(refillNormalWrite(set * p.ways + way)) {
+                        normal(set)(way).tag := refillStage.vpn(19, p.setBits)
+                        normal(set)(way).asid := refillStage.asid
+                        normal(set)(way).global := refillStage.global
+                        normal(set)(way).ppn := refillStage.ppn
+                        normal(set)(way).pma := refillStage.pma
+                        normal(set)(way).permissions := refillStage.permissions
+                        normal(set)(way).valid := true.B
+                        normal(set)(way).inScope := refillStage.global || refillStage.asid === activeAsid
                     }
                 }
-                normal(refillSet)(normalRefillWay).tag := refillTag
-                normal(refillSet)(normalRefillWay).asid := refill.asid
-                normal(refillSet)(normalRefillWay).global := refill.global
-                normal(refillSet)(normalRefillWay).ppn := refill.ppn
-                normal(refillSet)(normalRefillWay).pma := refill.pma
-                normal(refillSet)(normalRefillWay).permissions := refill.permissions
-                normal(refillSet)(normalRefillWay).valid := true.B
-                normal(refillSet)(normalRefillWay).inScope := refill.global || refill.asid === activeAsid
-                normalPlru(refillSet) := plruAfter(normalPlru(refillSet), normalRefillWay)
+                for (set <- 0 until p.sets) {
+                    when(refillNormalPlruWrite(set)) { normalPlru(set) := refillNormalPlruValue }
+                }
             }
         }
+    }
+
+    when(io.refill.valid && io.refill.bits.superpage) {
+        assert(io.refill.bits.ppn(9, 0) === 0.U, "TLB: a 4 MiB Sv32 leaf requires PPN[0] = 0")
     }
 
     for (set <- 0 until p.sets; way <- 0 until p.ways) {
@@ -286,4 +366,5 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
 class InstructionTLB(p: TLBParams = TLBParams(), paddrLowBits: Int = 2)
     extends TLB(p.copy(queryPorts = 1), paddrLowBits)
 
-class DataTLB(p: TLBParams = TLBParams()) extends TLB(p.copy(queryPorts = 2))
+class DataTLB(p: TLBParams = TLBParams(), queryPorts: Int = 2)
+    extends TLB(p.copy(queryPorts = queryPorts))

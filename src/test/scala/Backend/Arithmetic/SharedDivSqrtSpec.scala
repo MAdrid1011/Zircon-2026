@@ -1,5 +1,6 @@
 import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
+import chisel3.util._
 import org.scalatest.freespec.AnyFreeSpec
 
 class DivideIntegerWindowProbe extends Module {
@@ -9,6 +10,45 @@ class DivideIntegerWindowProbe extends Module {
         val out = Output(UInt(32.W))
     })
     io.out := SRT4Logic.integerWindow(io.data, io.shift)
+}
+
+class DivideNegativeDivisorProbe extends Module {
+    val io = IO(new Bundle {
+        val data = Input(UInt(32.W))
+        val out = Output(UInt(34.W))
+    })
+    val leading = SRT4Logic.leadingZeros(io.data)
+    val negativeInput = -Cat(0.U(1.W), io.data)
+    io.out := Cat((negativeInput << leading)(32, 0), 0.U(1.W))
+}
+
+class DivideNormalizeProbe extends Module {
+    val io = IO(new Bundle {
+        val data = Input(UInt(32.W))
+        val shift = Input(UInt(6.W))
+        val out = Output(UInt(32.W))
+    })
+    io.out := (io.data << io.shift)(31, 0)
+}
+
+class DivideDigitProbe extends Module {
+    val io = IO(new Bundle {
+        val high = Input(UInt(7.W))
+        val index = Input(UInt(3.W))
+        val equivalent = Output(Bool())
+    })
+    val high = io.high.asSInt
+    val m2 = VecInit(Seq(12, 14, 16, 16, 18, 20, 20, 24).map(_.S(7.W)))(io.index)
+    val m1 = VecInit(Seq(4, 4, 4, 4, 6, 6, 8, 8).map(_.S(7.W)))(io.index)
+    val m0 = VecInit(Seq(-4, -4, -6, -6, -6, -8, -8, -8).map(_.S(7.W)))(io.index)
+    val mn = VecInit(Seq(-13, -14, -16, -17, -18, -20, -22, -22).map(_.S(7.W)))(io.index)
+    val ge2 = high >= m2
+    val ge1 = high >= m1
+    val ge0 = high >= m0
+    val gen = high >= mn
+    val oldDigit = Cat(ge2, !ge2 && ge1, !ge1 && ge0, !ge0 && gen, !gen)
+    val newDigit = SRT4Logic.selectDigit(high, io.index)
+    io.equivalent := oldDigit === newDigit && PopCount(newDigit) === 1.U
 }
 
 class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
@@ -40,6 +80,46 @@ class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
             val overflow = x.op % 2 == 0 && x.a == 0x80000000L && x.b == 0xffffffffL
             if (b == 0 || a == 0 || a < b || overflow) 0
             else (a.bitLength - b.bitLength + 1) / 2 + 1
+        }
+    }
+
+    "negative divisor can be formed before normalization" in {
+        simulate(new DivideNegativeDivisorProbe) { dut =>
+            val random = new scala.util.Random(0x41cafeL)
+            val mask32 = (BigInt(1) << 32) - 1
+            val mask34 = (BigInt(1) << 34) - 1
+            val corners = Seq(BigInt(0), BigInt(1), BigInt(2), BigInt(3),
+                BigInt(1) << 31, mask32)
+            for (data <- corners ++ (0 until 2000).map(_ => BigInt(32, random))) {
+                val leading = if (data == 0) 32 else 32 - data.bitLength
+                val normalized = (data << leading) & mask32
+                val expected = (-(normalized << 1)) & mask34
+                dut.io.data.poke(data)
+                dut.io.out.expect(expected)
+            }
+        }
+    }
+
+    "barrel normalization matches all legacy shift encodings" in {
+        simulate(new DivideNormalizeProbe) { dut =>
+            val mask32 = (BigInt(1) << 32) - 1
+            val patterns = Seq(BigInt(0), BigInt(1), BigInt(3),
+                BigInt(1) << 31, BigInt("89abcdef", 16), mask32)
+            for (shift <- 0 until 64; data <- patterns) {
+                dut.io.data.poke(data)
+                dut.io.shift.poke(shift)
+                dut.io.out.expect((data << shift) & mask32)
+            }
+        }
+    }
+
+    "parallel SRT digit thresholds match every high and index combination" in {
+        simulate(new DivideDigitProbe) { dut =>
+            for (index <- 0 until 8; high <- -64 until 64) {
+                dut.io.index.poke(index)
+                dut.io.high.poke(high & 0x7f)
+                dut.io.equivalent.expect(true)
+            }
         }
     }
 
@@ -96,6 +176,8 @@ class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.in.bits.src1.poke(x.a)
                 dut.io.in.bits.src2.poke(x.b)
                 dut.io.in.bits.op.poke(x.op)
+                dut.io.in.bits.fp.poke(x.op >= 4)
+                dut.io.in.bits.signedInteger.poke(x.op < 4 && (x.op & 1) == 0)
                 dut.io.in.bits.roundingMode.poke(x.rm)
                 dut.io.in.bits.tag.poke(x.tag)
                 def availability: Vector[Boolean] = {

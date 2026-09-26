@@ -27,9 +27,11 @@ class ClusterIndexFIFOIO[T <: Data](
     rw: Int,
     ww: Int,
     exposeDeqIndex: Boolean,
+    separateEnqWrite: Boolean,
 )
     extends Bundle {
     val enq = Vec(ew, Flipped(Decoupled(gen)))
+    val enqWrite = if (separateEnqWrite) Some(Input(Vec(ew, Bool()))) else None
     val enqIdx = Output(Vec(ew, new ClusterEntry(len, n)))
     val deq = Vec(dw, Decoupled(gen))
     val deqIdx = if (exposeDeqIndex) Some(Output(Vec(dw, new ClusterEntry(len, n)))) else None
@@ -57,14 +59,17 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     exposeDeqIndex: Boolean = false,
     writePayloadOnFlush: Boolean = false,
     registeredDeq: Boolean = false,
+    separateEnqWrite: Boolean = false,
+    selectDeqAfterRegister: Boolean = false,
 ) extends Module {
     require(num > 0 && ew > 0 && dw > 0, "ClusterIndexFIFO depth and transfer widths must be positive")
     require(rw >= 0 && ww >= 0, "ClusterIndexFIFO random port counts must be nonnegative")
+    require(!selectDeqAfterRegister || registeredDeq)
     val n: Int = math.max(ew, dw)
     require(num % n == 0, "ClusterIndexFIFO depth must be divisible by bank count")
     require(rstVal.forall(_.size == num), "ClusterIndexFIFO reset contents must match depth")
     val len: Int = num / n
-    val io = IO(new ClusterIndexFIFOIO(gen, n, len, ew, dw, rw, ww, exposeDeqIndex))
+    val io = IO(new ClusterIndexFIFOIO(gen, n, len, ew, dw, rw, ww, exposeDeqIndex, separateEnqWrite))
 
     private val banks = Seq.tabulate(n) { bank =>
         Module(new IndexFIFO(
@@ -80,7 +85,11 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     }
     private val enqBase = RegInit(1.U(n.W))
     private val deqBase = RegInit(1.U(n.W))
-    private val deqData = if (registeredDeq) Some(Reg(Vec(dw, gen))) else None
+    private val deqData = if (registeredDeq && !selectDeqAfterRegister) Some(Reg(Vec(dw, gen))) else None
+    private val deqAlternatives = if (selectDeqAfterRegister) Some(Reg(Vec(dw, Vec(dw + 1, gen)))) else None
+    private val deqPopSelect = if (selectDeqAfterRegister) Some(
+        RegInit(VecInit.fill(dw)(0.U((dw + 1).W)))
+    ) else None
     private val deqValid = if (registeredDeq) Some(RegInit(VecInit.fill(dw)(false.B))) else None
     private def hasMethod(name: String): Boolean = {
         val member = typeOf[T].member(TermName(name))
@@ -112,10 +121,23 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         }
     }
     io.enq.foreach(_.ready := allEnqReady)
+    val enqWrite = io.enqWrite.map(_.toSeq).getOrElse(io.enq.map(_.valid).toSeq)
+    val writeSelect = Wire(Vec(ew, UInt(n.W)))
+    if (compactEnq && separateEnqWrite) {
+        var next = enqBase
+        for (lane <- 0 until ew) {
+            writeSelect(lane) := next
+            next = Mux(enqWrite(lane), FIFOUtil.rotate(next, 1), next)
+        }
+    } else {
+        writeSelect := enqSelect
+    }
     for (bank <- 0 until n) {
         val hits = io.enq.indices.map(lane => enqSelect(lane)(bank) && io.enq(lane).valid)
+        val writeHits = io.enq.indices.map(lane => writeSelect(lane)(bank) && enqWrite(lane))
         banks(bank).enq.valid := VecInit(hits).asUInt.orR && allEnqReady
-        banks(bank).enq.bits := Mux1H(hits, io.enq.map(_.bits))
+        banks(bank).enqWrite := VecInit(writeHits).asUInt.orR && allEnqReady
+        banks(bank).enq.bits := Mux1H(writeHits, io.enq.map(_.bits))
     }
     io.enqIdx.zip(enqSelect).foreach { case (idx, select) =>
         idx.qidx := select
@@ -129,7 +151,9 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         io.deq(lane).valid := deqValid.map(_(lane)).getOrElse(
             Mux1H(select, banks.map(_.deq.valid)) && allDeqValid
         )
-        io.deq(lane).bits := deqData.map(_(lane)).getOrElse(Mux1H(select, banks.map(_.deq.bits)))
+        io.deq(lane).bits := deqAlternatives.map { alternatives =>
+            Mux1H(deqPopSelect.get(lane).asBools, alternatives(lane))
+        }.orElse(deqData.map(_(lane))).getOrElse(Mux1H(select, banks.map(_.deq.bits)))
         if (exposeDeqIndex) {
             io.deqIdx.get(lane).qidx := select
             io.deqIdx.get(lane).offset := Mux1H(select, banks.map(_.deqIdx))
@@ -189,11 +213,26 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
                 })
                 candidateValid -> candidateData
             }
+            // Flush invalidates the output; its payload remains unobservable.
+            // Keep the wide data registers off the recovery-control cone.
+            if (selectDeqAfterRegister) {
+                for (candidateCount <- 0 to dw) {
+                    deqAlternatives.get(lane)(candidateCount) := candidates(candidateCount)._2
+                }
+            } else {
+                deqData.get(lane) := Mux1H(popCountOH, candidates.map(_._2))
+            }
             when(io.flush) {
                 deqValid.get(lane) := false.B
+                deqPopSelect.foreach(_(lane) := 0.U)
             }.otherwise {
-                deqValid.get(lane) := Mux1H(popCountOH, candidates.map(_._1))
-                deqData.get(lane) := Mux1H(popCountOH, candidates.map(_._2))
+                val nextValid = Mux1H(popCountOH, candidates.map(_._1))
+                deqValid.get(lane) := nextValid
+                if (selectDeqAfterRegister) {
+                    // Invalid output data is unobservable. Qualifying each lane
+                    // gives its wide payload mux a distinct registered driver.
+                    deqPopSelect.get(lane) := Mux(nextValid, popCountOH.asUInt, 0.U)
+                }
             }
         }
     }

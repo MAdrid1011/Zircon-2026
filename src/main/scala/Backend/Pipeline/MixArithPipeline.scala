@@ -78,13 +78,36 @@ class MixArithPipeline extends Module {
     val fpZeroEX1 = Reg(Vec(MixArithConstants.numSources, Bool()))
     val validEX1 = RegInit(false.B)
 
-    val selectCSR = packageEX1.fu === DecodeUnit.System.U &&
-        packageEX1.op >= SystemOp.CSRRW.U && packageEX1.op <= SystemOp.CSRRCI.U
-    val selectMultiply = packageEX1.fu === DecodeUnit.Multiply.U && packageEX1.op <= 10.U
-    val selectDivide = packageEX1.fu === DecodeUnit.Divide.U && packageEX1.op <= 5.U
-    val selectFpLogic = packageEX1.fu === DecodeUnit.FpMisc.U && packageEX1.op <= FpMiscOp.FMV_W_X.U
-    val selectFpConvert = packageEX1.fu === DecodeUnit.FpMisc.U &&
-        packageEX1.op >= FpMiscOp.FCVT_W_S.U && packageEX1.op <= FpMiscOp.FCVT_S_WU.U
+    val selectCSR = RegEnable(packageRF.fu === DecodeUnit.System.U &&
+        packageRF.op >= SystemOp.CSRRW.U && packageRF.op <= SystemOp.CSRRCI.U, advanceRF)
+    val selectMultiply = RegEnable(packageRF.fu === DecodeUnit.Multiply.U && packageRF.op <= 10.U, advanceRF)
+    val selectDivide = RegEnable(packageRF.fu === DecodeUnit.Divide.U && packageRF.op <= 5.U, advanceRF)
+    val selectFpLogic = RegEnable(packageRF.fu === DecodeUnit.FpMisc.U &&
+        packageRF.op <= FpMiscOp.FMV_W_X.U, advanceRF)
+    val selectFpConvert = RegEnable(packageRF.fu === DecodeUnit.FpMisc.U &&
+        packageRF.op >= FpMiscOp.FCVT_W_S.U && packageRF.op <= FpMiscOp.FCVT_S_WU.U, advanceRF)
+    val multiplyFpRF = packageRF.op >= ZirconConfig.MultiplyOp.FADD
+    val multiplyFpEX1 = RegEnable(multiplyFpRF, advanceRF)
+    val multiplyASignedEX1 = RegEnable(!multiplyFpRF &&
+        packageRF.op =/= ZirconConfig.MultiplyOp.MULHU, advanceRF)
+    val multiplyBSignedEX1 = RegEnable(!multiplyFpRF &&
+        packageRF.op =/= ZirconConfig.MultiplyOp.MULHU &&
+        packageRF.op =/= ZirconConfig.MultiplyOp.MULHSU, advanceRF)
+    val divideFpRF = packageRF.op >= ZirconConfig.DivideOp.FDIV.U
+    val divideFpEX1 = RegEnable(divideFpRF, advanceRF)
+    val divideSignedEX1 = RegEnable(!divideFpRF && !packageRF.op(0), advanceRF)
+    val convertToFloatEX1 = RegEnable(packageRF.op === FpMiscOp.FCVT_S_W.U ||
+        packageRF.op === FpMiscOp.FCVT_S_WU.U, advanceRF)
+    val convertSignedEX1 = RegEnable(packageRF.op === FpMiscOp.FCVT_W_S.U ||
+        packageRF.op === FpMiscOp.FCVT_S_W.U, advanceRF)
+    val csrRwEX1 = RegEnable(packageRF.op === SystemOp.CSRRW.U ||
+        packageRF.op === SystemOp.CSRRWI.U, advanceRF)
+    val csrRsEX1 = RegEnable(packageRF.op === SystemOp.CSRRS.U ||
+        packageRF.op === SystemOp.CSRRSI.U, advanceRF)
+    val csrRcEX1 = RegEnable(packageRF.op === SystemOp.CSRRC.U ||
+        packageRF.op === SystemOp.CSRRCI.U, advanceRF)
+    val csrImmediateEX1 = RegEnable(packageRF.op === SystemOp.CSRRWI.U ||
+        packageRF.op === SystemOp.CSRRSI.U || packageRF.op === SystemOp.CSRRCI.U, advanceRF)
     val dynamicRounding = packageEX1.roundingMode === 7.U
     val badRounding = dynamicRounding && io.csr.frm > 4.U
     val roundingMode = Mux(dynamicRounding, Mux(badRounding, 0.U, io.csr.frm), packageEX1.roundingMode)
@@ -205,6 +228,10 @@ class MixArithPipeline extends Module {
     io.csr.req.valid := fireEX1 && selectCSR
     io.csr.req.bits.addr := packageEX1.imm(11, 0)
     io.csr.req.bits.op := packageEX1.op
+    io.csr.req.bits.rw := csrRwEX1
+    io.csr.req.bits.rs := csrRsEX1
+    io.csr.req.bits.rc := csrRcEX1
+    io.csr.req.bits.immediate := csrImmediateEX1
     io.csr.req.bits.source := packageEX1.imm(16, 12)
     io.csr.req.bits.data := sourceValue(0)
     io.csr.req.bits.rdZero := packageEX1.rdZero
@@ -247,6 +274,9 @@ class MixArithPipeline extends Module {
     multiply.io.in.bits.fpZero2 := fpZeroEX1(1)
     multiply.io.in.bits.fpZero3 := fpZeroEX1(2)
     multiply.io.in.bits.op := packageEX1.op(3, 0)
+    multiply.io.in.bits.fp := multiplyFpEX1
+    multiply.io.in.bits.aSigned := multiplyASignedEX1
+    multiply.io.in.bits.bSigned := multiplyBSignedEX1
     multiply.io.in.bits.roundingMode := roundingMode
     multiply.io.in.bits.tag := resultTag(executionPackage).asUInt
     multiply.io.flush := flush
@@ -257,6 +287,8 @@ class MixArithPipeline extends Module {
     divide.io.in.bits.src1 := sourceValue(0)
     divide.io.in.bits.src2 := sourceValue(1)
     divide.io.in.bits.op := packageEX1.op(2, 0)
+    divide.io.in.bits.fp := divideFpEX1
+    divide.io.in.bits.signedInteger := divideSignedEX1
     divide.io.in.bits.roundingMode := roundingMode
     divide.io.in.bits.tag := resultTag(executionPackage).asUInt
     divide.io.flush := flush
@@ -303,6 +335,8 @@ class MixArithPipeline extends Module {
     fpConvert.io.in.valid := launchEX1 && selectFpConvert
     fpConvert.io.in.bits.src1 := sourceValue(0)
     fpConvert.io.in.bits.op := packageEX1.op(3, 0)
+    fpConvert.io.in.bits.toFloat := convertToFloatEX1
+    fpConvert.io.in.bits.signedInt := convertSignedEX1
     fpConvert.io.in.bits.roundingMode := roundingMode
     fpConvert.io.in.bits.tag := resultTag(executionPackage).asUInt
     fpConvert.io.flush := flush
@@ -330,13 +364,39 @@ class MixArithPipeline extends Module {
         shortValid,
         Seq(packageCSR_EX4, packageFpLogic_EX4, packageFpConvert_EX4)
     )
-    val packageShortWB = Reg(new MixArithResult)
+    val packageShortWB = RegInit(0.U.asTypeOf(new MixArithResult))
     val validShortWB = RegInit(false.B)
+    val shortIntWriteOneHot = RegInit(0.U(MixArithConstants.numIntPhys.W))
+    val shortFpWriteOneHot = RegInit(0.U(MixArithConstants.numFpPhys.W))
+
+    def destinationOneHot(tag: MixArithTag, fp: Boolean, entries: Int): UInt = {
+        val destinationFp = tag.prd(MixArithConstants.physTagWidth - 1)
+        val localWidth = log2Ceil(entries)
+        Mux(
+            tag.rdValid && !tag.exception.valid && destinationFp === fp.B,
+            UIntToOH(tag.prd(localWidth - 1, 0), entries),
+            0.U(entries.W),
+        )
+    }
+
     when(flush) {
         validShortWB := false.B
+        packageShortWB := 0.U.asTypeOf(new MixArithResult)
+        shortIntWriteOneHot := 0.U
+        shortFpWriteOneHot := 0.U
     }.otherwise {
         validShortWB := shortValid.asUInt.orR
-        when(shortValid.asUInt.orR) { packageShortWB := shortPackage }
+        packageShortWB := shortPackage
+        shortIntWriteOneHot := Mux(
+            shortValid.asUInt.orR,
+            destinationOneHot(shortPackage.tag, fp = false, MixArithConstants.numIntPhys),
+            0.U,
+        )
+        shortFpWriteOneHot := Mux(
+            shortValid.asUInt.orR,
+            destinationOneHot(shortPackage.tag, fp = true, MixArithConstants.numFpPhys),
+            0.U,
+        )
     }
     assert(flush || PopCount(shortValid) <= 1.U, "MixArith short units must occupy distinct EX4 cycles")
 
@@ -355,20 +415,40 @@ class MixArithPipeline extends Module {
     // WB presence comes only from registered stage-valid bits. Flush gates architectural
     // effects separately so it cannot enter the global Bypass data-selection cone.
     val wbPresent = VecInit(Seq(validShortWB, multiply.io.present, divide.io.present))
-    val packageWB = Mux1H(wbPresent, Seq(packageShortWB, packageMultiplyWB, packageDivideWB))
+    val longPackageWB = Mux1H(
+        Seq(multiply.io.present, divide.io.present),
+        Seq(packageMultiplyWB, packageDivideWB),
+    )
+    val packageWB = (packageShortWB.asUInt | longPackageWB.asUInt).asTypeOf(new MixArithResult)
     val validWB = wbPresent.asUInt.orR && !flush
     assert(flush || PopCount(wbPresent) <= 1.U, "MixArith permits only one ordered WB result per cycle")
+    when(!validShortWB) {
+        assert(packageShortWB.asUInt === 0.U, "Invalid short WB payload must be zero")
+    }
 
     val destinationFp = packageWB.tag.prd(MixArithConstants.physTagWidth - 1)
     val destination = packageWB.tag.prd(MixArithConstants.localPhysWidth - 1, 0)
 
-    val successfulWrite = validWB && packageWB.tag.rdValid && !packageWB.tag.exception.valid
+    val successfulWrite = !flush && packageWB.tag.rdValid && !packageWB.tag.exception.valid
     io.rf.intWrite.valid := successfulWrite && !destinationFp
     io.rf.intWrite.bits.addr := destination
     io.rf.intWrite.bits.data := packageWB.data
     io.rf.fpWrite.valid := successfulWrite && destinationFp
     io.rf.fpWrite.bits.addr := destination(MixArithConstants.fpPhysWidth - 1, 0)
     io.rf.fpWrite.bits.data := packageWB.data
+    // Short results carry a one-hot destination from EX4/WB. Long units retain
+    // the ordinary address-decoded path so recovery cannot fan out through their
+    // combinational output-valid controls.
+    io.rf.intWriteOneHot := shortIntWriteOneHot
+    io.rf.intWriteData := packageShortWB.data
+    io.rf.fpWriteOneHot := shortFpWriteOneHot
+    io.rf.fpWriteData := packageShortWB.data
+    when(shortIntWriteOneHot.orR && io.rf.intWrite.valid) {
+        assert(shortIntWriteOneHot === UIntToOH(io.rf.intWrite.bits.addr, MixArithConstants.numIntPhys))
+    }
+    when(shortFpWriteOneHot.orR && io.rf.fpWrite.valid) {
+        assert(shortFpWriteOneHot === UIntToOH(io.rf.fpWrite.bits.addr, MixArithConstants.numFpPhys))
+    }
 
     io.cmt.rob.complete.valid := validWB
     io.cmt.rob.complete.bits.prd := packageWB.tag.prd
@@ -379,7 +459,7 @@ class MixArithPipeline extends Module {
     io.cmt.rob.complete.bits.robIdx := packageWB.tag.robIdx
     io.cmt.rob.complete.bits.exception := packageWB.tag.exception
 
-    io.wakeup.valid := wbPresent.asUInt.orR && packageWB.tag.rdValid && !packageWB.tag.exception.valid
+    io.wakeup.valid := packageWB.tag.rdValid && !packageWB.tag.exception.valid
     io.wakeup.bits := packageWB.tag.prd
     val divideWake = divide.io.out.valid && packageDivideWB.tag.rdValid && !packageDivideWB.tag.exception.valid
     io.wakeEX2.valid := earlyWakeValid(1) || divideWake

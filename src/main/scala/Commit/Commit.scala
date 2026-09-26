@@ -73,6 +73,14 @@ class Commit(
     val sb = Module(new StoreBuffer(cp, DCacheParams(load.entries)))
     val csr = Module(new CSR)
     val privilege = RegInit(3.U(2.W))
+    val delayedRecovery = RegInit(false.B)
+    // The middleend clear uses the opposite register polarity so synthesis does
+    // not merge its high-fanout source with the frontend/backend clear source.
+    val delayedBackendRecovery = RegInit(false.B)
+    val delayedMiddleendRecoveryN = RegInit(true.B)
+    val delayedMiddleendRecovery = !delayedMiddleendRecoveryN
+    val delayedMiddleendRestore = RegInit(false.B)
+    val delayedTlbFlush = RegInit(false.B)
 
     /* Middleend may advance only through the common ROB/SQ/FTQ availability prefix. */
     ftq.io.allocate := io.middleend.ftqAllocate
@@ -87,7 +95,7 @@ class Commit(
     val ftqFree = fp.ftqDepth.U - ftq.io.used
     val ftqAvailable = VecInit((0 until issue.dispatchWidth).map { lane =>
         PopCount((0 to lane).map { previous =>
-            io.middleend.request.valid(previous) && io.middleend.request.packetStart(previous)
+            io.middleend.request.packetStart(previous)
         }) <= ftqFree
     })
     io.middleend.resourcePrefix := rob.io.availablePrefix & sq.io.availablePrefix & ftqAvailable.asUInt
@@ -114,11 +122,13 @@ class Commit(
         exception: BackendException,
         fflags: UInt = 0.U,
         fpFlagsValid: Bool = false.B,
+        mispredicted: Bool = false.B,
     ): Valid[ROBWrite] = {
         val result = Wire(Valid(new ROBWrite(CommitIndex.addressWidth(cp.robEntries))))
         result.valid := valid
         result.bits.address := robIdx(CommitIndex.addressWidth(cp.robEntries) - 1, 0)
         result.bits.data := data
+        result.bits.mispredicted := mispredicted
         result.bits.exception := exception
         result.bits.fflags := fflags
         result.bits.fpFlagsValid := fpFlagsValid
@@ -131,6 +141,7 @@ class Commit(
             port.rob.complete.bits.robIdx,
             port.rob.complete.bits.data,
             port.rob.complete.bits.exception,
+            mispredicted = port.branch.update.valid && port.branch.update.bits.predFail,
         )
     }
 
@@ -139,12 +150,14 @@ class Commit(
     for (port <- branchInputs.indices) {
         val input = branchInputs(port)
         ftq.io.commit.branch(port).valid := input.valid
-        ftq.io.commit.branch(port).bits.ftqIdx := rob.io.readEntry(3 + port).ftqIdx
+        ftq.io.commit.branch(port).bits.ftqIdxOH := rob.io.readEntry(3 + port).ftqIdxOH
         ftq.io.commit.branch(port).bits.slot := rob.io.readEntry(3 + port).slot
         ftq.io.commit.branch(port).bits.taken := input.bits.taken
         ftq.io.commit.branch(port).bits.target := input.bits.target
-        ftq.io.commit.branch(port).bits.mispredicted := input.bits.predFail
-        when(input.valid) { assert(io.backend.arith(port).rob.complete.valid) }
+        when(input.valid && !delayedBackendRecovery) {
+            assert(io.backend.arith(port).rob.complete.valid)
+            assert(input.bits.robIdx === io.backend.arith(port).rob.complete.bits.robIdx)
+        }
     }
     /* Mix, Load, Store and Atomic producers occupy fixed ROB completion ports. */
     rob.io.completion(2) := completion(
@@ -193,19 +206,40 @@ class Commit(
     sb.io.enqueue <> sq.io.drain
     io.backend.store <> sb.io.store
     /* Retirement stops at the first recovery event and delays its global redirect by one cycle. */
-    val delayedRecovery = RegInit(false.B)
-    // Keep the high-fanout queue clear domains on independent register outputs.
-    val delayedBackendRecovery = RegInit(false.B)
-    val delayedMiddleendRecovery = RegInit(false.B)
-    val delayedMiddleendRestore = RegInit(false.B)
-    val trainQueue = Module(new ClusterIndexFIFO(new FrontendTraining(fp), 6, cp.width, 1, 0, 0))
+    val trainQueue = Module(new ClusterIndexFIFO(
+        new FrontendTraining(fp),
+        6,
+        cp.width,
+        1,
+        0,
+        0,
+        compactEnq = true,
+    ))
+    val trainStage = Reg(Vec(cp.width, new FrontendTraining(fp)))
+    val trainStageValid = RegInit(0.U(cp.width.W))
     val pendingRecoveryTrain = Reg(new FrontendTraining(fp))
     val pendingRecoveryTrainValid = RegInit(false.B)
+    for (port <- 0 until cp.width) {
+        trainQueue.io.enq(port).valid := Mux(
+            pendingRecoveryTrainValid,
+            if (port == 0) true.B else false.B,
+            trainStageValid(port),
+        )
+        trainQueue.io.enq(port).bits := Mux(
+            pendingRecoveryTrainValid,
+            pendingRecoveryTrain,
+            trainStage(port),
+        )
+    }
+    val trainStageAccepted = !pendingRecoveryTrainValid &&
+        trainStageValid.orR && trainQueue.io.enq(0).ready
+    val trainStageReady = !trainStageValid.orR || trainStageAccepted
+    val pendingRecoveryTrainAccepted = pendingRecoveryTrainValid && trainQueue.io.enq(0).ready
     trainQueue.io.flush := false.B
     trainQueue.io.deq(0).ready := io.frontend.ftq.train.ready
     io.frontend.ftq.train.valid := trainQueue.io.deq(0).valid
     io.frontend.ftq.train.bits := trainQueue.io.deq(0).bits
-    val trainingSpace = trainQueue.io.enq(0).ready && !pendingRecoveryTrainValid
+    val trainingSpace = trainStageReady && !pendingRecoveryTrainValid
     val headSystem = rob.io.head(0).valid && rob.io.head(0).bits.isSystem
     val headAtomic = rob.io.head(0).valid && rob.io.head(0).bits.isAtomic
     val headSystemOp = rob.io.head(0).bits.systemOp
@@ -230,14 +264,19 @@ class Commit(
     io.backend.atomic.request.bits.exception := sq.io.atomic.request.bits.exception
     io.backend.atomic.blockMemoryIssue := headAtomic && sq.io.atomic.request.valid && !delayedRecovery
     val maintenanceStarted = RegInit(false.B)
+    val maintenanceInvalidate = RegInit(false.B)
     val cacheMaintenance = fenceI || sfence
     when(!cacheMaintenance || delayedRecovery) {
         maintenanceStarted := false.B
+        maintenanceInvalidate := false.B
     }.elsewhen(memoryDrained) {
         maintenanceStarted := true.B
+        when(!maintenanceStarted) { maintenanceInvalidate := fenceI }
     }
-    io.maintenance.request := cacheMaintenance && maintenanceStarted && !delayedRecovery
-    io.maintenance.invalidate := fenceI
+    // Once maintenance starts, its registered kind owns the request until the
+    // recovery edge. ROB head decode must not feed the cache/frontend flush tree.
+    io.maintenance.request := maintenanceStarted && !delayedRecovery
+    io.maintenance.invalidate := maintenanceInvalidate
     val systemReadyNow = Mux(
         cacheMaintenance,
         maintenanceStarted && io.maintenance.done,
@@ -253,24 +292,23 @@ class Commit(
     }
     val systemReady = !headSystem ||
         (systemReadyValid && systemReadyRobIdx === rob.io.head(0).bits.robIdx)
-    /* The ordered ROB window maps to the FTQ head window by prior packet ends. */
+    /* ROB entries retain their FTQ identity; the ordered head window validates it. */
     val selectedFtq = Wire(Vec(cp.width, new FrontendFtqEntry(fp)))
     val selectedFtqIdx = Wire(Vec(cp.width, UInt(fp.ftqBits.W)))
     val selectedFtqValid = Wire(Vec(cp.width, Bool()))
     val headMatchesFtq = Wire(Vec(cp.width, Bool()))
     for (lane <- 0 until cp.width) {
-        // The random-read ports remain available for isolated FTQ tests; Commit
-        // uses the ordered head window so ROB identity cannot enter recovery PC.
-        ftq.io.commit.readIdx(lane) := 0.U
+        ftq.io.commit.readIndexOH(lane) := rob.io.head(lane).bits.ftqIdxOH
         val packetRank = if (lane == 0) 0.U else PopCount((0 until lane).map { previous =>
             rob.io.head(previous).valid && rob.io.head(previous).bits.packetEnd
         })
         val hits = (0 until cp.width).map(packet => packetRank === packet.U)
-        selectedFtq(lane) := Mux1H(hits, ftq.io.commit.head.map(_.bits))
-        selectedFtqIdx(lane) := Mux1H(hits, ftq.io.commit.headIdx)
+        selectedFtq(lane) := ftq.io.commit.read(lane)
+        selectedFtqIdx(lane) := rob.io.head(lane).bits.ftqIdx
+        val expectedFtqIdx = Mux1H(hits, ftq.io.commit.headIdx)
         selectedFtqValid(lane) := Mux1H(hits, ftq.io.commit.head.map(_.valid))
         headMatchesFtq(lane) := selectedFtqValid(lane) &&
-            selectedFtqIdx(lane) === rob.io.head(lane).bits.ftqIdx
+            expectedFtqIdx === rob.io.head(lane).bits.ftqIdx
     }
     val retire = Wire(Vec(cp.width, Bool()))
     val recovery = Wire(Vec(cp.width, Bool()))
@@ -298,10 +336,6 @@ class Commit(
     var continue = true.B
     for (lane <- 0 until cp.width) {
         val entry = rob.io.head(lane).bits
-        val mispredicted = Mux1H(
-            VecInit.tabulate(fp.fetchWidth)(slot => entry.slot === slot.U),
-            selectedFtq(lane).mispredicted.asBools,
-        )
         val commitSystem = entry.isSystem &&
             (entry.systemOp <= SystemOp.FENCE_I.U || entry.systemOp >= SystemOp.ECALL.U)
         val ecall = entry.isSystem && entry.systemOp === SystemOp.ECALL.U
@@ -310,10 +344,10 @@ class Commit(
         val sretIllegal = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
         val systemException = ecall || ebreak || mretIllegal || sretIllegal
-        recoveryCandidate(lane) := entry.exception.valid || mispredicted || commitSystem ||
+        recoveryCandidate(lane) := entry.exception.valid || entry.mispredicted || commitSystem ||
             writesExecutionState(entry) || entry.isAtomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
-        val completed = rob.io.head(lane).valid && headMatchesFtq(lane) && entry.complete &&
+        val completed = rob.io.head(lane).valid && entry.complete &&
             (if (lane == 0) systemReady else !headSystem && !entry.isSystem) &&
             (!needsFeedback || trainingSpace)
         val recover = completed && recoveryCandidate(lane)
@@ -347,7 +381,7 @@ class Commit(
     for (lane <- 0 until cp.width) {
         val entry = rob.io.head(lane).bits
         val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
-        val completed = rob.io.head(lane).valid && selectedFtqValid(lane) && entry.complete &&
+        val completed = rob.io.head(lane).valid && entry.complete &&
             !entry.isSystem && (!needsFeedback || trainingSpace)
         val recover = completed && recoveryCandidate(lane)
         interruptRecovery(lane) := interruptContinue && recover
@@ -373,8 +407,15 @@ class Commit(
     val recoveryFtq = Mux1H(recoveryPayloadSelect, selectedFtq)
     val recoverySelectedFtqIdx = Mux1H(recoveryPayloadSelect, selectedFtqIdx)
     val recoverySlotOH = UIntToOH(recoverySlot, fp.fetchWidth)
-    val recoveryTaken = (recoveryFtq.taken & recoverySlotOH).orR
-    val recoveryTarget = Mux1H(recoverySlotOH, recoveryFtq.targets)
+    val candidateSlotOH = rob.io.head.map(head => UIntToOH(head.bits.slot, fp.fetchWidth))
+    val candidateTaken = (0 until cp.width).map { lane =>
+        (selectedFtq(lane).taken & candidateSlotOH(lane)).orR
+    }
+    val candidateTarget = (0 until cp.width).map { lane =>
+        Mux1H(candidateSlotOH(lane).asBools, selectedFtq(lane).targets)
+    }
+    val recoveryTaken = Mux1H(recoveryPayloadSelect, candidateTaken)
+    val recoveryTarget = Mux1H(recoveryPayloadSelect, candidateTarget)
     val recoveryRetirement = Wire(new FrontendRetirement(fp))
     val recoveryMask = recoveryFtq.record.train.mask & VecInit.tabulate(fp.fetchWidth) { slot =>
         slot.U <= recoverySlot
@@ -403,10 +444,17 @@ class Commit(
     val selectedExceptionValid = Mux(takeInterrupt, rob.io.head(0).bits.exception.valid, recoveryExceptionValid)
     val selectedExceptionCause = Mux(takeInterrupt, rob.io.head(0).bits.exception.cause, recoveryExceptionCause)
     val selectedExceptionTval = Mux(takeInterrupt, rob.io.head(0).bits.exception.tval, recoveryExceptionTval)
-    val selectedEcall = selectedIsSystem && selectedSystemOp === SystemOp.ECALL.U
-    val selectedEbreak = selectedIsSystem && selectedSystemOp === SystemOp.EBREAK.U
-    val selectedMret = selectedIsSystem && selectedSystemOp === SystemOp.MRET.U
-    val selectedSret = selectedIsSystem && selectedSystemOp === SystemOp.SRET.U
+    def selectedSystemKind(op: UInt): Bool = Mux(
+        takeInterrupt,
+        rob.io.head(0).bits.isSystem && rob.io.head(0).bits.systemOp === op,
+        Mux1H(recoveryPayloadSelect, rob.io.head.map { head =>
+            head.bits.isSystem && head.bits.systemOp === op
+        }),
+    )
+    val selectedEcall = selectedSystemKind(SystemOp.ECALL.U)
+    val selectedEbreak = selectedSystemKind(SystemOp.EBREAK.U)
+    val selectedMret = selectedSystemKind(SystemOp.MRET.U)
+    val selectedSret = selectedSystemKind(SystemOp.SRET.U)
     val selectedMretIllegal = selectedMret && privilege =/= 3.U
     val selectedSretIllegal = selectedSret &&
         !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
@@ -438,7 +486,9 @@ class Commit(
 
     delayedRecovery := recoveryValid
     delayedBackendRecovery := recoveryValid
-    delayedMiddleendRecovery := recoveryValid
+    delayedMiddleendRecoveryN := !recoveryValid
+    delayedTlbFlush := recoveryValid &&
+        (sfence || (writesSatpFields(selectedIsSystem, selectedSystemOp, selectedInstruction) && !trap))
     // Rename restoration follows the global clear so it sees the committed map
     // and free-list tail after the final registered retirement update.
     delayedMiddleendRestore := delayedMiddleendRecovery
@@ -514,67 +564,58 @@ class Commit(
         delayedFtq,
     )
 
-    /* Normal events register here; recovery data already crosses delayedFtq. */
+    /* Compact normal events before the register; recovery remains an independent event. */
+    require(cp.width == 3, "frontend predictor state retirement is three packets wide")
+    val normalStateValid = VecInit(normalFeedback.map(_.io.state.valid))
+    val compactNormalState = Wire(Vec(cp.width, Valid(new FrontendStateEvent(fp))))
+    compactNormalState(0).valid := normalStateValid.asUInt.orR
+    compactNormalState(0).bits := Mux(
+        normalStateValid(0),
+        normalFeedback(0).io.state.bits,
+        Mux(normalStateValid(1), normalFeedback(1).io.state.bits, normalFeedback(2).io.state.bits),
+    )
+    compactNormalState(1).valid :=
+        (normalStateValid(0) && normalStateValid(1)) ||
+        (normalStateValid(0) && normalStateValid(2)) ||
+        (normalStateValid(1) && normalStateValid(2))
+    compactNormalState(1).bits := Mux(
+        normalStateValid(0) && normalStateValid(1),
+        normalFeedback(1).io.state.bits,
+        normalFeedback(2).io.state.bits,
+    )
+    compactNormalState(2).valid := normalStateValid.asUInt.andR
+    compactNormalState(2).bits := normalFeedback(2).io.state.bits
     val delayedNormalStateValid = RegInit(0.U(cp.width.W))
     val delayedNormalState = Reg(Vec(cp.width, new FrontendStateEvent(fp)))
-    delayedNormalStateValid := VecInit(normalFeedback.map(_.io.state.valid)).asUInt
+    delayedNormalStateValid := VecInit(compactNormalState.map(_.valid)).asUInt
+    delayedNormalState := VecInit(compactNormalState.map(_.bits))
     val delayedNormalCount = PopCount(delayedNormalStateValid)
-    val delayedNormalCompact = Wire(Vec(cp.width, Valid(new FrontendStateEvent(fp))))
     for (port <- 0 until cp.width) {
-        val hits = (0 until cp.width).map { lane =>
-            val rank = if (lane == 0) 0.U else PopCount(delayedNormalStateValid.take(lane))
-            delayedNormalStateValid(lane) && rank === port.U
-        }
-        delayedNormalCompact(port).valid := VecInit(hits).asUInt.orR
-        delayedNormalCompact(port).bits := Mux1H(hits, delayedNormalState)
+        io.frontend.ftq.retire(port).valid := delayedNormalStateValid(port)
+        io.frontend.ftq.retire(port).bits := delayedNormalState(port)
     }
-    for (port <- 0 until cp.width) {
-        when(normalFeedback(port).io.state.valid) {
-            delayedNormalState(port) := normalFeedback(port).io.state.bits
-        }
-        val recoveryHere = delayedRecovery && delayedFeedback.io.state.valid && delayedNormalCount === port.U
-        io.frontend.ftq.retire(port).valid := delayedNormalCompact(port).valid || recoveryHere
-        io.frontend.ftq.retire(port).bits := Mux(
-            recoveryHere,
-            delayedFeedback.io.state.bits,
-            delayedNormalCompact(port).bits,
-        )
-    }
+    io.frontend.ftq.recovery := delayedFeedback.io.state
     when(delayedRecovery) {
         assert(delayedNormalCount + delayedFeedback.io.state.valid <= cp.width.U)
     }
 
     val recoveryTrain = delayedFeedback.io.train.valid
     val normalTrainValid = VecInit(normalFeedback.map(_.io.train.valid))
-    val compactNormalTrain = Wire(Vec(cp.width, Valid(new FrontendTraining(fp))))
-    for (port <- 0 until cp.width) {
-        val hits = (0 until cp.width).map { lane =>
-            val rank = if (lane == 0) 0.U else PopCount(normalTrainValid.take(lane))
-            normalTrainValid(lane) && rank === port.U
+    when(trainStageReady) {
+        trainStageValid := normalTrainValid.asUInt
+        for (lane <- 0 until cp.width) {
+            // Validity controls observability; an invalid payload may be overwritten.
+            trainStage(lane) := normalFeedback(lane).io.train.bits
         }
-        compactNormalTrain(port).valid := VecInit(hits).asUInt.orR
-        compactNormalTrain(port).bits := Mux1H(hits, normalFeedback.map(_.io.train.bits))
     }
-    val enqueuePendingTrain = pendingRecoveryTrainValid && trainQueue.io.enq(0).ready
-    for (port <- 0 until cp.width) {
-        trainQueue.io.enq(port).valid := Mux(
-            pendingRecoveryTrainValid,
-            if (port == 0) true.B else false.B,
-            Mux(recoveryTrain, if (port == 0) true.B else false.B, compactNormalTrain(port).valid),
-        )
-        trainQueue.io.enq(port).bits := Mux(
-            pendingRecoveryTrainValid,
-            pendingRecoveryTrain,
-            Mux(recoveryTrain, delayedFeedback.io.train.bits, compactNormalTrain(port).bits),
-        )
-    }
-    when(enqueuePendingTrain) {
+    when(pendingRecoveryTrainAccepted) {
         pendingRecoveryTrainValid := false.B
     }
-    when(recoveryTrain && !trainQueue.io.enq(0).ready) {
+    when(recoveryTrain) {
         pendingRecoveryTrain := delayedFeedback.io.train.bits
         pendingRecoveryTrainValid := true.B
     }
+    assert(!(pendingRecoveryTrainValid && recoveryTrain))
 
     ftq.io.commit.flush := delayedRecovery
     io.frontend.rob.redirect.valid := delayedRecovery
@@ -655,8 +696,7 @@ class Commit(
     }
     // SATP changes become visible only after all younger work is discarded and the
     // frontend redirects to the next instruction under the new translation regime.
-    io.csr.tlbFlush := recoveryValid &&
-        (sfence || (writesSatpFields(selectedIsSystem, selectedSystemOp, selectedInstruction) && !trap))
+    io.csr.tlbFlush := delayedTlbFlush
     io.csr.currentPrivilege := privilege
     io.csr.state := csr.io.state
 
@@ -667,7 +707,7 @@ class Commit(
         assert(!retireFire.asUInt.orR, "Trap acceptance and instruction retirement must not share a cycle")
     }
     for (lane <- 0 until cp.width) {
-        when(retireFire(lane) || recovery(lane)) {
+        when(rob.io.head(lane).valid && !delayedRecovery) {
             assert(headMatchesFtq(lane), "ROB and FTQ retirement order must match")
         }
     }
@@ -711,13 +751,8 @@ class Commit(
         val ret = rd === 0.U && (rs1 === 1.U || rs1 === 5.U)
         fire && instruction(6, 0) === "h67".U && !call && !ret
     })
-    val retiredPredictionFail = VecInit(retireFire.zip(rob.io.head).zipWithIndex.map {
-        case ((fire, entry), lane) =>
-            val selected = Mux1H(
-                VecInit.tabulate(fp.fetchWidth)(slot => entry.bits.slot === slot.U),
-                selectedFtq(lane).mispredicted.asBools,
-            )
-            fire && selected
+    val retiredPredictionFail = VecInit(retireFire.zip(rob.io.head).map {
+        case (fire, entry) => fire && entry.bits.mispredicted
     })
     branchCount := branchCount + PopCount(retiredBranch)
     branchFailCount := branchFailCount + PopCount(retiredBranch.asUInt & retiredPredictionFail.asUInt)

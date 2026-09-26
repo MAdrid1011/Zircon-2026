@@ -1,6 +1,7 @@
 """Parse timing reports and enforce the Nangate45 electrical-report gate."""
 
 import argparse
+from collections import defaultdict
 import json
 from pathlib import Path
 import re
@@ -60,6 +61,158 @@ def parse_endpoint_inventory(report):
         if previous is None or item["slack_ns"] < previous["slack_ns"]:
             endpoints[endpoint] = item
     return sorted(endpoints.values(), key=lambda item: (item["slack_ns"], item["endpoint"]))
+
+
+def parse_path_inventory(report):
+    """Parse one startpoint-to-endpoint row for every reported endpoint."""
+    paths = []
+    for line in report.splitlines():
+        match = ENDPOINT_ROW.match(line)
+        if not match:
+            continue
+        startpoint, endpoint, slack = match.groups()
+        slack_ns = float(slack)
+        # OpenROAD's endpoint-limited summary may include the first met path at
+        # the reporting boundary. It is useful as a sentinel in the raw report,
+        # but it is not part of the violating-path population.
+        if slack_ns >= 0.0:
+            continue
+        paths.append({
+            "startpoint": startpoint,
+            "endpoint": endpoint,
+            "slack_ns": slack_ns,
+        })
+    return paths
+
+
+def normalize_register_family(name):
+    """Collapse generated array indices while retaining the RTL signal family."""
+    name = name.lstrip("\\").replace("\\", "")
+    name = re.sub(r"\s+(?=\[)", "", name)
+    name = re.sub(r"\[\d+\]", "[B]", name)
+    name = re.sub(r"(?<=_)\d+(?=(_|\.|\[|$))", "N", name)
+    name = re.sub(r"(?<=\.)\d+(?=(_|\.|\[|$))", "N", name)
+    return name
+
+
+def timing_block(name):
+    """Return a stable functional block name for an RTL register or macro pin."""
+    family = normalize_register_family(name)
+    parts = family.split(".")
+    if len(parts) >= 3 and parts[0] in {"backend", "commit", "frontend", "middleend"}:
+        return ".".join(parts[:3])
+    if len(parts) >= 2:
+        return ".".join(parts[:2])
+    return family.split("/", 1)[0]
+
+
+def _cluster_paths(paths, key):
+    clusters = defaultdict(lambda: {"count": 0, "tns_ns": 0.0, "worst_slack_ns": 0.0})
+    for path in paths:
+        name = key(path)
+        cluster = clusters[name]
+        cluster["count"] += 1
+        cluster["tns_ns"] += min(path["slack_ns"], 0.0)
+        cluster["worst_slack_ns"] = min(cluster["worst_slack_ns"], path["slack_ns"])
+    result = []
+    for name, values in clusters.items():
+        result.append({
+            "name": name,
+            "count": values["count"],
+            "tns_ns": round(values["tns_ns"], 6),
+            "worst_slack_ns": values["worst_slack_ns"],
+        })
+    return sorted(result, key=lambda item: (-item["count"], item["worst_slack_ns"], item["name"]))
+
+
+def build_path_clusters(paths, registers):
+    """Classify every timing row without a count or slack cutoff."""
+    classified = []
+    source_mapped = 0
+    endpoint_mapped = 0
+    for path in paths:
+        source_instance = path["startpoint"].split("/", 1)[0]
+        endpoint_instance = path["endpoint"].split("/", 1)[0]
+        source = registers.get(source_instance, path["startpoint"])
+        endpoint = registers.get(endpoint_instance, path["endpoint"])
+        source_mapped += source_instance in registers
+        endpoint_mapped += endpoint_instance in registers
+        classified.append({
+            **path,
+            "source_register": source,
+            "endpoint_register": endpoint,
+            "source_family": normalize_register_family(source),
+            "endpoint_family": normalize_register_family(endpoint),
+            "source_block": timing_block(source),
+            "endpoint_block": timing_block(endpoint),
+        })
+
+    dimensions = {
+        "source_blocks": _cluster_paths(classified, lambda path: path["source_block"]),
+        "endpoint_blocks": _cluster_paths(classified, lambda path: path["endpoint_block"]),
+        "block_pairs": _cluster_paths(
+            classified,
+            lambda path: f'{path["source_block"]} -> {path["endpoint_block"]}',
+        ),
+        "family_pairs": _cluster_paths(
+            classified,
+            lambda path: f'{path["source_family"]} -> {path["endpoint_family"]}',
+        ),
+    }
+    total = len(classified)
+    for name, clusters in dimensions.items():
+        clustered = sum(item["count"] for item in clusters)
+        if clustered != total:
+            raise ValueError(f"{name} classified {clustered} paths, expected {total}")
+    return {
+        "path_count": total,
+        "unique_endpoint_count": len({path["endpoint"] for path in classified}),
+        "mapped_source_count": source_mapped,
+        "mapped_endpoint_count": endpoint_mapped,
+        **dimensions,
+    }
+
+
+def write_path_clusters(path_report, netlist, output_dir):
+    """Write complete machine-readable and text timing-cluster reports."""
+    path_report = Path(path_report)
+    netlist = Path(netlist)
+    output_dir = Path(output_dir)
+    paths = parse_path_inventory(path_report.read_text(errors="replace"))
+    instances = {
+        pin.split("/", 1)[0]
+        for path in paths
+        for pin in (path["startpoint"], path["endpoint"])
+        if pin.startswith("_")
+    }
+    registers = parse_dff_registers(netlist, instances)
+    result = build_path_clusters(paths, registers)
+    json_path = output_dir / "logic-only-path-clusters.json"
+    report_path = output_dir / "logic-only-path-clusters.rpt"
+    json_path.write_text(json.dumps(result, indent=2) + "\n")
+
+    lines = [
+        f'PATH_COUNT {result["path_count"]}',
+        f'UNIQUE_ENDPOINT_COUNT {result["unique_endpoint_count"]}',
+        f'MAPPED_SOURCE_COUNT {result["mapped_source_count"]}',
+        f'MAPPED_ENDPOINT_COUNT {result["mapped_endpoint_count"]}',
+    ]
+    for dimension in ("source_blocks", "endpoint_blocks", "block_pairs", "family_pairs"):
+        lines += ["", f'[{dimension}]', "Count TNS(ns) WorstSlack(ns) Name"]
+        lines += [
+            f'{item["count"]:7d} {item["tns_ns"]: .6f} '
+            f'{item["worst_slack_ns"]: .6f} {item["name"]}'
+            for item in result[dimension]
+        ]
+    report_path.write_text("\n".join(lines) + "\n")
+    return {
+        "path_count": result["path_count"],
+        "unique_endpoint_count": result["unique_endpoint_count"],
+        "mapped_source_count": result["mapped_source_count"],
+        "mapped_endpoint_count": result["mapped_endpoint_count"],
+        "json": str(json_path),
+        "report": str(report_path),
+    }
 
 
 def parse_dff_registers(netlist, instances=None):

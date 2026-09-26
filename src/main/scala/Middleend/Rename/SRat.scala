@@ -9,6 +9,7 @@ class RatWrite(width: Int) extends Bundle {
 class SRatIO(width: Int, readers: Int, renameWidth: Int, commitWidth: Int) extends Bundle {
     val readAddr = Input(Vec(readers, UInt(5.W)))
     val readData = Output(Vec(readers, UInt(width.W)))
+    val preview = Input(Vec(renameWidth, Valid(new RatWrite(width))))
     val rename = Input(Vec(renameWidth, Valid(new RatWrite(width))))
     val commit = Input(Vec(commitWidth, Valid(new RatWrite(width))))
     val restore = Input(Bool())
@@ -33,25 +34,36 @@ class SRat(
     // x0 is constant in either implementation. f0 remains an ordinary mapping.
     if (hasZero) { ratRnm(0) := 0.U; ratCmt(0) := 0.U }
     val first = if (hasZero) 1 else 0
-    def writeRows(table: Vec[UInt], ports: Vec[ValidIO[RatWrite]]): Unit = {
+    def winners(ports: Seq[ValidIO[RatWrite]], row: Int): Seq[Bool] = {
+        val hits = ports.map(port => port.valid && port.bits.addr === row.U)
+        hits.indices.map(index => hits(index) && !hits.drop(index + 1).foldLeft(false.B)(_ || _))
+    }
+    def writeRows(table: Vec[UInt], ports: Seq[ValidIO[RatWrite]]): Unit = {
         for (row <- first until 32) {
-            val hits = ports.map(p => p.valid && p.bits.addr === row.U)
-            val winners = hits.indices.map(i => hits(i) && !hits.drop(i + 1).foldLeft(false.B)(_ || _))
-            when(hits.reduce(_ || _)) { table(row) := Mux1H(winners, ports.map(_.bits.data)) }
+            val selected = winners(ports, row)
+            when(selected.reduce(_ || _)) { table(row) := Mux1H(selected, ports.map(_.bits.data)) }
         }
     }
-    writeRows(ratRnm, io.rename)
-    writeRows(ratCmt, io.commit)
+    writeRows(ratRnm, io.rename.toSeq)
+    writeRows(ratCmt, io.commit.toSeq)
 
     when(io.restore) {
         for (row <- first until 32) {
-            val hits = io.commit.map(port => port.valid && port.bits.addr === row.U)
-            val winners = hits.indices.map(index => hits(index) && !hits.drop(index + 1).foldLeft(false.B)(_ || _))
-            ratRnm(row) := Mux(hits.reduce(_ || _), Mux1H(winners, io.commit.map(_.bits.data)), ratCmt(row))
+            val selected = winners(io.commit.toSeq, row)
+            ratRnm(row) := Mux(
+                selected.reduce(_ || _),
+                Mux1H(selected, io.commit.map(_.bits.data)),
+                ratCmt(row),
+            )
         }
     }
     io.readAddr.zip(io.readData).foreach { case (addr, data) =>
-        data := Mux1H((0 until 32).map(i => (addr === i.U) -> ratRnm(i)))
+        val pending = io.preview.map(port => port.valid && port.bits.addr === addr)
+        val selected = pending.indices.map(index => pending(index) && !pending.drop(index + 1).foldLeft(false.B)(_ || _))
+        val registered = Mux1H((0 until 32).map(i => (addr === i.U) -> ratRnm(i)))
+        // A stalled Q-side group may be previewed without changing SRAT state.
+        // Last lane wins when that group is actually accepted.
+        data := Mux(pending.reduce(_ || _), Mux1H(selected, io.preview.map(_.bits.data)), registered)
     }
     io.pra := RegNext(ratCmt(1), 0.U)
 }

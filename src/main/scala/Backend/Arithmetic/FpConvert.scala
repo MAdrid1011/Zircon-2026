@@ -9,6 +9,8 @@ import ZirconUtil.Log2Rev
 class FpConvertRequest(val tagWidth: Int) extends Bundle {
     val src1 = UInt(32.W)
     val op = UInt(4.W)
+    val toFloat = Bool()
+    val signedInt = Bool()
     // Resolved by issue: RNE=0, RTZ=1, RDN=2, RUP=3, RMM=4.
     val roundingMode = UInt(3.W)
     val tag = UInt(tagWidth.W)
@@ -63,14 +65,20 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
 
     /* EX1: integer magnitude and leading zeros run in parallel. */
     val req = io.in.bits
-    val toFloat = req.op === FCVT_S_W.U || req.op === FCVT_S_WU.U
-    val signedInt = req.op === FCVT_W_S.U || req.op === FCVT_S_W.U
+    val toFloat = req.toFloat
+    val signedInt = req.signedInt
     val negativeInt = signedInt && req.src1(31)
-    val complemented = req.src1 ^ Fill(32, negativeInt)
-    val leading = Mux(!complemented.orR, 32.U(6.W), Log2Rev(Reverse(complemented)).pad(6))
-    val lowOnes = !((complemented >> 1) & ~complemented).orR
-    val magnitudeLeading = leading - (negativeInt && lowOnes).asUInt
-    val magnitude = Mux(negativeInt, -req.src1, req.src1)
+    val negativeBits = ~req.src1
+    val unsignedLeading = Mux(!req.src1.orR, 32.U(6.W), Log2Rev(Reverse(req.src1)).pad(6))
+    val signedLeading = Mux(!negativeBits.orR, 32.U(6.W), Log2Rev(Reverse(negativeBits)).pad(6))
+    val lowOnes = !((negativeBits >> 1) & ~negativeBits).orR
+    val negativeLeading = signedLeading - lowOnes.asUInt
+    val magnitudeLeading = Mux(negativeInt, negativeLeading, unsignedLeading)
+    val negativeCarry = VecInit((0 until 32).map { bit =>
+        if (bit == 0) true.B else negativeBits(bit - 1, 0).andR
+    }).asUInt
+    val negativeMagnitude = negativeBits ^ negativeCarry
+    val magnitude = Mux(negativeInt, negativeMagnitude, req.src1)
 
     val exponent = req.src1(30, 23)
     val fraction = req.src1(22, 0)
@@ -88,18 +96,19 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     s1.small := exponent < 127.U
     s1.smallGuard := exponent === 126.U
     s1.smallSticky := Mux(exponent === 126.U, fraction.orR, req.src1(30, 0).orR)
-    s1.exponent := 158.U(8.W) - magnitudeLeading
-    s1.exponentCarry := 159.U(8.W) - magnitudeLeading
+    s1.exponent := Mux(negativeInt,
+        158.U(8.W) - negativeLeading, 158.U(8.W) - unsignedLeading)
+    s1.exponentCarry := Mux(negativeInt,
+        159.U(8.W) - negativeLeading, 159.U(8.W) - unsignedLeading)
     s1.rm := req.roundingMode
     s1.tag := req.tag
 
-    /* EX2: one 34-bit barrel; inputs below one bypass the 0..31 shift range. */
-    var shifted = r1.data
-    for (stage <- 0 until 5) {
-        val distance = 1 << stage
-        val jammed = (shifted >> distance).pad(34) | shifted(distance - 1, 0).orR
-        shifted = Mux(r1.shift(stage), jammed, shifted)
-    }
+    /* EX2: shifted-out sticky bits are reduced beside the barrel, not through it. */
+    val shiftedData = (r1.data >> r1.shift).pad(34)
+    val shiftedOut = VecInit((0 until 32).map { bit =>
+        r1.data(bit) && r1.shift > bit.U
+    }).asUInt.orR
+    val shifted = shiftedData | shiftedOut.asUInt
     val normalized = Reverse(shifted)
     val integerMagnitude = Mux(r1.small, 0.U(32.W), shifted(33, 2))
     val retained = Mux(r1.toFloat, normalized(33, 10).pad(32), integerMagnitude)
@@ -112,13 +121,14 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
             (r1.rm === 2.U && r1.sign && inexact) ||
             (r1.rm === 3.U && !r1.sign && inexact)
 
-    // -(q + up) = ~q + !up: one shared increment, not rounding followed by negation.
+    // -(q + up) = ~q + !up. A conditional increment has only prefix carries.
     val negate = !r1.toFloat && r1.sign
-    val rounded = BLevelPAdder32.sum(
-        retained ^ Fill(32, negate),
-        0.U(32.W),
-        (roundUp ^ negate).asUInt
-    )
+    val roundBase = retained ^ Fill(32, negate)
+    val increment = roundUp ^ negate
+    val roundCarry = VecInit((0 until 32).map { bit =>
+        if (bit == 0) increment else increment && roundBase(bit - 1, 0).andR
+    }).asUInt
+    val rounded = roundBase ^ roundCarry
     val floatCarry = retained(23, 0).andR && roundUp
     val floatExponent = Mux(floatCarry, r1.exponentCarry, r1.exponent)
     val floatResult = Mux(r1.zero, 0.U(32.W), Cat(r1.sign, floatExponent, rounded(22, 0)))
@@ -155,6 +165,8 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     when(active && advance2 && valid1) { r2 := s2 }
     when(active && io.in.valid) {
         assert(req.op >= FCVT_W_S.U && req.op <= FCVT_S_WU.U, "FpConvert received a non-conversion operation")
+        assert(toFloat === (req.op === FCVT_S_W.U || req.op === FCVT_S_WU.U))
+        assert(signedInt === (req.op === FCVT_W_S.U || req.op === FCVT_S_W.U))
         assert(req.roundingMode <= 4.U, "FpConvert requires a resolved rounding mode")
     }
 }

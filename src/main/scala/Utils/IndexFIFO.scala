@@ -20,6 +20,7 @@ object FIFOUtil {
 
 class IndexFIFOIO[T <: Data](gen: T, n: Int, rw: Int, ww: Int, registeredDeq: Boolean) extends Bundle {
     val enq = Flipped(Decoupled(gen))
+    val enqWrite = Input(Bool())
     val enqIdx = Output(UInt(n.W))
     val enqHigh = Output(Bool())
     val deq = Decoupled(gen)
@@ -73,6 +74,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     io.enq.ready := (if (isFlst) true.B else !full)
     io.deq.valid := !empty
     val push = io.enq.fire
+    val pushWrite = io.enqWrite && io.enq.ready
     val pop = io.deq.fire
     val headNext = Mux(pop, FIFOUtil.rotate(head, 1), head)
     val tailNext = Mux(push, FIFOUtil.rotate(tail, 1), tail)
@@ -120,7 +122,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     q.zipWithIndex.foreach { case (entry, row) =>
         // FreeLists accept returns on recovery. ROB payload may also take
         // unobservable writes while flush independently clears its occupancy.
-        when(push && tail(row) && (if (isFlst) true.B else payloadWriteAllowed)) {
+        when(pushWrite && tail(row) && (if (isFlst) true.B else payloadWriteAllowed)) {
             if (hasEnqueue) entry.asInstanceOf[{ def enqueue(data: T): Unit }].enqueue(io.enq.bits)
             else entry := io.enq.bits
         }
@@ -144,8 +146,11 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
             val popCandidate = candidatePop.B
             val selectedHead = if (candidatePop == 0) head else FIFOUtil.rotate(head, 1)
             val candidateData = WireDefault(Mux1H(selectedHead, q))
-            val pushHead = push && (tail & selectedHead).orR && payloadWriteAllowed
-            when(pushHead) {
+            // Payload prewrite arrives independently of the occupancy push, so
+            // the registered head window keeps its old latency without putting
+            // the late push predicate back onto every payload bit.
+            val writeHead = pushWrite && (tail & selectedHead).orR && payloadWriteAllowed
+            when(writeHead) {
                 if (hasEnqueue) candidateData.asInstanceOf[{ def enqueue(data: T): Unit }].enqueue(io.enq.bits)
                 else candidateData := io.enq.bits
             }
@@ -158,4 +163,6 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
             io.deqCandidateIdx.get(candidatePop) := selectedHead
         }
     }
+
+    assert(!push || pushWrite, "IndexFIFO occupancy cannot advance without writing its payload")
 }

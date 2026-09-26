@@ -61,6 +61,7 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
 
     private def response(dut: AtomicUnit, expected: Long): Unit = {
         dut.io.response.valid.expect(true)
+        dut.io.writeResult.expect(true)
         dut.io.response.bits.data.expect(expected & 0xffffffffL)
         dut.io.response.bits.exception.expect(0)
         dut.clock.step()
@@ -90,6 +91,37 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
         }
     }
 
+    "AMO datapath matches signed and unsigned software results across operands" in {
+        val mask = 0xffffffffL
+        val random = new scala.util.Random(20260926L)
+        val operands = Seq(0L, 1L, 0x7fffffffL, 0x80000000L, mask) ++
+            Seq.fill(64)(random.nextLong() & mask)
+        val operations = Seq(0, 1, 4, 8, 12, 16, 20, 24, 28)
+        simulate(new AtomicUnit) { dut =>
+            initialize(dut)
+            for (op <- operations; (oldValue, index) <- operands.zipWithIndex) {
+                val operand = operands((index * 17 + 3) % operands.size)
+                val signedLess = operand.toInt < oldValue.toInt
+                val unsignedLess = java.lang.Long.compareUnsigned(operand, oldValue) < 0
+                val newValue = op match {
+                    case 0 => (oldValue + operand) & mask
+                    case 1 => operand
+                    case 4 => oldValue ^ operand
+                    case 8 => oldValue | operand
+                    case 12 => oldValue & operand
+                    case 16 => if (signedLess) operand else oldValue
+                    case 20 => if (signedLess) oldValue else operand
+                    case 24 => if (unsignedLess) operand else oldValue
+                    case 28 => if (unsignedLess) oldValue else operand
+                }
+                request(dut, op, 0x80001000L + index * 4, operand)
+                load(dut, oldValue)
+                store(dut, newValue)
+                response(dut, oldValue)
+            }
+        }
+    }
+
     "LR and SC preserve one word reservation and SC clears it" in {
         simulate(new AtomicUnit) { dut =>
             initialize(dut)
@@ -104,6 +136,84 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
             request(dut, op = 3, address = 0x80002000L, data = 0x11111111L)
             dut.io.store.request.valid.expect(false)
             response(dut, 1)
+        }
+    }
+
+    "faults and an unwritable destination never assert the PRF write pulse" in {
+        simulate(new AtomicUnit) { dut =>
+            initialize(dut)
+            dut.io.response.ready.poke(false)
+            dut.io.request.valid.poke(true)
+            dut.io.request.bits.robIdx.poke(9)
+            dut.io.request.bits.prd.poke(7)
+            dut.io.request.bits.vaddr.poke(0x80003000L)
+            dut.io.request.bits.paddr.poke(0x80003000L)
+            dut.io.request.bits.data.poke(0)
+            dut.io.request.bits.op.poke(2)
+            dut.io.request.bits.uncache.poke(false)
+            dut.io.request.bits.exception.poke(5)
+            dut.clock.step()
+            dut.io.request.valid.poke(false)
+            dut.io.response.valid.expect(true)
+            dut.io.response.bits.exception.expect(5)
+            dut.io.writeResult.expect(false)
+            dut.io.response.ready.poke(true)
+            dut.io.writeResult.expect(false)
+            dut.clock.step()
+
+            request(dut, op = 2, address = 0x80003004L, data = 0)
+            dut.io.load.request.ready.poke(true)
+            dut.clock.step()
+            dut.io.load.request.ready.poke(false)
+            dut.io.load.response.valid.poke(true)
+            dut.io.load.response.bits.data.poke(0)
+            dut.io.load.response.bits.exception.poke(5)
+            dut.io.load.response.bits.retry.poke(false)
+            dut.clock.step()
+            dut.io.load.response.valid.poke(false)
+            dut.io.response.valid.expect(true)
+            dut.io.writeResult.expect(false)
+            dut.clock.step()
+
+            dut.io.request.valid.poke(true)
+            dut.io.request.bits.prd.poke(0)
+            dut.io.request.bits.exception.poke(0)
+            dut.io.request.bits.op.poke(3)
+            dut.clock.step()
+            dut.io.request.valid.poke(false)
+            dut.io.response.valid.expect(true)
+            dut.io.writeResult.expect(false)
+            dut.clock.step()
+
+            request(dut, op = 1, address = 0x80003008L, data = 1)
+            load(dut, 0x2468ace0L)
+            dut.io.store.request.ready.poke(true)
+            dut.clock.step()
+            dut.io.store.request.ready.poke(false)
+            dut.io.store.response.valid.poke(true)
+            dut.io.store.response.bits.exception.poke(7)
+            dut.clock.step()
+            dut.io.store.response.valid.poke(false)
+            dut.io.response.valid.expect(true)
+            dut.io.response.bits.exception.expect(7)
+            dut.io.writeResult.expect(false)
+        }
+    }
+
+    "a held successful response writes only on its accepted cycle" in {
+        simulate(new AtomicUnit) { dut =>
+            initialize(dut)
+            request(dut, op = 2, address = 0x80004000L, data = 0)
+            load(dut, 0x13579bdfL)
+            dut.io.response.ready.poke(false)
+            dut.io.response.valid.expect(true)
+            dut.io.writeResult.expect(false)
+            dut.clock.step(2)
+            dut.io.writeResult.expect(false)
+            dut.io.response.ready.poke(true)
+            dut.io.writeResult.expect(true)
+            dut.clock.step()
+            dut.io.writeResult.expect(false)
         }
     }
 }

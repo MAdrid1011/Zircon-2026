@@ -32,9 +32,7 @@ class LoadROBIO(p: LoadPipelineParams) extends Bundle {
     val data = UInt(32.W)
 }
 
-class LoadSQQuery(p: LoadPipelineParams) extends DForwardQuery(DCacheParams(p.entries)) {
-    val sqTail = UInt(log2Ceil(ZirconConfig.CommitParams().sqEntries * 2).W)
-}
+class LoadSQQuery(p: LoadPipelineParams) extends DForwardQuery(DCacheParams(p.entries))
 
 class LoadCompletionIO(p: LoadPipelineParams, withStore: Boolean = false) extends Bundle {
     val rob = Output(Valid(new LoadROBIO(p)))
@@ -134,6 +132,7 @@ class LoadPipeline(
 
     /* Issue and RF stage */
     val instPkgRF = Reg(new BackendPackage(p.backend))
+    val sqTailOHRF = Reg(UInt((ZirconConfig.CommitParams().sqEntries * 2).W))
     val validRF = RegInit(false.B)
     val indexRF = Reg(UInt(p.slotWidth.W))
     val heldRF = RegInit(false.B)
@@ -174,6 +173,7 @@ class LoadPipeline(
     io.cache.req.bits.vaddr := agu.io.res
     io.cache.req.bits.paddr := Cat(0.U(2.W), agu.io.res)
     io.cache.req.bits.slot := indexRF
+    io.cache.req.bits.sqTailOH := sqTailOHRF
     io.cache.req.bits.mtype := instPkgRF.mtype
     io.cache.req.bits.uncache := instPkgRF.uncache
     io.cache.req.bits.ioAuthorized := instPkgRF.ioAuthorized
@@ -187,10 +187,12 @@ class LoadPipeline(
     io.wk.wakeRF.prd := Mux(speculateRF, instPkgRF.prd, 0.U)
     io.wk.wakeRF.specMask := Mux(speculateRF, io.wk.grant, 0.U)
     val wakeD1Valid = RegNext(speculateRF, false.B)
-    val wakeD1Prd = RegEnable(instPkgRF.prd, speculateRF)
-    val wakeD1Mask = RegEnable(io.wk.grant, speculateRF)
-    io.wk.wakeD1.prd := Mux(wakeD1Valid, wakeD1Prd, 0.U)
-    io.wk.wakeD1.specMask := Mux(wakeD1Valid, wakeD1Mask, 0.U)
+    // The D1 wakeup payload is zero for an idle cycle at the register input;
+    // wakeD1Valid must not fan out through every consumer's wakeup decoder.
+    val wakeD1Prd = RegNext(io.wk.wakeRF.prd, 0.U)
+    val wakeD1Mask = RegNext(io.wk.wakeRF.specMask, 0.U)
+    io.wk.wakeD1.prd := wakeD1Prd
+    io.wk.wakeD1.specMask := wakeD1Mask
     val wakeD2Valid = RegNext(wakeD1Valid, false.B)
     val wakeD2Prd = RegEnable(wakeD1Prd, wakeD1Valid)
     val wakeD2Mask = RegEnable(wakeD1Mask, wakeD1Valid)
@@ -199,43 +201,47 @@ class LoadPipeline(
 
     val expectedValid = RegInit(VecInit.fill(4)(false.B))
     val expectedSlot = Reg(Vec(4, UInt(p.slotWidth.W)))
-    val expectedMask = Reg(Vec(4, UInt(p.backend.specWidth.W)))
+    // A zero mask denotes an invalid speculation result. Keeping validity in
+    // the registered payload prevents expectedValid from entering every IQ's
+    // resolution cone.
+    val expectedMask = RegInit(VecInit.fill(4)(0.U(p.backend.specWidth.W)))
     val expectedPrd = Reg(Vec(4, UInt(p.tagWidth.W)))
     when(io.cmt.flush) {
         expectedValid := VecInit.fill(4)(false.B)
+        expectedMask := VecInit.fill(4)(0.U)
     }.otherwise {
         expectedValid(0) := speculateRF
         expectedValid(1) := expectedValid(0)
         expectedValid(2) := expectedValid(1)
         expectedValid(3) := expectedValid(2)
+        expectedMask(0) := Mux(speculateRF, io.wk.grant, 0.U)
+        expectedMask(1) := expectedMask(0)
+        expectedMask(2) := expectedMask(1)
+        expectedMask(3) := expectedMask(2)
         when(speculateRF) {
             expectedSlot(0) := indexRF
-            expectedMask(0) := io.wk.grant
             expectedPrd(0) := instPkgRF.prd
         }
         when(expectedValid(0)) {
             expectedSlot(1) := expectedSlot(0)
-            expectedMask(1) := expectedMask(0)
             expectedPrd(1) := expectedPrd(0)
         }
         when(expectedValid(1)) {
             expectedSlot(2) := expectedSlot(1)
-            expectedMask(2) := expectedMask(1)
             expectedPrd(2) := expectedPrd(1)
         }
         when(expectedValid(2)) {
             expectedSlot(3) := expectedSlot(2)
-            expectedMask(3) := expectedMask(2)
             expectedPrd(3) := expectedPrd(2)
         }
     }
     val predictionMatchesD2 = io.cache.wbSelect.valid && expectedValid(1) &&
         io.cache.wbSelect.bits.slot === expectedSlot(1) && !io.cache.wbSelect.bits.retry &&
         io.cache.wbSelect.bits.exception === 0.U
-    val predictionMatchesWB = RegNext(predictionMatchesD2, false.B)
+    val failedMaskWB = RegNext(Mux(predictionMatchesD2, 0.U, expectedMask(1)), 0.U)
     io.wk.result.valid := expectedValid(2)
     io.wk.result.bits.mask := expectedMask(2)
-    io.wk.result.bits.failed := !predictionMatchesWB
+    io.wk.result.bits.failedMask := failedMaskWB
 
     when(validRF && !killed(instPkgRF) && !addressAccept && !heldRF) {
         heldRF := true.B
@@ -257,6 +263,10 @@ class LoadPipeline(
     }
     when(io.iq.instPkg.fire) {
         instPkgRF := io.iq.instPkg.bits
+        sqTailOHRF := UIntToOH(
+            io.iq.instPkg.bits.sqTail,
+            ZirconConfig.CommitParams().sqEntries * 2,
+        )
         validRF := true.B
         indexRF := indexIS
         heldRF := false.B
@@ -286,13 +296,17 @@ class LoadPipeline(
 
     if (withStore) {
         /* STA captures the AGU result before translation so DTLB/SQ backpressure
-         * cannot return through the RF datapath to IssueQueue. Two entries sustain
-         * one accepted address per cycle without a combinational dequeue bypass. */
+         * cannot return through the RF datapath to IssueQueue. The resolved output
+         * register keeps translation and permission logic off SQ/ROB write enables. */
         val addressStages = Reg(Vec(2, new StoreAddressStage(p)))
+        // Keep the DTLB/PTW address fanout separate from the local SQ result path.
+        val translationVaddr = RegInit(VecInit.fill(2)(0.U(32.W)))
         val addressStageCount = RegInit(0.U(2.W))
         val addressStageValid = addressStageCount =/= 0.U
         val addressStageFull = addressStageCount === 2.U
-        storeAddressIdle := !addressStageValid
+        val resolvedAddress = Reg(new StoreAddressResult(p))
+        val resolvedAddressValid = RegInit(false.B)
+        storeAddressIdle := !addressStageValid && !resolvedAddressValid
         val addressInput = Wire(new StoreAddressStage(p))
         addressInput.item := instPkgRF
         addressInput.vaddr := agu.io.res
@@ -306,8 +320,6 @@ class LoadPipeline(
         } else {
             addressInput.permission.direct := true.B
         }
-        storeAddressAccept := validRF && storeRF && !killed(instPkgRF) && !addressStageFull
-
         val addressItem = addressStages(0).item
         val addressVaddr = addressStages(0).vaddr
         val addr = io.cmt.storeAddress.get
@@ -322,7 +334,7 @@ class LoadPipeline(
         if (tlbEnabled) {
             val translation = io.cache.storeTranslation.get
             translation.request.valid := addressStageValid && !io.cmt.flush
-            translation.request.bits.vaddr := addressVaddr
+            translation.request.bits.vaddr := translationVaddr(0)
             translation.request.bits.uncache := addressItem.uncache
             translation.request.bits.exception :=
                 Mux(addressItem.exception.valid, addressItem.exception.cause(3, 0), 0.U)
@@ -334,50 +346,78 @@ class LoadPipeline(
             translatedUncache := translation.response.uncache
             translatedException := translation.response.exception
         }
-        addr.valid := addressStageValid && !io.cmt.flush && translationReady
-        addr.bits.sqIdx := addressItem.sqIdx
-        addr.bits.robIdx := addressItem.robIdx
-        addr.bits.vaddr := addressVaddr
-        addr.bits.paddr := translatedPaddr
-        addr.bits.size := addressItem.mtype(1, 0)
+        val resolvedAddressReady = !resolvedAddressValid || addr.ready
+        val addressStageRemove = addressStageValid && !io.cmt.flush &&
+            translationReady && resolvedAddressReady
+        storeAddressAccept := validRF && storeRF && !killed(instPkgRF) &&
+            !addressStageFull
+
+        val nextResolvedAddress = Wire(new StoreAddressResult(p))
+        nextResolvedAddress.sqIdx := addressItem.sqIdx
+        nextResolvedAddress.robIdx := addressItem.robIdx
+        nextResolvedAddress.vaddr := addressVaddr
+        nextResolvedAddress.paddr := translatedPaddr
+        nextResolvedAddress.size := addressItem.mtype(1, 0)
         val baseMask = MuxLookup(addressItem.mtype, 0.U(4.W))(
             Seq(0.U -> 1.U, 1.U -> 3.U, 2.U -> 15.U)
         )
-        addr.bits.mask := MuxLookup(addressVaddr(1, 0), 0.U(4.W))(Seq(
+        nextResolvedAddress.mask := MuxLookup(addressVaddr(1, 0), 0.U(4.W))(Seq(
             0.U -> baseMask,
             1.U -> Cat(baseMask(2, 0), 0.U(1.W)),
             2.U -> Cat(baseMask(1, 0), 0.U(2.W)),
             3.U -> Cat(baseMask(0), 0.U(3.W)),
         ))
-        addr.bits.exception := Mux(
+        nextResolvedAddress.exception := Mux(
             addressItem.exception.valid,
             addressItem.exception.cause(3, 0),
             Mux(misaligned, Mux(lrAddress, 4.U, 6.U), translatedException)
         )
-        addr.bits.uncache := translatedUncache
+        nextResolvedAddress.uncache := translatedUncache
 
-        val addressStageRemove = addr.fire
+        addr.valid := resolvedAddressValid && !io.cmt.flush
+        addr.bits := resolvedAddress
+
         when(io.cmt.flush) {
             addressStageCount := 0.U
+            resolvedAddressValid := false.B
+            translationVaddr := VecInit.fill(2)(0.U)
         }.otherwise {
+            when(addressStageRemove) {
+                resolvedAddress := nextResolvedAddress
+                resolvedAddressValid := true.B
+            }.elsewhen(addr.fire) {
+                resolvedAddressValid := false.B
+            }
             when(storeAddressAccept && addressStageRemove) {
                 assert(addressStageCount === 1.U)
                 addressStages(0) := addressInput
+                translationVaddr(0) := addressInput.vaddr
             }.elsewhen(storeAddressAccept) {
                 when(addressStageCount === 0.U) {
                     addressStages(0) := addressInput
+                    translationVaddr(0) := addressInput.vaddr
                 }.otherwise {
                     addressStages(1) := addressInput
+                    translationVaddr(1) := addressInput.vaddr
                 }
                 addressStageCount := addressStageCount + 1.U
             }.elsewhen(addressStageRemove) {
                 when(addressStageCount === 2.U) {
                     addressStages(0) := addressStages(1)
+                    translationVaddr(0) := translationVaddr(1)
                 }
                 addressStageCount := addressStageCount - 1.U
             }
         }
         assert(addressStageCount <= 2.U)
+        if (tlbEnabled) {
+            when(addressStageValid) {
+                assert(translationVaddr(0) === addressVaddr, "STA translation address lost its owner")
+            }
+        }
+        when(resolvedAddressValid && !addr.ready && !io.cmt.flush) {
+            assert(!addressStageRemove, "STA must hold its translated output under backpressure")
+        }
         when(storeAddressAccept) {
             assert(storeRF && (instPkgRF.fu === ZirconConfig.DecodeUnit.Store.U ||
                 instPkgRF.fu === ZirconConfig.DecodeUnit.Atomic.U))
@@ -429,7 +469,6 @@ class LoadPipeline(
     io.cmt.sbQuery.valid := forwardQuery
     io.cmt.sbQuery.bits := io.cache.forward.query.bits
     InheritFields(io.cmt.sqQuery.bits, io.cache.forward.query.bits)
-    io.cmt.sqQuery.bits.sqTail := pending(forwardIndex).sqTail
 
     val resultIndex = io.cmt.sqResult.bits.slot
     val resultLive = valid(resultIndex) && sent(resultIndex) && !killed(pending(resultIndex))

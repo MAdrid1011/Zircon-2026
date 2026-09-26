@@ -7,6 +7,7 @@ class IndirectTargetRow(p: FrontendParams) extends Bundle {
     val slotOH = UInt(p.fetchWidth.W)
     val target = UInt(30.W)
     val confidence = UInt(2.W)
+    val useful = Bool()
 }
 
 class IndirectTargetQueryIO(p: FrontendParams) extends Bundle {
@@ -35,7 +36,11 @@ class IndirectTargetPredictor(
         Module(new PredictorTableRam(p.ittageSets, (new IndirectTargetRow(p)).getWidth, ramBackend))
     )
     val valid = Seq.fill(p.ittageCount)(RegInit(VecInit.fill(p.ittageSets)(false.B)))
-    val useful = Seq.fill(p.ittageCount)(RegInit(VecInit.fill(p.ittageSets)(false.B)))
+    val pendingWrite = RegInit(VecInit.fill(p.ittageCount)(false.B))
+    val pendingAllocation = RegInit(VecInit.fill(p.ittageCount)(false.B))
+    val pendingIndex = Reg(Vec(p.ittageCount, UInt(p.ittageIndexBits.W)))
+    val pendingIndexOH = Reg(Vec(p.ittageCount, UInt(p.ittageSets.W)))
+    val pendingRows = Reg(Vec(p.ittageCount, new IndirectTargetRow(p)))
 
     val aheadRows = Wire(Vec(p.ittageCount, new IndirectTargetRow(p)))
     val aheadValid = Reg(Vec(p.ittageCount, Bool()))
@@ -142,23 +147,49 @@ class IndirectTargetPredictor(
     for (table <- 0 until p.ittageCount) {
         tables(table).io.predictEnable := io.query.fire
         tables(table).io.predictAddress := indices(table)
-        aheadRows(table) := tables(table).io.predictData.asTypeOf(new IndirectTargetRow(p))
+        val pendingHit = pendingWrite(table) &&
+            (pendingIndexOH(table) & UIntToOH(aheadIndices(table), p.ittageSets)).orR
+        aheadRows(table) := Mux(
+            pendingHit,
+            pendingRows(table),
+            tables(table).io.predictData.asTypeOf(new IndirectTargetRow(p)),
+        )
     }
     when(io.query.fire) {
         ahead := true.B
         for (table <- 0 until p.ittageCount) {
-            aheadValid(table) := valid(table)(indices(table))
+            val pendingHit = pendingAllocation(table) &&
+                (pendingIndexOH(table) & UIntToOH(indices(table), p.ittageSets)).orR
+            aheadValid(table) := valid(table)(indices(table)) || pendingHit
             aheadIndices(table) := indices(table)
         }
     }
     when(io.query.invalidate) { ahead := false.B }
 
     val train = io.train.bits
-    val trainSlots = VecInit((0 until p.fetchWidth).map { slot =>
-        train.mask(slot) && train.taken(slot) && train.kinds(slot) === FrontendCfi.Indirect.U
+    val trainReadSlots = VecInit((0 until p.fetchWidth).map { slot =>
+        io.trainRead.bits.mask(slot) && io.trainRead.bits.taken(slot) &&
+            io.trainRead.bits.kinds(slot) === FrontendCfi.Indirect.U
     })
-    val trainSlot = PriorityEncoder(trainSlots)
-    val trainValid = io.train.valid && train.meta.ittage.aheadValid && trainSlots.asUInt.orR
+    val trainSlots = RegEnable(trainReadSlots.asUInt, io.trainRead.valid)
+    val trainSlot = RegEnable(PriorityEncoder(trainReadSlots), io.trainRead.valid)
+    val actualTarget = RegEnable(
+        Mux1H(trainReadSlots, io.trainRead.bits.targets),
+        io.trainRead.valid,
+    )
+    val readIndexOH = VecInit((0 until p.ittageCount).map { table =>
+        UIntToOH(io.trainRead.bits.meta.ittage.indices(table), p.ittageSets)
+    })
+    val trainIndexOH = RegEnable(readIndexOH, io.trainRead.valid)
+    val trainValidState = Wire(Vec(p.ittageCount, Bool()))
+    val writeAlloc = Wire(Vec(p.ittageCount, Bool()))
+    for (table <- 0 until p.ittageCount) {
+        val storedValid = Mux1H(trainIndexOH(table).asBools, valid(table))
+        val pendingHit = pendingAllocation(table) &&
+            (pendingIndexOH(table) & trainIndexOH(table)).orR
+        trainValidState(table) := storedValid || pendingHit
+    }
+    val trainValid = io.train.valid && train.meta.ittage.aheadValid && trainSlots.orR
     when(io.train.valid) {
         assert(PopCount(trainSlots) <= 1.U, "At most one ordinary indirect jump can train ITTAGE per block")
     }
@@ -166,12 +197,18 @@ class IndirectTargetPredictor(
     val trainRows = (0 until p.ittageCount).map { table =>
         tables(table).io.updateReadEnable := io.trainRead.valid
         tables(table).io.updateReadAddress := io.trainRead.bits.meta.ittage.indices(table)
-        tables(table).io.updateReadData.asTypeOf(new IndirectTargetRow(p))
+        val pendingHit = pendingWrite(table) &&
+            (pendingIndexOH(table) & trainIndexOH(table)).orR
+        Mux(
+            pendingHit,
+            pendingRows(table),
+            tables(table).io.updateReadData.asTypeOf(new IndirectTargetRow(p)),
+        )
     }
     val trainMatches = VecInit((0 until p.ittageCount).map { table =>
-        valid(table)(train.meta.ittage.indices(table)) &&
+        trainValidState(table) &&
             trainRows(table).tag === train.meta.ittage.tags(table) &&
-            (trainRows(table).slotOH & UIntToOH(trainSlot, p.fetchWidth)).orR
+            (trainRows(table).slotOH & trainSlots).orR
     })
     val requestedProvider = train.meta.ittage.providers(trainSlot)
     val providerMatches = VecInit((0 until p.ittageCount).map { table =>
@@ -179,7 +216,6 @@ class IndirectTargetPredictor(
     })
     val providerPresent = providerMatches.asUInt.orR
     val provider = Mux(providerPresent, requestedProvider, 0.U)
-    val actualTarget = train.targets(trainSlot)
     val providerTarget = train.meta.ittage.providerTargets(trainSlot)
     val alternateTarget = train.meta.ittage.alternateTargets(trainSlot)
     val predictedTarget = train.meta.ittage.predictedTargets(trainSlot)
@@ -188,7 +224,7 @@ class IndirectTargetPredictor(
     val needAllocation = mispredicted && !providerCorrect
     val allocatable = VecInit((0 until p.ittageCount).map { table =>
         (table + 1).U > provider && (
-            !valid(table)(train.meta.ittage.indices(table)) || !useful(table)(train.meta.ittage.indices(table))
+            !trainValidState(table) || !trainRows(table).useful
         )
     })
     val allocate = PriorityEncoderOH(allocatable)
@@ -196,9 +232,10 @@ class IndirectTargetPredictor(
     for (table <- 0 until p.ittageCount) {
         val old = trainRows(table)
         val next = WireDefault(old)
-        val nextUseful = WireDefault(useful(table)(train.meta.ittage.indices(table)))
+        val nextUseful = WireDefault(old.useful)
         val isProvider = providerMatches(table)
         val doAllocate = needAllocation && allocate(table)
+        writeAlloc(table) := trainValid && doAllocate
         val ageUseful = needAllocation && !allocatable.asUInt.orR && (table + 1).U > provider
         when(isProvider) {
             when(providerTarget === actualTarget) {
@@ -221,14 +258,18 @@ class IndirectTargetPredictor(
             nextUseful := false.B
         }
         val update = trainValid && (isProvider || ageUseful || doAllocate)
-        val write = update
-        tables(table).io.updateWriteEnable := write
-        tables(table).io.updateWriteAddress := train.meta.ittage.indices(table)
-        tables(table).io.updateWriteData := next.asUInt
-        when(write) {
-            useful(table)(train.meta.ittage.indices(table)) := nextUseful
-            when(doAllocate) {
-                valid(table)(train.meta.ittage.indices(table)) := true.B
+        next.useful := nextUseful
+        pendingWrite(table) := update
+        pendingAllocation(table) := writeAlloc(table)
+        pendingIndex(table) := train.meta.ittage.indices(table)
+        pendingIndexOH(table) := trainIndexOH(table)
+        pendingRows(table) := next
+        tables(table).io.updateWriteEnable := pendingWrite(table)
+        tables(table).io.updateWriteAddress := pendingIndex(table)
+        tables(table).io.updateWriteData := pendingRows(table).asUInt
+        for (entry <- 0 until p.ittageSets) {
+            when(pendingAllocation(table) && pendingIndexOH(table)(entry)) {
+                valid(table)(entry) := true.B
             }
         }
     }

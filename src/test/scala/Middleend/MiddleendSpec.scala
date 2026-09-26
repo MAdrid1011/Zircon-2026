@@ -27,10 +27,10 @@ class MiddleendTestHarness(
         val request = Output(new MiddleendCommitRequest(fp, issue.dispatchWidth))
         val enqueue = Output(new MiddleendCommitEnqueue(fp, bp, issue.dispatchWidth))
         val ftqAllocate = Output(Vec(issue.dispatchWidth, Valid(new FrontendFtqAllocation(fp))))
-        val arith0 = Output(new IssueEnqueueGroup(bp, issue.dispatchWidth))
-        val arith1 = Output(new IssueEnqueueGroup(bp, issue.dispatchWidth))
-        val loadStoreAddress = Output(new IssueEnqueueGroup(bp, issue.dispatchWidth))
-        val storeData = Output(new IssueEnqueueGroup(bp, issue.dispatchWidth))
+        val arith0 = Output(new RoutedIssueEnqueueGroup(bp, issue.dispatchWidth))
+        val arith1 = Output(new RoutedIssueEnqueueGroup(bp, issue.dispatchWidth))
+        val loadStoreAddress = Output(new RoutedIssueEnqueueGroup(bp, issue.dispatchWidth))
+        val storeData = Output(new RoutedIssueEnqueueGroup(bp, issue.dispatchWidth))
     })
     val middleend = Module(new Middleend(fp, bp, issue))
     val fetchQueue = Module(new FetchQueue(fp, issue.dispatchWidth))
@@ -52,6 +52,7 @@ class MiddleendTestHarness(
         val earlier = if (slot == 0) false.B else packet.mask(slot - 1, 0).orR
         val later = if (slot + 1 == fp.fetchWidth) false.B else packet.mask(fp.fetchWidth - 1, slot + 1).orR
         fetchQueue.io.enq(slot).valid := io.in.valid && packet.mask(slot)
+        fetchQueue.io.enqPayloadWrite(slot) := io.in.valid && packet.mask(slot)
         fetchQueue.io.enq(slot).bits.slot := slot.U
         fetchQueue.io.enq(slot).bits.packetStart := !earlier
         fetchQueue.io.enq(slot).bits.packetEnd := !later
@@ -62,7 +63,9 @@ class MiddleendTestHarness(
     middleend.io.frontend.out <> fetchQueue.io.out
     io.in.ready := fetchQueue.io.enq(0).ready
 
-    middleend.io.backend.freeCount := io.freeCount
+    middleend.io.backend.freePrefix := VecInit(io.freeCount.map { count =>
+        VecInit((1 to issue.dispatchWidth).map(amount => count >= amount.U)).asUInt
+    })
     middleend.io.backend.wakeup.foreach { wakeup => wakeup.prd := 0.U; wakeup.specMask := 0.U }
     middleend.io.backend.memoryWakeup.zipWithIndex.foreach { case (wakeup, index) =>
         wakeup := Mux(index.U === 0.U, io.memoryWakeup, 0.U.asTypeOf(new BackendWakeup(bp)))
@@ -225,6 +228,37 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "a blocked Dispatch group previews its tags for the next Rename group" in {
+        simulate(new MiddleendTestHarness) { dut =>
+            initialize(dut)
+            dut.io.freeCount.foreach(_.poke(0))
+            val dependent = add(8, 5, 0)
+            offer(dut, 35, Seq(addi(5), addi(6), addi(7), dependent))
+            var waited = 0
+            while (dut.io.request.valid.peek().litValue != 7 && waited < 8) {
+                dut.clock.step()
+                waited += 1
+            }
+            dut.io.request.valid.expect(7)
+            val producerTag = dut.io.enqueue.entries(0).destination.prd.peek().litValue
+            dut.clock.step(2)
+            dut.io.enqueue.valid.expect(0)
+
+            dut.io.freeCount(IssueQueueIndex.Arith0).poke(6)
+            dut.io.freeCount(IssueQueueIndex.Arith1).poke(6)
+            waited = 0
+            while ((dut.io.enqueue.valid.peek().litValue != 1 ||
+                dut.io.enqueue.entries(0).context.instruction.inst.peek().litValue != dependent) && waited < 8) {
+                dut.clock.step()
+                waited += 1
+            }
+            dut.io.enqueue.entries(0).context.instruction.inst.expect(dependent)
+            dut.io.enqueue.valid.expect(1)
+            val route = Seq(dut.io.arith0, dut.io.arith1).find(_.valid.peek().litValue == 1).get
+            route.entries(0).prs(0).expect(producerTag)
+        }
+    }
+
     "a buffered same-group RAW observes a wakeup before Dispatch" in {
         simulate(new MiddleendTestHarness) { dut =>
             initialize(dut)
@@ -272,26 +306,43 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "partial queue and Commit permissions accept only the oldest instruction" in {
+    "a fixed Dispatch group waits for every queue and Commit resource" in {
         simulate(new MiddleendTestHarness) { dut =>
             initialize(dut)
             dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
             dut.io.freeCount(IssueQueueIndex.Arith1).poke(1)
             offer(dut, 11, Seq(branch(1, 2), branch(3, 4)), mask = 3)
             while (dut.io.request.valid.peek().litValue == 0) dut.clock.step()
-            dut.io.enqueue.valid.expect(1)
-            dut.io.enqueue.entries(0).context.instruction.inst.expect(branch(1, 2))
-            dut.clock.step()
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
             dut.io.enqueue.valid.expect(0)
+            dut.clock.step()
 
             dut.io.resourcePrefix.poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(2)
+            dut.io.freeCount(IssueQueueIndex.Arith0).poke(1)
+            dut.io.freeCount(IssueQueueIndex.Arith1).poke(1)
             dut.clock.step(3)
             dut.io.enqueue.valid.expect(0)
+            dut.io.resourcePrefix.poke(3)
+            dut.io.enqueue.valid.expect(3)
+            dut.io.enqueue.entries(0).context.instruction.inst.expect(branch(1, 2))
+            dut.io.enqueue.entries(1).context.instruction.inst.expect(branch(3, 4))
+        }
+    }
+
+    "Commit payload prewrite stays independent of fixed group admission" in {
+        simulate(new MiddleendTestHarness) { dut =>
+            initialize(dut)
             dut.io.resourcePrefix.poke(1)
-            dut.io.enqueue.valid.expect(1)
-            dut.io.enqueue.entries(0).context.instruction.inst.expect(branch(3, 4))
+            offer(dut, 33, Seq(addi(1), addi(2), addi(3)), mask = 7)
+            while (dut.io.request.valid.peek().litValue != 7) dut.clock.step()
+
+            dut.io.enqueue.valid.expect(0)
+            dut.io.enqueue.writeValid.expect(7)
+            dut.io.ftqAllocate(0).bits.writeValid.expect(true)
+
+            dut.io.resourcePrefix.poke(7)
+            dut.io.enqueue.valid.expect(7)
+            dut.io.enqueue.writeValid.expect(7)
+            dut.io.ftqAllocate(0).bits.writeValid.expect(true)
         }
     }
 
@@ -330,7 +381,7 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "three single-instruction packets allocate three FTQ entries in one Dispatch group" in {
+    "single-instruction packets remain ordered across fixed Dispatch groups" in {
         simulate(new MiddleendTestHarness) { dut =>
             initialize(dut)
             dut.io.freeCount.foreach(_.poke(0))
@@ -341,16 +392,20 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
             dut.io.freeCount(IssueQueueIndex.Arith0).poke(6)
             dut.io.freeCount(IssueQueueIndex.Arith1).poke(6)
 
-            while (dut.io.enqueue.valid.peek().litValue == 0) dut.clock.step()
-            dut.io.enqueue.valid.expect(7)
-            dut.io.ftqAllocate.foreach(_.valid.expect(true))
-            dut.io.enqueue.entries.zipWithIndex.foreach { case (entry, lane) =>
-                entry.context.ftqIdx.expect(4 + lane)
-                entry.context.packetStart.expect(true)
-                entry.context.packetEnd.expect(true)
+            val dispatched = scala.collection.mutable.ArrayBuffer.empty[BigInt]
+            for (_ <- 0 until 10) {
+                val valid = dut.io.enqueue.valid.peek().litValue
+                for (lane <- 0 until dut.issue.dispatchWidth if valid.testBit(lane)) {
+                    val entry = dut.io.enqueue.entries(lane)
+                    dispatched += entry.context.instruction.inst.peek().litValue
+                    entry.context.ftqIdx.expect(4 + lane)
+                    entry.context.packetStart.expect(true)
+                    entry.context.packetEnd.expect(true)
+                    dut.io.ftqAllocate(lane).valid.expect(true)
+                }
+                dut.clock.step()
             }
-            dut.clock.step()
-            dut.io.ftqAllocate.foreach(_.valid.expect(false))
+            assert(dispatched == Seq(addi(1), addi(2), addi(3)))
         }
     }
 
@@ -367,6 +422,8 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
             offer(dut, 14, Seq(addi(10), addi(11)), mask = 3)
             dut.clock.step(3)
             dut.io.flush.poke(true)
+            dut.io.ftqAllocate(0).valid.expect(false)
+            dut.io.ftqAllocate(0).bits.writeValid.expect(true)
             dut.clock.step()
             dut.io.flush.poke(false)
             dut.io.freeCount(IssueQueueIndex.Arith0).poke(6)

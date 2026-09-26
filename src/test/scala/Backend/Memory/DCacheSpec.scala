@@ -179,15 +179,21 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
                 .foreach(x => f = Forward(x.data, x.mask))
             val prior = pendingForward(i)
             val priorReady = prior.exists { case (_, response) => cycles >= response.available }
+            val queryValid = cancel.isEmpty && q.valid.peek().litToBoolean
             dut.io.forward(i).result.valid.poke(priorReady)
             dut.io.forward(i).result.bits.slot.poke(prior.map(_._1).getOrElse(0))
             dut.io.forward(i).result.bits.data.poke(prior.map(_._2.data).getOrElse(BigInt(0)))
             dut.io.forward(i).result.bits.mask.poke(prior.map(_._2.mask).getOrElse(0))
             dut.io.forward(i).result.bits.blocked.poke(prior.exists(_._2.blocked))
-            pendingForward(i) =
-                if (q.valid.peek().litToBoolean) Some(id -> f)
-                else if (priorReady) None
-                else prior
+            pendingForward(i) = if (priorReady) {
+                // A held query is the request being answered this cycle. Do not
+                // enqueue it again and generate a duplicate late response.
+                if (queryValid && !prior.exists(_._1 == id)) Some(id -> f) else None
+            } else if (prior.isEmpty && queryValid) {
+                Some(id -> f)
+            } else {
+                prior
+            }
             val responseValid = dut.io.load(i).rsp.valid.peek().litToBoolean
             val responseId = dut.io.load(i).rsp.bits.slot.peek().litValue.toInt
             val responseExpected = expected.contains((i, responseId))

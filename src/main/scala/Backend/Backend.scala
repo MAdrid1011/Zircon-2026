@@ -8,8 +8,8 @@ class ArithCommitIO extends Bundle {
 }
 
 class BackendMiddleendIO(p: BackendParams, issue: IssueParams) extends Bundle {
-    val enqueue = Input(Vec(IssueQueueIndex.Count, new IssueEnqueueGroup(p, issue.dispatchWidth)))
-    val freeCount = Output(Vec(IssueQueueIndex.Count, UInt(issue.countWidth.W)))
+    val enqueue = Input(Vec(IssueQueueIndex.Count, new RoutedIssueEnqueueGroup(p, issue.dispatchWidth)))
+    val freePrefix = Output(Vec(IssueQueueIndex.Count, UInt(issue.dispatchWidth.W)))
     val wakeup = Output(Vec(issue.wakeupPorts, new BackendWakeup(p)))
     val memoryWakeup = Output(Vec(issue.wakeupPorts, new BackendWakeup(p)))
     val speculation = Output(new SpeculationResolution(p))
@@ -57,7 +57,13 @@ class Backend(
     val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe))
 
     /* IssueQueueIndex is the shared ordering contract for dispatch, counters and execution pipes. */
-    val queues = issueParams.queueParams.map(params => Module(new IssueQueue(p, params)))
+    private val arithIssueCandidateCount =
+        issueParams.arith0.entries + math.max(issueParams.arith0.replayEntries, 1) + 1 +
+        issueParams.arith1.entries + math.max(issueParams.arith1.replayEntries, 1) + 1
+    val queues = issueParams.queueParams.zipWithIndex.map { case (params, index) =>
+        val directCandidates = if (index <= IssueQueueIndex.MixArith) arithIssueCandidateCount else 0
+        Module(new IssueQueue(p, params, directCandidates))
+    }
     val arith0IQ = queues(IssueQueueIndex.Arith0)
     val arith1IQ = queues(IssueQueueIndex.Arith1)
     val mixArithIQ = queues(IssueQueueIndex.MixArith)
@@ -90,15 +96,15 @@ class Backend(
         hasZeroReg = false,
         holdReads = true,
     )
-    val intRf = Module(new Regfile(intRfParams))
-    val fpRf = Module(new Regfile(fpRfParams))
+    val intRf = Module(new Regfile(intRfParams, directWritePort = Some(2)))
+    val fpRf = Module(new Regfile(fpRfParams, directWritePort = Some(0)))
     val bypass = Module(new Bypass(BypassParams.twoArithBackend(p)))
     val wakeupRouter = Module(new WakeupRouter(p))
     val loadSpeculation = Module(new LoadSpeculationTracker(p))
 
     /* The indexed Middleend boundary connects homogeneously to the six issue queues. */
     queues.zip(io.middleend.enqueue).foreach { case (queue, enqueue) => queue.io.enq := enqueue }
-    io.middleend.freeCount := VecInit(queues.map(_.io.freeCount))
+    io.middleend.freePrefix := VecInit(queues.map(_.io.freePrefix))
     queues.foreach { queue =>
         queue.io.flush := io.commit.flush
         queue.io.speculation := loadSpeculation.io.resolution
@@ -139,9 +145,22 @@ class Backend(
         wakeupRouter.io.loadWB(lane) := pipe.io.wk.wakeWB
     }
 
-    Seq(arith0IQ, arith1IQ, mixArithIQ).foreach(_.io.wakeup := wakeupRouter.io.compute)
+    val arithIssueCandidates = VecInit(
+        arith0IQ.io.issueWakeupCandidates.get.toSeq ++
+        arith1IQ.io.issueWakeupCandidates.get.toSeq
+    )
+    val registeredComputeWakeup = WireDefault(wakeupRouter.io.compute)
+    for (lane <- 0 until 2) {
+        registeredComputeWakeup(lane) := arithPipes(lane).io.wakeup.wakeRF
+    }
+    Seq(arith0IQ, arith1IQ, mixArithIQ).foreach { queue =>
+        queue.io.wakeup := registeredComputeWakeup
+        queue.io.directWakeup.get := arithIssueCandidates
+    }
     Seq(loadIQ, loadStoreAddressIQ, storeDataIQ).foreach(_.io.wakeup := wakeupRouter.io.memory)
-    io.middleend.wakeup := wakeupRouter.io.compute
+    // Incoming IQ entries absorb the candidate-level issue wakeup directly.
+    // The RF-stage copy preserves readiness for consumers that arrive later.
+    io.middleend.wakeup := registeredComputeWakeup
     io.middleend.memoryWakeup := wakeupRouter.io.memory
     io.middleend.speculation := loadSpeculation.io.resolution
 
@@ -208,14 +227,16 @@ class Backend(
         intWrite(port, pipe.io.rf.write.valid, pipe.io.rf.write.bits.prd, pipe.io.rf.write.bits.data)
     }
     intWrite(2, mixArith.io.rf.intWrite.valid, mixArith.io.rf.intWrite.bits.addr, mixArith.io.rf.intWrite.bits.data)
+    intRf.io.directWrite.get.oneHot := mixArith.io.rf.intWriteOneHot
+    intRf.io.directWrite.get.data := mixArith.io.rf.intWriteData
     intWrite(
         3,
         ls0.io.rf.wr.valid && !ls0.io.rf.wr.bits.prd(p.tagWidth - 1),
         ls0.io.rf.wr.bits.prd(p.physWidth - 1, 0),
         ls0.io.rf.wr.bits.data,
     )
-    val atomicIntWrite = atomic.io.response.fire && !atomic.io.response.bits.exception.orR &&
-        atomic.io.response.bits.prd =/= 0.U
+    // AtomicUnit captures the result-write decision alongside its response.
+    val atomicIntWrite = atomic.io.writeResult
     val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)
     intWrite(
         4,
@@ -227,6 +248,8 @@ class Backend(
     fpRf.io.write(0).we := mixArith.io.rf.fpWrite.valid
     fpRf.io.write(0).addr := mixArith.io.rf.fpWrite.bits.addr
     fpRf.io.write(0).data := mixArith.io.rf.fpWrite.bits.data
+    fpRf.io.directWrite.get.oneHot := mixArith.io.rf.fpWriteOneHot
+    fpRf.io.directWrite.get.data := mixArith.io.rf.fpWriteData
     for ((pipe, port) <- Seq(ls0 -> 1, ls1 -> 2)) {
         fpRf.io.write(port).we := pipe.io.rf.wr.valid && pipe.io.rf.wr.bits.prd(p.tagWidth - 1)
         fpRf.io.write(port).addr := pipe.io.rf.wr.bits.prd(p.physWidth - 1, 0)

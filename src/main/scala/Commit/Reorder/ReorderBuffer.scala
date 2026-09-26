@@ -5,6 +5,7 @@ import ZirconConfig._
 /** Static instruction state retained until architectural retirement. */
 class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val ftqIdx = UInt(fp.ftqBits.W)
+    val ftqIdxOH = UInt(fp.ftqDepth.W)
     val slot = UInt(fp.slotBits.W)
     val packetEnd = Bool()
     val pc = UInt(32.W)
@@ -19,6 +20,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val fpDirty = Bool()
 
     val complete = Bool()
+    val mispredicted = Bool()
     val exception = new BackendException
     val fflags = UInt(5.W)
     val fpFlagsValid = Bool()
@@ -26,6 +28,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     def enqueue(data: Data): Unit = {
         val incoming = data.asInstanceOf[ROBEntry]
         ftqIdx := incoming.ftqIdx
+        ftqIdxOH := incoming.ftqIdxOH
         slot := incoming.slot
         packetEnd := incoming.packetEnd
         pc := incoming.pc
@@ -39,6 +42,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
         instruction := incoming.instruction
         fpDirty := incoming.fpDirty
         complete := incoming.complete
+        mispredicted := false.B
         exception := incoming.exception
         fflags := 0.U
         fpFlagsValid := false.B
@@ -47,6 +51,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     def write(data: Data): Unit = {
         val incoming = data.asInstanceOf[ROBEntry]
         complete := incoming.complete
+        mispredicted := incoming.mispredicted
         exception := incoming.exception
         fflags := incoming.fflags
         fpFlagsValid := incoming.fpFlagsValid
@@ -57,6 +62,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
 class ROBWrite(addressWidth: Int) extends Bundle {
     val address = UInt(addressWidth.W)
     val data = UInt(32.W)
+    val mispredicted = Bool()
     val exception = new BackendException
     val fflags = UInt(5.W)
     val fpFlagsValid = Bool()
@@ -109,7 +115,10 @@ class ReorderBuffer(
         cp.completionPorts,
         writePayloadOnFlush = true,
         registeredDeq = true,
+        separateEnqWrite = true,
+        selectDeqAfterRegister = true,
     ))
+    queue.io.enqWrite.get := io.enqueue.writeValid.asBools
 
     val ready = queue.io.enq(0).ready
     io.availablePrefix := Fill(dispatchWidth, ready)
@@ -117,6 +126,7 @@ class ReorderBuffer(
         val incoming = io.enqueue.entries(lane)
         val entry = WireDefault(0.U.asTypeOf(new ROBEntry(fp, bp)))
         entry.ftqIdx := incoming.context.ftqIdx
+        entry.ftqIdxOH := UIntToOH(incoming.context.ftqIdx, fp.ftqDepth)
         entry.slot := incoming.context.slot
         entry.packetEnd := incoming.context.packetEnd
         entry.pc := incoming.context.instruction.pc
@@ -161,12 +171,14 @@ class ReorderBuffer(
     }
     when(!io.clear) {
         assert((io.enqueue.valid & ~io.availablePrefix) === 0.U, "ROB enqueue exceeded available capacity")
+        assert((io.enqueue.valid & ~io.enqueue.writeValid) === 0.U)
     }
 
     for (port <- 0 until cp.completionPorts) {
         val completion = io.completion(port)
         val update = WireDefault(0.U.asTypeOf(new ROBEntry(fp, bp)))
         update.complete := true.B
+        update.mispredicted := completion.bits.mispredicted
         update.exception := completion.bits.exception
         update.fflags := completion.bits.fflags
         update.fpFlagsValid := completion.bits.fpFlagsValid

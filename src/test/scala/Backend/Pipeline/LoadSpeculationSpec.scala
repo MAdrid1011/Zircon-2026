@@ -79,7 +79,7 @@ class LoadSpeculationSpec extends AnyFreeSpec with ChiselSim {
             dut.io.bypass.result.expect(0x12345678)
             dut.io.wk.result.valid.expect(true)
             dut.io.wk.result.bits.mask.expect(1)
-            dut.io.wk.result.bits.failed.expect(false)
+            dut.io.wk.result.bits.failedMask.expect(0)
         }
     }
 }

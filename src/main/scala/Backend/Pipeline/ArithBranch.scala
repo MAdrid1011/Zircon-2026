@@ -50,18 +50,27 @@ class ArithBranch extends Module {
     val issueProduces = io.iq.valid && !inputKilled && io.iq.bits.rdValid && !io.iq.bits.exception.valid
     io.wakeup.wakeIssue.prd := Mux(issueProduces, io.iq.bits.prd, 0.U)
     io.wakeup.wakeIssue.specMask := Mux(issueProduces, io.iq.bits.sourceSpecMask.reduce(_ | _), 0.U)
-    val rfProduces = validRF && !specFailed(packageRF) && packageRF.rdValid && !packageRF.exception.valid
-    io.wakeup.wakeRF.prd := Mux(rfProduces, packageRF.prd, 0.U)
-    io.wakeup.wakeRF.specMask := Mux(rfProduces, packageRF.sourceSpecMask.reduce(_ | _), 0.U)
+    // Qualify RF wakeup before the existing Issue/RF edge. Its registered tag
+    // is already zero for a non-producer, avoiding a validRF-to-scoreboard cone.
+    val wakeRF = RegInit(0.U.asTypeOf(new BackendWakeup))
+    wakeRF.prd := Mux(issueProduces, io.iq.bits.prd, 0.U)
+    wakeRF.specMask := Mux(
+        issueProduces,
+        io.iq.bits.sourceSpecMask.reduce(_ | _) & ~io.speculation.resolvedMask,
+        0.U,
+    )
+    io.wakeup.wakeRF := wakeRF
 
     val acceptedLiveInput = io.iq.fire && !inputKilled
     validRF := acceptedLiveInput
+    // packageRF is unobservable when validRF is clear. Sampling the presented
+    // payload every cycle removes a self-hold mux from every payload D input.
+    packageRF := io.iq.bits
+    for (source <- 0 until 3) {
+        packageRF.sourceSpecMask(source) := io.iq.bits.sourceSpecMask(source) &
+            ~io.speculation.resolvedMask
+    }
     when(acceptedLiveInput) {
-        packageRF := io.iq.bits
-        for (source <- 0 until 3) {
-            packageRF.sourceSpecMask(source) := io.iq.bits.sourceSpecMask(source) &
-                ~io.speculation.resolvedMask
-        }
         assert(
             io.iq.bits.exception.valid || io.iq.bits.fu === DecodeUnit.ALU.U ||
                 io.iq.bits.fu === DecodeUnit.Branch.U,
@@ -72,11 +81,6 @@ class ArithBranch extends Module {
         assert(io.iq.bits.prj < ArithConstants.numIntPhys.U && io.iq.bits.prk < ArithConstants.numIntPhys.U)
         when(io.iq.bits.rdValid) {
             assert(io.iq.bits.prd =/= 0.U && io.iq.bits.prd < ArithConstants.numIntPhys.U)
-        }
-    }.elsewhen(io.speculation.resolvedMask.orR) {
-        for (source <- 0 until 3) {
-            packageRF.sourceSpecMask(source) := packageRF.sourceSpecMask(source) &
-                ~io.speculation.resolvedMask
         }
     }
 
@@ -182,7 +186,10 @@ class ArithBranch extends Module {
     io.cmt.rob.complete.bits.data := packageWB.result
     io.cmt.rob.complete.bits.exception := packageWB.exception
 
-    io.cmt.branch.update.valid := liveWB && packageWB.fu === DecodeUnit.Branch.U &&
+    // FTQ occupancy is cleared by flush, so a coincident payload update is
+    // unobservable. Keep flush out of this wide payload write-enable cone.
+    io.cmt.branch.update.valid := validWB && !specFailed(packageWB) &&
+        packageWB.fu === DecodeUnit.Branch.U &&
         !packageWB.exception.valid
     io.cmt.branch.update.bits.robIdx := packageWB.robIdx
     io.cmt.branch.update.bits.taken := packageWB.branchTaken

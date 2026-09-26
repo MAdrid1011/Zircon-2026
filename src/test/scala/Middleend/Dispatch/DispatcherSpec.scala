@@ -3,6 +3,11 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig._
 
 class DispatcherSpec extends AnyFreeSpec with ChiselSim {
+    private def setFreeCount(dut: Dispatcher, index: Int, count: Int): Unit = {
+        val available = math.min(count, dut.issue.dispatchWidth)
+        dut.io.freePrefix(index).poke((BigInt(1) << available) - 1)
+    }
+
     private def initialize(dut: Dispatcher): Unit = {
         dut.io.in.valid.poke(0)
         dut.io.in.entries.foreach(BackendPackageTestUtils.clear)
@@ -15,8 +20,10 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             route.noIssue.poke(false)
         }
         dut.io.resourcePrefix.poke((BigInt(1) << dut.issue.dispatchWidth) - 1)
-        dut.io.freeCount.zip(dut.issue.queueParams).foreach { case (count, queue) => count.poke(queue.entries) }
         dut.io.clearPreference.poke(false)
+        dut.issue.queueParams.indices.foreach(index =>
+            setFreeCount(dut, index, dut.issue.queueParams(index).entries)
+        )
         dut.reset.poke(true)
         dut.clock.step(2)
         dut.reset.poke(false)
@@ -60,7 +67,7 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "three-wide dispatch accepts one parallel plan and compacts every queue output" in {
+    "three-wide dispatch compacts alternating routes" in {
         val issue = IssueParams(dispatchWidth = 3)
         simulate(new Dispatcher(issue = issue)) { dut =>
             initialize(dut)
@@ -82,29 +89,59 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "three-wide dispatch selects the largest feasible ordered prefix" in {
+    "three-wide dispatch retains a group when a route lacks capacity" in {
         val issue = IssueParams(dispatchWidth = 3)
         simulate(new Dispatcher(issue = issue)) { dut =>
             initialize(dut)
-            dut.io.freeCount(IssueQueueIndex.Load).poke(1)
-            dut.io.freeCount(IssueQueueIndex.LoadStoreAddress).poke(1)
+            setFreeCount(dut, IssueQueueIndex.Load, 1)
+            setFreeCount(dut, IssueQueueIndex.LoadStoreAddress, 1)
             dut.io.in.valid.poke(7)
             instruction(dut, 0, 15, DecodeUnit.Load)
             instruction(dut, 1, 16, DecodeUnit.Load)
             instruction(dut, 2, 17, DecodeUnit.Load)
 
-            dut.io.accepted.expect(3)
-            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
-            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
-            val dispatched = Seq(
-                dut.io.enqueue(IssueQueueIndex.Load).entries(0).robIdx.peek().litValue,
-                dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).entries(0).robIdx.peek().litValue,
-            ).sorted
-            assert(dispatched == Seq(BigInt(15), BigInt(16)))
+            dut.io.accepted.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
         }
     }
 
-    "three-wide dispatch balances single arithmetic and Load operations" in {
+    "inactive younger classes cannot affect live-lane routing or preference" in {
+        simulate(new Dispatcher(issue = IssueParams(dispatchWidth = 3))) { dut =>
+            initialize(dut)
+            instruction(dut, 0, 100, DecodeUnit.Load)
+            instruction(dut, 1, 101, DecodeUnit.Load)
+            instruction(dut, 2, 102, DecodeUnit.Load)
+            dut.io.in.valid.poke(1)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
+            dut.clock.step()
+
+            dut.io.in.valid.poke(3)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(1)
+            dut.io.accepted.expect(3)
+        }
+    }
+
+    "inactive younger classes cannot consume capacity in a selected prefix" in {
+        simulate(new Dispatcher(issue = IssueParams(dispatchWidth = 3))) { dut =>
+            initialize(dut)
+            instruction(dut, 0, 103, DecodeUnit.ALU)
+            instruction(dut, 1, 104, DecodeUnit.Load)
+            instruction(dut, 2, 105, DecodeUnit.Load)
+            setFreeCount(dut, IssueQueueIndex.Load, 0)
+            setFreeCount(dut, IssueQueueIndex.LoadStoreAddress, 0)
+            dut.io.in.valid.poke(1)
+
+            dut.io.accepted.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(1)
+            dut.io.enqueue(IssueQueueIndex.Load).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
+        }
+    }
+
+    "successive single-lane groups alternate arithmetic and Load routes" in {
         simulate(new Dispatcher(issue = IssueParams(dispatchWidth = 3))) { dut =>
             initialize(dut)
             dut.io.in.valid.poke(1)
@@ -118,8 +155,8 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(1)
             dut.clock.step()
 
-            dut.io.freeCount(IssueQueueIndex.Load).poke(6)
-            dut.io.freeCount(IssueQueueIndex.LoadStoreAddress).poke(6)
+            setFreeCount(dut, IssueQueueIndex.Load, 6)
+            setFreeCount(dut, IssueQueueIndex.LoadStoreAddress, 6)
             instruction(dut, 0, 20, DecodeUnit.Load)
             dut.io.enqueue(IssueQueueIndex.Load).valid.expect(1)
             dut.io.enqueue(IssueQueueIndex.LoadStoreAddress).valid.expect(0)
@@ -131,7 +168,29 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "a single-lane resource prefix reuses the lane-zero route from a feasible pair" in {
+    "stalled groups do not rotate routes and flush clears preferences" in {
+        simulate(new Dispatcher) { dut =>
+            initialize(dut)
+            dut.io.in.valid.poke(1)
+            instruction(dut, 0, 22, DecodeUnit.ALU)
+            dut.clock.step()
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(1)
+
+            setFreeCount(dut, IssueQueueIndex.Arith1, 0)
+            dut.io.accepted.expect(0)
+            dut.clock.step(2)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(0)
+            setFreeCount(dut, IssueQueueIndex.Arith1, 3)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(1)
+
+            dut.io.clearPreference.poke(true)
+            dut.clock.step()
+            dut.io.clearPreference.poke(false)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(1)
+        }
+    }
+
+    "a partial resource prefix retains the complete dispatch group" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
             dut.io.resourcePrefix.poke(1)
@@ -139,14 +198,23 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
             instruction(dut, 0, 12, DecodeUnit.ALU)
             instruction(dut, 1, 13, DecodeUnit.ALU)
 
-            dut.io.accepted.expect(1)
-            val outputCount = dut.io.enqueue(IssueQueueIndex.Arith0).valid.peek().litValue +
-                dut.io.enqueue(IssueQueueIndex.Arith1).valid.peek().litValue +
-                dut.io.enqueue(IssueQueueIndex.MixArith).valid.peek().litValue
-            assert(outputCount == 1)
-            val selected = Seq(dut.io.enqueue(IssueQueueIndex.Arith0), dut.io.enqueue(IssueQueueIndex.Arith1), dut.io.enqueue(IssueQueueIndex.MixArith))
-                .find(_.valid.peek().litValue == 1).get
-            selected.entries(0).robIdx.expect(12)
+            dut.io.accepted.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith0).valid.expect(0)
+            dut.io.enqueue(IssueQueueIndex.Arith1).valid.expect(0)
+        }
+    }
+
+    "resource admission matches every three-wide prefix pair" in {
+        simulate(new Dispatcher(issue = IssueParams(dispatchWidth = 3))) { dut =>
+            initialize(dut)
+            dut.io.dispatchClass.foreach(_.noIssue.poke(true))
+            for (requested <- 0 to 3; permitted <- 0 to 3) {
+                val valid = (1 << requested) - 1
+                dut.io.in.valid.poke(valid)
+                dut.io.resourcePrefix.poke((1 << permitted) - 1)
+                dut.io.accepted.expect(if (requested <= permitted) valid else 0)
+                dut.clock.step()
+            }
         }
     }
 
@@ -236,9 +304,9 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
     "an ALU cannot overflow into MixArith" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
-            dut.io.freeCount(IssueQueueIndex.MixArith).poke(3)
+            setFreeCount(dut, IssueQueueIndex.Arith0, 0)
+            setFreeCount(dut, IssueQueueIndex.Arith1, 0)
+            setFreeCount(dut, IssueQueueIndex.MixArith, 3)
             dut.io.in.valid.poke(1)
             instruction(dut, 0, 50, DecodeUnit.ALU)
 
@@ -250,8 +318,8 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
     "a native Mix operation uses MixArith independently of the ALU queues" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
+            setFreeCount(dut, IssueQueueIndex.Arith0, 0)
+            setFreeCount(dut, IssueQueueIndex.Arith1, 0)
             dut.io.in.valid.poke(1)
             instruction(dut, 0, 55, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
 
@@ -264,8 +332,8 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
     "a visible native Mix operation prevents an older ALU from occupying its only route" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
+            setFreeCount(dut, IssueQueueIndex.Arith0, 0)
+            setFreeCount(dut, IssueQueueIndex.Arith1, 0)
             dut.io.in.valid.poke(3)
             instruction(dut, 0, 60, DecodeUnit.ALU)
             instruction(dut, 1, 61, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
@@ -278,8 +346,8 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
     "an unavailable older instruction prevents a younger instruction from bypassing Dispatch" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
-            dut.io.freeCount(IssueQueueIndex.Arith1).poke(0)
-            dut.io.freeCount(IssueQueueIndex.Arith0).poke(0)
+            setFreeCount(dut, IssueQueueIndex.Arith1, 0)
+            setFreeCount(dut, IssueQueueIndex.Arith0, 0)
             dut.io.in.valid.poke(3)
             instruction(dut, 0, 80, DecodeUnit.Branch)
             instruction(dut, 1, 81, DecodeUnit.Load)
@@ -293,7 +361,7 @@ class DispatcherSpec extends AnyFreeSpec with ChiselSim {
     "an exception consumes ordered resources without entering an issue queue" in {
         simulate(new Dispatcher) { dut =>
             initialize(dut)
-            dut.io.freeCount.foreach(_.poke(0))
+            dut.issue.queueParams.indices.foreach(index => setFreeCount(dut, index, 0))
             dut.io.in.valid.poke(1)
             instruction(dut, 0, 90, DecodeUnit.None)
             dut.io.in.entries(0).exception.valid.poke(true)

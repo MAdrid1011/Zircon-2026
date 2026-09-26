@@ -75,21 +75,24 @@ class StatisticalCorrector(p: FrontendParams) extends RawModule {
             1.U -> 12.U(6.W),
             2.U -> 16.U(6.W),
         ))
-        val baseVote = Mux(biasDirections(rank), baseMagnitude.zext, -baseMagnitude.zext)
-        val score = Wire(SInt(scoreBits.W))
-        score := addTree(components :+ baseVote)
-        val magnitude = Mux(score < 0.S, (-score).asUInt, score.asUInt)
-        val scPrediction = score >= 0.S
-        val protectHigh = io.meta.tageConfidence(rank) === 2.U && magnitude < (io.read.scThreshold >> 1)
-        val protectMedium = io.meta.tageConfidence(rank) === 1.U && magnitude < (io.read.scThreshold >> 2)
-
-        scPredictions(rank) := scPrediction
-        scLowMargin(rank) := magnitude < io.read.scThreshold
-        val corrected = Mux(
-            scPrediction =/= biasDirections(rank) && (protectHigh || protectMedium),
-            biasDirections(rank),
-            scPrediction,
-        )
+        val componentSum = addTree(components)
+        def candidate(baseDirection: Boolean): (Bool, Bool, Bool) = {
+            val score = Wire(SInt(scoreBits.W))
+            score := (if (baseDirection) componentSum +& baseMagnitude.zext
+                else componentSum -& baseMagnitude.zext)
+            val magnitude = Mux(score < 0.S, (-score).asUInt, score.asUInt)
+            val prediction = score >= 0.S
+            val protect =
+                (io.meta.tageConfidence(rank) === 2.U && magnitude < (io.read.scThreshold >> 1)) ||
+                    (io.meta.tageConfidence(rank) === 1.U && magnitude < (io.read.scThreshold >> 2))
+            val corrected = if (baseDirection) protect || prediction else !protect && prediction
+            (prediction, magnitude < io.read.scThreshold, corrected)
+        }
+        val positive = candidate(true)
+        val negative = candidate(false)
+        scPredictions(rank) := Mux(biasDirections(rank), positive._1, negative._1)
+        scLowMargin(rank) := Mux(biasDirections(rank), positive._2, negative._2)
+        val corrected = Mux(biasDirections(rank), positive._3, negative._3)
         directions(rank) := Mux(io.meta.loopValid(rank), io.meta.loopPredictions(rank), corrected)
     }
 

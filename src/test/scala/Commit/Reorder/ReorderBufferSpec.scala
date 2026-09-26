@@ -4,12 +4,14 @@ import org.scalatest.freespec.AnyFreeSpec
 class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
     private def initialize(dut: ReorderBuffer): Unit = {
         dut.io.enqueue.valid.poke(0)
+        dut.io.enqueue.writeValid.poke(0)
         dut.io.pop.poke(0)
         dut.io.clear.poke(false)
         dut.io.readIdx.foreach(_.poke(0))
         dut.io.completion.foreach { port =>
             port.valid.poke(false)
             port.bits.address.poke(0)
+            port.bits.mispredicted.poke(false)
             port.bits.exception.valid.poke(false)
             port.bits.exception.cause.poke(0)
             port.bits.exception.tval.poke(0)
@@ -46,6 +48,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
         dut.io.completion(port).valid.poke(true)
         dut.io.completion(port).bits.address.poke(robIdx)
         dut.io.completion(port).bits.data.poke(0)
+        dut.io.completion(port).bits.mispredicted.poke(false)
         dut.io.completion(port).bits.exception.valid.poke(false)
         dut.io.completion(port).bits.exception.cause.poke(0)
         dut.io.completion(port).bits.exception.tval.poke(0)
@@ -60,11 +63,13 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             val identities = dut.io.allocation.map(_.peek().litValue)
             assert(identities.distinct.size == 3)
             dut.io.enqueue.valid.poke(7)
+            dut.io.enqueue.writeValid.poke(7)
             for (lane <- 0 until 3) {
                 enqueueLane(dut, lane, pc = 0x1000 + lane * 4, identities(lane))
             }
             dut.clock.step()
             dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
             dut.io.readIdx(0).poke(identities(2))
             dut.io.readPc(0).expect(0x1008)
 
@@ -97,11 +102,13 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             initialize(dut)
             val first = dut.io.allocation(0).peek().litValue
             dut.io.enqueue.valid.poke(3)
+            dut.io.enqueue.writeValid.poke(3)
             for (lane <- 0 until 2) {
                 enqueueLane(dut, lane, pc = 0x2000 + lane * 4, dut.io.allocation(lane).peek().litValue)
             }
             dut.clock.step()
             dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
             dut.io.clear.poke(true)
             dut.clock.step()
             dut.io.clear.poke(false)
@@ -115,6 +122,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             initialize(dut)
             val first = dut.io.allocation.map(_.peek().litValue)
             dut.io.enqueue.valid.poke(7)
+            dut.io.enqueue.writeValid.poke(7)
             for (lane <- 0 until 3) {
                 enqueueLane(dut, lane, pc = 0x5000 + lane * 4, first(lane))
             }
@@ -125,16 +133,21 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
                 enqueueLane(dut, lane, pc = 0x5010 + lane * 4, second(lane))
                 complete(dut, lane, first(lane))
             }
+            dut.io.completion(1).bits.mispredicted.poke(true)
             dut.clock.step()
             dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
             dut.io.completion.take(3).foreach(_.valid.poke(false))
             dut.io.head.foreach(_.bits.complete.expect(true))
+            dut.io.head(0).bits.mispredicted.expect(false)
+            dut.io.head(1).bits.mispredicted.expect(true)
 
             dut.io.pop.poke(7)
             complete(dut, 0, second(0))
             dut.io.completion(0).bits.exception.valid.poke(true)
             dut.io.completion(0).bits.exception.cause.poke(5)
             dut.io.completion(0).bits.exception.tval.poke(0x1234)
+            dut.io.completion(0).bits.mispredicted.poke(true)
             dut.clock.step()
             dut.io.pop.poke(0)
             dut.io.completion(0).valid.poke(false)
@@ -145,8 +158,55 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.head(0).bits.exception.valid.expect(true)
             dut.io.head(0).bits.exception.cause.expect(5)
             dut.io.head(0).bits.exception.tval.expect(0x1234)
+            dut.io.head(0).bits.mispredicted.expect(true)
             dut.io.head(1).bits.complete.expect(false)
+            dut.io.head(1).bits.mispredicted.expect(false)
             dut.io.head(2).bits.complete.expect(false)
+        }
+    }
+
+    for (retired <- Seq(1, 2)) {
+        s"completion follows a $retired-entry head advance" in {
+            simulate(new ReorderBuffer(dispatchWidth = 3)) { dut =>
+                initialize(dut)
+                val first = dut.io.allocation.map(_.peek().litValue)
+                dut.io.enqueue.valid.poke(7)
+                dut.io.enqueue.writeValid.poke(7)
+                for (lane <- 0 until 3) {
+                    enqueueLane(dut, lane, pc = 0x7000 + lane * 4, first(lane))
+                }
+                dut.clock.step()
+
+                val second = dut.io.allocation.map(_.peek().litValue)
+                for (lane <- 0 until 3) {
+                    enqueueLane(dut, lane, pc = 0x7010 + lane * 4, second(lane))
+                    complete(dut, lane, first(lane))
+                }
+                dut.clock.step()
+                dut.io.enqueue.valid.poke(0)
+                dut.io.enqueue.writeValid.poke(0)
+                dut.io.completion.foreach(_.valid.poke(false))
+
+                dut.io.pop.poke((1 << retired) - 1)
+                for (lane <- 0 until retired) {
+                    complete(dut, lane, second(lane))
+                    dut.io.completion(lane).bits.exception.tval.poke(0x8000 + lane)
+                }
+                dut.clock.step()
+                dut.io.pop.poke(0)
+                dut.io.completion.foreach(_.valid.poke(false))
+                for (lane <- 0 until 3 - retired) {
+                    dut.io.head(lane).bits.robIdx.expect(first(lane + retired))
+                    dut.io.head(lane).bits.complete.expect(true)
+                }
+                for (lane <- 0 until retired) {
+                    val head = dut.io.head(3 - retired + lane)
+                    head.valid.expect(true)
+                    head.bits.robIdx.expect(second(lane))
+                    head.bits.complete.expect(true)
+                    head.bits.exception.tval.expect(0x8000 + lane)
+                }
+            }
         }
     }
 
@@ -156,6 +216,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             val first = dut.io.allocation(0).peek().litValue
             dut.io.clear.poke(true)
             dut.io.enqueue.valid.poke(3)
+            dut.io.enqueue.writeValid.poke(3)
             for (lane <- 0 until 2) {
                 enqueueLane(dut, lane, pc = 0x3000 + lane * 4, dut.io.allocation(lane).peek().litValue)
             }
@@ -164,17 +225,40 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.clear.poke(false)
             dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
             dut.io.completion(0).valid.poke(false)
             dut.io.head(0).valid.expect(false)
             dut.io.allocation(0).expect(first)
 
             dut.io.enqueue.valid.poke(1)
+            dut.io.enqueue.writeValid.poke(1)
             enqueueLane(dut, 0, pc = 0x4000, first)
             dut.clock.step()
             dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
             dut.io.head(0).valid.expect(true)
             dut.io.head(0).bits.pc.expect(0x4000)
             dut.io.head(0).bits.complete.expect(false)
+        }
+    }
+
+    "payload prewrite does not allocate and preserves first-visible head latency" in {
+        simulate(new ReorderBuffer(dispatchWidth = 2)) { dut =>
+            initialize(dut)
+            val first = dut.io.allocation(0).peek().litValue
+            dut.io.enqueue.writeValid.poke(1)
+            enqueueLane(dut, 0, pc = 0x6000, first)
+            dut.clock.step()
+            dut.io.head(0).valid.expect(false)
+            dut.io.allocation(0).expect(first)
+
+            dut.io.enqueue.valid.poke(1)
+            dut.clock.step()
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+            dut.io.head(0).valid.expect(true)
+            dut.io.head(0).bits.pc.expect(0x6000)
+            dut.io.head(0).bits.robIdx.expect(first)
         }
     }
 }

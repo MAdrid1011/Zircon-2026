@@ -81,26 +81,26 @@ class StoreBuffer(
         }
         val bytes = Wire(Vec(4, UInt(8.W)))
         val mask = Wire(Vec(4, Bool()))
-        val newestToOldest = Seq.tabulate(entries) { distance =>
-            FIFOUtil.rotate(newestOH, (entries - distance) % entries)
-        }
         for (byte <- 0 until 4) {
             val hitMask = VecInit.tabulate(entries) { position =>
                 matches(position) && storage(position).mask(byte) && query.bits.mask(byte)
             }.asUInt
-            val orderedHits = VecInit(newestToOldest.map(positionOH => (positionOH & hitMask).orR)).asUInt
-            val selectedRankOH = PriorityEncoderOH(orderedHits)
-            val selectedPositionOH = Mux1H(selectedRankOH, newestToOldest)
-            bytes(byte) := Mux1H(
-                selectedPositionOH,
-                storage.map(_.data(8 * byte + 7, 8 * byte)),
-            )
-            mask(byte) := orderedHits.orR
+            val selectedByNewest = VecInit.tabulate(entries) { newest =>
+                val positions = Seq.tabulate(entries)(distance => (newest - distance + entries) % entries)
+                val orderedHits = VecInit(positions.map(hitMask(_)))
+                Mux1H(
+                    PriorityEncoderOH(orderedHits.asUInt).asBools,
+                    positions.map(position => storage(position).data(8 * byte + 7, 8 * byte)),
+                )
+            }
+            bytes(byte) := Mux1H(newestOH.asBools, selectedByNewest)
+            mask(byte) := hitMask.orR
         }
         val resultValid = RegNext(query.valid, false.B)
-        val resultSlot = RegEnable(query.bits.slot, query.valid)
-        val resultData = RegEnable(bytes.asUInt, query.valid)
-        val resultMask = RegEnable(mask.asUInt, query.valid)
+        // The payload is sampled freely and qualified only by resultValid.
+        val resultSlot = RegNext(query.bits.slot)
+        val resultData = RegNext(bytes.asUInt)
+        val resultMask = RegNext(mask.asUInt)
         io.query(port).response.valid := resultValid
         io.query(port).response.bits.slot := resultSlot
         io.query(port).response.bits.data := resultData

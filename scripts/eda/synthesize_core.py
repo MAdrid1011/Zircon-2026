@@ -259,10 +259,6 @@ def main():
     wrappers = [
         ROOT / "src/main/resources/BsgFakeram1RW1R_25.sv",
         ROOT / "src/main/resources/BsgFakeram1RW1R_32.sv",
-        ROOT / "src/main/resources/PredictorBsgFakeram_512_16.sv",
-        ROOT / "src/main/resources/PredictorBsgFakeram_128_45.sv",
-        ROOT / "src/main/resources/PredictorBsgFakeram_64_24.sv",
-        ROOT / "src/main/resources/PredictorBsgFakeram_256_8.sv",
     ]
     missing = [path for path in [filelist, *wrappers, CELL_LIB] if not path.is_file()]
     if missing:

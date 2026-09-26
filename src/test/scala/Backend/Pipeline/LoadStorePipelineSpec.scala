@@ -121,7 +121,7 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
             heldSTD = None
         }
         assert(sta.isEmpty || input.isEmpty, "LD and STA share one address issue port")
-        sta.foreach { s =>
+        sta.filter(_ => cancel.isEmpty).foreach { s =>
             val b = dut.io.iq.instPkg.bits
             dut.io.iq.instPkg.valid.poke(true)
             b.fu.poke(ZirconConfig.DecodeUnit.Store)
@@ -136,8 +136,8 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
             b.ioAuthorized.poke(true)
         }
         val s = dut.io.iq.std.get
-        s.valid.poke(std.nonEmpty)
-        std.foreach { x =>
+        s.valid.poke(std.nonEmpty && cancel.isEmpty)
+        std.filter(_ => cancel.isEmpty).foreach { x =>
             s.bits.fu.poke(ZirconConfig.DecodeUnit.Store)
             s.bits.prs(0).poke(x.prs); s.bits.sqIdx.poke(x.sq); s.bits.robIdx.poke(x.rob); s.bits.size.poke(x.size)
         }
@@ -183,8 +183,10 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
             dut.io.request.valid.peek().litToBoolean && dut.io.requestReady.peek().litToBoolean &&
             d.valid.peek().litToBoolean && stdReady
         ) count("ld_std_parallel")
-        staFired = sta.nonEmpty && dut.io.iq.instPkg.ready.peek().litToBoolean
-        stdFired = std.nonEmpty && dut.io.iq.std.get.ready.peek().litToBoolean
+        staFired = sta.nonEmpty && dut.io.iq.instPkg.valid.peek().litToBoolean &&
+            dut.io.iq.instPkg.ready.peek().litToBoolean
+        stdFired = std.nonEmpty && dut.io.iq.std.get.valid.peek().litToBoolean &&
+            dut.io.iq.std.get.ready.peek().litToBoolean
         if (staFired) { assert(sq.contains(sta.get)); pendingSTA += sta.get }
         if (stdFired) { assert(sq.contains(std.get)); pendingSTD += std.get }
         if (dut.io.store.req.valid.peek().litToBoolean && dut.io.store.req.ready.peek().litToBoolean) {

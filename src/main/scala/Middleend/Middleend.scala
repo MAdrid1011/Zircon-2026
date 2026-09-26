@@ -47,6 +47,9 @@ class MiddleendCommitRequest(fp: FrontendParams, width: Int) extends Bundle {
 
 class MiddleendCommitEnqueue(fp: FrontendParams, bp: BackendParams, width: Int) extends Bundle {
     val valid = UInt(width.W)
+    // Payload may be written into reserved-but-not-yet-visible Commit slots
+    // before backend issue capacity permits the matching occupancy update.
+    val writeValid = UInt(width.W)
     val entries = Vec(width, new MiddleendCommitEntry(fp, bp))
 }
 
@@ -116,8 +119,7 @@ class Middleend(
 
     private def unifiedTag(isFp: Boolean, index: UInt): UInt =
         Cat(isFp.B, index.pad(backendParams.physWidth))
-
-    /* This compacting register is the only Decode/Rename-to-Dispatch state boundary. */
+    /* The held Q-side group separates Rename from Dispatch. */
     val renameStageEntries = Reg(Vec(width, new MiddleendRenameEntry(frontendParams, backendParams)))
     val renameStageValid = RegInit(0.U(width.W))
     val accepted = Wire(UInt(width.W))
@@ -150,7 +152,7 @@ class Middleend(
     io.commit.request.packetStart := VecInit(renameStageEntries.map(_.context.packetStart)).asUInt
     FIFOUtil.assertPrefix(io.commit.resourcePrefix.asBools, "Commit resource permission must be a prefix")
 
-    /* Admission remains an ordered prefix across FQ space and both physical-register domains. */
+    /* Admission moves one complete FQ group into the fixed pipeline register. */
     val decodeCandidate = VecInit(io.frontend.out.map(_.valid))
     val decodeNeedsInt = VecInit((0 until width).map { lane =>
         decodeCandidate(lane) && instructions(lane).rinfo.dest.valid &&
@@ -160,22 +162,23 @@ class Middleend(
         decodeCandidate(lane) && instructions(lane).rinfo.dest.valid &&
             instructions(lane).rinfo.dest.isFp
     })
-    val acceptedCount = PopCount(accepted)
-    val retainedCount = PopCount(renameStageValid) - acceptedCount
-    val renameStageFree = width.U - retainedCount
+    val stageCanLoad = !renameStageValid.orR || accepted.orR
     val laneRenameReady = VecInit((0 until width).map { lane =>
         (!decodeNeedsInt(lane) || integerRename.io.freePrefix(lane)) &&
             (!decodeNeedsFp(lane) || floatingRename.io.freePrefix(lane))
     })
-    val decodeGrant = VecInit((0 until width).map { lane =>
-        val requested = PopCount(decodeCandidate.take(lane + 1))
-        decodeCandidate(lane) && renameStageFree >= requested && !io.commit.flush && !io.commit.restore &&
-            laneRenameReady.take(lane + 1).reduce(_ && _)
-    }).asUInt
-    integerRename.io.prepare := decodeGrant
-    floatingRename.io.prepare := decodeGrant
-    integerRename.io.allocate := decodeGrant
-    floatingRename.io.allocate := decodeGrant
+    val groupRenameReady = decodeCandidate.toSeq.zip(laneRenameReady.toSeq).map {
+        case (candidate, ready) => !candidate || ready
+    }.reduce(_ && _)
+    val decodeGrant = Mux(
+        stageCanLoad && groupRenameReady && !io.commit.flush && !io.commit.restore,
+        decodeCandidate.asUInt,
+        0.U(width.W),
+    )
+    // Prepare tags and same-group bypasses from the FQ candidates in parallel
+    // with Dispatch admission. Only the fixed stage register uses decodeGrant.
+    integerRename.io.prepare := decodeCandidate.asUInt
+    floatingRename.io.prepare := decodeCandidate.asUInt
     integerRename.io.restore := io.commit.restore
     floatingRename.io.restore := io.commit.restore
 
@@ -314,12 +317,25 @@ class Middleend(
         )
     }
     dispatcher.io.resourcePrefix := io.commit.resourcePrefix
-    dispatcher.io.freeCount := io.backend.freeCount
+    dispatcher.io.freePrefix := io.backend.freePrefix
     dispatcher.io.clearPreference := io.commit.flush
     io.backend.enqueue := dispatcher.io.enqueue
 
+    /* Flush owns the edge and discards the Q-side group before any dispatch-side effects. */
+    accepted := Mux(io.commit.flush, 0.U, dispatcher.io.accepted)
+    for ((rename, isFp) <- renames; lane <- 0 until width) {
+        val destination = renameStageEntries(lane).context.instruction.rinfo.dest
+        val writesDomain = destination.valid && destination.isFp === isFp.B &&
+            (isFp.B || destination.index =/= 0.U)
+        rename.io.preview(lane).valid := renameStageValid(lane) && writesDomain
+        rename.io.preview(lane).bits.rd := destination.index
+        rename.io.preview(lane).bits.prd := renameStageEntries(lane).physical.prd(rename.p.indexWidth - 1, 0)
+        rename.io.writeback(lane).valid := accepted(lane) && writesDomain
+        rename.io.writeback(lane).bits.rd := destination.index
+        rename.io.writeback(lane).bits.prd := rename.io.preview(lane).bits.prd
+    }
+
     /* A fetch packet may span dispatch groups, so continuation lanes reuse its allocated FTQ index. */
-    accepted := dispatcher.io.accepted
     val openPacketValid = RegInit(false.B)
     val openPacketFtqIdx = RegInit(0.U(frontendParams.ftqBits.W))
     val dispatchedFtqIdx = Wire(Vec(width, UInt(frontendParams.ftqBits.W)))
@@ -327,9 +343,11 @@ class Middleend(
     for (lane <- 0 until width) {
         val context = renameStageEntries(lane).context
         dispatchedFtqIdx(lane) := Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
-        precedingFtqIdx = Mux(renameStageValid(lane) && context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
+        precedingFtqIdx = Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
     }
     /* Accepted lanes update readiness and enter Commit atomically with their backend issue tasks. */
+    // Commit queues guard prewrites with their own free space. Stage validity
+    // controls visibility only, so it need not fan out to every payload bit.
     for (lane <- 0 until width) {
         val destination = renameStageEntries(lane).context.instruction.rinfo.dest
         val incomingDestination = instructions(lane).rinfo.dest
@@ -345,12 +363,19 @@ class Middleend(
         io.commit.enqueue.entries(lane).allocation := io.commit.allocation(lane)
         io.commit.ftqAllocate(lane).valid := accepted(lane) && renameStageEntries(lane).context.packetStart &&
             !io.commit.flush
+        // Flush clears FTQ occupancy, so a coincident payload prewrite remains
+        // invisible and must not put recovery on the wide FTQ payload D cone.
+        io.commit.ftqAllocate(lane).bits.writeValid := renameStageEntries(lane).context.packetStart
         io.commit.ftqAllocate(lane).bits.record := renameStageEntries(lane).context.ftqRecord
     }
     io.commit.enqueue.valid := accepted
+    io.commit.enqueue.writeValid := Fill(width, true.B)
 
-    val acceptedAny = accepted.orR
-    val lastAccepted = VecInit.tabulate(width)(lane => acceptedAny && acceptedCount === (lane + 1).U).asUInt
+    val acceptedAny = accepted(0)
+    val lastAccepted = VecInit.tabulate(width) { lane =>
+        val nextAccepted = if (lane + 1 == width) false.B else accepted(lane + 1)
+        accepted(lane) && !nextAccepted
+    }.asUInt
     val lastAcceptedEnd = Mux1H(lastAccepted.asBools, renameStageEntries.map(_.context.packetEnd))
     val lastAcceptedFtqIdx = Mux1H(lastAccepted.asBools, dispatchedFtqIdx)
     when(io.commit.flush) {
@@ -360,33 +385,12 @@ class Middleend(
         openPacketFtqIdx := lastAcceptedFtqIdx
     }
 
-    /* Rename-to-Dispatch is one compacting pipeline register. */
-    val nextRenameEntries = Wire(Vec(width, new MiddleendRenameEntry(frontendParams, backendParams)))
-    val grantCount = PopCount(decodeGrant)
-    for (position <- 0 until width) {
-        val retained = WireDefault(0.U.asTypeOf(new MiddleendRenameEntry(frontendParams, backendParams)))
-        when(position.U < retainedCount) {
-            retained := Mux1H((0 until width).map { source =>
-                (acceptedCount + position.U === source.U) -> renameStageEntries(source)
-            })
-        }
-        val incomingSelect = VecInit((0 until width).map { lane =>
-            val rank = if (lane == 0) 0.U else PopCount(decodeGrant.take(lane))
-            decodeGrant(lane) && retainedCount + rank === position.U
-        })
-        nextRenameEntries(position) := Mux(
-            position.U < retainedCount,
-            retained,
-            Mux1H(incomingSelect, renameIncoming),
-        )
-    }
+    /* Fixed stage: retain Q intact under backpressure or replace it as one group. */
     when(io.commit.flush) {
         renameStageValid := 0.U
-    }.otherwise {
-        renameStageValid := VecInit((0 until width).map(position =>
-            position.U < retainedCount + grantCount
-        )).asUInt
-        renameStageEntries := nextRenameEntries
+    }.elsewhen(stageCanLoad) {
+        renameStageValid := decodeGrant
+        renameStageEntries := renameIncoming
     }
 
     /* FQ dequeue follows the same prefix grant that enters the rename-stage register. */
@@ -394,8 +398,12 @@ class Middleend(
         io.frontend.out(lane).ready := decodeGrant(lane) && !io.commit.flush
     }
     assert((accepted & ~renameStageValid) === 0.U, "Dispatch cannot consume an invalid renamed instruction")
+    FIFOUtil.assertPrefix(decodeCandidate.toSeq, "Middleend frontend candidates must be an ordered prefix")
     FIFOUtil.assertPrefix(accepted.asBools, "Middleend acceptance must remain an ordered prefix")
     FIFOUtil.assertPrefix(decodeGrant.asBools, "Middleend decode must consume an ordered prefix")
+    when(accepted.orR) {
+        assert(accepted === renameStageValid, "Fixed Rename stage must dispatch atomically")
+    }
     when(accepted(0) && !renameStageEntries(0).context.packetStart) {
         assert(openPacketValid, "A continued fetch packet must retain its FTQ mapping")
     }

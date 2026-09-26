@@ -15,7 +15,6 @@ class ICacheFSMCacheIO extends Bundle {
     val tagvWe = Output(UInt(2.W))
     val memWe = Output(UInt(2.W))
     val addrOH = Output(UInt(3.W))
-    val r1H = Output(UInt(2.W))
     val lruUpd = Output(UInt(2.W))
     val start = Output(Bool())
     val ready = Output(Bool())
@@ -39,68 +38,69 @@ class ICacheFSM extends Module {
     val io = IO(new ICacheFSMIO)
 
     // Keep the original miss, installation and two-phase RAM recovery sequence.
-    val mIdle :: mMiss :: mRefill :: mWait :: Nil = Enum(4)
+    val mIdle = 1.U(4.W)
+    val mMiss = 2.U(4.W)
+    val mRefill = 4.U(4.W)
+    val mWait = 8.U(4.W)
     val mState = RegInit(mIdle)
     val lruReg = RegInit(0.U(2.W))
     val readIssued = RegInit(false.B)
     val requestHeld = RegInit(false.B)
-    val waited = RegNext(mState === mWait, false.B)
+    val waited = RegNext(mState(3), false.B)
 
     io.cc.cmiss := false.B
     io.cc.tagvWe := 0.U
     io.cc.memWe := 0.U
     // Normal requests always launch S1. A disabled SRAM port retains its last result.
     io.cc.addrOH := 1.U
-    io.cc.r1H := Mux(mState === mWait, 2.U, 1.U)
     io.cc.lruUpd := 0.U
     io.cc.start := false.B
-    io.cc.ready := mState === mIdle
+    io.cc.ready := mState(0)
     io.l2.rreq := false.B
     io.l2.pending := readIssued
 
-    switch(mState) {
-        is(mIdle) {
-            when(io.cc.rreq && !io.cc.flush && !io.cc.fault) {
-                when(io.cc.uncache || !io.cc.hit.orR) {
-                    mState := mMiss
-                    lruReg := io.cc.lru
-                    io.cc.start := true.B
-                }.elsewhen(io.cc.consumed) {
-                    io.cc.lruUpd := ~io.cc.hit
-                }
+    when(mState(0)) {
+        when(io.cc.rreq && !io.cc.flush && !io.cc.fault) {
+            when(io.cc.uncache || !io.cc.hit.orR) {
+                mState := mMiss
+                lruReg := io.cc.lru
+                io.cc.start := true.B
+            }.elsewhen(io.cc.consumed) {
+                io.cc.lruUpd := ~io.cc.hit
             }
-        }
-        is(mMiss) {
-            // Once presented, retain the lower request through backpressure and flush.
-            io.l2.rreq := !readIssued && (requestHeld || (io.cc.rreq && !io.cc.flush))
-            when(io.l2.rreq) {
-                requestHeld := !io.l2.ready
-                when(io.l2.ready) { readIssued := true.B }
-            }
-            when((!io.cc.rreq || io.cc.flush) && !requestHeld && !readIssued) { mState := mWait }
-            when(io.l2.rrsp) {
-                readIssued := false.B
-                when(!io.l2.more) {
-                    mState := Mux(!io.cc.rreq || io.cc.flush || io.cc.uncache || io.l2.error, mWait, mRefill)
-                }
-            }
-        }
-        is(mRefill) {
-            mState := mWait
-            when(!io.cc.flush) {
-                io.cc.addrOH := 4.U
-                io.cc.lruUpd := ~lruReg
-                io.cc.tagvWe := lruReg
-                io.cc.memWe := lruReg
-            }
-        }
-        is(mWait) {
-            // Restore the held IF1 address once after refill; later disabled cycles retain the result.
-            io.cc.cmiss := !waited
-            io.cc.ready := waited && (!io.cc.rreq || io.cc.responseReady || io.cc.flush)
-            when(!waited) { io.cc.addrOH := 2.U }
-            when(io.cc.ready) { mState := mIdle }
         }
     }
+    when(mState(1)) {
+        // Once presented, retain the lower request through backpressure and flush.
+        io.l2.rreq := !readIssued && (requestHeld || (io.cc.rreq && !io.cc.flush))
+        when(io.l2.rreq) {
+            requestHeld := !io.l2.ready
+            when(io.l2.ready) { readIssued := true.B }
+        }
+        when((!io.cc.rreq || io.cc.flush) && !requestHeld && !readIssued) { mState := mWait }
+        when(io.l2.rrsp) {
+            readIssued := false.B
+            when(!io.l2.more) {
+                mState := Mux(!io.cc.rreq || io.cc.flush || io.cc.uncache || io.l2.error, mWait, mRefill)
+            }
+        }
+    }
+    when(mState(2)) {
+        mState := mWait
+        when(!io.cc.flush) {
+            io.cc.addrOH := 4.U
+            io.cc.lruUpd := ~lruReg
+            io.cc.tagvWe := lruReg
+            io.cc.memWe := lruReg
+        }
+    }
+    when(mState(3)) {
+        // Restore the held IF1 address once after refill; later disabled cycles retain the result.
+        io.cc.cmiss := !waited
+        io.cc.ready := waited && (!io.cc.rreq || io.cc.responseReady || io.cc.flush)
+        when(!waited) { io.cc.addrOH := 2.U }
+        when(io.cc.ready) { mState := mIdle }
+    }
+    assert(PopCount(mState) === 1.U, "ICache FSM state must remain one-hot")
     assert(PopCount(io.cc.addrOH) === 1.U, "ICache array address source must be one-hot")
 }

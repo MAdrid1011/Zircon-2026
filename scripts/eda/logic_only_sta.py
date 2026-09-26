@@ -16,6 +16,8 @@ from openroad_resizer import (
     _container_path,
     _tcl_list,
 )
+from logic_path_audit import audit
+from timing_reports import write_path_clusters
 
 
 TEMPLATE = Path(__file__).with_name("logic_only_sta.tcl")
@@ -154,6 +156,23 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
                 output_dir / "logic-only-violating-paths-summary.rpt"
             ),
         },
+    }
+    summary["path_clusters"] = write_path_clusters(
+        output_dir / "logic-only-violating-paths-summary.rpt",
+        netlist,
+        output_dir,
+    )
+    audit_path = output_dir / "logic-only-path-audit.json"
+    audit_result = audit(
+        output_dir / "logic-only-violating-paths-full.rpt",
+        netlist,
+        json.loads(Path(summary["path_clusters"]["json"]).read_text()),
+    )
+    audit_path.write_text(json.dumps(audit_result, indent=2) + "\n")
+    summary["path_audit"] = {
+        "path_count": audit_result["path_count"],
+        "family_count": audit_result["family_count"],
+        "json": str(audit_path),
     }
     (output_dir / "logic-only-results.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary

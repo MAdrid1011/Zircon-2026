@@ -25,7 +25,6 @@ class FrontendPredecoderTestTop extends Module {
     val packet = WireDefault(0.U.asTypeOf(new FrontendPackage(p)))
     packet.startPc := io.pc
     packet.predict.range := 15.U
-    packet.predict.returned := 15.U
     packet.predict.directions := io.directions
     packet.predict.before.top := io.rasTop(31, 2)
     packet.predict.before.count := io.rasValid

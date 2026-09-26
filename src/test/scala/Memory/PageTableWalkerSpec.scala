@@ -110,4 +110,107 @@ class PageTableWalkerSpec extends AnyFreeSpec with ChiselSim {
             dut.io.busy.expect(false)
         }
     }
+
+    "simultaneous data misses use the selected lane's address" in {
+        simulate(new PageTableWalker) { dut =>
+            initialize(dut)
+            val first = BigInt("40400000", 16)
+            val second = BigInt("80800000", 16)
+            val root = BigInt("80000", 16) << 12
+            dut.io.data.miss(0).valid.poke(true)
+            dut.io.data.miss(0).bits.vaddr.poke(first)
+            dut.io.data.miss(1).valid.poke(true)
+            dut.io.data.miss(1).bits.vaddr.poke(second)
+            dut.clock.step()
+
+            dut.io.dptw.req.valid.expect(true)
+            dut.io.dptw.req.bits.paddr.expect(root + ((first >> 22) << 2))
+        }
+    }
+
+    "flush in idle suppresses a stale miss until the next valid request" in {
+        simulate(new PageTableWalker) { dut =>
+            initialize(dut)
+            dut.io.data.miss(1).valid.poke(true)
+            dut.io.data.miss(1).bits.vaddr.poke(BigInt("40400000", 16))
+            dut.io.flush.poke(true)
+            dut.clock.step()
+            dut.io.busy.expect(false)
+            dut.io.dptw.req.valid.expect(false)
+            dut.io.data.miss(1).valid.poke(false)
+            dut.io.flush.poke(false)
+            dut.clock.step()
+            dut.io.busy.expect(false)
+
+            dut.io.data.miss(1).valid.poke(true)
+            dut.io.data.miss(1).bits.vaddr.poke(BigInt("80800000", 16))
+            dut.clock.step()
+            dut.io.dptw.req.valid.expect(true)
+            dut.io.dptw.req.bits.paddr.expect((BigInt("80000", 16) << 12) | (BigInt(0x202) << 2))
+        }
+    }
+
+    "flush suppresses pending requests and refills on the same cycle" in {
+        simulate(new PageTableWalker) { dut =>
+            initialize(dut)
+            dut.io.data.miss(0).valid.poke(true)
+            dut.io.data.miss(0).bits.vaddr.poke(BigInt("40400000", 16))
+            dut.clock.step()
+            dut.io.dptw.req.valid.expect(true)
+            dut.io.flush.poke(true)
+            dut.io.dptw.req.valid.expect(false)
+            dut.io.data.miss(0).valid.poke(false)
+            dut.clock.step()
+            dut.io.flush.poke(false)
+            dut.io.dptw.req.valid.expect(false)
+        }
+        simulate(new PageTableWalker) { dut =>
+            initialize(dut)
+            dut.io.data.miss(0).valid.poke(true)
+            dut.io.data.miss(0).bits.vaddr.poke(BigInt("40400000", 16))
+            dut.clock.step()
+            dut.io.dptw.req.ready.poke(true)
+            dut.clock.step()
+            dut.io.dptw.req.ready.poke(false)
+            dut.io.dptw.rsp.valid.poke(true)
+            dut.io.dptw.rsp.bits.error.poke(true)
+            dut.clock.step()
+            dut.io.dptw.rsp.valid.poke(false)
+            dut.io.data.refill.valid.expect(true)
+            dut.io.flush.poke(true)
+            dut.io.data.refill.valid.expect(false)
+        }
+    }
+
+    "maximum page index and changed held miss preserve PTW address selection" in {
+        simulate(new PageTableWalker) { dut =>
+            initialize(dut)
+            val rootPpn = (BigInt(1) << 22) - 1
+            val first = BigInt("fffff000", 16)
+            val second = BigInt("40000000", 16)
+            dut.io.rootPpn.poke(rootPpn)
+            dut.io.data.miss(1).valid.poke(true)
+            dut.io.data.miss(1).bits.vaddr.poke(first)
+            dut.clock.step()
+            dut.io.dptw.req.valid.expect(true)
+            dut.io.dptw.req.bits.paddr.expect((rootPpn << 12) | (BigInt(0x3ff) << 2))
+
+            dut.io.dptw.req.ready.poke(true)
+            dut.clock.step()
+            dut.io.dptw.req.ready.poke(false)
+            dut.io.dptw.rsp.valid.poke(true)
+            dut.io.dptw.rsp.bits.error.poke(true)
+            dut.clock.step()
+            dut.io.dptw.rsp.valid.poke(false)
+            dut.io.data.refill.valid.expect(true)
+            dut.clock.step()
+
+            dut.io.data.miss(1).bits.vaddr.poke(second)
+            dut.clock.step()
+            dut.io.busy.expect(false)
+            dut.clock.step()
+            dut.io.dptw.req.valid.expect(true)
+            dut.io.dptw.req.bits.paddr.expect(rootPpn << 12 | (BigInt(0x100) << 2))
+        }
+    }
 }

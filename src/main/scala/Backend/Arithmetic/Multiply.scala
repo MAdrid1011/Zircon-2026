@@ -22,6 +22,9 @@ class MultiplyRequest(val tagWidth: Int) extends Bundle {
     val fpZero2 = Bool()
     val fpZero3 = Bool()
     val op = UInt(4.W)
+    val fp = Bool()
+    val aSigned = Bool()
+    val bSigned = Bool()
     // Already resolved by issue: RNE=0, RTZ=1, RDN=2, RUP=3, RMM=4.
     val roundingMode = UInt(3.W)
     val tag = UInt(tagWidth.W)
@@ -65,9 +68,9 @@ class MulStage1(tagWidth: Int) extends Bundle {
     val pp = Vec(8, UInt(80.W))
     val useMul = Bool() // EX2 main input: true selects the product rows, false selects primary.
     val primary = UInt(51.W) // FADD/FSUB's larger-exponent term, or the far-FMA product sticky.
-    val other = UInt(24.W) // FADD/FSUB's second term, FMA's C, or zero for plain multiplication.
-    val shift = UInt(7.W)
-    val right = Bool() // right/shift specify the alignment direction/distance of other.
+    val partialOther = UInt(31.W) // Addend after the 1/2/4-bit alignment stages.
+    val shiftHigh = UInt(4.W)
+    val right = Bool() // Remaining 8/16/32/64-bit alignment direction.
     val exp = SInt(11.W) // Weight of fusion-window bit 0; unused for integer results.
     val baseSign = Bool()
     val subtract = Bool() // Subtract other when its effective sign differs from baseSign.
@@ -285,13 +288,12 @@ object SharedMultiplyLogic {
         // A 24-bit increment overflows only from all ones, so its normalized value is fixed.
         val sig = Mux(carry, "h800000".U(24.W), rounded)
         val exponentBase = Mux(x.top < (-126).S, (-126).S, x.top)
-        val exponent = exponentBase + carry.asUInt.zext
         // Prepare both biased exponent cases before the rounding carry arrives.
         // Adding 128 modulo 256 only toggles bit 7 of the encoded exponent.
         val biased = (exponentBase + 127.S).asUInt
         val biasedCarry = Cat(!exponentBase.asUInt(7), exponentBase.asUInt(6, 0))
         val ef = Mux(!sig(23), 0.U(8.W), Mux(carry, biasedCarry, biased(7, 0)))
-        val overflow = exponent > 127.S
+        val overflow = x.top > 127.S || (x.top === 127.S && carry)
         val toInf = rm === 0.U || rm === 4.U || (rm === 2.U && x.sign) || (rm === 3.U && !x.sign)
         val overflowBits = Mux(toInf, "h7f800000".U, "h7f7fffff".U)
         val normalBits = Cat(ef(7, 0), sig(22, 0))
@@ -353,7 +355,7 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     // 1. Decode effective signs. FSUB negates B; FMA variants negate the product and/or C.
     val req = io.in.bits
     val op = req.op
-    val fp = op >= FADD
+    val fp = req.fp
     val add = op === FADD || op === FSUB
     val fma = op >= FMADD
     val negProduct = op === FNMSUB || op === FNMADD
@@ -395,8 +397,8 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val (partials, correction) = booth(
         input1,
         input2,
-        !fp && op =/= MULHU,
-        !fp && op =/= MULHU && op =/= MULHSU
+        req.aSigned,
+        req.bSigned
     )
     val s1 = Wire(new MulStage1(tagWidth))
     // 17 partial products + 1 Booth correction row: 18 -> 12 -> 8, two CSA levels before R1.
@@ -412,7 +414,7 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     //    Align other by its exponent minus E; rightJam preserves discarded bits as sticky.
     s1.useMul := !add && !far
     s1.primary := Mux(add, large.sig << 27, (far && !pzero).asUInt)
-    s1.other := Mux(add, small.sig, Mux(fma, c.sig, 0.U))
+    val other = Mux(add, small.sig, Mux(fma, c.sig, 0.U))
     // Plain integer and FP multiplies have no aligned addend. Keeping their
     // shift at zero removes unused FP exponent alignment from the EX1 data cone.
     // Keep the no-addend integer/FP-multiply case off the exponent-alignment
@@ -428,7 +430,18 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val (alignShiftWithOther, alignRightWithOther) = shiftControl(shiftCWithOther)
     val alignShift = Mux(hasOther, alignShiftWithOther, 0.U(7.W))
     val alignRight = Mux(hasOther, alignRightWithOther, false.B)
-    s1.shift := alignShift; s1.right := alignRight
+    val lowShift = Cat(0.U(4.W), alignShift(2, 0))
+    val otherWindow = Cat(0.U(56.W), other)
+    val partialOther = Mux(
+        alignRight,
+        rightJam(otherWindow, lowShift, 80),
+        leftTruncate(otherWindow, lowShift, 80),
+    )
+    // A 24-bit addend shifted left by at most seven fits in 31 bits; right
+    // alignment and its sticky bit fit there too.
+    s1.partialOther := partialOther(30, 0)
+    s1.shiftHigh := alignShift(6, 3)
+    s1.right := alignRight
     s1.exp := Mux(
         add,
         largeExp.zext - 177.S(11.W),
@@ -461,8 +474,9 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     // -- EX2: fuse product/addend and precompute block candidates for the final adder --
     // 1. Parallel work: reduce the product to two rows and align other to the 80-bit window.
     val productRows = compress(r1.pp.toSeq)
-    val other = Cat(0.U(56.W), r1.other)
-    val aligned = Mux(r1.right, rightJam(other, r1.shift, 80), leftTruncate(other, r1.shift, 80))
+    val registeredOther = Cat(0.U(49.W), r1.partialOther)
+    val highShift = Cat(r1.shiftHigh, 0.U(3.W))
+    val aligned = Mux(r1.right, rightJam(registeredOther, highShift, 80), leftTruncate(registeredOther, highShift, 80))
 
     // 2. All paths meet here. useMul=false replaces the product rows with primary.
     //    D = main + (subtract ? -aligned : aligned); subtraction uses inversion plus one.
@@ -517,6 +531,11 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     io.wbInput.valid := advance && v3 && active
     io.wbInput.bits.res := s4.res
     io.wbInput.bits.tag := MixArithWakeTag.fromUInt(s4.tag)
+    when(io.in.valid && active) {
+        assert(req.fp === (op >= FADD))
+        assert(req.aSigned === (!req.fp && op =/= MULHU))
+        assert(req.bSigned === (!req.fp && op =/= MULHU && op =/= MULHSU))
+    }
     // Data contents are don't-care after flush; keep flush out of every wide register D path.
     when(advance) { r1 := s1; r2 := s2; r3 := s3; r4 := s4 }
 }

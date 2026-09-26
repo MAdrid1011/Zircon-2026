@@ -12,6 +12,8 @@ class DivideRequest(val tagWidth: Int) extends Bundle {
     val src1 = UInt(32.W)
     val src2 = UInt(32.W)
     val op = UInt(3.W)
+    val fp = Bool()
+    val signedInteger = Bool()
     // Resolved by issue: RNE=0, RTZ=1, RDN=2, RUP=3, RMM=4.
     val roundingMode = UInt(3.W)
     val tag = UInt(tagWidth.W)
@@ -67,10 +69,30 @@ object SRT4Logic {
         stages(31, 0)
     }
 
+    def selectDigit(high: SInt, index: UInt): UInt = {
+        val thresholds = Seq(
+            (12, 4, -4, -13), (14, 4, -4, -14),
+            (16, 4, -6, -16), (16, 4, -6, -17),
+            (18, 6, -6, -18), (20, 6, -8, -20),
+            (20, 8, -8, -22), (24, 8, -8, -22),
+        )
+        val candidates = thresholds.map { case (m2, m1, m0, mn) =>
+            val ge2 = high >= m2.S(7.W)
+            val ge1 = high >= m1.S(7.W)
+            val ge0 = high >= m0.S(7.W)
+            val gen = high >= mn.S(7.W)
+            Cat(ge2, !ge2 && ge1, !ge1 && ge0, !ge0 && gen, !gen)
+        }
+        Mux1H(UIntToOH(index, thresholds.size).asBools, candidates)
+    }
+
     /** Round an already normalized 27-bit significand window with a sticky LSB. */
-    def round(windowIn: UInt, exponent: SInt, sign: Bool, rm: UInt): (UInt, UInt) = {
+    def subnormalShift(exponent: SInt): UInt = {
         val distance = (-126).S(11.W) - exponent
-        val shift = Mux(exponent < (-126).S, Mux(distance > 27.S, 27.U, distance.asUInt), 0.U)
+        Mux(exponent < (-126).S, Mux(distance > 27.S, 27.U(5.W), distance.asUInt(4, 0)), 0.U(5.W))
+    }
+
+    def round(windowIn: UInt, exponent: SInt, shift: UInt, sign: Bool, rm: UInt): (UInt, UInt) = {
         val window = rightJam(windowIn, shift)
         def increment(g: Bool, s: Bool, lsb: Bool): Bool =
             (rm === 0.U && g && (s || lsb)) ||
@@ -88,11 +110,10 @@ object SRT4Logic {
         val normalCarry = windowIn(26, 3).andR && increment(windowIn(2), windowIn(1, 0).orR, windowIn(3))
         val tiny = exponent < (-127).S || (exponent === (-127).S && !normalCarry)
         val base = Mux(exponent < (-126).S, (-126).S(11.W), exponent)
-        val outExponent = base + carry.asUInt.zext
         val biased = (base + 127.S).asUInt
         val biasedCarry = Cat(!base.asUInt(7), base.asUInt(6, 0))
         val ef = Mux(!sig(23), 0.U(8.W), Mux(carry, biasedCarry, biased(7, 0)))
-        val overflow = outExponent > 127.S
+        val overflow = exponent > 127.S || (exponent === 127.S && carry)
         val toInf = rm === 0.U || rm === 4.U || (rm === 2.U && sign) || (rm === 3.U && !sign)
         val magnitude = Mux(overflow, Mux(toInf, "h7f800000".U, "h7f7fffff".U), Cat(ef, sig(22, 0)))
         val flags = Mux(overflow, 5.U, Mux(inexact, Mux(tiny, 3.U, 1.U), 0.U))
@@ -137,12 +158,7 @@ class SRT4Iteration extends RawModule {
     val highA = io.sum(Width - 1, Fraction - 4)
     val highB = io.carry(Width - 1, Fraction - 4)
     val high = (highA(7, 1) +& highB(7, 1) +& (highA(0) && highB(0)).asUInt)(6, 0).asSInt
-    val m2 = VecInit(Seq(12, 14, 16, 16, 18, 20, 20, 24).map(_.S(7.W)))(index)
-    val m1 = VecInit(Seq(4, 4, 4, 4, 6, 6, 8, 8).map(_.S(7.W)))(index)
-    val m0 = VecInit(Seq(-4, -4, -6, -6, -6, -8, -8, -8).map(_.S(7.W)))(index)
-    val mn = VecInit(Seq(-13, -14, -16, -17, -18, -20, -22, -22).map(_.S(7.W)))(index)
-    val ge2 = high >= m2; val ge1 = high >= m1; val ge0 = high >= m0; val gen = high >= mn
-    val digit = Cat(ge2, !ge2 && ge1, !ge1 && ge0, !ge0 && gen, !gen)
+    val digit = selectDigit(high, index)
     io.digit := digit
     val u = io.result.pad(Width); val um = io.resultMinus.pad(Width)
     // Adder-free square-root multiples, derived from UMinus = U - 4*K.
@@ -161,11 +177,14 @@ class SRT4Iteration extends RawModule {
         io.negativeDivisor.asSInt.pad(Width).asUInt,
         (io.negativeDivisor.asSInt.pad(Width).asUInt << 1)(Width - 1, 0)
     )
-    val addend = Mux1H((0 until 5).map(i => digit(i) -> Mux(io.sqrt, rootTerms(i), divTerms(i))))
-    val xor = io.sum ^ io.carry ^ addend
-    val majority = (io.sum & io.carry) | ((io.sum ^ io.carry) & addend)
-    io.nextSum := (xor << 2)(Width - 1, 0)
-    io.nextCarry := (majority << 3)(Width - 1, 0)
+    val sumXorCarry = io.sum ^ io.carry
+    val sumAndCarry = io.sum & io.carry
+    val addends = (0 until 5).map(i => Mux(io.sqrt, rootTerms(i), divTerms(i)))
+    val nextSums = addends.map(term => ((sumXorCarry ^ term) << 2)(Width - 1, 0))
+    val nextCarries = addends.map(term =>
+        ((sumAndCarry | (sumXorCarry & term)) << 3)(Width - 1, 0))
+    io.nextSum := Mux1H(digit.asBools, nextSums)
+    io.nextCarry := Mux1H(digit.asBools, nextCarries)
     val two = (bit << 1)(ResultWidth - 1, 0)
     io.nextResult := Mux1H(Seq(
         digit(0) -> (io.resultMinus | two),
@@ -224,6 +243,7 @@ class DivStage2(tagWidth: Int) extends Bundle {
 class DivStage3(tagWidth: Int) extends Bundle {
     val data = UInt(SRT4Logic.Width.W)
     val exponent = SInt(11.W)
+    val roundShift = UInt(5.W)
     val integerShift = UInt(6.W)
     val meta = new DivMeta(tagWidth)
 }
@@ -285,20 +305,20 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     // It excludes completed R23 backpressure; upstream acceptance uses in.ready.
     io.divBusy := ex2Busy
 
-    def normalizeLeft32(value: UInt, amount: UInt): UInt = MuxLookup(amount, 0.U(32.W))(
-        (0 until 32).map { shift =>
-            shift.U -> (if (shift == 0) value else Cat(value(31 - shift, 0), 0.U(shift.W)))
-        }
-    )
+    def normalizeLeft32(value: UInt, amount: UInt): UInt = (value << amount)(31, 0)
 
     // -- EX1: classify, compute magnitudes and count leading zeros in parallel --
     val req = io.in.bits
     val a = req.src1
     val b = req.src2
-    val fp = req.op >= FDIV.U
+    val fp = req.fp
     val sqrt = req.op === FSQRT.U
     val remainder = req.op(1)
-    val signedInteger = !fp && !req.op(0)
+    val signedInteger = req.signedInteger
+    when(io.in.valid && active) {
+        assert(req.fp === (req.op >= FDIV.U))
+        assert(req.signedInteger === (!req.fp && !req.op(0)))
+    }
     val ea = a(30, 23)
     val eb = b(30, 23)
     val az = a(30, 0) === 0.U
@@ -362,6 +382,10 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     val normalizedA = normalizeLeft32(r1.a, r1.leadingA)
     val normalizedB = normalizeLeft32(r1.b, r1.leadingB)
     val divisor = Cat(0.U(3.W), normalizedB, 0.U(1.W))
+    // Normalization cannot discard a set bit. Negate B beside the shift rather
+    // than after it; the final 34-bit value is identical modulo 2^34.
+    val negativeInputB = -Cat(0.U(1.W), r1.b)
+    val negativeDivisor = Cat((negativeInputB << r1.leadingB)(32, 0), 0.U(1.W))
     val dividend = Cat(0.U(3.W), normalizedA, 0.U(1.W))
     val delta = r1.leadingB - r1.leadingA
     val evenDelta = delta + delta(0)
@@ -392,12 +416,13 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     val negative = r2.residual(Width - 1)
     val adjusted = BLevelPAdder36.sum(r2.residual, r2.multiple, 0.U)
     val correctedRemainder = Mux(negative, adjusted, r2.residual)
+    val remainderNonzero = Mux(negative, adjusted.orR, r2.residual.orR)
     val correctedResult = Mux(negative, r2.resultMinus, r2.result)
     val lowerThanOne = !correctedResult(Fraction)
     val normalized = Mux(lowerThanOne, (correctedResult << 1)(ResultWidth - 1, 0), correctedResult)
     val window = Cat(
         normalized(Fraction, Fraction - 25),
-        normalized(Fraction - 26, 0).orR || correctedRemainder.orR
+        normalized(Fraction - 26, 0).orR || remainderNonzero
     )
     val s3 = Wire(new DivStage3(tagWidth))
     s3.data := Mux(
@@ -405,14 +430,26 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
         window.pad(Width),
         Mux(r2.meta.op(1), correctedRemainder, correctedResult.pad(Width))
     )
-    s3.exponent := r2.exponent - lowerThanOne.asUInt.zext
+    val exponentIfLow = r2.exponent - 1.S
+    s3.exponent := Mux(lowerThanOne, exponentIfLow, r2.exponent)
+    s3.roundShift := Mux(
+        lowerThanOne,
+        subnormalShift(exponentIfLow),
+        subnormalShift(r2.exponent),
+    )
     s3.integerShift := r2.integerShift
     s3.meta := r2.meta
 
     // -- EX4: round FP once, restore integer scale/sign, and register every response --
-    val (floatResult, floatFlags) = round(r3.data(26, 0), r3.exponent, r3.meta.sign, r3.meta.roundingMode)
+    val (floatResult, floatFlags) = round(
+        r3.data(26, 0), r3.exponent, r3.roundShift, r3.meta.sign, r3.meta.roundingMode
+    )
     val unsignedInteger = SRT4Logic.integerWindow(r3.data, r3.integerShift)
-    val integerResult = Mux(r3.meta.sign, -unsignedInteger, unsignedInteger)
+    val negativeBase = ~unsignedInteger
+    val negativeCarry = VecInit((0 until 32).map { bit =>
+        if (bit == 0) true.B else negativeBase(bit - 1, 0).andR
+    }).asUInt
+    val integerResult = Mux(r3.meta.sign, negativeBase ^ negativeCarry, unsignedInteger)
     val s4 = Wire(new DivideResponse(tagWidth))
     val floatOperation = r3.meta.op === FDIV.U || r3.meta.op === FSQRT.U
     s4.tag := r3.meta.tag
@@ -459,7 +496,7 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
                 r2.exponent := Mux(sqrt1, (exponentA >> 1) + 1.S, exponentA - exponentB)
                 r2.integerShift := Mux(r1.meta.op(1), 3.U + r1.leadingB, Fraction.U - evenDelta)
                 iterCarry := 0.U
-                iterNegativeDivisor := (-divisor)(Width - 3, 0)
+                iterNegativeDivisor := negativeDivisor
                 iterPosition := Mux(
                     sqrt1,
                     (-(BigInt(1) << Fraction)).S(Width.W).asUInt,

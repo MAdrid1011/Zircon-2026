@@ -11,6 +11,7 @@ class FetchQueueSpec extends AnyFreeSpec with ChiselSim {
             port.valid.poke(false)
             port.bits.poke(0.U.asTypeOf(new FetchQueueEntry(p)))
         }
+        dut.io.enqPayloadWrite.foreach(_.poke(false))
         dut.io.out.foreach(_.ready.poke(false))
         dut.io.flush.poke(false)
         dut.reset.poke(true)
@@ -22,6 +23,7 @@ class FetchQueueSpec extends AnyFreeSpec with ChiselSim {
         dut.io.enq.zip(words.padTo(p.fetchWidth, 0)).zipWithIndex.foreach { case ((entry, word), slot) =>
             entry.bits.poke(0.U.asTypeOf(new FetchQueueEntry(p)))
             entry.valid.poke((mask & (1 << slot)) != 0)
+            dut.io.enqPayloadWrite(slot).poke((mask & (1 << slot)) != 0)
             entry.bits.slot.poke(slot)
             entry.bits.packetStart.poke((mask & ((1 << slot) - 1)) == 0)
             entry.bits.packetEnd.poke((mask >> (slot + 1)) == 0)
@@ -31,6 +33,7 @@ class FetchQueueSpec extends AnyFreeSpec with ChiselSim {
         while (!dut.io.enq(0).ready.peek().litToBoolean) dut.clock.step()
         dut.clock.step()
         dut.io.enq.foreach(_.valid.poke(false))
+        dut.io.enqPayloadWrite.foreach(_.poke(false))
     }
 
     "four-in three-out compaction crosses packet boundaries without losing metadata" in {
@@ -78,9 +81,40 @@ class FetchQueueSpec extends AnyFreeSpec with ChiselSim {
             initialize(dut)
             enqueue(dut, 0xf, Seq(1, 2, 3, 4), 0x3300)
             dut.io.flush.poke(true)
+            dut.io.enq.zipWithIndex.foreach { case (entry, slot) =>
+                entry.valid.poke(true)
+                dut.io.enqPayloadWrite(slot).poke(true)
+                entry.bits.poke(0.U.asTypeOf(new FetchQueueEntry(p)))
+                entry.bits.instruction.inst.poke(100 + slot)
+            }
             dut.clock.step()
             dut.io.flush.poke(false)
+            dut.io.enq.foreach(_.valid.poke(false))
+            dut.io.enqPayloadWrite.foreach(_.poke(false))
             dut.io.out.foreach(_.valid.expect(false))
+        }
+    }
+
+    "invalid prewrites into free tail slots do not change visible entries" in {
+        simulate(new FetchQueue(p, 3)) { dut =>
+            initialize(dut)
+            enqueue(dut, 1, Seq(111), 0x1100)
+
+            dut.io.enq(0).bits.poke(0.U.asTypeOf(new FetchQueueEntry(p)))
+            dut.io.enq(0).bits.instruction.inst.poke(999)
+            dut.io.enqPayloadWrite(0).poke(true)
+            dut.io.enq(0).valid.expect(false)
+            dut.clock.step()
+            dut.io.enqPayloadWrite(0).poke(false)
+
+            enqueue(dut, 1, Seq(222), 0x2200)
+            dut.io.out.foreach(_.ready.poke(true))
+            dut.io.out(0).valid.expect(true)
+            dut.io.out(0).bits.instruction.inst.expect(111)
+            dut.io.out(0).bits.record.nextPc.expect(0x1100)
+            dut.io.out(1).valid.expect(true)
+            dut.io.out(1).bits.instruction.inst.expect(222)
+            dut.io.out(1).bits.record.nextPc.expect(0x2200)
         }
     }
 }

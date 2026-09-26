@@ -66,7 +66,6 @@ class FrontendInstruction(p: FrontendParams) extends Bundle {
 /** Internal prediction context travels in the common package until PD completes it. */
 class FrontendPredictInfo(p: FrontendParams) extends Bundle {
     val range = UInt(p.fetchWidth.W)
-    val returned = UInt(p.fetchWidth.W)
     val early = new FrontendPrediction(p)
     val main = new FrontendTargetPrediction(p)
     val earlyDirections = UInt(p.fetchWidth.W)
@@ -129,6 +128,7 @@ class FrontendRedirect extends Bundle {
 
 class FrontendFtqIO(p: FrontendParams) extends Bundle {
     val retire = Flipped(Vec(3, Valid(new FrontendStateEvent(p))))
+    val recovery = Flipped(Valid(new FrontendStateEvent(p)))
     val train = Flipped(Decoupled(new FrontendTraining(p)))
     val used = if (p.observe) Some(Input(UInt(log2Ceil(p.ftqDepth + 1).W))) else None
 }

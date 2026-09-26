@@ -11,7 +11,6 @@ class IStage1Signal extends Bundle {
 class IStage2Signal(p: FrontendParams, c: ICacheParams) extends Bundle {
     val rreq = Bool()
     val vaddrWord = UInt((c.indexBits + c.offsetBits - 2).W)
-    val rdata = Vec(c.ways, UInt((32 * p.fetchWidth).W))
     val victimWay = UInt(c.ways.W)
     val victimData = UInt(c.lineBits.W)
     val victimTag = UInt(c.tagBits.W)
@@ -52,7 +51,7 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val itlb = Module(new InstructionTLB(paddrLowBits = p.blockBits))
     val missC1 = RegInit(false.B)
     val rbuf = RegInit(0.U(c.lineBits.W))
-    val dbuf = RegInit(VecInit.fill(p.fetchWidth)(0.U(32.W)))
+    val responseWords = RegInit(VecInit.fill(p.fetchWidth)(0.U(32.W)))
     val dbufFault = RegInit(0.U(p.fetchWidth.W))
     val readSlot = RegInit(0.U(p.slotBits.W))
     io.miss := missC1
@@ -167,7 +166,7 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     c1s3In.uncache := translatedUncache
     c1s3In.fault := faultC1s2
     c1s3In.hit := hitC1s2
-    c1s3In.rdata := VecInit(dataTab.map(t => fragment(t.dataOut, c1s2.vaddr)))
+    val hitWords = Mux1H(hitC1s2, dataTab.map(t => fragment(t.dataOut, c1s2.vaddr)))
     c1s3In.victimWay := lruTab.rdata(0)
     c1s3In.victimData := Mux1H(lruTab.rdata(0), dataTab.map(_.dataOut))
     c1s3In.victimTag := Mux1H(lruTab.rdata(0), tagTab.map(_.dataOut))
@@ -184,19 +183,40 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     } else {
         Cat(c1s3.paddrBlock, c1s3Vaddr(p.blockBits - 1, 2), 0.U(2.W))
     }
-    val rline = Mux1H(fsm.io.cc.r1H, Seq(Mux1H(c1s3.hit, c1s3.rdata), dbuf.asUInt))
     io.pp.response.valid := c1s3.rreq && !missC1 && !io.flush
     io.pp.response.bits.mask := FrontendMath.range(c1s3Vaddr, p)
-    io.pp.response.bits.inst := rline.asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+    io.pp.response.bits.inst := responseWords
     io.pp.response.bits.fault := Mux(
         c1s3.fault,
         io.pp.response.bits.mask,
-        Mux(fsm.io.cc.r1H(1), dbufFault & io.pp.response.bits.mask, 0.U)
+        dbufFault & io.pp.response.bits.mask
     )
 
+    // The payload is unobservable without rreq, but a miss retains it even after
+    // flush until the lower transaction drains. Keep FSM ready off its wide D enables.
+    val payloadMayOverwrite = !missC1 && (!c1s3.rreq || io.pp.response.fire)
+    when(payloadMayOverwrite) {
+        c1s3.vaddrWord := c1s3In.vaddrWord
+        c1s3.paddrBlock := c1s3In.paddrBlock
+        c1s3.uncache := c1s3In.uncache
+        c1s3.fault := c1s3In.fault
+        c1s3.hit := c1s3In.hit
+        c1s3.victimWay := c1s3In.victimWay
+        c1s3.victimData := c1s3In.victimData
+        c1s3.victimTag := c1s3In.victimTag
+        c1s3.victimValid := c1s3In.victimValid
+    }
+    when(c1s2Go) { assert(payloadMayOverwrite) }
     // Consumption and flush clear validity, while an active lower transaction retains its address.
     when(io.pp.response.fire) { c1s3.rreq := false.B }
-    when(c1s2Go) { c1s3 := c1s3In; c1s2.rreq := false.B }
+    when(c1s2Go) {
+        c1s3.rreq := true.B
+        c1s2.rreq := false.B
+        // A hit is ready at the existing IF1/IF2 boundary; a miss replaces these
+        // words as its lower responses arrive, before the response becomes valid.
+        responseWords := hitWords.asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+        dbufFault := 0.U
+    }
     when(io.flush) { c1s2.rreq := false.B; c1s3.rreq := false.B }
     when(io.pp.request.fire) { c1s2 := c1s1 }
 
@@ -219,16 +239,15 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     lruTab.wen(0) := fsm.io.cc.lruUpd.orR
     lruTab.waddr(0) := index(c1s3Vaddr)
     lruTab.wdata(0) := fsm.io.cc.lruUpd
-    val recoveryAddress = Mux(fsm.io.cc.addrOH(2), index(c1s3Vaddr), index(c1s2.vaddr))
-    // Normal fetch is the late input; addrOH is asserted one-hot by ICacheFSM.
-    val arrayAddress = Mux(fsm.io.cc.addrOH(0), index(c1s1.vaddr), recoveryAddress)
-    val recoveryEnable = Mux(
-        fsm.io.cc.addrOH(1),
-        c1s2.rreq,
-        (c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR,
-    )
+    // ICacheFSM asserts exactly one address owner; all candidates reach the SRAM in parallel.
+    val arrayAddress = Mux1H(fsm.io.cc.addrOH.asBools, Seq(
+        index(c1s1.vaddr), index(c1s2.vaddr), index(c1s3Vaddr),
+    ))
     // A flush may replace an occupied S2 with the redirect PC in this cycle.
-    val arrayEnable = Mux(fsm.io.cc.addrOH(0), io.pp.request.ready, recoveryEnable)
+    val arrayEnable =
+        (fsm.io.cc.addrOH(0) && io.pp.request.ready) ||
+            (fsm.io.cc.addrOH(1) && c1s2.rreq) ||
+            (fsm.io.cc.addrOH(2) && ((c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR))
     for (way <- 0 until c.ways) {
         tagTab(way).clock := clock
         tagTab(way).address := arrayAddress
@@ -263,26 +282,26 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         Cat(c1s3Paddr(33, c.offsetBits), 0.U(c.offsetBits.W))
     )
     io.l2.response.ready := fsm.io.l2.pending
+    // Every response-visible slot is overwritten before Wait; masked slots need no clearing.
     when(fsm.io.cc.start) {
         readSlot := (if (p.fetchWidth == 1) 0.U else c1s3Vaddr(p.blockBits - 1, 2))
-        dbuf := VecInit.fill(p.fetchWidth)(0.U(32.W))
-        dbufFault := 0.U
     }
     when(io.l2.response.fire) {
         val responseError = io.l2.response.bits.error
         when(c1s3.uncache) {
-            if (p.fetchWidth == 1) dbuf(0) := io.l2.response.bits.data(31, 0)
-            else dbuf(readSlot) := io.l2.response.bits.data(31, 0)
+            if (p.fetchWidth == 1) responseWords(0) := io.l2.response.bits.data(31, 0)
+            else responseWords(readSlot) := io.l2.response.bits.data(31, 0)
             dbufFault := dbufFault | Mux(responseError, UIntToOH(readSlot, p.fetchWidth), 0.U)
             readSlot := readSlot + 1.U
         }.otherwise {
             rbuf := io.l2.response.bits.data
-            dbuf := fragment(io.l2.response.bits.data, c1s3Vaddr).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+            responseWords := fragment(io.l2.response.bits.data, c1s3Vaddr).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
             dbufFault := Fill(p.fetchWidth, responseError)
         }
     }
 
     /* Assertions and Optional Statistics */
+    assert(!(c1s2Go && io.l2.response.fire), "ICache: new fetch cannot overlap lower response")
     when(c1s2Go && !faultC1s2) {
         assert(PopCount(hitC1s2) <= 1.U, "ICache: multiple hits")
         assert(

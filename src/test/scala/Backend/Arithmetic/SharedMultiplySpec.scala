@@ -36,7 +36,11 @@ class SharedMultiplySpec extends AnyFreeSpec with ChiselSim {
                 dut.io.in.bits.fpZero1.poke((x.a & 0x7fffffffL) == 0)
                 dut.io.in.bits.fpZero2.poke((x.b & 0x7fffffffL) == 0)
                 dut.io.in.bits.fpZero3.poke((x.c & 0x7fffffffL) == 0)
-                dut.io.in.bits.op.poke(x.op); dut.io.in.bits.roundingMode.poke(x.rm); dut.io.in.bits.tag.poke(x.tag)
+                dut.io.in.bits.op.poke(x.op)
+                dut.io.in.bits.fp.poke(x.op >= 4)
+                dut.io.in.bits.aSigned.poke(x.op < 4 && x.op != 3)
+                dut.io.in.bits.bSigned.poke(x.op < 4 && x.op != 2 && x.op != 3)
+                dut.io.in.bits.roundingMode.poke(x.rm); dut.io.in.bits.tag.poke(x.tag)
                 def check(): Unit = {
                     dut.io.in.ready.expect((!reset && !flush && (pipe(3).isEmpty || ready)).B, s"ready cycle $cycle")
                     dut.io.out.valid.expect((!reset && !flush && pipe(3).nonEmpty).B, s"valid cycle $cycle")

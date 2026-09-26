@@ -19,7 +19,11 @@ class Bypass(val p: BypassParams = BypassParams()) extends Module {
             producer.nextWb.valid && producer.nextWb.bits === query.prs
         })
         val selected = RegInit(0.U(producers.size.W))
+        // Replicate the registered validity so the one-hot data selector does
+        // not also fan out into every held execution-stage payload enable.
+        val selectedValid = RegInit(false.B)
         selected := 0.U
+        selectedValid := false.B
         when(io.consumer(consumer).advance) {
             val selectedHit = if (p.captureConsumers.contains(consumer)) {
                 nextHit.zip(producers).zip(producerIds).map { case ((hit, producer), producerId) =>
@@ -28,6 +32,7 @@ class Bypass(val p: BypassParams = BypassParams()) extends Module {
                 }
             } else nextHit
             selected := VecInit(selectedHit).asUInt
+            selectedValid := VecInit(selectedHit).asUInt.orR
         }
 
         val captureHit = nextHit.zip(producers).map { case (hit, producer) =>
@@ -41,12 +46,12 @@ class Bypass(val p: BypassParams = BypassParams()) extends Module {
         // not extend the selected 32-bit bypass-data cone at the consumer.
         io.consumer(consumer).captureFpZero(source) :=
             Mux1H(captureHit, producers.map(producer => !producer.nextResult.bits(30, 0).orR))
-        io.consumer(consumer).value(source).valid := selected.orR
+        io.consumer(consumer).value(source).valid := selectedValid
         io.consumer(consumer).value(source).bits := Mux1H(selected.asBools, producers.map(_.result))
         io.consumer(consumer).valueFpZero(source) :=
             Mux1H(selected.asBools, producers.map(producer => !producer.result(30, 0).orR))
         assert(PopCount(nextHit) <= 1.U, "One RF source cannot match multiple promised WB producers")
-        when(selected.orR) {
+        when(selectedValid) {
             assert(PopCount(selected) === 1.U, "One EX source must select exactly one WB producer")
         }
     }

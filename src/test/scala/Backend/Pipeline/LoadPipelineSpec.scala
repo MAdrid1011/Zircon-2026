@@ -86,7 +86,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             prd,
             mtype,
             rdVld,
-            (serial * 37) & ((1 << dut.p.sqWidth) - 1),
+            (serial * 37) % (ZirconConfig.CommitParams().sqEntries * 2),
             exception,
             uncache,
             authorized,
@@ -231,7 +231,7 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
             // forwarding in the same cycle that the scoreboard records it.
             val x = requests.getOrElse(id, accepted.front)
             q.bits.wordAddress.expect(x.address >> 2)
-            q.bits.sqTail.expect(x.sq & ((1 << q.bits.sqTail.getWidth) - 1))
+            q.bits.sqTailOH.expect(BigInt(1) << x.sq)
             dut.io.cmt.sbQuery.valid.expect(true)
             Some(x)
         } else None
@@ -249,6 +249,10 @@ class LoadPipelineDriver(dut: LoadPipelineSystem) extends chisel3.simulator.Peek
 
         val reqValid = dut.io.request.valid.peek().litToBoolean
         val reqReady = dut.io.requestReady.peek().litToBoolean
+        if (reqValid) {
+            val x = requests.getOrElse(dut.io.request.bits.slot.peek().litValue.toInt, accepted.front)
+            dut.io.request.bits.sqTailOH.expect(BigInt(1) << x.sq)
+        }
         val request = fields(dut.io.request.bits)
         stable(heldRequest, reqValid, request, "cache request")
         heldRequest = if (reqValid && !reqReady) Some(request) else None

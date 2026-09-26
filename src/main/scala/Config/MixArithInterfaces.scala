@@ -117,6 +117,12 @@ class MixArithRegfileIO extends Bundle {
     val fpRead = Vec(3, new MixArithReadPort(MixArithConstants.fpPhysWidth))
     val intWrite = Output(Valid(new MixArithLocalWrite(MixArithConstants.localPhysWidth)))
     val fpWrite = Output(Valid(new MixArithLocalWrite(MixArithConstants.fpPhysWidth)))
+    // EX4/WB predecodes the short-result destination so the PRF storage write
+    // need not recover it through the shared WB tag selector.
+    val intWriteOneHot = Output(UInt(MixArithConstants.numIntPhys.W))
+    val intWriteData = Output(UInt(32.W))
+    val fpWriteOneHot = Output(UInt(MixArithConstants.numFpPhys.W))
+    val fpWriteData = Output(UInt(32.W))
 }
 
 class MixArithRobIO extends Bundle {
