@@ -17,10 +17,10 @@ class LoadSpeculationTracker(val p: BackendParams = BackendParams()) extends Mod
     val io = IO(new LoadSpeculationTrackerIO(p))
 
     val active = RegInit(0.U(p.specWidth.W))
-    val rawResolvedMask = io.result.map(result => Mux(result.valid, result.bits.mask, 0.U)).reduce(_ | _)
-    val rawFailedMask = io.result.map(result =>
-        Mux(result.valid && result.bits.failed, result.bits.mask, 0.U)
-    ).reduce(_ | _)
+    // Producers encode invalid results as a zero mask, so result.valid remains
+    // an interface check instead of a high-fanout IQ resolution input.
+    val rawResolvedMask = io.result.map(_.bits.mask).reduce(_ | _)
+    val rawFailedMask = io.result.map(_.bits.failedMask).reduce(_ | _)
     // IQ failure maintenance consumes a failed token one cycle after the execute
     // boundary kills it. Prevent that token from being reassigned in between.
     val failedQuarantine = RegNext(Mux(io.flush, 0.U(p.specWidth.W), rawFailedMask), 0.U(p.specWidth.W))
@@ -54,6 +54,12 @@ class LoadSpeculationTracker(val p: BackendParams = BackendParams()) extends Mod
     assert((allocatedMask & failedQuarantine) === 0.U, "A failed speculation token was reused too early")
     assert(!(io.allocate(0) && io.allocate(1)) || !(io.grant(0) & io.grant(1)).orR)
     for (lane <- 0 until 2) {
+        when(!io.result(lane).valid) {
+            assert(!io.result(lane).bits.mask.orR, "An invalid Load speculation result must carry a zero mask")
+            assert(!io.result(lane).bits.failedMask.orR,
+                "An invalid Load speculation result must carry a zero failed mask")
+        }
+        assert((io.result(lane).bits.failedMask & ~io.result(lane).bits.mask) === 0.U)
         when(io.allocate(lane)) {
             assert(io.grant(lane).orR, "A speculative Load allocation requires a free token")
         }

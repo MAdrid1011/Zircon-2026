@@ -6,6 +6,7 @@ class TageRow(p: FrontendParams) extends Bundle {
     val tag = UInt(p.tageTagBits.W)
     val rankOH = UInt(p.fetchWidth.W)
     val counter = UInt(3.W)
+    val useful = Bool()
 }
 
 class LoopRow(p: FrontendParams) extends Bundle {
@@ -13,6 +14,7 @@ class LoopRow(p: FrontendParams) extends Bundle {
     val rankOH = UInt(p.fetchWidth.W)
     val tripCount = UInt(p.loopCountBits.W)
     val confidence = UInt(2.W)
+    val observedCount = UInt(p.loopCountBits.W)
 }
 
 /** Direction-training fields used by MORSL, with address bits narrowed at its boundary. */
@@ -26,8 +28,44 @@ class MorslTraining(p: FrontendParams) extends Bundle {
     val earlyDirections = UInt(p.fetchWidth.W)
 }
 
+/** PC-only predictor hashes computed at PF and consumed with IF1's current history. */
+class MorslPcHashes(p: FrontendParams) extends Bundle {
+    val phtIndex = UInt(p.phtIndexBits.W)
+    val scBiasIndex = UInt(p.scBiasIndexBits.W)
+    val scThresholdIndex = UInt(p.scThresholdIndexBits.W)
+    val loopIndex = UInt(p.loopIndexBits.W)
+    val loopTag = UInt(p.loopTagBits.W)
+    val scIndices = Vec(p.scCount, UInt(p.scIndexBits.W))
+    val tageTags = Vec(p.tageCount, UInt(p.tageTagBits.W))
+    val tageIndices = Vec(p.tageCount, UInt(p.tageIndexBits.W))
+    val scBiasTag = UInt(10.W)
+}
+
+object MorslPcHashes {
+    def fromPcWord(pcWord: UInt, p: FrontendParams): MorslPcHashes = {
+        val hashes = Wire(new MorslPcHashes(p))
+        hashes.phtIndex := FrontendMath.fold(pcWord, p.phtIndexBits)
+        hashes.scBiasIndex := FrontendMath.fold(pcWord, p.scBiasIndexBits)
+        hashes.scThresholdIndex := FrontendMath.fold(pcWord, p.scThresholdIndexBits)
+        hashes.loopIndex := FrontendMath.fold(pcWord, p.loopIndexBits)
+        hashes.loopTag := FrontendMath.fold(pcWord, p.loopTagBits)
+        for (table <- 0 until p.scCount) {
+            hashes.scIndices(table) := FrontendMath.fold(
+                pcWord ^ (pcWord >> (table + 1)),
+                p.scIndexBits,
+            )
+        }
+        for (table <- 0 until p.tageCount) {
+            hashes.tageTags(table) := FrontendMath.fold(pcWord, p.tageTagBits)
+            hashes.tageIndices(table) := FrontendMath.fold(pcWord, p.tageIndexBits)
+        }
+        hashes.scBiasTag := FrontendMath.fold(pcWord, 10)
+        hashes
+    }
+}
+
 class MorslDirectionQueryIO(p: FrontendParams) extends Bundle {
-    val pcWord = Input(UInt(30.W))
+    val pcHashes = Input(new MorslPcHashes(p))
     val prefetchPcWord = Input(UInt(30.W))
     val prefetch = Input(Bool())
     val folds = Input(Vec(p.tageCount, UInt(p.hashBits.W)))
@@ -38,6 +76,8 @@ class MorslDirectionQueryIO(p: FrontendParams) extends Bundle {
 
 class MorslDirectionIO(p: FrontendParams) extends Bundle {
     val query = new MorslDirectionQueryIO(p)
+    // PHT is the IF1 fallback; TAGE and loop selection are retained for IF2.
+    val fastDirections = Output(UInt(p.fetchWidth.W))
     val directions = Output(UInt(p.fetchWidth.W))
     val meta = Output(new FrontendDirectionMeta(p))
     val scRead = Output(new FrontendCorrectorRead(p))
@@ -64,7 +104,8 @@ class MorslDirection(
         Module(new PredictorTableRam(p.tageSets, (new TageRow(p)).getWidth, ramBackend))
     )
     val tageValid = Seq.fill(p.tageCount)(RegInit(VecInit.fill(p.tageSets)(false.B)))
-    val tageUseful = Seq.fill(p.tageCount)(RegInit(VecInit.fill(p.tageSets)(false.B)))
+    val tageStateWrite = Wire(Vec(p.tageCount, Bool()))
+    val tageStateAllocate = Wire(Vec(p.tageCount, Bool()))
     // The proven PC-bias table anchors a compact Multi-GEHL statistical corrector.
     val scBiasTable = Reg(Vec(p.scBiasSets, new ScBiasRow(p)))
     val scBiasValid = RegInit(VecInit.fill(p.scBiasSets)(false.B))
@@ -76,8 +117,10 @@ class MorslDirection(
     val scGlobalThreshold = RegInit(64.U(7.W))
     val loopTable = Module(new PredictorTableRam(p.loopSets, (new LoopRow(p)).getWidth, ramBackend))
     val loopValid = RegInit(VecInit.fill(p.loopSets)(false.B))
-    val loopObservedCount = RegInit(VecInit.fill(p.loopSets)(0.U(p.loopCountBits.W)))
     val loopSpecCount = RegInit(VecInit.fill(p.loopSets)(0.U(p.loopCountBits.W)))
+    val pendingLoopAdvance = RegInit(false.B)
+    val pendingLoopIndexOH = Reg(UInt(p.loopSets.W))
+    val pendingLoopCount = Reg(UInt(p.loopCountBits.W))
 
     /* Ahead Registers */
     // Predecessor-read rows for the next block. Saved valid bits are not tag-match results.
@@ -94,23 +137,23 @@ class MorslDirection(
     val aheadValid = RegInit(false.B)
 
     /* Query Indices and Tags */
-    val pcWord = io.query.pcWord
-    val phtIndex = FrontendMath.fold(pcWord, p.phtIndexBits)
-    val scBiasIndex = FrontendMath.fold(pcWord, p.scBiasIndexBits)
-    val scThresholdIndex = FrontendMath.fold(pcWord, p.scThresholdIndexBits)
-    val loopIndex = FrontendMath.fold(pcWord, p.loopIndexBits)
-    val loopTag = FrontendMath.fold(pcWord, p.loopTagBits)
+    val pcHashes = io.query.pcHashes
+    val phtIndex = pcHashes.phtIndex
+    val scBiasIndex = pcHashes.scBiasIndex
+    val scThresholdIndex = pcHashes.scThresholdIndex
+    val loopIndex = pcHashes.loopIndex
+    val loopTag = pcHashes.loopTag
     val scIndices = Wire(Vec(p.scCount, UInt(p.scIndexBits.W)))
     for (table <- p.scHistoryIndices.indices) {
         val history = FrontendMath.fold(io.query.folds(p.scHistoryIndices(table)), p.scIndexBits)
-        val pcHash = FrontendMath.fold(pcWord ^ (pcWord >> (table + 1)), p.scIndexBits)
-        scIndices(table) := pcHash ^ history ^ ((table + 1) * 21).U(p.scIndexBits.W)
+        scIndices(table) := pcHashes.scIndices(table) ^ history ^ ((table + 1) * 21).U(p.scIndexBits.W)
     }
     val tageTags = VecInit((0 until p.tageCount).map(i =>
-        (FrontendMath.fold(pcWord, p.tageTagBits) ^ io.query.folds(i))(p.tageTagBits - 1, 0)
+        (pcHashes.tageTags(i) ^ FrontendMath.fold(io.query.folds(i), p.tageTagBits))(p.tageTagBits - 1, 0)
     ))
     val tageIndices = VecInit((0 until p.tageCount).map { table =>
-        FrontendMath.fold(pcWord ^ io.query.folds(table) ^ (table + 1).U, p.tageIndexBits)
+        pcHashes.tageIndices(table) ^ FrontendMath.fold(io.query.folds(table), p.tageIndexBits) ^
+            (table + 1).U(p.tageIndexBits.W)
     })
     val phtPrefetchIndex = FrontendMath.fold(io.query.prefetchPcWord, p.phtIndexBits)
     val phtPredictionIndex = RegEnable(phtPrefetchIndex, io.query.prefetch)
@@ -121,6 +164,7 @@ class MorslDirection(
     for (rank <- 0 until p.fetchWidth) {
         phtRData(rank) := Mux(phtValid(phtIndex), phtRaw(rank), 1.U)
     }
+    val phtDirections = VecInit(phtRData.map(_(1))).asUInt
 
     /* Provider Selection */
     val directions = Wire(Vec(p.fetchWidth, Bool()))
@@ -130,7 +174,9 @@ class MorslDirection(
     val tageConfidence = Wire(Vec(p.fetchWidth, UInt(2.W)))
     val loopProviders = Wire(Vec(p.fetchWidth, Bool()))
     val loopPredictions = Wire(Vec(p.fetchWidth, Bool()))
-    val aheadLoopCount = Mux1H(aheadLoopIndexOH.asBools, loopSpecCount)
+    val storedAheadLoopCount = Mux1H(aheadLoopIndexOH.asBools, loopSpecCount)
+    val pendingAheadLoop = pendingLoopAdvance && (pendingLoopIndexOH & aheadLoopIndexOH).orR
+    val aheadLoopCount = Mux(pendingAheadLoop, pendingLoopCount, storedAheadLoopCount)
     val loopPrediction = aheadLoopCount =/= aheadLoopRow.tripCount
     val tageTagMatches = (0 until p.tageCount).map(table =>
         aheadValid && aheadTageValid(table) && aheadTageRows(table).tag === tageTags(table)
@@ -161,6 +207,21 @@ class MorslDirection(
             val (highValid, highValue) = longestBool(hits.drop(split), values.drop(split))
             (lowValid || highValid, Mux(highValid, highValue, lowValue))
         }
+    }
+    // IF1 only uses the four shortest tagged tables. This recovers local and
+    // medium-history correlation over PHT without putting the full six-table TAGE
+    // selection cone on the NPC/ICache request path.
+    val fastTageCount = math.min(4, p.tageCount)
+    val fastDirections = Wire(Vec(p.fetchWidth, Bool()))
+    for (rank <- 0 until p.fetchWidth) {
+        val fastHits = (0 until fastTageCount).map(table =>
+            tageTagMatches(table) && aheadTageRows(table).rankOH(rank)
+        )
+        val (hasFastProvider, fastPrediction) = longestBool(
+            fastHits,
+            aheadTageRows.take(fastTageCount).map(_.counter(2)),
+        )
+        fastDirections(rank) := Mux(hasFastProvider, fastPrediction, phtDirections(rank))
     }
     for (rank <- 0 until p.fetchWidth) {
         val hits = (0 until p.tageCount).map(table =>
@@ -197,6 +258,7 @@ class MorslDirection(
 
     /* Prediction Metadata */
     // Retain the lookup keys until commit; training must not use a newer speculative history.
+    io.fastDirections := fastDirections.asUInt
     io.directions := directions.asUInt
     io.meta := 0.U.asTypeOf(new FrontendDirectionMeta(p))
     io.meta.phtIndex := phtIndex
@@ -207,7 +269,7 @@ class MorslDirection(
     io.meta.tageDirections := tageDirections.asUInt
     io.meta.alternateDirections := alternateDirections.asUInt
     io.meta.aheadValid := aheadValid
-    io.meta.scBiasTag := FrontendMath.fold(pcWord, 10)
+    io.meta.scBiasTag := pcHashes.scBiasTag
     io.meta.scIndices := aheadScIndices
     io.meta.scThresholdIndex := scThresholdIndex
     io.meta.loopIndex := aheadLoopIndex
@@ -267,45 +329,94 @@ class MorslDirection(
 
     /* Committed Slot to Conditional Rank */
     val train = io.train.bits
-    val trainPcWord = train.pcWord
-    val trainPhtIndex = FrontendMath.fold(trainPcWord, p.phtIndexBits)
-    val trainScBiasIndex = FrontendMath.fold(trainPcWord, p.scBiasIndexBits)
-    val trainScBiasTag = FrontendMath.fold(trainPcWord, 10)
-    val trainLoopIndex = train.meta.loopIndex
-    val trainLoopTag = FrontendMath.fold(trainPcWord, p.loopTagBits)
-    val trainRanks = Wire(Vec(p.fetchWidth, Bool()))
-    val trainDirections = Wire(Vec(p.fetchWidth, Bool()))
+    // Training SRAM reads start one cycle before their update. Prepare every
+    // PC/kind-derived field beside that read instead of rebuilding it from the
+    // delayed raw packet on the table-write cycle.
+    val trainRead = io.trainRead.bits
+    val readConditionals = VecInit((0 until p.fetchWidth).map(slot =>
+        trainRead.mask(slot) && FrontendCfi.conditional(trainRead.kinds(slot))
+    ))
+    val readRanks = Wire(Vec(p.fetchWidth, Bool()))
+    val readDirections = Wire(Vec(p.fetchWidth, Bool()))
+    val readBackward = Wire(Vec(p.fetchWidth, Bool()))
     for (rank <- 0 until p.fetchWidth) {
         val hits = (0 until p.fetchWidth).map { slot =>
-            val rankBefore = if (slot == 0) 0.U
-            else PopCount((0 until slot).map(j =>
-                train.mask(j) && FrontendCfi.conditional(train.kinds(j))
-            ))
-            train.mask(slot) && FrontendCfi.conditional(train.kinds(slot)) && rankBefore === rank.U
+            val rankBefore = if (slot == 0) 0.U else PopCount(readConditionals.take(slot))
+            readConditionals(slot) && rankBefore === rank.U
         }
-        trainRanks(rank) := hits.reduce(_ || _)
-        trainDirections(rank) := Mux1H(hits, train.taken.asBools)
+        readRanks(rank) := hits.reduce(_ || _)
+        readDirections(rank) := Mux1H(hits, trainRead.taken.asBools)
+        readBackward(rank) := (0 until p.fetchWidth).map { slot =>
+            hits(slot) && FrontendMath.backwardBranch(
+                FrontendMath.slotPc(Cat(trainRead.pcWord, 0.U(2.W)), slot, p),
+                trainRead.targetLow(slot),
+            )
+        }.reduce(_ || _)
     }
+    val trainRanks = RegEnable(readRanks, io.trainRead.valid)
+    val trainDirections = RegEnable(readDirections, io.trainRead.valid)
+    val trainBackward = RegEnable(readBackward, io.trainRead.valid)
+    val trainPhtIndex = RegEnable(
+        FrontendMath.fold(trainRead.pcWord, p.phtIndexBits),
+        io.trainRead.valid,
+    )
+    val trainScBiasIndexOH = RegEnable(
+        UIntToOH(FrontendMath.fold(trainRead.pcWord, p.scBiasIndexBits), p.scBiasSets),
+        io.trainRead.valid,
+    )
+    val readTageIndices = VecInit((0 until p.tageCount).map(table =>
+        io.trainRead.bits.meta.tageIndices(table)
+    ))
+    val readTageIndexOH = VecInit((0 until p.tageCount).map(table =>
+        UIntToOH(readTageIndices(table), p.tageSets)
+    ))
+    val trainTageIndices = RegEnable(
+        VecInit((0 until p.tageCount).map(table => io.trainRead.bits.meta.tageIndices(table))),
+        io.trainRead.valid,
+    )
+    val trainTageIndexOH = RegEnable(readTageIndexOH, io.trainRead.valid)
+    val readTageValidState = Wire(Vec(p.tageCount, Bool()))
+    for (table <- 0 until p.tageCount) {
+        val currentValid = Mux1H(readTageIndexOH(table), tageValid(table))
+        val sameAsWrite = (readTageIndexOH(table) & trainTageIndexOH(table)).orR
+        readTageValidState(table) := Mux(
+            sameAsWrite && tageStateWrite(table) && tageStateAllocate(table),
+            true.B,
+            currentValid,
+        )
+    }
+    val trainTageValidState = RegEnable(readTageValidState, io.trainRead.valid)
+    val readTageErrors = readRanks.asUInt & (trainRead.earlyDirections ^ readDirections.asUInt)
+    val readTageErrorRank = PriorityEncoder(readTageErrors)
+    val trainTageErrors = RegEnable(readTageErrors, io.trainRead.valid)
+    val trainTageErrorRank = RegEnable(readTageErrorRank, io.trainRead.valid)
+    val trainTageErrorProvider = RegEnable(
+        trainRead.meta.tageProviders(readTageErrorRank),
+        io.trainRead.valid,
+    )
+    val trainTageUsefulUpdate = RegEnable(
+        VecInit((0 until p.tageCount).map { table =>
+            VecInit((0 until p.fetchWidth).map { rank =>
+                trainRead.meta.tageProviders(rank) === (table + 1).U &&
+                    trainRead.earlyDirections(rank) =/= trainRead.meta.alternateDirections(rank)
+            }).asUInt
+        }),
+        io.trainRead.valid,
+    )
+    val trainTageUsefulValue = RegEnable(
+        ~(trainRead.earlyDirections ^ readDirections.asUInt),
+        io.trainRead.valid,
+    )
+    val trainScBiasTag = RegEnable(FrontendMath.fold(trainRead.pcWord, 10), io.trainRead.valid)
+    val trainLoopIndex = train.meta.loopIndex
+    val trainLoopTag = RegEnable(FrontendMath.fold(trainRead.pcWord, p.loopTagBits), io.trainRead.valid)
 
     /* Loop Predictor Training */
     loopTable.io.updateReadEnable := io.trainRead.valid
     loopTable.io.updateReadAddress := io.trainRead.bits.meta.loopIndex
     val loopTrainRow = loopTable.io.updateReadData.asTypeOf(new LoopRow(p))
     val loopTrainValid = loopValid(trainLoopIndex)
-    val loopTrainObserved = loopObservedCount(trainLoopIndex)
-    val trainBackward = Wire(Vec(p.fetchWidth, Bool()))
-    for (rank <- 0 until p.fetchWidth) {
-        val backward = (0 until p.fetchWidth).map { slot =>
-            val rankBefore = if (slot == 0) 0.U
-            else PopCount((0 until slot).map(j => train.mask(j) && FrontendCfi.conditional(train.kinds(j))))
-            train.mask(slot) && FrontendCfi.conditional(train.kinds(slot)) && rankBefore === rank.U &&
-                FrontendMath.backwardBranch(
-                    FrontendMath.slotPc(Cat(train.pcWord, 0.U(2.W)), slot, p),
-                    train.targetLow(slot),
-                )
-        }
-        trainBackward(rank) := backward.reduce(_ || _)
-    }
+    val loopTrainObserved = loopTrainRow.observedCount
     val loopCandidate = trainRanks.asUInt & trainBackward.asUInt
     val loopRankOH = PriorityEncoderOH(loopCandidate)
     val loopMatch = loopTrainValid && loopTrainRow.tag === trainLoopTag &&
@@ -339,22 +450,26 @@ class MorslDirection(
         loopNext.confidence := 0.U
     }
     val loopWrite = io.train.valid && loopCandidate.orR
+    loopNext.observedCount := loopObservedNext
     loopTable.io.updateWriteEnable := loopWrite
     loopTable.io.updateWriteAddress := trainLoopIndex
     loopTable.io.updateWriteData := loopNext.asUInt
     when(loopWrite) {
         loopValid(trainLoopIndex) := true.B
-        loopObservedCount(trainLoopIndex) := loopObservedNext
     }
     val resetTrainedLoop = loopWrite && !loopMatch
     val trainLoopIndexOH = UIntToOH(trainLoopIndex, p.loopSets)
+    pendingLoopAdvance := advanceLoop && !io.query.invalidate &&
+        !(resetTrainedLoop && (trainLoopIndexOH & aheadLoopIndexOH).orR)
+    pendingLoopIndexOH := aheadLoopIndexOH
+    pendingLoopCount := advancedLoopCount
     for (entry <- 0 until p.loopSets) {
         when(resetTrainedLoop && trainLoopIndexOH(entry)) {
             loopSpecCount(entry) := 0.U
         }.elsewhen(io.query.invalidate) {
             loopSpecCount(entry) := 0.U
-        }.elsewhen(advanceLoop && aheadLoopIndexOH(entry)) {
-            loopSpecCount(entry) := advancedLoopCount
+        }.elsewhen(pendingLoopAdvance && pendingLoopIndexOH(entry)) {
+            loopSpecCount(entry) := pendingLoopCount
         }
     }
     when(aheadValid) { assert(PopCount(aheadLoopIndexOH) === 1.U) }
@@ -391,35 +506,30 @@ class MorslDirection(
         tageTables(table).io.updateReadAddress := io.trainRead.bits.meta.tageIndices(table)
         tageTables(table).io.updateReadData.asTypeOf(new TageRow(p))
     }
-    val tageTrainValid = (0 until p.tageCount).map(table =>
-        tageValid(table)(train.meta.tageIndices(table))
-    )
-    val tageErrors = trainRanks.asUInt & (train.earlyDirections ^ trainDirections.asUInt)
-    val tageErrorRank = PriorityEncoder(tageErrors)
-    val tageErrorProvider = train.meta.tageProviders(tageErrorRank)
+    val tageTrainValid = trainTageValidState
     val tageAllocatable = VecInit((0 until p.tageCount).map(table =>
-        (table + 1).U > tageErrorProvider && (
-            !tageTrainValid(table) || !tageUseful(table)(train.meta.tageIndices(table))
+        (table + 1).U > trainTageErrorProvider && (
+            !tageTrainValid(table) || !tageTrainRows(table).useful
         )
     ))
     val tageAllocate = PriorityEncoderOH(tageAllocatable)
     for (table <- 0 until p.tageCount) {
         val old = tageTrainRows(table)
         val next = WireDefault(old)
-        val nextUseful = WireDefault(tageUseful(table)(train.meta.tageIndices(table)))
+        val nextUseful = WireDefault(old.useful)
         val oldRankOH = old.rankOH
-        val earlyBit = (train.earlyDirections & oldRankOH).orR
-        val alternateBit = (train.meta.alternateDirections & oldRankOH).orR
         val actualBit = (trainDirections.asUInt & oldRankOH).orR
-        val oldProvider = Mux1H(oldRankOH.asBools, train.meta.tageProviders)
+        val updateUseful = (trainTageUsefulUpdate(table) & oldRankOH).orR
+        val usefulValue = (trainTageUsefulValue & oldRankOH).orR
         val matching = tageTrainValid(table) && old.tag === train.meta.tageTags(table) &&
             (trainRanks.asUInt & oldRankOH).orR
-        val ageUseful = tageErrors.orR && !tageAllocatable.asUInt.orR && (table + 1).U > tageErrorProvider
-        val allocate = tageErrors.orR && tageAllocate(table)
+        val ageUseful = trainTageErrors.orR && !tageAllocatable.asUInt.orR &&
+            (table + 1).U > trainTageErrorProvider
+        val allocate = trainTageErrors.orR && tageAllocate(table)
         when(matching) {
             next.counter := FrontendMath.sat(old.counter, actualBit)
-            when(oldProvider === (table + 1).U && earlyBit =/= alternateBit) {
-                nextUseful := earlyBit === actualBit
+            when(updateUseful) {
+                nextUseful := usefulValue
             }
         }
         when(ageUseful) {
@@ -427,43 +537,49 @@ class MorslDirection(
         }
         when(allocate) {
             next.tag := train.meta.tageTags(table)
-            next.rankOH := UIntToOH(tageErrorRank, p.fetchWidth)
-            next.counter := Mux(trainDirections(tageErrorRank), 4.U, 3.U)
+            next.rankOH := UIntToOH(trainTageErrorRank, p.fetchWidth)
+            next.counter := Mux(trainDirections(trainTageErrorRank), 4.U, 3.U)
             nextUseful := false.B
         }
         val update = train.meta.aheadValid && (matching || ageUseful || allocate)
         val write = trainCommit && update
+        tageStateWrite(table) := write
+        tageStateAllocate(table) := allocate
+        next.useful := nextUseful
         tageTables(table).io.updateWriteEnable := write
-        tageTables(table).io.updateWriteAddress := train.meta.tageIndices(table)
+        tageTables(table).io.updateWriteAddress := trainTageIndices(table)
         tageTables(table).io.updateWriteData := next.asUInt
-        when(write) {
-            tageUseful(table)(train.meta.tageIndices(table)) := nextUseful
-            when(allocate) {
-                tageValid(table)(train.meta.tageIndices(table)) := true.B
+        for (entry <- 0 until p.tageSets) {
+            when(write && trainTageIndexOH(table)(entry)) {
+                when(allocate) {
+                    tageValid(table)(entry) := true.B
+                }
             }
         }
     }
 
     /* SC Bias Training */
-    val scBiasTrain = scBiasTable(trainScBiasIndex)
-    val scBiasNext = WireDefault(scBiasTrain)
-    val scBiasMatched = scBiasValid(trainScBiasIndex) && scBiasTrain.tag === trainScBiasTag
-    scBiasNext.tag := trainScBiasTag
-    for (rank <- 0 until p.fetchWidth) {
-        when(!scBiasMatched) {
-            scBiasNext.counters(rank) := Mux(trainRanks(rank) && trainDirections(rank), 4.U, 3.U)
-            scBiasNext.confidence(rank) := 0.U
-        }.elsewhen(trainRanks(rank)) {
-            val correct = scBiasTrain.counters(rank)(2) === trainDirections(rank)
-            scBiasNext.counters(rank) := FrontendMath.sat(scBiasTrain.counters(rank), trainDirections(rank))
-            when(!correct || train.earlyDirections(rank) =/= trainDirections(rank)) {
-                scBiasNext.confidence(rank) := FrontendMath.sat(scBiasTrain.confidence(rank), correct)
+    for (entry <- 0 until p.scBiasSets) {
+        val old = scBiasTable(entry)
+        val next = WireDefault(old)
+        val matched = scBiasValid(entry) && old.tag === trainScBiasTag
+        next.tag := trainScBiasTag
+        for (rank <- 0 until p.fetchWidth) {
+            when(!matched) {
+                next.counters(rank) := Mux(trainRanks(rank) && trainDirections(rank), 4.U, 3.U)
+                next.confidence(rank) := 0.U
+            }.elsewhen(trainRanks(rank)) {
+                val correct = old.counters(rank)(2) === trainDirections(rank)
+                next.counters(rank) := FrontendMath.sat(old.counters(rank), trainDirections(rank))
+                when(!correct || train.earlyDirections(rank) =/= trainDirections(rank)) {
+                    next.confidence(rank) := FrontendMath.sat(old.confidence(rank), correct)
+                }
             }
         }
-    }
-    when(trainCommit && trainRanks.asUInt.orR) {
-        scBiasTable(trainScBiasIndex) := scBiasNext
-        scBiasValid(trainScBiasIndex) := true.B
+        when(trainCommit && trainRanks.asUInt.orR && trainScBiasIndexOH(entry)) {
+            scBiasTable(entry) := next
+            scBiasValid(entry) := true.B
+        }
     }
 
     /* Multi-GEHL Training */

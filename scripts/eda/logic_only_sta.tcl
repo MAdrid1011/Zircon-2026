@@ -40,4 +40,8 @@ report_checks -path_delay max -slack_max 0 -group_path_count 1000000 \
 report_checks -path_delay max -slack_max 0 -group_path_count 1000000 \
   -endpoint_path_count 1 -unique_paths_to_endpoint -format summary -digits 6 \
   -no_line_splits > [file join $output_dir logic-only-violating-paths-summary.rpt]
+report_checks -path_delay max -slack_max 0 -group_path_count 1000000 \
+  -endpoint_path_count 1 -unique_paths_to_endpoint -format full_clock_expanded \
+  -fields capacitance,slew,fanout,input_pin,net -digits 6 -no_line_splits \
+  > [file join $output_dir logic-only-violating-paths-full.rpt]
 exit

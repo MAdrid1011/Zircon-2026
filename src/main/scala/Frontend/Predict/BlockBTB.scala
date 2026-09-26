@@ -14,17 +14,24 @@ class FrontendBtbRaw(p: FrontendParams, sets: Int, ways: Int) extends Bundle {
     val lines = Vec(ways, new FrontendBtbLine(p))
 }
 
-class BtbTraining(p: FrontendParams) extends Bundle {
-    val pcBlock = UInt((32 - p.blockBits).W)
+class BtbTraining(p: FrontendParams, sets: Int) extends Bundle {
+    val index = UInt(log2Ceil(sets).W)
+    val indexOH = UInt(sets.W)
+    val tag = UInt((32 - p.blockBits - log2Ceil(sets)).W)
     val mask = UInt(p.fetchWidth.W)
+    val cfi = UInt(p.fetchWidth.W)
     val kinds = Vec(p.fetchWidth, UInt(3.W))
     val targetWords = Vec(p.fetchWidth, UInt(30.W))
+    val backward = UInt(p.fetchWidth.W)
 }
 
 class BlockBTBIO(p: FrontendParams, sets: Int, ways: Int) extends Bundle {
-    val index = Input(UInt(log2Ceil(sets).W))
+    val indexOH = Input(UInt(sets.W))
+    val lookupTag = Input(UInt((32 - p.blockBits - log2Ceil(sets)).W))
+    val trainTagGroups = Input(Vec(math.min(8, sets), UInt((32 - p.blockBits - log2Ceil(sets)).W)))
+    val hits = Output(Vec(ways, Bool()))
     val raw = Output(new FrontendBtbRaw(p, sets, ways))
-    val train = Flipped(Valid(new BtbTraining(p)))
+    val train = Flipped(Valid(new BtbTraining(p, sets)))
 }
 
 /** A block shares a tag; training preserves unexecuted slots in a matching row. */
@@ -35,59 +42,79 @@ class BlockBTB(p: FrontendParams, sets: Int, ways: Int) extends Module {
     // All slots in a row share one block tag. Valid bits reset independently of data.
     val indexBits = log2Ceil(sets)
     val tagBits = 32 - p.blockBits - indexBits
+    val rowsPerTagGroup = sets / math.min(8, sets)
     val tags = Seq.fill(ways)(Reg(Vec(sets, UInt(tagBits.W))))
     val payload = Seq.fill(ways)(Reg(Vec(sets, new FrontendBtbLine(p))))
     val valid = Seq.fill(ways)(RegInit(VecInit.fill(sets)(0.U(p.fetchWidth.W))))
     val replacement = RegInit(VecInit.fill(sets)(false.B))
-    def index(pc: UInt): UInt = pc(p.blockBits + indexBits - 1, p.blockBits)
-    def tag(pc: UInt): UInt = pc(31, p.blockBits + indexBits)
-
     /* Prediction Read */
     for (way <- 0 until ways) {
-        io.raw.tags(way) := FrontendMath.read(tags(way).toSeq, io.index)
-        io.raw.lines(way) := FrontendMath.read(payload(way).toSeq, io.index)
-        io.raw.lines(way).valid := FrontendMath.read(valid(way).toSeq, io.index)
+        val rowHits = VecInit((0 until sets).map { row =>
+            valid(way)(row).orR && tags(way)(row) === io.lookupTag
+        }).asUInt
+        io.hits(way) := (rowHits & io.indexOH).orR
+        io.raw.tags(way) := Mux1H(io.indexOH.asBools, tags(way))
+        io.raw.lines(way) := Mux1H(io.indexOH.asBools, payload(way))
+        io.raw.lines(way).valid := Mux1H(io.indexOH.asBools, valid(way))
     }
 
     /* Training Lookup and Way Selection */
     val train = io.train.bits
-    val trainPc = Cat(train.pcBlock, 0.U(p.blockBits.W))
-    val writeIndex = index(trainPc)
     val writeHits = VecInit((0 until ways).map(w =>
-        FrontendMath.read(valid(w).toSeq, writeIndex).orR &&
-            FrontendMath.read(tags(w).toSeq, writeIndex) === tag(trainPc)
+        Mux1H(train.indexOH.asBools, valid(w)).orR &&
+            Mux1H(train.indexOH.asBools, tags(w)) === train.tag
     ))
-    val writeOccupied = VecInit((0 until ways).map(w => FrontendMath.read(valid(w).toSeq, writeIndex).orR))
+    val writeOccupied = VecInit((0 until ways).map(w => Mux1H(train.indexOH.asBools, valid(w)).orR))
     // Reuse a matching way, then an empty way, then the replacement way.
     val writeWay = if (ways == 1) 0.U
     else Mux(
         writeHits.asUInt.orR,
         PriorityEncoder(writeHits),
-        Mux(!writeOccupied.asUInt.andR, PriorityEncoder(~writeOccupied.asUInt), replacement(writeIndex).asUInt)
+        Mux(
+            !writeOccupied.asUInt.andR,
+            PriorityEncoder(~writeOccupied.asUInt),
+            Mux1H(train.indexOH.asBools, replacement).asUInt,
+        )
     )
-    val writeCfi = VecInit((0 until p.fetchWidth).map(i => train.mask(i) && train.kinds(i) =/= 0.U)).asUInt
     when(io.train.valid) {
         assert(PopCount(writeHits) <= 1.U, "BTB tags must have at most one matching way")
+        assert(PopCount(train.indexOH) === 1.U, "BTB training index must be one-hot")
     }
 
     /* Training Write */
     // A matching row keeps the unexecuted suffix; ordinary instructions clear stale CFI bits.
-    for (row <- 0 until sets; way <- 0 until ways) {
-        when(io.train.valid && writeIndex === row.U && writeWay === way.U && (writeCfi.orR || writeHits.asUInt.orR)) {
-            tags(way)(row) := tag(trainPc)
-            valid(way)(row) := (Mux(writeHits(way), valid(way)(row), 0.U) & ~train.mask) | writeCfi
-            for (slot <- 0 until p.fetchWidth) {
-                when(train.mask(slot)) {
-                    payload(way)(row).kinds(slot) := train.kinds(slot)
-                    payload(way)(row).targets(slot) := train.targetWords(slot)
-                    payload(way)(row).backward(slot) := FrontendCfi.conditional(train.kinds(slot)) &&
-                        FrontendMath.backwardBranch(
-                            FrontendMath.slotPc(trainPc, slot, p),
-                            Cat(train.targetWords(slot), 0.U(2.W)),
-                        )
+    for (row <- 0 until sets) {
+        // Keep training-way selection within its candidate row.  The global
+        // selection above remains for the protocol assertions, but feeding it
+        // into every payload D input created a wide train-index/occupancy cone.
+        val rowHits = VecInit((0 until ways).map(way =>
+            valid(way)(row).orR && tags(way)(row) === io.trainTagGroups(row / rowsPerTagGroup)
+        ))
+        val rowOccupied = VecInit((0 until ways).map(way => valid(way)(row).orR))
+        val rowWriteWay = if (ways == 1) 0.U else Mux(
+            rowHits.asUInt.orR,
+            PriorityEncoder(rowHits),
+            Mux(
+                !rowOccupied.asUInt.andR,
+                PriorityEncoder(~rowOccupied.asUInt),
+                replacement(row).asUInt,
+            )
+        )
+        for (way <- 0 until ways) {
+            when(io.train.valid && train.indexOH(row) && rowWriteWay === way.U &&
+                (train.cfi.orR || rowHits.asUInt.orR)) {
+                when(train.cfi.orR) { tags(way)(row) := io.trainTagGroups(row / rowsPerTagGroup) }
+                valid(way)(row) := (Mux(rowHits(way), valid(way)(row), 0.U) & ~train.mask) | train.cfi
+                for (slot <- 0 until p.fetchWidth) {
+                    // Payload belonging to a cleared ordinary slot is unobservable.
+                    when(train.cfi(slot)) {
+                        payload(way)(row).kinds(slot) := train.kinds(slot)
+                        payload(way)(row).targets(slot) := train.targetWords(slot)
+                        payload(way)(row).backward(slot) := train.backward(slot)
+                    }
                 }
+                replacement(row) := !rowWriteWay(0)
             }
-            replacement(row) := !writeWay(0)
         }
     }
 }

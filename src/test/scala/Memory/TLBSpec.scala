@@ -66,6 +66,7 @@ class TLBDriver(val dut: TLB) extends chisel3.simulator.PeekPokeAPI {
         dut.io.refill.valid.poke(true)
         dut.clock.step()
         dut.io.refill.valid.poke(false)
+        dut.clock.step()
     }
 
     def expect(
@@ -94,6 +95,31 @@ class TLBDriver(val dut: TLB) extends chisel3.simulator.PeekPokeAPI {
 }
 
 class TLBSpec extends AnyFreeSpec with ChiselSim {
+    "three DTLB ports select independent 4 KiB sets in the same cycle" in {
+        simulate(new DataTLB(queryPorts = 3)) { dut =>
+            val d = new TLBDriver(dut)
+            d.initialize()
+            d.scope(4)
+            val base = BigInt("24000000", 16)
+            val ppns = (0 until 4).map(set => BigInt("18000", 16) + set)
+            for (set <- 0 until 4) {
+                d.refill(base + (set << 12), ppns(set), asid = 4, pma = set % 3)
+            }
+
+            for (first <- 0 until 4) {
+                for (port <- 0 until 3) {
+                    val set = (first + port) % 4
+                    val offset = 0x40 + port * 4
+                    d.expect(port, base + (set << 12) + offset,
+                        hit = true, (ppns(set) << 12) + offset, pma = set % 3)
+                }
+                dut.clock.step()
+                d.clearLookups()
+            }
+            d.expect(0, base + 0x4000, hit = false)
+        }
+    }
+
     "ITLB translates 4 KiB pages and keeps only the current ASID in scope" in {
         simulate(new InstructionTLB) { dut =>
             val d = new TLBDriver(dut)
@@ -221,6 +247,7 @@ class TLBSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.scopeUpdate.valid.poke(false)
             dut.io.refill.valid.poke(false)
+            dut.clock.step()
             d.expect(0, va, hit = true, ppn << 12)
         }
     }

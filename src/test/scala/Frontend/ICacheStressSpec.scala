@@ -194,7 +194,7 @@ class ICacheStressSpec extends AnyFreeSpec with ChiselSim {
                     // Redirect on the same edge as a held hit, replacing both older pipeline requests.
                     e.outputReady = false
                     val heldHit = e.add(BigInt("61001000", 16))
-                    val younger = e.add(BigInt("61002000", 16), delay = 127)
+                    val younger = e.add(BigInt("61002000", 16), delay = 0)
                     e.until(d.io.pp.response.valid.peek().litToBoolean)
                     e.step()
                     assert(e.queued.isEmpty)
@@ -205,6 +205,23 @@ class ICacheStressSpec extends AnyFreeSpec with ChiselSim {
                     e.drain()
                     assert(e.accepted(redirect) == redirectCycle && e.completed.contains(redirect))
                     assert(!e.completed.contains(heldHit) && !e.completed.contains(younger))
+
+                    // Without translation tags, a pending younger response must drain
+                    // before the redirect can claim the sole translation slot.
+                    e.outputReady = false
+                    val heldBeforeDrain = e.add(BigInt("61001000", 16))
+                    val delayedYounger = e.add(BigInt("61003000", 16), delay = 127)
+                    e.until(d.io.pp.response.valid.peek().litToBoolean)
+                    e.step()
+                    assert(e.queued.isEmpty)
+                    val delayedRedirect = e.add(BigInt("61001000", 16))
+                    val delayedRedirectCycle = e.cycle
+                    e.step(flush = true)
+                    e.outputReady = true
+                    e.drain()
+                    assert(e.accepted(delayedRedirect) > delayedRedirectCycle)
+                    assert(e.completed.contains(delayedRedirect))
+                    assert(!e.completed.contains(heldBeforeDrain) && !e.completed.contains(delayedYounger))
 
                     // An untagged translation slot must drain its canceled response before reuse.
                     val stale = e.add(BigInt("62000000", 16), delay = 511)

@@ -4,6 +4,81 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.LoadPipelineParams
 
 class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
+    "full STA queue holds a DTLB miss and resumes without reordering" in {
+        val p = LoadPipelineParams(entries = 4)
+        simulate(new LoadStorePipeline(p, tlbEnabled = true)) { dut =>
+            val a = dut.io.iq.instPkg
+            val s = dut.io.iq.std.get
+            BackendPackageTestUtils.clear(a.bits)
+            BackendPackageTestUtils.clear(s.bits)
+            a.valid.poke(false); s.valid.poke(false)
+            a.bits.store.poke(true); a.bits.fu.poke(ZirconConfig.DecodeUnit.Store)
+            a.bits.rdVld.poke(false); a.bits.prj.poke(1); a.bits.mtype.poke(2)
+            dut.io.rf.rd.prjData.poke(0x1000)
+            dut.io.rf.std.get.intData.poke(0); dut.io.rf.std.get.fpData.poke(0)
+            dut.io.blockIssue.poke(false)
+            dut.io.wk.grant.poke(0)
+            dut.io.cmt.flush.poke(false)
+            dut.io.cmt.storeAddress.get.ready.poke(true)
+            dut.io.cmt.storeData.get.ready.poke(true)
+            for (r <- Seq(dut.io.cmt.sqResult, dut.io.cmt.sbResult)) {
+                r.valid.poke(false); r.bits.data.poke(0); r.bits.mask.poke(0); r.bits.blocked.poke(false)
+            }
+            dut.io.cache.req.ready.poke(true)
+            dut.io.cache.fixedLatency.poke(true)
+            dut.io.cache.wbSelect.valid.poke(false)
+            dut.io.cache.rsp.valid.poke(false)
+            dut.io.cache.forward.query.valid.poke(false)
+            dut.io.translationControl.get.enabled.poke(true)
+            dut.io.translationControl.get.asid.poke(0)
+            dut.io.translationControl.get.privilege.poke(1)
+            dut.io.translationControl.get.mxr.poke(false)
+            dut.io.translationControl.get.sum.poke(false)
+            val translation = dut.io.cache.storeTranslation.get
+            translation.response.miss.poke(true)
+            translation.response.paddr.poke(0)
+            translation.response.uncache.poke(false)
+            translation.response.exception.poke(0)
+            dut.clock.step()
+
+            for (i <- 0 until 3) {
+                a.valid.poke(true)
+                a.bits.sqIdx.poke(i); a.bits.robIdx.poke(i); a.bits.imm.poke(i * 4)
+                a.ready.expect(true)
+                dut.clock.step()
+            }
+            a.valid.poke(false)
+            for (_ <- 0 until 3) {
+                a.ready.expect(false)
+                translation.request.valid.expect(true)
+                translation.request.bits.vaddr.expect(0x1000)
+                dut.io.cmt.storeAddress.get.valid.expect(false)
+                dut.clock.step()
+            }
+
+            translation.response.miss.poke(false)
+            translation.response.paddr.poke(0x2000)
+            a.ready.expect(false)
+            dut.clock.step()
+            translation.request.bits.vaddr.expect(0x1004)
+            a.ready.expect(true)
+            dut.io.cmt.storeAddress.get.valid.expect(true)
+            dut.io.cmt.storeAddress.get.bits.sqIdx.expect(0)
+            dut.io.cmt.storeAddress.get.bits.paddr.expect(0x2000)
+            translation.response.paddr.poke(0x2004)
+            dut.clock.step()
+            translation.request.bits.vaddr.expect(0x1008)
+            dut.io.cmt.storeAddress.get.bits.sqIdx.expect(1)
+            dut.io.cmt.storeAddress.get.bits.paddr.expect(0x2004)
+            translation.response.paddr.poke(0x2008)
+            dut.clock.step()
+            dut.io.cmt.storeAddress.get.bits.sqIdx.expect(2)
+            dut.io.cmt.storeAddress.get.bits.paddr.expect(0x2008)
+            dut.clock.step()
+            dut.io.cmt.storeAddress.get.valid.expect(false)
+        }
+    }
+
     "full load contexts leave STA/STD independent, with unequal non-power-of-two PRFs" in {
         // This fixture isolates reservation/issue control; cache acceptance and PRF values are driven inputs.
         val p = LoadPipelineParams(numIntPhys = 10, numFpPhys = 33)
@@ -59,10 +134,10 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
                 a.ready.expect(true); s.ready.expect(true)
                 dut.io.cache.req.valid.expect(false)
                 dut.clock.step()
-                dut.io.cmt.storeAddress.get.valid.expect(i > 0)
-                if (i > 0) {
-                    dut.io.cmt.storeAddress.get.bits.sqIdx.expect(i - 1)
-                    dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * (i - 1))
+                dut.io.cmt.storeAddress.get.valid.expect(i > 1)
+                if (i > 1) {
+                    dut.io.cmt.storeAddress.get.bits.sqIdx.expect(i - 2)
+                    dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * (i - 2))
                 }
                 dut.io.cmt.storeData.get.valid.expect(true)
                 dut.io.cmt.storeData.get.bits.sqIdx.expect(i)
@@ -72,6 +147,10 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.rf.wr.valid.expect(false); dut.io.cmt.rob.valid.expect(false)
             }
             a.valid.poke(false); s.valid.poke(false); dut.clock.step()
+            dut.io.cmt.storeAddress.get.valid.expect(true)
+            dut.io.cmt.storeAddress.get.bits.sqIdx.expect(10)
+            dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * 10)
+            dut.clock.step()
             dut.io.cmt.storeAddress.get.valid.expect(true)
             dut.io.cmt.storeAddress.get.bits.sqIdx.expect(11)
             dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * 11)

@@ -139,10 +139,12 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
 
     switch(state) {
         is(idle) {
+            // Idle payload is invisible until allocation advances the state.
+            // Prewrite it without putting late miss eligibility on every payload D input.
+            entry := 0.U.asTypeOf(new DCacheMissEntry(p))
+            InheritFields(entry, io.allocate.bits)
+            line := io.allocate.bits.victimData
             when(io.allocate.fire) {
-                entry := 0.U.asTypeOf(new DCacheMissEntry(p))
-                InheritFields(entry, io.allocate.bits)
-                line := io.allocate.bits.victimData
                 lineDirty := false.B
                 error := false.B
                 discard := false.B

@@ -1,13 +1,14 @@
 import chisel3._
 import chisel3.util.{log2Ceil, Valid}
 import ZirconConfig.Cache._
-import ZirconConfig.DCacheParams
+import ZirconConfig.{CommitParams, DCacheParams}
 
 // The request carries the virtual address into S1; translated attributes are resolved before tag comparison.
 class DLoadRequest(val p: DCacheParams = DCacheParams()) extends Bundle {
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
     val slot = UInt(p.slotWidth.W)
+    val sqTailOH = UInt((CommitParams().sqEntries * 2).W)
     val mtype = UInt(3.W)
     val uncache = Bool()
     val ioAuthorized = Bool()
@@ -77,6 +78,7 @@ class DForwardQuery(val p: DCacheParams = DCacheParams()) extends Bundle {
     val wordAddress = UInt(32.W)
     val slot = UInt(p.slotWidth.W)
     val mask = UInt(4.W)
+    val sqTailOH = UInt((CommitParams().sqEntries * 2).W)
 }
 
 class DForwardResult(val p: DCacheParams = DCacheParams()) extends Bundle {

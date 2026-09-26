@@ -50,10 +50,12 @@ class Frontend(
     /* Previous Fetch Stage */
     val instPkgPF = WireDefault(0.U.asTypeOf(new FrontendPackage(p)))
     val instPkgIF1 = Reg(new FrontendPackage(p))
+    val fastBtbIndexOHIF1 = Reg(UInt(p.fastBtbSets.W))
+    val fastBtbTagIF1 = Reg(UInt((32 - p.blockBits - log2Ceil(p.fastBtbSets)).W))
+    val mainBtbIndexIF1 = Reg(UInt(log2Ceil(p.btbSets).W))
+    val directionPcHashesIF1 = RegInit(0.U.asTypeOf(new MorslPcHashes(p)))
     val validIF1 = RegInit(false.B)
     npc.io.cmt <> io.commit.rob.redirect
-    npc.io.pd.valid := pdFlush
-    npc.io.pd.bits.pc := pd.io.out.nextPc
     npc.io.pr.valid := if1Fire
     npc.io.pr.bits.pc := pr.io.fc.out.predict.early.nextPc
     npc.io.space := !validIF1 || if1Fire || flushYounger
@@ -62,11 +64,22 @@ class Frontend(
     when(if1Fire || flushYounger) { validIF1 := false.B }
     when(ic.io.pp.request.fire) {
         instPkgIF1 := instPkgPF
+        fastBtbIndexOHIF1 := UIntToOH(
+            npc.io.request.bits.pc(p.blockBits + log2Ceil(p.fastBtbSets) - 1, p.blockBits),
+            p.fastBtbSets,
+        )
+        fastBtbTagIF1 := npc.io.request.bits.pc(31, p.blockBits + log2Ceil(p.fastBtbSets))
+        mainBtbIndexIF1 := npc.io.request.bits.pc(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
+        directionPcHashesIF1 := MorslPcHashes.fromPcWord(npc.io.request.bits.pc(31, 2), p)
         validIF1 := true.B
     }
 
     /* Fetch Stage 1 */
     pr.io.fc.instPkg := instPkgIF1
+    pr.io.fc.fastBtbIndexOH := fastBtbIndexOHIF1
+    pr.io.fc.fastBtbTag := fastBtbTagIF1
+    pr.io.fc.mainBtbIndex := mainBtbIndexIF1
+    pr.io.fc.directionPcHashes := directionPcHashesIF1
     pr.io.fc.prefetch.valid := ic.io.pp.request.fire
     pr.io.fc.prefetch.bits := npc.io.request.bits.pc(31, 2)
     pr.io.fte.accept := if1Fire
@@ -85,14 +98,16 @@ class Frontend(
     instPkgPDIn.predict.main := pr.io.lookup.prediction
     instPkgPDIn.predict.directions := pr.io.lookup.directions
     instPkgPDIn.predict.meta := pr.io.lookup.meta
-    instPkgPDIn.predict.returned := ic.io.pp.response.bits.mask
     instPkgPDIn.instructions.zipWithIndex.foreach { case (inst, i) =>
         inst.pc := FrontendMath.slotPc(instPkgIF2.startPc, i, p)
         inst.inst := ic.io.pp.response.bits.inst(i)
         inst.fault := ic.io.pp.response.bits.fault(i)
     }
     instPkgPDIn.predict.fields := VecInit(fields.map(_.io.fields))
+    pd.io.in := instPkgPDIn
     val instPkgPD = Reg(new FrontendPackage(p))
+    val pdChanged = Reg(Bool())
+    val pdRepair = Reg(new FrontendStateRepair(p))
     val validPD = RegInit(false.B)
     val pdRepairApplied = RegInit(false.B)
     val pdRepairAllowed = RegInit(false.B)
@@ -113,8 +128,14 @@ class Frontend(
         pdRepairApplied := false.B
         pdRepairAllowed := false.B
     }
+    // Invalid payload is unobservable; a live PD entry holds until it enters FQ.
+    // The ICache response still controls validity, not every payload register D.
+    when(!validPD || pdFire) {
+        instPkgPD := pd.io.out
+        pdChanged := pd.io.changed
+        pdRepair := pd.io.repair
+    }
     when(if2Fire) {
-        instPkgPD := instPkgPDIn
         validPD := true.B
         pdRepairApplied := false.B
         pdRepairAllowed := !ic.io.pp.response.bits.fault.orR
@@ -122,17 +143,21 @@ class Frontend(
 
     /* Previous Decode Stage */
     val instPkgFQIn = WireDefault(instPkgPD)
-    pd.io.in := instPkgPD
-    instPkgFQIn := pd.io.out
     instPkgFQIn.ftqIdx := 0.U
-    pdFlush := validPD && pdRepairAllowed && pd.io.changed && !pdRepairApplied && !cmtFlush
+    pdFlush := validPD && pdRepairAllowed && pdChanged && !pdRepairApplied && !cmtFlush
+    npc.io.pd.valid := pdFlush
+    npc.io.pd.bits.pc := instPkgPD.nextPc
     pr.io.pd.valid := pdFlush
-    pr.io.pd.bits := pd.io.repair
+    pr.io.pd.bits := pdRepair
     when(pdFlush && !pdFire) { pdRepairApplied := true.B }
     for (slot <- 0 until p.fetchWidth) {
         val earlier = if (slot == 0) false.B else instPkgFQIn.mask(slot - 1, 0).orR
         val later = if (slot + 1 == p.fetchWidth) false.B else instPkgFQIn.mask(p.fetchWidth - 1, slot + 1).orR
-        fq.io.enq(slot).valid := validPD && instPkgFQIn.mask(slot) && !cmtFlush && !io.maintenance.request
+        val payloadValid = validPD && instPkgFQIn.mask(slot)
+        // Flush or maintenance can suppress occupancy without suppressing an
+        // unobservable prewrite into the current free slot.
+        fq.io.enq(slot).valid := payloadValid && !cmtFlush && !io.maintenance.request
+        fq.io.enqPayloadWrite(slot) := instPkgFQIn.mask(slot)
         fq.io.enq(slot).bits.slot := slot.U
         fq.io.enq(slot).bits.packetStart := !earlier
         fq.io.enq(slot).bits.packetEnd := !later
@@ -145,6 +170,7 @@ class Frontend(
 
     /* Commit Feedback */
     pr.io.cmt.retire <> io.commit.ftq.retire
+    pr.io.cmt.recovery <> io.commit.ftq.recovery
     pr.io.cmt.flush := cmtFlush
     pr.io.cmt.train <> io.commit.ftq.train
 

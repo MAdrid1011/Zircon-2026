@@ -30,9 +30,8 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         for (byte <- 0 until lineBytes) memory(base + byte) = ((data >> (8 * byte)) & 255).toInt
     }
     def putMasked(address: Long, data: BigInt, mask: BigInt): Unit = {
-        val base = if ((mask >> 4) != 0) address & ~(lineBytes - 1).toLong else address & ~3L
-        val count = if ((mask >> 4) != 0) lineBytes else 4
-        for (byte <- 0 until count if mask.testBit(byte)) {
+        val base = address & ~7L
+        for (byte <- 0 until 8 if mask.testBit(byte)) {
             memory(base + byte) = ((data >> (8 * byte)) & 255).toInt
         }
     }

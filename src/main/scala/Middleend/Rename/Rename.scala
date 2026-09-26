@@ -21,10 +21,20 @@ class DomainCommitEntry(p: RenameParams) extends Bundle {
     val pprd = UInt(p.indexWidth.W)
 }
 
+/** A renamed destination carried by the fixed Rename-to-Dispatch stage. */
+class DomainRenameWrite(p: RenameParams) extends Bundle {
+    val rd = UInt(5.W)
+    val prd = UInt(p.indexWidth.W)
+}
+
 class RenameIO(p: RenameParams) extends Bundle {
     val rinfo = Input(Vec(p.renameWidth, new DomainRegisterInfo(p)))
     val prepare = Input(UInt(p.renameWidth.W))
-    val allocate = Input(UInt(p.renameWidth.W))
+    // The held Q-side group is the next-state view if Dispatch accepts it.
+    val preview = Input(Vec(p.renameWidth, Valid(new DomainRenameWrite(p))))
+    // Dispatch accepts this Q-side group atomically. These ports update the
+    // speculative map and consume the physical tags captured in that group.
+    val writeback = Input(Vec(p.renameWidth, Valid(new DomainRenameWrite(p))))
     val available = Output(Bool())
     val freeAvailable = Output(Bool())
     val freePrefix = Output(UInt(p.renameWidth.W))
@@ -36,8 +46,9 @@ class RenameIO(p: RenameParams) extends Bundle {
 
 /** One independently instantiable integer OR floating-point rename domain.
   * All tags are local. Sparse destination requests retain original lane order.
-  * The caller combines domain availability and grants only dispatched lanes.
-  * restore is the actual recovery cycle and may carry the final retirement update.
+  * The caller prepares a new D-side group while the accepted Q-side group
+  * writes back. Read ports are write-first with respect to that Q-side group,
+  * so the fixed pipeline boundary does not create a Rename bubble.
   */
 class Rename(val p: RenameParams = RenameParams()) extends Module {
     val io = IO(new RenameIO(p))
@@ -56,22 +67,20 @@ class Rename(val p: RenameParams = RenameParams()) extends Module {
     val prepared = request.zipWithIndex.map { case (candidate, lane) =>
         candidate && io.prepare(lane) && !io.restore
     }
-    val granted = request.zipWithIndex.map { case (candidate, lane) =>
-        candidate && io.allocate(lane) && !io.restore
-    }
     fList.io.request := request
-    fList.io.allocate := VecInit(granted)
+    fList.io.previewAllocate := VecInit(io.preview.map(_.valid))
+    fList.io.allocate := VecInit(io.writeback.map(write => write.valid && !io.restore))
     fList.io.restore := io.restore
     srat.io.restore := io.restore
-    when(granted.reduce(_ || _)) {
-        assert(
-            !VecInit(granted.zip(fList.io.availablePrefix.asBools).map { case (lane, available) =>
-                lane && !available
-            }).asUInt.orR,
-            "Rename allocation requires available resources",
-        )
+    when(io.restore) {
+        assert(!io.writeback.map(_.valid).reduce(_ || _), "Recovery must discard pending Rename writes")
     }
-    assert((io.allocate & ~io.prepare) === 0.U, "Rename allocation must be a prepared lane prefix")
+    for (lane <- 0 until p.renameWidth) {
+        when(io.writeback(lane).valid) {
+            assert(io.preview(lane).valid && io.preview(lane).bits.asUInt === io.writeback(lane).bits.asUInt,
+                "Accepted Rename writes must match the Q-side preview")
+        }
+    }
 
     for (i <- 0 until p.renameWidth) {
         io.pinfo(i).prd := Mux(prepared(i), fList.io.prd(i), 0.U)
@@ -92,9 +101,12 @@ class Rename(val p: RenameParams = RenameParams()) extends Module {
                 io.pinfo(i).prs(s) := Mux(valid, value, 0.U)
             }
         }
-        srat.io.rename(i).valid := granted(i)
-        srat.io.rename(i).bits.addr := r.rd
-        srat.io.rename(i).bits.data := io.pinfo(i).prd
+        srat.io.preview(i).valid := io.preview(i).valid
+        srat.io.preview(i).bits.addr := io.preview(i).bits.rd
+        srat.io.preview(i).bits.data := io.preview(i).bits.prd
+        srat.io.rename(i).valid := io.writeback(i).valid && !io.restore
+        srat.io.rename(i).bits.addr := io.writeback(i).bits.rd
+        srat.io.rename(i).bits.data := io.writeback(i).bits.prd
     }
     for (i <- 0 until p.commitWidth) {
         val c = io.commit(i)

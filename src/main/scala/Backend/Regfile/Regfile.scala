@@ -13,9 +13,15 @@ class RegfileWriteIO(p: RegfileParams) extends Bundle {
     val data = Input(UInt(p.dataWidth.W))
 }
 
-class RegfileIO(p: RegfileParams) extends Bundle {
+class RegfileDirectWriteIO(p: RegfileParams) extends Bundle {
+    val oneHot = Input(UInt(p.numEntries.W))
+    val data = Input(UInt(p.dataWidth.W))
+}
+
+class RegfileIO(p: RegfileParams, directWritePort: Option[Int]) extends Bundle {
     val read = Vec(p.numReadPorts, new RegfileReadIO(p))
     val write = Vec(p.numWritePorts, new RegfileWriteIO(p))
+    val directWrite = directWritePort.map(_ => new RegfileDirectWriteIO(p))
     val readHold = if (p.holdReads) Some(Input(Vec(p.numReadPorts, Bool()))) else None
 }
 
@@ -23,8 +29,12 @@ class RegfileIO(p: RegfileParams) extends Bundle {
   * Enabled writes must have distinct destinations; address zero requires we=false when hasZeroReg.
   * Flush/replay cancellation belongs to the producer; this block has no backpressure.
   */
-class Regfile(val p: RegfileParams = RegfileParams()) extends Module {
-    val io = IO(new RegfileIO(p))
+class Regfile(
+    val p: RegfileParams = RegfileParams(),
+    directWritePort: Option[Int] = None,
+) extends Module {
+    directWritePort.foreach(port => require(port >= 0 && port < p.numWritePorts))
+    val io = IO(new RegfileIO(p, directWritePort))
     // Integer configurations omit storage for p0; FP configurations store every entry.
     private val firstWritable = if (p.hasZeroReg) 1 else 0
     private val data = RegInit(VecInit.fill(p.numEntries - firstWritable)(0.U(p.dataWidth.W)))
@@ -45,11 +55,33 @@ class Regfile(val p: RegfileParams = RegfileParams()) extends Module {
             "PRF simultaneous writes must have distinct destinations"
         )
     }
+    directWritePort.foreach { port =>
+        val direct = io.directWrite.get
+        assert(PopCount(direct.oneHot) <= 1.U, "PRF direct write must be zero-hot or one-hot")
+        when(direct.oneHot.orR && io.write(port).we) {
+            assert(
+                direct.oneHot === UIntToOH(io.write(port).addr, p.numEntries),
+                "PRF direct write index must match its port address"
+            )
+        }
+    }
 
     for (entry <- firstWritable until p.numEntries) {
-        val hit = io.write.map(w => w.we && w.addr === entry.U)
+        val hit = io.write.zipWithIndex.map { case (write, port) =>
+            if (directWritePort.contains(port)) {
+                val direct = io.directWrite.get
+                Mux(direct.oneHot.orR && write.we, direct.oneHot(entry), write.we && write.addr === entry.U)
+            }
+            else write.we && write.addr === entry.U
+        }
+        val writeData = io.write.zipWithIndex.map { case (write, port) =>
+            if (directWritePort.contains(port)) {
+                val direct = io.directWrite.get
+                Mux(direct.oneHot.orR && write.we, direct.data, write.data)
+            } else write.data
+        }
         when(hit.reduce(_ || _)) {
-            data(entry - firstWritable) := Mux1H(hit, io.write.map(_.data))
+            data(entry - firstWritable) := Mux1H(hit, writeData)
         }
     }
 

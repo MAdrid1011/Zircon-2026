@@ -96,6 +96,7 @@ class StoreQueue(
     val io = IO(new StoreQueueIO(fp, bp, load, dispatchWidth, cp))
     val storage = RegInit(VecInit.fill(entries)(0.U.asTypeOf(new StoreQueueEntry(bp))))
     val head = RegInit(0.U(pointerWidth.W))
+    val headSlotOH = RegInit(1.U(entries.W))
     val commitTail = RegInit(0.U(pointerWidth.W))
     val tail = RegInit(0.U(pointerWidth.W))
     val allocated = RegInit(0.U(log2Ceil(entries + 1).W))
@@ -125,7 +126,7 @@ class StoreQueue(
     val available = Wire(Vec(dispatchWidth, Bool()))
     var allocationPointer = tail
     for (lane <- 0 until dispatchWidth) {
-        val request = io.request.valid(lane) && io.request.store(lane)
+        val request = io.request.store(lane)
         requestStores(lane) := request
         io.allocation(lane).tail := extended(allocationPointer)
         io.allocation(lane).index := extended(allocationPointer)
@@ -137,25 +138,38 @@ class StoreQueue(
 
     val acceptedStores = Wire(Vec(dispatchWidth, Bool()))
     var enqueuePointer = tail
+    val writeStores = Wire(Vec(dispatchWidth, Bool()))
+    val writeStoreClass = io.request.store.asBools
+    var writePointer = tail
     for (lane <- 0 until dispatchWidth) {
         val incoming = io.enqueue.entries(lane)
         val isStore = incoming.context.instruction.fu === DecodeUnit.Store.U
         val isAtomic = incoming.context.instruction.fu === DecodeUnit.Atomic.U
-        acceptedStores(lane) := io.enqueue.valid(lane) && (isStore || isAtomic) && !io.flush
+        acceptedStores(lane) := io.enqueue.valid(lane) && writeStoreClass(lane) && !io.flush
+        // Payload prewrite may run before another Commit resource admits this
+        // group, but it must never cross this queue's own free-space boundary.
+        val writeRank = PopCount(writeStoreClass.take(lane + 1))
+        writeStores(lane) := io.enqueue.writeValid(lane) &&
+            allocated + writeRank <= entries.U && writeStoreClass(lane) && !io.flush
         val index = slot(enqueuePointer)
-        when(acceptedStores(lane)) {
-            storage(index).valid := true.B
-            storage(index).identity := extended(enqueuePointer)
-            storage(index).robIdx := incoming.allocation.robIdx
-            storage(index).committed := false.B
-            storage(index).addressValid := false.B
-            storage(index).dataValid := false.B
-            storage(index).exception := 0.U
-            storage(index).atomic := isAtomic
-            storage(index).atomicOp := incoming.context.instruction.op
-            storage(index).prd := incoming.destination.prd
+        val writeIndex = slot(writePointer)
+        when(writeStores(lane)) {
+            storage(writeIndex).identity := extended(writePointer)
+            storage(writeIndex).robIdx := incoming.allocation.robIdx
+            storage(writeIndex).committed := false.B
+            storage(writeIndex).addressValid := false.B
+            storage(writeIndex).dataValid := false.B
+            storage(writeIndex).exception := 0.U
+            storage(writeIndex).atomic := isAtomic
+            storage(writeIndex).atomicOp := incoming.context.instruction.op
+            storage(writeIndex).prd := incoming.destination.prd
         }
+        when(acceptedStores(lane)) { storage(index).valid := true.B }
         enqueuePointer = Mux(acceptedStores(lane), next(enqueuePointer), enqueuePointer)
+        writePointer = Mux(writeStores(lane), next(writePointer), writePointer)
+        when(io.request.valid(lane)) {
+            assert(io.request.store(lane) === (isStore || isAtomic))
+        }
     }
     val enqueueCount = PopCount(acceptedStores)
 
@@ -198,22 +212,41 @@ class StoreQueue(
 
     val addressGetsData = dataEntry.valid && io.data.fire && io.address.fire &&
         io.data.bits.sqIdx === io.address.bits.sqIdx
-    io.completion(0).valid := io.address.fire && !addressEntry.atomic &&
+    val completionNext = Wire(Vec(2, Valid(new ROBWrite(CommitIndex.addressWidth(cp.robEntries)))))
+    completionNext(0).valid := io.address.fire && !addressEntry.atomic &&
         (io.address.bits.exception.orR || addressEntry.dataValid || addressGetsData)
-    io.completion(0).bits.address := io.address.bits.robIdx
-    io.completion(0).bits.data := 0.U
-    io.completion(0).bits.exception.valid := io.address.bits.exception.orR
-    io.completion(0).bits.exception.cause := io.address.bits.exception
-    io.completion(0).bits.exception.tval := io.address.bits.vaddr
-    io.completion(0).bits.fflags := 0.U
-    io.completion(0).bits.fpFlagsValid := false.B
-    io.completion(1).valid := io.data.fire && !dataEntry.atomic && dataEntry.addressValid &&
+    completionNext(0).bits.address := io.address.bits.robIdx
+    completionNext(0).bits.data := 0.U
+    completionNext(0).bits.mispredicted := false.B
+    completionNext(0).bits.exception.valid := io.address.bits.exception.orR
+    completionNext(0).bits.exception.cause := io.address.bits.exception
+    completionNext(0).bits.exception.tval := io.address.bits.vaddr
+    completionNext(0).bits.fflags := 0.U
+    completionNext(0).bits.fpFlagsValid := false.B
+    completionNext(1).valid := io.data.fire && !dataEntry.atomic && dataEntry.addressValid &&
         !dataEntry.exception.orR && !(io.address.fire && io.address.bits.sqIdx === io.data.bits.sqIdx)
-    io.completion(1).bits.address := io.data.bits.robIdx
-    io.completion(1).bits.data := 0.U
-    io.completion(1).bits.exception := 0.U.asTypeOf(new BackendException)
-    io.completion(1).bits.fflags := 0.U
-    io.completion(1).bits.fpFlagsValid := false.B
+    completionNext(1).bits.address := io.data.bits.robIdx
+    completionNext(1).bits.data := 0.U
+    completionNext(1).bits.mispredicted := false.B
+    completionNext(1).bits.exception := 0.U.asTypeOf(new BackendException)
+    completionNext(1).bits.fflags := 0.U
+    completionNext(1).bits.fpFlagsValid := false.B
+
+    // Completion is architectural only at the ROB write edge. Registering the
+    // narrow event keeps SQ entry selection and merge logic off every ROB bank.
+    val completionValid = RegInit(VecInit.fill(2)(false.B))
+    val completionBits = Reg(Vec(2, new ROBWrite(CommitIndex.addressWidth(cp.robEntries))))
+    // Flush clears validity; the payload sampled on that edge is unobservable.
+    completionBits := VecInit(completionNext.map(_.bits))
+    when(io.flush) {
+        completionValid := VecInit.fill(2)(false.B)
+    }.otherwise {
+        completionValid := VecInit(completionNext.map(_.valid))
+    }
+    for (port <- 0 until 2) {
+        io.completion(port).valid := completionValid(port) && !io.flush
+        io.completion(port).bits := completionBits(port)
+    }
 
     val commitCount = PopCount(io.commit.map(_.valid))
     for (lane <- 0 until cp.width) {
@@ -233,7 +266,7 @@ class StoreQueue(
         }
     }
 
-    val headEntry = storage(slot(head))
+    val headEntry = Mux1H(headSlotOH.asBools, storage)
     val requestedAtomic = io.atomic.sqIdx.valid && headEntry.valid && headEntry.atomic &&
         headEntry.identity === io.atomic.sqIdx.bits
     val atomicReady = requestedAtomic && headEntry.addressValid && headEntry.dataValid
@@ -267,10 +300,6 @@ class StoreQueue(
     io.drain.bits.mask := headEntry.mask
     io.drain.bits.size := headEntry.size
     io.drain.bits.uncache := headEntry.uncache
-    when(io.drain.fire) {
-        headEntry.valid := false.B
-        headEntry.committed := false.B
-    }
 
     val atomicRetire = VecInit(io.commit.map { event =>
         val entry = storage(slot(narrow(event.bits)))
@@ -278,10 +307,16 @@ class StoreQueue(
     }).asUInt.orR
     when(atomicRetire) {
         assert(headEntry.valid && headEntry.atomic)
-        headEntry.valid := false.B
-        headEntry.committed := false.B
     }
     val removeHead = io.drain.fire || atomicRetire
+    when(removeHead) {
+        for (index <- 0 until entries) {
+            when(headSlotOH(index)) {
+                storage(index).valid := false.B
+                storage(index).committed := false.B
+            }
+        }
+    }
     val removeCount = removeHead.asUInt
     val committedAfterEvents = committed + commitCount - removeCount
     when(io.flush) {
@@ -295,20 +330,45 @@ class StoreQueue(
         allocated := allocated + enqueueCount - removeCount
     }
     commitTail := advance(commitTail, commitCount, cp.width)
-    when(removeHead) { head := next(head) }
+    when(removeHead) {
+        head := next(head)
+        headSlotOH := FIFOUtil.rotate(headSlotOH, 1)
+    }
     committed := committedAfterEvents
     io.empty := allocated === 0.U
     io.committedEmpty := committed === 0.U
 
+    val queryData = Wire(Vec(entries, UInt(32.W)))
+    for (index <- 0 until entries) {
+        val entry = storage(index)
+        val addressHit = io.address.fire && entry.valid && entry.identity === io.address.bits.sqIdx
+        val dataHit = io.data.fire && entry.valid && entry.identity === io.data.bits.sqIdx
+        val sameCycleAddress = addressHit && io.address.bits.sqIdx === io.data.bits.sqIdx
+        queryData(index) := entry.data
+        when(addressHit && entry.dataValid) {
+            queryData(index) := alignStoreData(entry.data, io.address.bits.paddr(1, 0))
+        }
+        when(dataHit) {
+            val offset = Mux(sameCycleAddress, io.address.bits.paddr(1, 0), entry.paddr(1, 0))
+            queryData(index) := Mux(
+                entry.addressValid || sameCycleAddress,
+                alignStoreData(io.data.bits.data, offset),
+                io.data.bits.data,
+            )
+        }
+    }
+
     for (port <- 0 until 2) {
         val query = io.query(port).request
-        val boundary = narrow(query.bits.sqTail)
+        val boundaryOH = query.bits.sqTailOH
         val candidates = Wire(Vec(entries, new StoreQueueEntry(bp)))
         val active = Wire(Vec(entries, Bool()))
         val hits = Wire(Vec(4, Vec(entries, Bool())))
         for (position <- 0 until entries) {
-            val identity = retreat(boundary, position + 1)
-            val entry = storage(slot(identity))
+            val identityOH = FIFOUtil.rotate(boundaryOH, ringEntries - position - 1)
+            val identity = OHToUInt(identityOH)
+            val slotOH = identityOH(entries - 1, 0) | identityOH(ringEntries - 1, entries)
+            val entry = Mux1H(slotOH.asBools, storage)
             candidates(position) := entry
             when(io.address.fire && entry.valid && entry.identity === io.address.bits.sqIdx) {
                 candidates(position).addressValid := true.B
@@ -340,37 +400,52 @@ class StoreQueue(
                     candidates(position).mask(byte) && query.bits.mask(byte)
             }
         }
-        val hitStage = Reg(Vec(4, UInt(entries.W)))
+        val winnerStage = Reg(Vec(4, UInt(entries.W)))
         val dataStage = Reg(Vec(entries, UInt(32.W)))
         val dataValidStage = Reg(UInt(entries.W))
         val unknownStage = Reg(Bool())
         val resultQuery = Reg(new LoadSQQuery(load))
         val resultValid = RegInit(false.B)
+        // Payload is unobservable unless resultValid is set. Sampling it every
+        // cycle keeps request valid out of every wide forwarding register D mux.
+        for (byte <- 0 until 4) {
+            val hitBits = hits(byte).asUInt
+            var prefix = hitBits
+            var distance = 1
+            while (distance < entries) {
+                prefix = (prefix | (prefix << distance))(entries - 1, 0)
+                distance *= 2
+            }
+            val youngerHit = (prefix << 1)(entries - 1, 0)
+            winnerStage(byte) := hitBits & ~youngerHit
+        }
+        for (index <- 0 until entries) { dataStage(index) := queryData(index) }
+        dataValidStage := VecInit(candidates.map(_.dataValid)).asUInt
+        unknownStage := VecInit(active.zip(candidates).map { case (valid, entry) =>
+            valid && !entry.addressValid
+        }).asUInt.orR
+        resultQuery := query.bits
         when(io.flush) {
             resultValid := false.B
         }.otherwise {
             resultValid := query.valid
-            when(query.valid) {
-                for (byte <- 0 until 4) { hitStage(byte) := hits(byte).asUInt }
-                for (position <- 0 until entries) { dataStage(position) := candidates(position).data }
-                dataValidStage := VecInit(candidates.map(_.dataValid)).asUInt
-                unknownStage := VecInit(active.zip(candidates).map { case (valid, entry) =>
-                    valid && !entry.addressValid
-                }).asUInt.orR
-                resultQuery := query.bits
-            }
         }
         val resultBytes = Wire(Vec(4, UInt(8.W)))
         val resultMask = Wire(Vec(4, Bool()))
         val blockedBytes = Wire(Vec(4, Bool()))
+        val physicalAtPosition = (0 until entries).map { position =>
+            val identityOH = FIFOUtil.rotate(resultQuery.sqTailOH, ringEntries - position - 1)
+            identityOH(entries - 1, 0) | identityOH(ringEntries - 1, entries)
+        }
         for (byte <- 0 until 4) {
-            val select = PriorityEncoderOH(hitStage(byte))
+            val select = winnerStage(byte)
+            val physicalSelect = Mux1H(select.asBools, physicalAtPosition)
             val dataBytes = Wire(Vec(entries, UInt(8.W)))
-            for (position <- 0 until entries) {
-                dataBytes(position) := dataStage(position)(8 * byte + 7, 8 * byte)
+            for (index <- 0 until entries) {
+                dataBytes(index) := dataStage(index)(8 * byte + 7, 8 * byte)
             }
-            resultBytes(byte) := Mux1H(select, dataBytes)
-            resultMask(byte) := hitStage(byte).orR
+            resultBytes(byte) := Mux1H(physicalSelect, dataBytes)
+            resultMask(byte) := select.orR
             blockedBytes(byte) := resultMask(byte) && !Mux1H(select, dataValidStage.asBools)
         }
         io.query(port).response.valid := resultValid
@@ -383,5 +458,7 @@ class StoreQueue(
     when(!io.flush) {
         assert(allocated <= entries.U && committed <= allocated)
         assert((io.enqueue.valid & ~io.request.valid) === 0.U)
+        assert((io.enqueue.valid & ~io.enqueue.writeValid) === 0.U)
     }
+    assert(PopCount(headSlotOH) === 1.U && headSlotOH === UIntToOH(slot(head), entries))
 }

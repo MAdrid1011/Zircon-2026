@@ -48,6 +48,7 @@ class AtomicStoreIO extends Bundle {
 class AtomicUnitIO(p: BackendParams, cache: DCacheParams, observe: Boolean) extends Bundle {
     val request = Flipped(Decoupled(new AtomicRequest(p)))
     val response = Decoupled(new AtomicResponse(p))
+    val writeResult = Output(Bool())
     val clearReservation = Input(Bool())
     val busy = Output(Bool())
 
@@ -68,6 +69,7 @@ class AtomicUnit(
     val request = RegInit(0.U.asTypeOf(new AtomicRequest(p)))
     val result = RegInit(0.U(32.W))
     val exception = RegInit(0.U(4.W))
+    val responseWritesResult = RegInit(false.B)
     val reservationValid = RegInit(false.B)
     val reservationAddress = RegInit(0.U(32.W))
 
@@ -76,18 +78,20 @@ class AtomicUnit(
     val reservationHit = reservationValid && reservationAddress === request.paddr(33, 2)
     val signedLess = request.data.asSInt < result.asSInt
     val unsignedLess = request.data < result
-    val storeData = MuxLookup(request.op, request.data)(Seq(
-        0.U -> (result + request.data),
-        1.U -> request.data,
-        3.U -> request.data,
-        4.U -> (result ^ request.data),
-        8.U -> (result | request.data),
-        12.U -> (result & request.data),
-        16.U -> Mux(signedLess, request.data, result),
-        20.U -> Mux(signedLess, result, request.data),
-        24.U -> Mux(unsignedLess, request.data, result),
-        28.U -> Mux(unsignedLess, result, request.data),
-    ))
+    val operationCodes = Seq(0, 4, 8, 12, 16, 20, 24, 28)
+    val operationSelect = VecInit(operationCodes.map(op => request.op === op.U)).asUInt
+    val operationData = Seq(
+        BLevelPAdder32.sum(result, request.data, 0.U),
+        result ^ request.data,
+        result | request.data,
+        result & request.data,
+        Mux(signedLess, request.data, result),
+        Mux(signedLess, result, request.data),
+        Mux(unsignedLess, request.data, result),
+        Mux(unsignedLess, result, request.data),
+    )
+    val storeData = Mux1H(operationSelect.asBools :+ !operationSelect.orR, operationData :+ request.data)
+    assert(PopCount(operationSelect) <= 1.U, "AMO operation selects must be disjoint")
 
     io.request.ready := state === idle
     io.response.valid := state === respond
@@ -96,6 +100,8 @@ class AtomicUnit(
     io.response.bits.vaddr := request.vaddr
     io.response.bits.data := result
     io.response.bits.exception := exception
+    // The result-write flag is set only on entry to respond and cleared on its fire.
+    io.writeResult := io.response.ready && responseWritesResult
     io.busy := state =/= idle
 
     io.load.request.valid := state === loadRequest
@@ -130,6 +136,7 @@ class AtomicUnit(
         request := io.request.bits
         result := 0.U
         exception := io.request.bits.exception
+        responseWritesResult := false.B
         when(io.request.bits.exception.orR || io.request.bits.uncache) {
             exception := Mux(
                 io.request.bits.exception.orR,
@@ -143,6 +150,7 @@ class AtomicUnit(
                 state := storeRequest
             }.otherwise {
                 result := 1.U
+                responseWritesResult := io.request.bits.prd =/= 0.U
                 state := respond
             }
         }.otherwise {
@@ -158,6 +166,7 @@ class AtomicUnit(
     when(state === loadWait && io.load.response.valid) {
         result := io.load.response.bits.data
         exception := io.load.response.bits.exception
+        responseWritesResult := false.B
         when(io.load.response.bits.retry) {
             state := loadRequest
         }.elsewhen(io.load.response.bits.exception.orR) {
@@ -165,6 +174,7 @@ class AtomicUnit(
         }.elsewhen(isLr) {
             reservationValid := true.B
             reservationAddress := request.paddr(33, 2)
+            responseWritesResult := request.prd =/= 0.U
             state := respond
         }.otherwise {
             state := storeRequest
@@ -175,18 +185,23 @@ class AtomicUnit(
     }
     when(io.store.response.fire) {
         exception := io.store.response.bits.exception
+        responseWritesResult := !io.store.response.bits.exception.orR && request.prd =/= 0.U
         when(isSc && !io.store.response.bits.exception.orR) {
             result := 0.U
         }
         state := respond
     }
     when(io.response.fire) {
+        responseWritesResult := false.B
         state := idle
     }
 
     when(state === storeRequest || state === storeWait) {
         assert(!isLr)
         assert(!isSc || reservationHit || !reservationValid)
+    }
+    when(responseWritesResult) {
+        assert(state === respond, "Atomic result write must belong to a response")
     }
 
     if (observe) {

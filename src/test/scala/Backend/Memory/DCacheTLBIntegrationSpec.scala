@@ -115,6 +115,7 @@ class DCacheTLBIntegrationDriver(val dut: DCache) extends chisel3.simulator.Peek
         dut.io.tlb.get.refill.bits.superpage.poke(superpage)
         step()
         dut.io.tlb.get.refill.valid.poke(false)
+        step()
     }
 
     def presentLoad(lane: Int, vaddr: BigInt, slot: Int): Unit = {
@@ -227,7 +228,7 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "lane 1 D1 lookup has priority over STA and a 4 MiB entry translates the held STA" in {
+    "lane 1 and STA translate in parallel while simultaneous misses preserve load priority" in {
         simulate(new DCache(DualPortRamBackend.Registers, DCacheParams(), tlbEnabled = true)) { dut =>
             val d = new DCacheTLBIntegrationDriver(dut)
             d.initialize()
@@ -245,16 +246,36 @@ class DCacheTLBIntegrationSpec extends AnyFreeSpec with ChiselSim {
             dut.io.storeTranslation.get.request.bits.vaddr.poke(storeVa)
             dut.io.storeTranslation.get.request.bits.uncache.poke(false)
             dut.io.storeTranslation.get.request.bits.exception.poke(0)
-            // Once the registered load reaches D1, it owns lane 1's DTLB lookup for this cycle.
-            dut.io.storeTranslation.get.response.miss.expect(true)
+            // Load lane 1 and STA use independent combinational DTLB read ports.
+            dut.io.storeTranslation.get.response.miss.expect(false)
+            dut.io.storeTranslation.get.response.paddr.expect((superPpn1 << 22) | (storeVa & 0x3fffff))
             dut.io.tlbMiss.get(1).valid.expect(false)
             d.step()
 
-            // A continuously presented younger load cannot replace the lookup and starve STA.
             dut.io.storeTranslation.get.response.miss.expect(false)
             dut.io.storeTranslation.get.response.paddr.expect((superPpn1 << 22) | (storeVa & 0x3fffff))
             dut.io.storeTranslation.get.response.exception.expect(0)
             dut.io.load(1).req.valid.poke(false)
+
+            dut.io.storeTranslation.get.request.valid.poke(false)
+            d.step()
+            val loadMissVa = BigInt("61234004", 16)
+            val storeMissVa = BigInt("62345008", 16)
+            d.presentLoad(1, loadMissVa, 6)
+            d.step()
+            dut.io.load(1).req.valid.poke(false)
+            dut.io.storeTranslation.get.request.valid.poke(true)
+            dut.io.storeTranslation.get.request.bits.vaddr.poke(storeMissVa)
+            dut.io.storeTranslation.get.response.miss.expect(true)
+            dut.io.tlbMiss.get(1).valid.expect(true)
+            dut.io.tlbMiss.get(1).bits.vaddr.expect(loadMissVa)
+            dut.io.tlbMiss.get(1).bits.store.expect(false)
+            d.step()
+
+            dut.io.storeTranslation.get.response.miss.expect(true)
+            dut.io.tlbMiss.get(1).valid.expect(true)
+            dut.io.tlbMiss.get(1).bits.vaddr.expect(storeMissVa)
+            dut.io.tlbMiss.get(1).bits.store.expect(true)
         }
     }
 

@@ -9,13 +9,10 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 MEMORY = ROOT / 'eda/platforms/nangate45/memory'
 PATTERN = re.compile(r'SinglePortMaskedRam_(\d+)_(\d+)_(\d+)')
+PREDICTOR_PATTERN = re.compile(r'PredictorBsgFakeram_(\d+)_(\d+)')
 DUAL_PORT_MACROS = (
     ("fakeram45_1rw1r_16x25", 16, 25, 0),
     ("fakeram45_1rw1r_16x32", 16, 32, 4),
-    ("fakeram45_1rw1r_64x24", 64, 24, 0),
-    ("fakeram45_1rw1r_128x45", 128, 45, 0),
-    ("fakeram45_1rw1r_256x8", 256, 8, 0),
-    ("fakeram45_1rw1r_512x16", 512, 16, 0),
 )
 
 
@@ -258,10 +255,52 @@ def _dual_port_lef(name, depth, width, mask_width, area):
     return '\n'.join(lines)
 
 
+def _predictor_wrapper(depth, width):
+    name = f'PredictorBsgFakeram_{depth}_{width}'
+    macro = f'fakeram45_1rw1r_{depth}x{width}'
+    address_width = max(1, (depth - 1).bit_length())
+    return f'''module {name} (
+    input clock,
+    input csb0,
+    input csb1,
+    input web0,
+    input [{address_width - 1}:0] addr0,
+    input [{address_width - 1}:0] addr1,
+    input [{width - 1}:0] din0,
+    output [{width - 1}:0] dout0,
+    output [{width - 1}:0] dout1
+);
+    wire csb0_buffered;
+    wire csb1_buffered;
+    wire web0_buffered;
+    wire [{address_width - 1}:0] addr0_buffered;
+    wire [{address_width - 1}:0] addr1_buffered;
+
+    BUF_X1 csb0_buffer (.A(csb0), .Z(csb0_buffered));
+    BUF_X1 csb1_buffer (.A(csb1), .Z(csb1_buffered));
+    BUF_X1 web0_buffer (.A(web0), .Z(web0_buffered));
+    for (genvar bit_index = 0; bit_index < {address_width}; bit_index = bit_index + 1) begin : address_buffers
+        BUF_X1 addr0_buffer (.A(addr0[bit_index]), .Z(addr0_buffered[bit_index]));
+        BUF_X1 addr1_buffer (.A(addr1[bit_index]), .Z(addr1_buffered[bit_index]));
+    end
+
+    {macro} ram (
+        .clock(clock), .csb0(csb0_buffered), .csb1(csb1_buffered), .web0(web0_buffered),
+        .addr0(addr0_buffered), .addr1(addr1_buffered),
+        .din0(din0), .dout0(dout0), .dout1(dout1)
+    );
+endmodule'''
+
+
 def generate(rtl, output):
     output.mkdir(parents=True, exist_ok=True)
     macros = catalog()
     wrappers, bindings, used = [], [], {}
+    predictor_shapes = sorted({
+        tuple(map(int, match.groups()))
+        for path in rtl.glob('*.sv')
+        for match in PREDICTOR_PATTERN.finditer(path.read_text())
+    })
     for path in sorted(rtl.glob('SinglePortMaskedRam_*.sv')):
         match = PATTERN.fullmatch(path.stem)
         if not match:
@@ -324,7 +363,16 @@ def generate(rtl, output):
     if not bindings:
         raise ValueError('No synchronous RAM wrappers were emitted')
 
-    for name, depth, width, mask_width in DUAL_PORT_MACROS:
+    dual_port_macros = list(DUAL_PORT_MACROS)
+    known_dual_port = {name for name, _, _, _ in dual_port_macros}
+    for depth, width in predictor_shapes:
+        name = f'fakeram45_1rw1r_{depth}x{width}'
+        if name not in known_dual_port:
+            dual_port_macros.append((name, depth, width, 0))
+            known_dual_port.add(name)
+        wrappers.append(_predictor_wrapper(depth, width))
+
+    for name, depth, width, mask_width in dual_port_macros:
         exact_depth = [macro for macro in macros if macro['depth'] == depth]
         parts = choose(depth, width, exact_depth or macros)
         base = max(parts, key=lambda macro: _timing_parameters(macro)['clock_to_q_ns'])

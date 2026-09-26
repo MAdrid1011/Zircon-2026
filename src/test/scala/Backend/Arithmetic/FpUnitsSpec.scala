@@ -32,7 +32,8 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
         flags: UInt,
         outTag: UInt,
         depth: Int,
-        tagWidth: Int
+        tagWidth: Int,
+        convertControls: Option[(Bool, Bool)] = None
     ): Unit = {
         val vectors = new Random(20260914).shuffle(samples.filter(x => (x.op >= 11) == (depth == 2)))
         assert(vectors.map(_.op).toSet == (if (depth == 2) (11 to 14).toSet else (0 to 10).toSet))
@@ -52,6 +53,10 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
             inValid.poke(input.nonEmpty); outReady.poke(ready)
             src1.poke(data.a); src2.foreach(_.poke(data.b))
             op.poke(data.op); rm.foreach(_.poke(data.rm)); inTag.poke(tag)
+            convertControls.foreach { case (toFloat, signedInt) =>
+                toFloat.poke(data.op >= 13)
+                signedInt.poke(data.op == 11 || data.op == 13)
+            }
             val active = !rst && !kill
             val lastReady = pipe.last.isEmpty || ready
             val firstReady = if (depth == 1) lastReady else pipe.head.isEmpty || lastReady
@@ -153,7 +158,8 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.out.bits.fflags,
                 dut.io.out.bits.tag,
                 depth = 2,
-                tagWidth = 7
+                tagWidth = 7,
+                convertControls = Some(dut.io.in.bits.toFloat -> dut.io.in.bits.signedInt)
             )
         }
     }

@@ -53,15 +53,15 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
     val selectedVaddr = Mux(
         chooseInstruction,
         io.instruction.miss.bits.pc,
-        Mux1H(io.data.miss.map(_.valid), io.data.miss.map(_.bits.vaddr)),
+        Mux(io.data.miss(0).valid, io.data.miss(0).bits.vaddr, io.data.miss(1).bits.vaddr),
     )
 
     val requestState = state === levelOneRequest || state === levelZeroRequest
     val responseState = state === levelOneResponse || state === levelZeroResponse
-    io.iptw.req.valid := sourceInstruction && requestState
+    io.iptw.req.valid := sourceInstruction && requestState && !cancelled && !io.flush
     io.iptw.req.bits.paddr := pteAddress
     io.iptw.rsp.ready := sourceInstruction && responseState
-    io.dptw.req.valid := !sourceInstruction && requestState
+    io.dptw.req.valid := !sourceInstruction && requestState && !cancelled && !io.flush
     io.dptw.req.bits.paddr := pteAddress
     io.dptw.rsp.ready := !sourceInstruction && responseState
 
@@ -72,9 +72,9 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
     val requestFire = Mux(sourceInstruction, io.iptw.req.fire, io.dptw.req.fire)
     val responseFire = responseValid && Mux(sourceInstruction, io.iptw.rsp.ready, io.dptw.rsp.ready)
 
-    io.instruction.refill.valid := state === emitRefill && sourceInstruction && !cancelled
+    io.instruction.refill.valid := state === emitRefill && sourceInstruction && !cancelled && !io.flush
     io.instruction.refill.bits := result
-    io.data.refill.valid := state === emitRefill && !sourceInstruction && !cancelled
+    io.data.refill.valid := state === emitRefill && !sourceInstruction && !cancelled && !io.flush
     io.data.refill.bits := result
     io.busy := state =/= idle
 
@@ -130,7 +130,7 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
             state := emitRefill
         }.otherwise {
             inheritedGlobal := inheritedGlobal || pte.global
-            pteAddress := Cat(pte.ppn, 0.U(12.W)) + Cat(0.U(22.W), vaddr(21, 12), 0.U(2.W))
+            pteAddress := Cat(pte.ppn, vaddr(21, 12), 0.U(2.W))
             state := levelZeroRequest
         }
     }
@@ -142,13 +142,12 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
     switch(state) {
         is(idle) {
             cancelled := false.B
-            when(instructionMiss || dataMiss) {
+            when(!io.flush && (instructionMiss || dataMiss)) {
                 sourceInstruction := chooseInstruction
                 sourceLane := selectedDataLane
                 vaddr := selectedVaddr
                 asid := io.control.asid
-                pteAddress := Cat(io.rootPpn, 0.U(12.W)) +
-                    Cat(0.U(22.W), selectedVaddr(31, 22), 0.U(2.W))
+                pteAddress := Cat(io.rootPpn, selectedVaddr(31, 22), 0.U(2.W))
                 inheritedGlobal := false.B
                 result := pageFaultRefill(selectedVaddr, io.control.asid)
                 preferInstruction := !chooseInstruction
@@ -183,10 +182,15 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
             state := waitDrop
         }
         is(waitDrop) {
+            val instructionStillAsserted = io.instruction.miss.valid &&
+                io.instruction.miss.bits.pc === vaddr
+            val dataStillAsserted = VecInit(io.data.miss.map { miss =>
+                miss.valid && miss.bits.vaddr === vaddr
+            })
             val sourceStillAsserted = Mux(
                 sourceInstruction,
-                io.instruction.miss.valid && io.instruction.miss.bits.pc === vaddr,
-                io.data.miss(sourceLane).valid && io.data.miss(sourceLane).bits.vaddr === vaddr,
+                instructionStillAsserted,
+                dataStillAsserted(sourceLane),
             )
             when(!sourceStillAsserted || cancelled) {
                 state := idle

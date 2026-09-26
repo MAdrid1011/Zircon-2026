@@ -39,6 +39,17 @@ class ReadyBoard(
     private val fpReady = RegInit(VecInit(Seq.fill(p.numFpPhys)(true.B)))
     private val intSpec = RegInit(VecInit(Seq.fill(p.numIntPhys)(0.U(p.specWidth.W))))
     private val fpSpec = RegInit(VecInit(Seq.fill(p.numFpPhys)(0.U(p.specWidth.W))))
+    // Allocation is consumed one edge after Rename accepts it. Queries bypass
+    // this narrow pending register, preserving the original externally visible
+    // not-ready cycle without placing admission on every scoreboard D-input.
+    private val delayedAllocate = RegInit(VecInit.fill(width)(
+        0.U.asTypeOf(Valid(UInt(p.tagWidth.W)))
+    ))
+    val nextAllocate = WireDefault(io.allocate)
+    when(io.flush) {
+        nextAllocate.foreach(_.valid := false.B)
+    }
+    delayedAllocate := nextAllocate
 
     private def updateDomain(
         ready: Vec[Bool],
@@ -46,34 +57,32 @@ class ReadyBoard(
         isFp: Boolean,
     ): Unit = {
         val indexWidth = log2Ceil(if (isFp) p.numFpPhys else p.numIntPhys)
-        // Maintain every live speculation tag, then update only the dynamically
-        // indexed wakeup and allocation destinations as in Zircon-2024.
+        // Wakeup destinations are mutually exclusive. Decode every port in
+        // parallel so a late producer valid does not traverse eight writes.
         for (index <- ready.indices) {
-            ready(index) := ready(index) && !(spec(index) & io.speculation.failedMask).orR
-            spec(index) := spec(index) & ~io.speculation.resolvedMask
-        }
-
-        for (wakeup <- io.wakeup) {
-            val valid = wakeup.prd =/= 0.U && wakeup.prd(p.tagWidth - 1) === isFp.B
-            val index = wakeup.prd(indexWidth - 1, 0)
-            when(valid) {
-                ready(index) := !(wakeup.specMask & io.speculation.failedMask).orR
-                spec(index) := wakeup.specMask & ~io.speculation.resolvedMask
+            val allocated = delayedAllocate.map { entry =>
+                entry.valid && entry.bits(p.tagWidth - 1) === isFp.B &&
+                    entry.bits(indexWidth - 1, 0) === index.U
+            }.reduce(_ || _)
+            val wakeHits = io.wakeup.map { wakeup =>
+                wakeup.prd =/= 0.U && wakeup.prd(p.tagWidth - 1) === isFp.B &&
+                    wakeup.prd(indexWidth - 1, 0) === index.U
             }
-        }
-
-        for (entry <- io.allocate) {
-            val valid = entry.valid && entry.bits(p.tagWidth - 1) === isFp.B
-            val index = entry.bits(indexWidth - 1, 0)
-            when(valid) {
+            val wakeAny = wakeHits.reduce(_ || _)
+            val wakeMask = Mux1H(wakeHits, io.wakeup.map(_.specMask))
+            when(io.flush) {
+                ready(index) := true.B
+                spec(index) := 0.U
+            }.elsewhen(wakeAny) {
+                ready(index) := !(wakeMask & io.speculation.failedMask).orR
+                spec(index) := wakeMask & ~io.speculation.resolvedMask
+            }.elsewhen(allocated) {
                 ready(index) := false.B
                 spec(index) := 0.U
+            }.otherwise {
+                ready(index) := ready(index) && !(spec(index) & io.speculation.failedMask).orR
+                spec(index) := spec(index) & ~io.speculation.resolvedMask
             }
-        }
-
-        when(io.flush) {
-            ready := VecInit.fill(ready.length)(true.B)
-            spec := VecInit.fill(spec.length)(0.U(p.specWidth.W))
         }
     }
 
@@ -88,13 +97,17 @@ class ReadyBoard(
         val fpIndex = index(log2Ceil(p.numFpPhys) - 1, 0)
         val storedReady = Mux(isFp, fpReady(fpIndex), intReady(intIndex))
         val storedMask = Mux(isFp, fpSpec(fpIndex), intSpec(intIndex))
+        val pendingAllocation = delayedAllocate.map { entry =>
+            entry.valid && entry.bits === query.prs(source)
+        }.reduce(_ || _)
         // The IssueQueue applies the current-cycle wakeup again when it writes
         // an incoming entry. Keep this query on registered ReadyBoard state so
         // wakeup does not form a combinational ReadyBoard-to-dispatch path.
         io.state(lane).ready(source) :=
-            !query.valid(source) || storedReady && !(storedMask & io.speculation.failedMask).orR
+            !query.valid(source) || !pendingAllocation && storedReady &&
+                !(storedMask & io.speculation.failedMask).orR
         io.state(lane).specMask(source) := Mux(
-            query.valid(source),
+            query.valid(source) && !pendingAllocation,
             storedMask & ~io.speculation.resolvedMask,
             0.U,
         )

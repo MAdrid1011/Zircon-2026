@@ -4,9 +4,9 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.FrontendParams
 
 class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
-    "different histories retain different targets for one indirect branch" in {
+    private def checkTargets(backend: DualPortRamBackend): Unit = {
         val p = FrontendParams(fetchWidth = 4, ittageSets = 8)
-        simulate(new IndirectTargetPredictor(p)) { d =>
+        simulate(new IndirectTargetPredictor(p, backend)) { d =>
             case class Lookup(
                 indices: Seq[BigInt],
                 tags: Seq[BigInt],
@@ -50,7 +50,7 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
                 )
             }
 
-            def train(meta: Lookup, actual: BigInt, predicted: BigInt): Unit = {
+            def train(meta: Lookup, actual: BigInt, predicted: BigInt, collideRead: Boolean = false): Unit = {
                 d.io.train.bits.poke(0.U.asTypeOf(new FrontendTraining(p)))
                 d.io.train.bits.pcWord.poke(pc >> 2)
                 d.io.train.bits.mask.poke(1)
@@ -73,9 +73,19 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
                 d.io.trainRead.bits.poke(d.io.train.bits.peek())
                 d.io.trainRead.valid.poke(true)
                 d.clock.step()
-                d.io.trainRead.valid.poke(false)
+                d.io.trainRead.valid.poke(collideRead)
                 d.io.train.valid.poke(true)
                 d.clock.step()
+                if (collideRead) {
+                    // The colliding read must see the just-allocated valid bit
+                    // and row on the next edge, so this provider hit trains
+                    // confidence instead of silently missing the row.
+                    d.io.trainRead.valid.poke(false)
+                    d.io.train.bits.meta.ittage.providers(0).poke(1)
+                    d.io.train.bits.meta.ittage.providerTargets(0).poke(actual)
+                    d.io.train.bits.meta.ittage.predictedTargets(0).poke(actual)
+                    d.clock.step()
+                }
                 clearTrain()
             }
 
@@ -84,9 +94,10 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
 
             val emptyA = lookup(0x11)
             assert(emptyA.providers.head == 0)
-            train(emptyA, targetA, baseTarget)
+            train(emptyA, targetA, baseTarget, collideRead = true)
             val weakA = lookup(0x11)
-            assert(weakA.providers.head != 0 && weakA.providerTargets.head == targetA)
+            assert(weakA.providers.head != 0 && weakA.providerTargets.head == targetA &&
+                weakA.confidence.head > 0)
             train(weakA, targetA, baseTarget)
 
             val emptyB = lookup(0x62)
@@ -101,5 +112,13 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
             assert(learnedA.providerTargets.head == targetA && learnedA.confidence.head > 0)
             assert(learnedB.providerTargets.head == targetB && learnedB.confidence.head > 0)
         }
+    }
+
+    "register RAM: different histories retain different indirect targets" in {
+        checkTargets(DualPortRamBackend.Registers)
+    }
+
+    "BSG RAM: different histories retain different indirect targets" in {
+        checkTargets(DualPortRamBackend.BSG)
     }
 }

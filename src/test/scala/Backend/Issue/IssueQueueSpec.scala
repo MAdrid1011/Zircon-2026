@@ -24,12 +24,20 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
     private def initialize(dut: IssueQueue): Unit = {
         dut.io.enq.valid.poke(0)
-        dut.io.enq.entries.foreach(clearEnqueue)
+        dut.io.enq.candidates.foreach(clearEnqueue)
+        dut.io.enq.selection.zipWithIndex.foreach { case (selection, lane) =>
+            selection.poke(BigInt(1) << lane)
+        }
         dut.io.issue.ready.poke(false)
         dut.io.wakeup.foreach { wakeup =>
             wakeup.prd.poke(0)
             wakeup.specMask.poke(0)
         }
+        dut.io.directWakeup.foreach(_.foreach { wakeup =>
+            wakeup.valid.poke(false)
+            wakeup.prd.poke(0)
+            wakeup.specMask.poke(0)
+        })
         dut.io.speculation.resolvedMask.poke(0)
         dut.io.speculation.failedMask.poke(0)
         dut.io.flush.poke(false)
@@ -83,9 +91,9 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
     ): Unit = {
         require(items.nonEmpty && items.size <= dut.q.enqueueWidth)
         dut.io.enq.valid.poke((1 << items.size) - 1)
-        dut.io.enq.entries.foreach(clearEnqueue)
+        dut.io.enq.candidates.foreach(clearEnqueue)
         items.zipWithIndex.foreach { case ((rob, fu, op, tag, ready), lane) =>
-            packageEntry(dut.io.enq.entries(lane), rob, fu, op, tag, ready)
+            packageEntry(dut.io.enq.candidates(lane), rob, fu, op, tag, ready)
         }
         dut.clock.step()
         dut.io.enq.valid.poke(0)
@@ -117,14 +125,77 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.issue.bits.robIdx.expect(1)
 
             dut.io.enq.valid.poke(3)
-            packageEntry(dut.io.enq.entries(0), 3, DecodeUnit.ALU)
-            packageEntry(dut.io.enq.entries(1), 4, DecodeUnit.Branch)
+            packageEntry(dut.io.enq.candidates(0), 3, DecodeUnit.ALU)
+            packageEntry(dut.io.enq.candidates(1), 4, DecodeUnit.Branch)
             dut.clock.step()
             dut.io.enq.valid.poke(0)
             dut.io.issue.bits.robIdx.expect(3)
             dut.io.occupancy.expect(2)
             dut.clock.step()
             dut.io.issue.bits.robIdx.expect(4)
+        }
+    }
+
+    "dispatch source selection maps sparse original lanes directly into free physical slots" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, enqueueWidth = 3, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.enq.valid.poke(3)
+            packageEntry(dut.io.enq.candidates(0), 10, DecodeUnit.ALU)
+            packageEntry(dut.io.enq.candidates(1), 11, DecodeUnit.ALU)
+            packageEntry(dut.io.enq.candidates(2), 12, DecodeUnit.Branch)
+            dut.io.enq.selection(0).poke(4)
+            dut.io.enq.selection(1).poke(1)
+            dut.io.enq.selection(2).poke(2)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+
+            dut.io.occupancy.expect(2)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(12)
+            dut.io.issue.ready.poke(true)
+            dut.clock.step()
+            dut.io.issue.bits.robIdx.expect(10)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+            dut.io.occupancy.expect(0)
+        }
+    }
+
+    "candidate-level arithmetic wakeup updates a waiting source in the issue cycle" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 2)) { dut =>
+            initialize(dut)
+            enqueue(dut, Seq((1, DecodeUnit.ALU, 0, Some(9), false)))
+            dut.io.issue.valid.expect(false)
+
+            dut.io.directWakeup.get(0).valid.poke(true)
+            dut.io.directWakeup.get(0).prd.poke(9)
+            dut.clock.step()
+            dut.io.directWakeup.get(0).valid.poke(false)
+
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(1)
+        }
+    }
+
+    "flush discards a coincident candidate wakeup and its queued consumer" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>
+            initialize(dut)
+            enqueue(dut, Seq((1, DecodeUnit.ALU, 0, Some(9), false)))
+            dut.io.directWakeup.get(0).valid.poke(true)
+            dut.io.directWakeup.get(0).prd.poke(9)
+            dut.io.flush.poke(true)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
+            dut.io.flush.poke(false)
+            dut.io.directWakeup.get(0).valid.poke(false)
+            dut.io.occupancy.expect(0)
+            dut.io.issue.valid.expect(false)
+
+            enqueue(dut, Seq((2, DecodeUnit.ALU, 0, Some(9), false)))
+            dut.io.issue.valid.expect(false)
         }
     }
 
@@ -158,7 +229,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             initialize(dut)
             dut.io.enq.valid.poke(1)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 12,
                 DecodeUnit.ALU,
                 sourceTag = Some(5),
@@ -205,8 +276,8 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
                 )
             )
             dut.io.enq.valid.poke(3)
-            packageEntry(dut.io.enq.entries(0), 24, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
-            packageEntry(dut.io.enq.entries(1), 25, DecodeUnit.Divide, DivideOp.REM)
+            packageEntry(dut.io.enq.candidates(0), 24, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
+            packageEntry(dut.io.enq.candidates(1), 25, DecodeUnit.Divide, DivideOp.REM)
             dut.io.flush.poke(true)
             dut.clock.step()
             dut.io.enq.valid.poke(0)
@@ -257,7 +328,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.issue.ready.poke(true)
             dut.io.enq.valid.poke(1)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 42,
                 DecodeUnit.Multiply,
                 MultiplyOp.MUL.litValue.toInt,
@@ -284,7 +355,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.issue.ready.poke(true)
             dut.io.enq.valid.poke(1)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 43,
                 DecodeUnit.Multiply,
                 MultiplyOp.MUL.litValue.toInt,
@@ -405,8 +476,8 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.completed.get.valid.poke(true)
             dut.io.completed.get.bits.robIdx.poke(52)
             dut.io.enq.valid.poke(3)
-            packageEntry(dut.io.enq.entries(0), 56, DecodeUnit.Store)
-            packageEntry(dut.io.enq.entries(1), 57, DecodeUnit.Store)
+            packageEntry(dut.io.enq.candidates(0), 56, DecodeUnit.Store)
+            packageEntry(dut.io.enq.candidates(1), 57, DecodeUnit.Store)
             dut.clock.step()
             dut.io.completed.get.valid.poke(false)
             dut.io.enq.valid.poke(0)
@@ -445,6 +516,9 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(1)
             dut.io.issue.valid.expect(false)
+            // Let the pending snapshot enter replay before resolving it; this
+            // case checks retained replay state rather than lookahead release.
+            dut.clock.step()
             dut.io.speculation.resolvedMask.poke(1)
             dut.clock.step()
             dut.io.speculation.resolvedMask.poke(0)
@@ -538,9 +612,9 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             initialize(dut)
             dut.io.issue.ready.poke(true)
             dut.io.enq.valid.poke(3)
-            packageEntry(dut.io.enq.entries(0), 20, DecodeUnit.ALU)
+            packageEntry(dut.io.enq.candidates(0), 20, DecodeUnit.ALU)
             packageEntry(
-                dut.io.enq.entries(1),
+                dut.io.enq.candidates(1),
                 21,
                 DecodeUnit.ALU,
                 sourceTag = Some(7),
@@ -567,6 +641,8 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(1)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(21)
             dut.clock.step()
@@ -596,10 +672,10 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.issue.bits.robIdx.expect(7)
             dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(1)
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(2)
 
-            dut.io.speculation.resolvedMask.poke(1)
             dut.clock.step()
             dut.io.speculation.resolvedMask.poke(0)
             dut.io.replayOccupancy.expect(0)
@@ -613,14 +689,14 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.issue.ready.poke(true)
             dut.io.enq.valid.poke(3)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 16,
                 DecodeUnit.ALU,
                 sourceTag = Some(10),
                 sourceSpecMask = 1,
             )
             packageEntry(
-                dut.io.enq.entries(1),
+                dut.io.enq.candidates(1),
                 17,
                 DecodeUnit.ALU,
                 sourceTag = Some(11),
@@ -631,13 +707,15 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.issue.bits.robIdx.expect(16)
             dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(1)
             dut.io.occupancy.expect(1)
             dut.io.replayOccupancy.expect(1)
+            // The one-cycle pending snapshot conservatively retains its replay
+            // reservation until the registered resolution is consumed.
             dut.io.issue.valid.expect(false)
-
-            dut.io.speculation.resolvedMask.poke(1)
             dut.clock.step()
             dut.io.speculation.resolvedMask.poke(0)
+            dut.io.replayOccupancy.expect(0)
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(17)
             dut.clock.step()
@@ -654,7 +732,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.enq.valid.poke(1)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 54,
                 DecodeUnit.ALU,
                 sourceTag = Some(10),
@@ -667,13 +745,13 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.enq.valid.poke(3)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 55,
                 DecodeUnit.ALU,
                 sourceTag = Some(11),
                 sourceSpecMask = 2,
             )
-            packageEntry(dut.io.enq.entries(1), 56, DecodeUnit.ALU)
+            packageEntry(dut.io.enq.candidates(1), 56, DecodeUnit.ALU)
             dut.clock.step()
             dut.io.enq.valid.poke(0)
 
@@ -697,14 +775,14 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.issue.ready.poke(true)
             dut.io.enq.valid.poke(3)
             packageEntry(
-                dut.io.enq.entries(0),
+                dut.io.enq.candidates(0),
                 56,
                 DecodeUnit.ALU,
                 sourceTag = Some(12),
                 sourceSpecMask = 1,
             )
             packageEntry(
-                dut.io.enq.entries(1),
+                dut.io.enq.candidates(1),
                 57,
                 DecodeUnit.Branch,
                 sourceTag = Some(13),
@@ -754,16 +832,16 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
                     val ready = tag.isEmpty || random.nextBoolean()
                     val rob = id & ((1 << backend.robWidth) - 1)
                     packageEntry(
-                        dut.io.enq.entries(lane),
+                        dut.io.enq.candidates(lane),
                         rob,
                         if (random.nextBoolean()) DecodeUnit.ALU else DecodeUnit.Branch,
                         sourceTag = tag,
                         sourceReady = ready,
                     )
-                    dut.io.enq.entries(lane).inst.poke(id)
+                    dut.io.enq.candidates(lane).inst.poke(id)
                     ReferenceEntry(id, rob, tag, ready)
                 }
-                for (lane <- enqueueCount until q.enqueueWidth) clearEnqueue(dut.io.enq.entries(lane))
+                for (lane <- enqueueCount until q.enqueueWidth) clearEnqueue(dut.io.enq.candidates(lane))
                 dut.io.enq.valid.poke((1 << enqueueCount) - 1)
 
                 val selected = model.indexWhere(entry => entry.tag.isEmpty || entry.ready)

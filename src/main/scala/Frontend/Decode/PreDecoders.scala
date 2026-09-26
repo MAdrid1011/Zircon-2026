@@ -25,7 +25,8 @@ class PreDecoders(p: FrontendParams) extends RawModule {
     // FTQ owns training context after PD; the common FQ package carries zeros here.
     instPkgOut.predict := 0.U.asTypeOf(new FrontendPredictInfo(p))
     finalSelect.io.pcBlock := io.in.startPc(31, p.blockBits)
-    finalSelect.io.range := predInfo.range & predInfo.returned
+    // ICache must return every requested slot; faults are carried separately.
+    finalSelect.io.range := predInfo.range
     finalSelect.io.directions := predInfo.directions
     finalSelect.io.backward := VecInit(predInfo.fields.map(f => f.immediate(31) || !f.immediate.orR)).asUInt
     val targetMismatch = Wire(Vec(p.fetchWidth, Bool()))

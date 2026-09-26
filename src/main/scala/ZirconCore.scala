@@ -1,5 +1,5 @@
 import chisel3._
-import chisel3.util.Valid
+import chisel3.util.{Cat, Valid}
 import ZirconConfig._
 
 class ZirconInterrupts extends Bundle {
@@ -48,16 +48,22 @@ class ZirconCore(
     bridge.io.axi <> io.axi
 
     /* Commit owns CSR state; the core shell supplies time, interrupts and cache-idle status. */
-    val time = RegInit(0.U(64.W))
+    val timeWords = RegInit(VecInit.fill(4)(0.U(16.W)))
     val timeSubcycle = RegInit(0.U(4.W))
+    val timeTick = RegInit(false.B)
+    val timeCarry = RegInit(VecInit(true.B, false.B, false.B, false.B))
     /* The platform exposes a 10 MHz timebase while the core runs at 100 MHz. */
+    timeTick := timeSubcycle === 8.U
     when(timeSubcycle === 9.U) {
         timeSubcycle := 0.U
-        time := time + 1.U
     }.otherwise {
         timeSubcycle := timeSubcycle + 1.U
     }
-    commit.io.csr.time := time
+    for (word <- timeWords.indices) {
+        timeCarry(word) := (if (word == 0) true.B else timeWords.take(word).map(_.andR).reduce(_ && _))
+        when(timeTick && timeCarry(word)) { timeWords(word) := timeWords(word) + 1.U }
+    }
+    commit.io.csr.time := Cat(timeWords.reverse)
     commit.io.csr.interrupt.software := io.interrupts.msip
     commit.io.csr.interrupt.timer := io.interrupts.mtip
     commit.io.csr.interrupt.external := io.interrupts.meip
@@ -88,9 +94,19 @@ class ZirconCore(
     /* The shared PTW serves both TLBs through dedicated L2 request channels. */
     ptw.io.control := translation
     ptw.io.rootPpn := commit.io.csr.state.satp(21, 0)
-    ptw.io.flush := commit.io.csr.tlbFlush
+    val dataMissFlush = commit.io.backend.flush || commit.io.csr.tlbFlush
+    val dataMissStage = RegInit(VecInit.fill(2)(0.U.asTypeOf(Valid(new DTLBMissRequest))))
+    when(dataMissFlush) {
+        dataMissStage.foreach(_.valid := false.B)
+    }.otherwise {
+        dataMissStage := backend.io.dtlbMiss.get
+    }
+    ptw.io.flush := dataMissFlush
     ptw.io.instruction.miss := frontend.io.mmu.request
-    ptw.io.data.miss := backend.io.dtlbMiss.get
+    for (lane <- 0 until 2) {
+        ptw.io.data.miss(lane).valid := dataMissStage(lane).valid && !dataMissFlush
+        ptw.io.data.miss(lane).bits := dataMissStage(lane).bits
+    }
     frontend.io.mmu.response.valid := false.B
     frontend.io.mmu.response.bits := 0.U.asTypeOf(new ICacheTranslation)
     ptw.io.iptw <> l2.io.iptw

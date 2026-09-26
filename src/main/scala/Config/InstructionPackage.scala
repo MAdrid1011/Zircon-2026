@@ -185,5 +185,5 @@ class SpeculationResolution(val p: BackendParams = BackendParams()) extends Bund
 
 class LoadSpeculationResult(val p: BackendParams = BackendParams()) extends Bundle {
     val mask = UInt(p.specWidth.W)
-    val failed = Bool()
+    val failedMask = UInt(p.specWidth.W)
 }

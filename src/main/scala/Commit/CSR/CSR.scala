@@ -6,6 +6,10 @@ class CSRRequest extends Bundle {
     val addr = UInt(12.W)
     // SystemOp encoding, not the instruction's funct3.
     val op = UInt(5.W)
+    val rw = Bool()
+    val rs = Bool()
+    val rc = Bool()
+    val immediate = Bool()
     // Original architectural rs1 index or zimm; zero detection must precede renaming.
     val source = UInt(5.W)
     val data = UInt(32.W)
@@ -119,11 +123,10 @@ class CSR extends Module {
         (io.interrupt.external.asUInt << 11) | (io.interrupt.supervisorExternal.asUInt << 9)
 
     /* Access intent depends on instruction fields, never on the value read from the PRF. */
-    val rw = io.req.bits.op === SystemOp.CSRRW.U || io.req.bits.op === SystemOp.CSRRWI.U
-    val rs = io.req.bits.op === SystemOp.CSRRS.U || io.req.bits.op === SystemOp.CSRRSI.U
-    val rc = io.req.bits.op === SystemOp.CSRRC.U || io.req.bits.op === SystemOp.CSRRCI.U
-    val immediate = io.req.bits.op === SystemOp.CSRRWI.U || io.req.bits.op === SystemOp.CSRRSI.U ||
-        io.req.bits.op === SystemOp.CSRRCI.U
+    val rw = io.req.bits.rw
+    val rs = io.req.bits.rs
+    val rc = io.req.bits.rc
+    val immediate = io.req.bits.immediate
     val read = !rw || !io.req.bits.rdZero
     val write = rw || io.req.bits.source.orR
     val operand = Mux(immediate, io.req.bits.source.pad(32), Mux(io.req.bits.source.orR, io.req.bits.data, 0.U))
@@ -274,7 +277,9 @@ class CSR extends Module {
     // CSR input-to-register path without changing the illegal response.
     // Address-specific FP, SATP and counter permissions affect their own state
     // only. Other CSR write enables avoid those unrelated comparisons.
-    writeFire := io.req.valid && io.commit && basePermitted && write && !io.trap.valid && !io.xret.valid
+    // commit, trap and xret are mutually exclusive by contract (asserted below).
+    // Keep their unrelated selection logic off every CSR write-enable path.
+    writeFire := io.req.valid && io.commit && basePermitted && write
     io.rsp.valid := io.req.valid
     io.rsp.bits.illegal := io.req.valid && illegal
     io.rsp.bits.read := io.req.valid && !illegal && read
@@ -331,6 +336,13 @@ class CSR extends Module {
 
     assert(io.retired <= 3.U)
     assert(!io.commit || io.req.valid, "CSR commit requires an access request")
+    when(io.req.valid) {
+        assert(rw === (io.req.bits.op === SystemOp.CSRRW.U || io.req.bits.op === SystemOp.CSRRWI.U))
+        assert(rs === (io.req.bits.op === SystemOp.CSRRS.U || io.req.bits.op === SystemOp.CSRRSI.U))
+        assert(rc === (io.req.bits.op === SystemOp.CSRRC.U || io.req.bits.op === SystemOp.CSRRCI.U))
+        assert(immediate === (io.req.bits.op === SystemOp.CSRRWI.U ||
+            io.req.bits.op === SystemOp.CSRRSI.U || io.req.bits.op === SystemOp.CSRRCI.U))
+    }
     assert(PopCount(Seq(io.commit, io.trap.valid, io.xret.valid)) <= 1.U, "Architectural events must be serialized")
     when(io.commit) {
         assert(!io.fp.valid, "Older FP retirement must finish before the CSR access commits")
