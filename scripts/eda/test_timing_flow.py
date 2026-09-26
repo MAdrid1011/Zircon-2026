@@ -31,6 +31,7 @@ from timing_reports import (
     parse_dff_registers,
     parse_endpoint_inventory,
     parse_path_inventory,
+    parse_violated_endpoints,
     parse_repair_counts,
     parse_ram_edge_paths,
     require_electrically_clean,
@@ -470,6 +471,24 @@ _e_/Q (DFF_X1)                       _f_/D (DFF_X1)                           0.
         self.assertEqual(
             clusters["family_pairs"][0]["name"],
             "frontend.pr.pendingTrain_pcWord[B] -> frontend.pr.direction.tageValid_N_N",
+        )
+
+    def test_rounded_zero_slack_retains_violated_endpoint(self):
+        endpoints = """Endpoint                                   Delay       Delay       Slack
+------------------------------------------------------------------------
+_b_/D (DFF_X1)                         0.970000    0.970001    0.000000 (VIOLATED)
+_d_/D (DFF_X1)                         0.970000    0.969999    0.000001
+"""
+        summary = """Startpoint                           Endpoint                                  Slack
+-----------------------------------------------------------------------------------
+_a_/Q (DFF_X1)                       _b_/D (DFF_X1)                           0.000000
+_c_/Q (DFF_X1)                       _d_/D (DFF_X1)                           0.000001
+"""
+        violated = parse_violated_endpoints(endpoints)
+        self.assertEqual(violated, {"_b_/D"})
+        self.assertEqual(
+            [path["endpoint"] for path in parse_path_inventory(summary, violated)],
+            ["_b_/D"],
         )
 
     def test_endpoint_inventory_parses_openroad_end_format(self):

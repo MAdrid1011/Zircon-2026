@@ -161,6 +161,7 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
         output_dir / "logic-only-violating-paths-summary.rpt",
         netlist,
         output_dir,
+        violating_endpoints,
     )
     audit_path = output_dir / "logic-only-path-audit.json"
     audit_result = audit(

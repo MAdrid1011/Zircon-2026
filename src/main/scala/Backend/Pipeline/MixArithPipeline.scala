@@ -411,6 +411,7 @@ class MixArithPipeline extends Module {
         divide.io.out.bits.res,
         divide.io.out.bits.fflags,
     )
+    val bypassDataWB = Reg(UInt(32.W))
 
     // WB presence comes only from registered stage-valid bits. Flush gates architectural
     // effects separately so it cannot enter the global Bypass data-selection cone.
@@ -432,17 +433,17 @@ class MixArithPipeline extends Module {
     val successfulWrite = !flush && packageWB.tag.rdValid && !packageWB.tag.exception.valid
     io.rf.intWrite.valid := successfulWrite && !destinationFp
     io.rf.intWrite.bits.addr := destination
-    io.rf.intWrite.bits.data := packageWB.data
+    io.rf.intWrite.bits.data := bypassDataWB
     io.rf.fpWrite.valid := successfulWrite && destinationFp
     io.rf.fpWrite.bits.addr := destination(MixArithConstants.fpPhysWidth - 1, 0)
-    io.rf.fpWrite.bits.data := packageWB.data
+    io.rf.fpWrite.bits.data := bypassDataWB
     // Short results carry a one-hot destination from EX4/WB. Long units retain
     // the ordinary address-decoded path so recovery cannot fan out through their
     // combinational output-valid controls.
     io.rf.intWriteOneHot := shortIntWriteOneHot
-    io.rf.intWriteData := packageShortWB.data
+    io.rf.intWriteData := bypassDataWB
     io.rf.fpWriteOneHot := shortFpWriteOneHot
-    io.rf.fpWriteData := packageShortWB.data
+    io.rf.fpWriteData := bypassDataWB
     when(shortIntWriteOneHot.orR && io.rf.intWrite.valid) {
         assert(shortIntWriteOneHot === UIntToOH(io.rf.intWrite.bits.addr, MixArithConstants.numIntPhys))
     }
@@ -485,11 +486,13 @@ class MixArithPipeline extends Module {
             divide.io.wbInput.bits.tag,
         )
     )
-    val bypassDataWB = Reg(UInt(32.W))
     when(!flush) {
         when(bypassInputValid.asUInt.orR) {
             bypassDataWB := bypassInput
         }
+    }
+    when(validWB) {
+        assert(bypassDataWB === packageWB.data, "MixArith WB data must match the registered bypass result")
     }
     io.bypass.producer.result := bypassDataWB
     io.bypass.producer.nextWb.valid := !flush && bypassInputValid.asUInt.orR && bypassTag.rdValid &&
