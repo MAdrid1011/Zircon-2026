@@ -63,7 +63,7 @@ def parse_endpoint_inventory(report):
     return sorted(endpoints.values(), key=lambda item: (item["slack_ns"], item["endpoint"]))
 
 
-def parse_path_inventory(report):
+def parse_path_inventory(report, violated_endpoints=None):
     """Parse one startpoint-to-endpoint row for every reported endpoint."""
     paths = []
     for line in report.splitlines():
@@ -72,10 +72,12 @@ def parse_path_inventory(report):
             continue
         startpoint, endpoint, slack = match.groups()
         slack_ns = float(slack)
-        # OpenROAD's endpoint-limited summary may include the first met path at
-        # the reporting boundary. It is useful as a sentinel in the raw report,
-        # but it is not part of the violating-path population.
-        if slack_ns >= 0.0:
+        # A small negative slack can round to 0.000000 in this summary. The
+        # endpoint report's VIOLATED marker is authoritative when available.
+        if violated_endpoints is not None:
+            if endpoint not in violated_endpoints:
+                continue
+        elif slack_ns >= 0.0:
             continue
         paths.append({
             "startpoint": startpoint,
@@ -83,6 +85,17 @@ def parse_path_inventory(report):
             "slack_ns": slack_ns,
         })
     return paths
+
+
+def parse_violated_endpoints(report):
+    names = set()
+    for line in report.splitlines():
+        if not line.rstrip().endswith("(VIOLATED)"):
+            continue
+        match = ENDPOINT_ONLY_ROW.match(line)
+        if match:
+            names.add(match.group(1))
+    return names
 
 
 def normalize_register_family(name):
@@ -173,12 +186,17 @@ def build_path_clusters(paths, registers):
     }
 
 
-def write_path_clusters(path_report, netlist, output_dir):
+def write_path_clusters(path_report, netlist, output_dir, endpoint_report=None):
     """Write complete machine-readable and text timing-cluster reports."""
     path_report = Path(path_report)
     netlist = Path(netlist)
     output_dir = Path(output_dir)
-    paths = parse_path_inventory(path_report.read_text(errors="replace"))
+    violated = None
+    if endpoint_report is not None:
+        violated = parse_violated_endpoints(Path(endpoint_report).read_text(errors="replace"))
+    paths = parse_path_inventory(path_report.read_text(errors="replace"), violated)
+    if violated is not None and {path["endpoint"] for path in paths} != violated:
+        raise ValueError("Path summary does not cover every violating endpoint")
     instances = {
         pin.split("/", 1)[0]
         for path in paths

@@ -9,5 +9,6 @@ Unit tests for the Nangate45 synthesis, physical repair, and timing-report contr
 - Verify generated ABC commands include BLevel direct mapping, the requested `-D` target, `-constr`, and the standard buffer/upsize/downsize sequence.
 - Verify the OpenROAD command script uses ordinary placement repair and contains no false-path, multicycle, or relaxed-clock exceptions.
 - Verify report parsing counts max-cap/max-transition violations and preserves worst-path-per-endpoint inventory rows.
+- Verify a rounded-zero summary row remains in the logic-only inventory when its endpoint is marked `VIOLATED`.
 - Verify RAM reports retain falling-edge launch information.
 - Verify the electrical gate rejects path interpretation until both violation counts are zero.
