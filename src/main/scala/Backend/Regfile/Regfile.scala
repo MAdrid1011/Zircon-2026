@@ -18,10 +18,12 @@ class RegfileDirectWriteIO(p: RegfileParams) extends Bundle {
     val data = Input(UInt(p.dataWidth.W))
 }
 
-class RegfileIO(p: RegfileParams, directWritePort: Option[Int]) extends Bundle {
+class RegfileIO(p: RegfileParams, directWritePort: Option[Int], readBypassOverridePort: Option[Int]) extends Bundle {
     val read = Vec(p.numReadPorts, new RegfileReadIO(p))
     val write = Vec(p.numWritePorts, new RegfileWriteIO(p))
     val directWrite = directWritePort.map(_ => new RegfileDirectWriteIO(p))
+    val readBypassOverride = readBypassOverridePort.map(_ => Input(Bool()))
+    val readBypassOverrideAddr = readBypassOverridePort.map(_ => Input(UInt(p.addrWidth.W)))
     val readHold = if (p.holdReads) Some(Input(Vec(p.numReadPorts, Bool()))) else None
 }
 
@@ -32,9 +34,14 @@ class RegfileIO(p: RegfileParams, directWritePort: Option[Int]) extends Bundle {
 class Regfile(
     val p: RegfileParams = RegfileParams(),
     directWritePort: Option[Int] = None,
+    readBypassOverridePort: Option[Int] = None,
+    overrideReadPorts: Set[Int] = Set.empty,
 ) extends Module {
     directWritePort.foreach(port => require(port >= 0 && port < p.numWritePorts))
-    val io = IO(new RegfileIO(p, directWritePort))
+    readBypassOverridePort.foreach(port => require(port >= 0 && port < p.numWritePorts))
+    require(overrideReadPorts.forall(port => port >= 0 && port < p.numReadPorts))
+    require(overrideReadPorts.isEmpty || readBypassOverridePort.nonEmpty)
+    val io = IO(new RegfileIO(p, directWritePort, readBypassOverridePort))
     // Integer configurations omit storage for p0; FP configurations store every entry.
     private val firstWritable = if (p.hasZeroReg) 1 else 0
     private val data = RegInit(VecInit.fill(p.numEntries - firstWritable)(0.U(p.dataWidth.W)))
@@ -86,7 +93,16 @@ class Regfile(
     }
 
     io.read.zipWithIndex.foreach { case (r, index) =>
-        val hit = io.write.map(w => w.we && w.addr === r.addr)
+        val stored = if (overrideReadPorts.contains(index)) {
+            Mux1H(UIntToOH(r.addr, p.numEntries).asBools, values.toSeq)
+        } else values(r.addr)
+        val hit = io.write.zipWithIndex.map { case (w, port) =>
+            if (readBypassOverridePort.contains(port) && overrideReadPorts.contains(index)) {
+                io.readBypassOverride.get && io.readBypassOverrideAddr.get === r.addr
+            } else {
+                w.we && w.addr === r.addr
+            }
+        }
         val bypass = hit.reduce(_ || _)
         if (p.holdReads) {
             // The first stalled read is captured at its edge; hold then reuses that operand.
@@ -94,11 +110,11 @@ class Regfile(
             val hold = io.readHold.get(index)
             val previous = RegEnable(r.data, !hold)
             r.data := Mux1H(
-                Seq(hold -> previous, (!hold && !bypass) -> values(r.addr)) ++
+                Seq(hold -> previous, (!hold && !bypass) -> stored) ++
                     hit.zip(io.write).map { case (h, w) => (!hold && h) -> w.data }
             )
         } else {
-            r.data := Mux(bypass, Mux1H(hit, io.write.map(_.data)), values(r.addr))
+            r.data := Mux(bypass, Mux1H(hit, io.write.map(_.data)), stored)
         }
     }
 }

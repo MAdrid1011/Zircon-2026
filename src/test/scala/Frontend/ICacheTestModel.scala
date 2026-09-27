@@ -74,7 +74,31 @@ object ICacheTestModel {
         private def output: Seq[BigInt] = Seq(
             d.io.pp.response.bits.mask.peek().litValue,
             d.io.pp.response.bits.fault.peek().litValue
-        ) ++ (0 until width).map(i => d.io.pp.response.bits.inst(i).peek().litValue)
+        ) ++ (0 until width).map(i => d.io.pp.response.bits.inst(i).peek().litValue) ++
+            (0 until width).flatMap(i => Seq(
+                d.io.pp.response.bits.fields(i).cfiClass.peek().litValue,
+                d.io.pp.response.bits.fields(i).immediate.peek().litValue
+            ))
+        private def signed(value: BigInt, bits: Int): BigInt =
+            if (value.testBit(bits - 1)) value | (u32 ^ ((BigInt(1) << bits) - 1)) else value
+        private def expectedFields(inst: BigInt): (Int, BigInt) = {
+            val opcode = (inst & 0x7f).toInt
+            val funct3 = ((inst >> 12) & 7).toInt
+            val branch = opcode == 0x63 && funct3 != 2 && funct3 != 3
+            val jal = opcode == 0x6f
+            val jalr = opcode == 0x67 && funct3 == 0
+            if (branch) {
+                val imm = ((inst >> 31) & 1) << 12 | ((inst >> 7) & 1) << 11 |
+                    ((inst >> 25) & 63) << 5 | ((inst >> 8) & 15) << 1
+                (FrontendCfiClass.Branch, signed(imm, 13))
+            } else if (jal) {
+                val imm = ((inst >> 31) & 1) << 20 | ((inst >> 12) & 255) << 12 |
+                    ((inst >> 20) & 1) << 11 | ((inst >> 21) & 1023) << 1
+                (FrontendCfiClass.Jal, signed(imm, 21))
+            } else if (jalr) {
+                (FrontendCfiClass.Jalr, signed(inst >> 20, 12))
+            } else (FrontendCfiClass.None, BigInt(0))
+        }
         private def lower: Seq[BigInt] = Seq(
             d.io.l2.request.bits.paddr.peek().litValue,
             d.io.l2.request.bits.uncache.peek().litValue,
@@ -132,6 +156,15 @@ object ICacheTestModel {
                 val expectedFault = if (f.fault || (f.pc & 3) != 0) mask(f) else faults(token) & mask(f)
                 assert(values(0) == mask(f), s"incorrect slot mask for PC ${f.pc.toString(16)}")
                 assert(values(1) == expectedFault, s"fault mismatch for request $token at $cycle")
+                for (i <- 0 until width if mask(f).testBit(i)) {
+                    val (cfiClass, immediate) = expectedFields(values(i + 2))
+                    assert(values(2 + width + 2 * i) == cfiClass,
+                        s"predecode class mismatch request=$token slot=$i cycle=$cycle " +
+                            s"mask=${values(0)} inst=${values(i + 2).toString(16)} " +
+                            s"actual=${values(2 + width + 2 * i)} expected=$cfiClass")
+                    assert(values(3 + width + 2 * i) == immediate,
+                        s"predecode immediate mismatch request=$token slot=$i cycle=$cycle")
+                }
                 for (i <- 0 until width if mask(f).testBit(i) && !expectedFault.testBit(i)) {
                     val expected = word((f.pa & ~BigInt(width * 4 - 1)) + 4 * i)
                     assert(

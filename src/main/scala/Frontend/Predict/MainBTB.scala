@@ -118,9 +118,9 @@ class MainBTB(p: FrontendParams) extends Module {
 
     /* IF2 Response and Stall Hold */
     // The RAM read crosses the IF1/IF2 edge. Save its response before a later write can disturb its output.
-    val readBank = RegEnable(queryIndex(0), read)
+    val readBankOH = RegEnable(UIntToOH(queryIndex(0), 2), read)
     val readIssued = RegNext(read, false.B)
-    val readData = Mux(readBank, banks(1).io.dataOut, banks(0).io.dataOut)
+    val readData = Mux1H(readBankOH.asBools, banks.map(_.io.dataOut))
     val heldData = RegEnable(readData, readIssued)
     val data = Mux(readIssued, readData, heldData)
     val hit = Wire(Vec(p.btbWays, Bool()))

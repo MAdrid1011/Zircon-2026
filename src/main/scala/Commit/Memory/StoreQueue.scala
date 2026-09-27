@@ -400,7 +400,9 @@ class StoreQueue(
                     candidates(position).mask(byte) && query.bits.mask(byte)
             }
         }
-        val winnerStage = Reg(Vec(4, UInt(entries.W)))
+        val hitStage = Reg(Vec(4, UInt(entries.W)))
+        val prefixStage = Reg(Vec(4, UInt(entries.W)))
+        val winnerStage = Wire(Vec(4, UInt(entries.W)))
         val dataStage = Reg(Vec(entries, UInt(32.W)))
         val dataValidStage = Reg(UInt(entries.W))
         val unknownStage = Reg(Bool())
@@ -410,14 +412,16 @@ class StoreQueue(
         // cycle keeps request valid out of every wide forwarding register D mux.
         for (byte <- 0 until 4) {
             val hitBits = hits(byte).asUInt
-            var prefix = hitBits
-            var distance = 1
+            hitStage(byte) := hitBits
+            prefixStage(byte) := hitBits | (hitBits << 1)(entries - 1, 0)
+            var prefix = prefixStage(byte)
+            var distance = 2
             while (distance < entries) {
                 prefix = (prefix | (prefix << distance))(entries - 1, 0)
                 distance *= 2
             }
             val youngerHit = (prefix << 1)(entries - 1, 0)
-            winnerStage(byte) := hitBits & ~youngerHit
+            winnerStage(byte) := hitStage(byte) & ~youngerHit
         }
         for (index <- 0 until entries) { dataStage(index) := queryData(index) }
         dataValidStage := VecInit(candidates.map(_.dataValid)).asUInt

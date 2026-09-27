@@ -17,6 +17,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val isSystem = Bool()
     val systemOp = UInt(5.W)
     val instruction = UInt(32.W)
+    val writesExecutionState = Bool()
     val fpDirty = Bool()
 
     val complete = Bool()
@@ -40,6 +41,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
         isSystem := incoming.isSystem
         systemOp := incoming.systemOp
         instruction := incoming.instruction
+        writesExecutionState := incoming.writesExecutionState
         fpDirty := incoming.fpDirty
         complete := incoming.complete
         mispredicted := false.B
@@ -138,6 +140,17 @@ class ReorderBuffer(
         entry.isSystem := incoming.context.instruction.fu === DecodeUnit.System.U
         entry.systemOp := incoming.context.instruction.op
         entry.instruction := incoming.context.instruction.inst
+        val unconditionalCsrWrite = entry.systemOp === SystemOp.CSRRW.U ||
+            entry.systemOp === SystemOp.CSRRWI.U
+        val conditionalCsrWrite = entry.systemOp === SystemOp.CSRRS.U ||
+            entry.systemOp === SystemOp.CSRRC.U || entry.systemOp === SystemOp.CSRRSI.U ||
+            entry.systemOp === SystemOp.CSRRCI.U
+        val csrAddress = entry.instruction(31, 20)
+        val executionCsr = csrAddress === CSRAddress.fflags.U || csrAddress === CSRAddress.frm.U ||
+            csrAddress === CSRAddress.fcsr.U || csrAddress === CSRAddress.sstatus.U ||
+            csrAddress === CSRAddress.satp.U || csrAddress === CSRAddress.mstatus.U
+        entry.writesExecutionState := entry.isSystem && executionCsr &&
+            (unconditionalCsrWrite || (conditionalCsrWrite && entry.instruction(19, 15).orR))
         val fpMultiplyFlags = incoming.context.instruction.fu === DecodeUnit.Multiply.U &&
             incoming.context.instruction.op >= MultiplyOp.FADD
         val fpDivideFlags = incoming.context.instruction.fu === DecodeUnit.Divide.U &&

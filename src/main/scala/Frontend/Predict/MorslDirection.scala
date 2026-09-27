@@ -66,6 +66,7 @@ object MorslPcHashes {
 
 class MorslDirectionQueryIO(p: FrontendParams) extends Bundle {
     val pcHashes = Input(new MorslPcHashes(p))
+    val slotRankOH = Input(Vec(p.fetchWidth, UInt(p.fetchWidth.W)))
     val prefetchPcWord = Input(UInt(30.W))
     val prefetch = Input(Bool())
     val folds = Input(Vec(p.tageCount, UInt(p.hashBits.W)))
@@ -77,7 +78,10 @@ class MorslDirectionQueryIO(p: FrontendParams) extends Bundle {
 class MorslDirectionIO(p: FrontendParams) extends Bundle {
     val query = new MorslDirectionQueryIO(p)
     // PHT is the IF1 fallback; TAGE and loop selection are retained for IF2.
+    val phtDirections = Output(UInt(p.fetchWidth.W))
+    val phtSlotDirections = Output(UInt(p.fetchWidth.W))
     val fastDirections = Output(UInt(p.fetchWidth.W))
+    val fastSlotDirections = Output(UInt(p.fetchWidth.W))
     val directions = Output(UInt(p.fetchWidth.W))
     val meta = Output(new FrontendDirectionMeta(p))
     val scRead = Output(new FrontendCorrectorRead(p))
@@ -157,14 +161,30 @@ class MorslDirection(
     })
     val phtPrefetchIndex = FrontendMath.fold(io.query.prefetchPcWord, p.phtIndexBits)
     val phtPredictionIndex = RegEnable(phtPrefetchIndex, io.query.prefetch)
+    // Capture valid banks at the PF/IF1 edge with the SRAM read. The next-PC
+    // path then ends at the index register, not at a bank-wide register D mux.
+    val phtValidLowBits = math.min(6, p.phtIndexBits)
+    val phtValidBankWidth = 1 << phtValidLowBits
+    val phtValidBanks = VecInit((0 until p.phtSets / phtValidBankWidth).map { bank =>
+        VecInit(phtValid.slice(bank * phtValidBankWidth,
+            (bank + 1) * phtValidBankWidth)).asUInt
+    })
+    val phtPredictionBanks = RegEnable(phtValidBanks, io.query.prefetch)
+    val phtPredictionBank = if (phtValidBanks.length == 1) phtPredictionBanks(0) else
+        phtPredictionBanks(phtPredictionIndex(p.phtIndexBits - 1, phtValidLowBits))
+    val phtPredictionValid = phtPredictionBank(phtPredictionIndex(phtValidLowBits - 1, 0))
     pht.io.predictEnable := io.query.prefetch
     pht.io.predictAddress := phtPrefetchIndex
     val phtRaw = pht.io.predictData.asTypeOf(Vec(p.fetchWidth, UInt(2.W)))
     val phtRData = Wire(Vec(p.fetchWidth, UInt(2.W)))
     for (rank <- 0 until p.fetchWidth) {
-        phtRData(rank) := Mux(phtValid(phtIndex), phtRaw(rank), 1.U)
+        phtRData(rank) := Mux(phtPredictionValid, phtRaw(rank), 1.U)
     }
     val phtDirections = VecInit(phtRData.map(_(1))).asUInt
+    val phtSlotDirectionsRaw = VecInit(io.query.slotRankOH.map(rankOH =>
+        Mux1H(rankOH.asBools, phtRaw.map(_(1)))
+    )).asUInt
+    val phtSlotDirections = Mux(phtPredictionValid, phtSlotDirectionsRaw, 0.U)
 
     /* Provider Selection */
     val directions = Wire(Vec(p.fetchWidth, Bool()))
@@ -217,11 +237,25 @@ class MorslDirection(
         val fastHits = (0 until fastTageCount).map(table =>
             tageTagMatches(table) && aheadTageRows(table).rankOH(rank)
         )
-        val (hasFastProvider, fastPrediction) = longestBool(
-            fastHits,
-            aheadTageRows.take(fastTageCount).map(_.counter(2)),
+        val fastProvider = longest(fastHits)
+        val fastSelect = fastProvider.asBools :+ !VecInit(fastHits).asUInt.orR
+        fastDirections(rank) := Mux1H(
+            fastSelect,
+            aheadTageRows.take(fastTageCount).map(_.counter(2)) :+ phtDirections(rank),
         )
-        fastDirections(rank) := Mux(hasFastProvider, fastPrediction, phtDirections(rank))
+    }
+    val fastSlotDirections = Wire(Vec(p.fetchWidth, Bool()))
+    for (slot <- 0 until p.fetchWidth) {
+        val rankOH = io.query.slotRankOH(slot)
+        val fastHits = (0 until fastTageCount).map(table =>
+            tageTagMatches(table) && (aheadTageRows(table).rankOH & rankOH).orR
+        )
+        val fastProvider = longest(fastHits)
+        fastSlotDirections(slot) := Mux1H(
+            fastProvider.asBools :+ !VecInit(fastHits).asUInt.orR,
+            aheadTageRows.take(fastTageCount).map(_.counter(2)) :+
+                Mux1H(rankOH.asBools, phtDirections.asBools),
+        )
     }
     for (rank <- 0 until p.fetchWidth) {
         val hits = (0 until p.tageCount).map(table =>
@@ -258,7 +292,10 @@ class MorslDirection(
 
     /* Prediction Metadata */
     // Retain the lookup keys until commit; training must not use a newer speculative history.
+    io.phtDirections := phtDirections
+    io.phtSlotDirections := phtSlotDirections
     io.fastDirections := fastDirections.asUInt
+    io.fastSlotDirections := fastSlotDirections.asUInt
     io.directions := directions.asUInt
     io.meta := 0.U.asTypeOf(new FrontendDirectionMeta(p))
     io.meta.phtIndex := phtIndex

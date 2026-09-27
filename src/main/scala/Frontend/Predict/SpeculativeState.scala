@@ -136,12 +136,9 @@ class SpeculativeState(p: FrontendParams) extends Module {
         pointerOH: UInt,
         countOH: UInt,
         event: FrontendStateEvent,
+        returnPc: UInt,
     ): (FrontendStateSnapshot, UInt, UInt) = {
         val selected = event.prediction.taken.asBools
-        val pc = Cat(event.pcWord, 0.U(2.W))
-        val returnPc = Mux1H(selected, (0 until p.fetchWidth).map(slot =>
-            FrontendMath.slotPc(pc, slot, p)(31, 2) + 1.U
-        ))
         val popRequested = selected.zip(event.prediction.kinds).map { case (taken, kind) =>
             taken && FrontendCfi.pop(kind)
         }.reduce(_ || _)
@@ -174,7 +171,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
         next.pointer := OHToUInt(nextPointerOH)
         next.count := OHToUInt(nextCountOH)
         for (slot <- 0 until p.rasDepth) {
-            val (write, data) = committedRasRowWrite(pointerOH, countOH, event, slot)
+            val (write, data) = committedRasRowWrite(pointerOH, countOH, event, returnPc, slot)
             when(write) { next.ras(slot) := data }
         }
         (next, nextPointerOH, nextCountOH)
@@ -184,19 +181,36 @@ class SpeculativeState(p: FrontendParams) extends Module {
         pointerOH: UInt,
         countOH: UInt,
         event: FrontendStateEvent,
+        returnPc: UInt,
         row: Int,
     ): (Bool, UInt) = {
-        val pc = Cat(event.pcWord, 0.U(2.W))
-        val writeSlots = (0 until p.fetchWidth).map { slot =>
+        val writeCurrent = (0 until p.fetchWidth).map { slot =>
             val kind = event.prediction.kinds(slot)
-            val pop = FrontendCfi.pop(kind) && !countOH(0)
             event.prediction.taken(slot) && FrontendCfi.push(kind) &&
-                Mux(pop, pointerOH((row + 1) % p.rasDepth), pointerOH(row))
+                (!FrontendCfi.pop(kind) || countOH(0))
         }
-        val returnPcs = (0 until p.fetchWidth).map(slot =>
-            FrontendMath.slotPc(pc, slot, p)(31, 2) + 1.U
-        )
-        (VecInit(writeSlots).asUInt.orR, Mux1H(writeSlots, returnPcs))
+        val replacePrevious = (0 until p.fetchWidth).map { slot =>
+            val kind = event.prediction.kinds(slot)
+            event.prediction.taken(slot) && FrontendCfi.push(kind) &&
+                FrontendCfi.pop(kind) && !countOH(0)
+        }
+        // The row enable owns whether this value is observed; select the PC
+        // independently of the row's pointer/kind decode.
+        (pointerOH(row) && VecInit(writeCurrent).asUInt.orR ||
+            pointerOH((row + 1) % p.rasDepth) && VecInit(replacePrevious).asUInt.orR, returnPc)
+    }
+
+    def returnPcWord(event: FrontendStateEvent): UInt = {
+        val slotBits = log2Ceil(p.fetchWidth)
+        if (slotBits == 0) event.pcWord + 1.U
+        else {
+            val block = event.pcWord(29, slotBits)
+            val nextBlock = (block + 1.U)(block.getWidth - 1, 0)
+            val selected = event.prediction.taken.asBools
+            val low = Mux1H(selected.dropRight(1),
+                (1 until p.fetchWidth).map(_.U(slotBits.W)))
+            Cat(Mux(selected.last, nextBlock, block), low)
+        }
     }
 
     /* Early Prediction Transition */
@@ -222,8 +236,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
         val replaceAfterPop = event.prediction.kinds.map(kind =>
             FrontendCfi.push(kind) && FrontendCfi.pop(kind) && before.count =/= 0.U
         )
-        // Select each row directly from per-slot return PCs; late taken bits
-        // do not pass through a shared 30-bit return-PC mux first.
+        // Select the return PC locally so taken does not fan through a full snapshot mux.
         for (row <- 0 until p.rasDepth) {
             val writeSlots = (0 until p.fetchWidth).map(slot =>
                 taken(slot) && (
@@ -243,6 +256,8 @@ class SpeculativeState(p: FrontendParams) extends Module {
     /* Commit and Recovery Priority */
     // A global flush includes this cycle's retirement; PD repair overrides younger speculation.
     val retireValid = VecInit(io.retire.map(_.valid))
+    val retireReturnPcs = (0 until 3).map(port => returnPcWord(io.retire(port).bits))
+    val recoveryReturnPc = returnPcWord(io.recovery.bits)
     val normalCommitted = Wire(Vec(4, new FrontendStateSnapshot(p)))
     val normalPointerOH = Wire(Vec(4, UInt(p.rasDepth.W)))
     val normalCountOH = Wire(Vec(4, UInt((p.rasDepth + 1).W)))
@@ -255,22 +270,15 @@ class SpeculativeState(p: FrontendParams) extends Module {
             normalPointerOH(port),
             normalCountOH(port),
             io.retire(port).bits,
+            retireReturnPcs(port),
         )
         normalCommitted(port + 1) := Mux(
             retireValid(port),
             advanced._1,
             normalCommitted(port),
         )
-        normalPointerOH(port + 1) := Mux(
-            retireValid(port),
-            advanced._2,
-            normalPointerOH(port),
-        )
-        normalCountOH(port + 1) := Mux(
-            retireValid(port),
-            advanced._3,
-            normalCountOH(port),
-        )
+        normalPointerOH(port + 1) := Mux(retireValid(port), advanced._2, normalPointerOH(port))
+        normalCountOH(port + 1) := Mux(retireValid(port), advanced._3, normalCountOH(port))
     }
     // Recovery may follow at most two normal retirement packets. Build that
     // legal three-transition path independently, so an inactive recovery does
@@ -287,6 +295,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
             recoveryPointerOH(port),
             recoveryCountOH(port),
             io.retire(port).bits,
+            retireReturnPcs(port),
         )
         recoveryCommitted(port + 1) := Mux(retireValid(port), advanced._1, recoveryCommitted(port))
         recoveryPointerOH(port + 1) := Mux(retireValid(port), advanced._2, recoveryPointerOH(port))
@@ -297,6 +306,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
         recoveryPointerOH(2),
         recoveryCountOH(2),
         io.recovery.bits,
+        recoveryReturnPc,
     )
     // History is independent of RAS pointer/count. Compute each legal event
     // prefix without valid muxes, then select once at the register input.
@@ -333,10 +343,11 @@ class SpeculativeState(p: FrontendParams) extends Module {
     // PCs. Only their row-write controls depend on earlier pointer transitions.
     for (row <- 0 until p.rasDepth) {
         val normalWrites = (0 until 3).map { port =>
-            committedRasRowWrite(normalPointerOH(port), normalCountOH(port), io.retire(port).bits, row)
+            committedRasRowWrite(normalPointerOH(port), normalCountOH(port), io.retire(port).bits,
+                retireReturnPcs(port), row)
         }
         val recoveryWrite = committedRasRowWrite(
-            normalPointerOH(2), normalCountOH(2), io.recovery.bits, row,
+            normalPointerOH(2), normalCountOH(2), io.recovery.bits, recoveryReturnPc, row,
         )
         val w0 = retireValid(0) && normalWrites(0)._1
         val w1 = retireValid(1) && normalWrites(1)._1
@@ -358,12 +369,23 @@ class SpeculativeState(p: FrontendParams) extends Module {
     val committedCountOHNext = Mux(io.recovery.valid, recovered._3, normalCountOH(3))
     // Keep flush as the final selector. It must not be decoded through every
     // normal speculative candidate before reaching the state registers.
-    val nonFlushNext = Mux(
-        io.repair.valid,
-        advance(io.repair.bits.before, io.repair.bits.event),
-        Mux(io.early.valid, advanceEarly(speculative, io.early.bits), speculative)
+    val repaired = advance(io.repair.bits.before, io.repair.bits.event)
+    val earlyNext = advanceEarly(speculative, io.early.bits)
+    val nonFlushNext = Mux(io.repair.valid, repaired, Mux(io.early.valid, earlyNext, speculative))
+    val speculativeNext = WireDefault(Mux(io.flush, committedNext, nonFlushNext))
+    val speculativeSelect = Seq(
+        io.flush,
+        !io.flush && io.repair.valid,
+        !io.flush && !io.repair.valid && io.early.valid,
+        !io.flush && !io.repair.valid && !io.early.valid,
     )
-    val speculativeNext = Mux(io.flush, committedNext, nonFlushNext)
+    speculativeNext.top := Mux1H(speculativeSelect,
+        Seq(committedNext.top, repaired.top, earlyNext.top, speculative.top))
+    for (row <- 0 until p.rasDepth) {
+        speculativeNext.ras(row) := Mux1H(speculativeSelect,
+            Seq(committedNext.ras(row), repaired.ras(row), earlyNext.ras(row), speculative.ras(row)))
+    }
+    assert(PopCount(VecInit(speculativeSelect)) === 1.U)
     when(retireValid.asUInt.orR || io.recovery.valid) {
         committed := committedNext
         committedPointerOH := committedPointerOHNext

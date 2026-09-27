@@ -6,7 +6,8 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
     private def initialize(dut: AtomicUnit): Unit = {
         dut.io.request.valid.poke(false)
         dut.io.response.ready.poke(true)
-        dut.io.clearReservation.poke(false)
+        dut.io.committedStore.valid.poke(false)
+        dut.io.committedStore.bits.poke(0)
         dut.io.load.request.ready.poke(false)
         dut.io.load.response.valid.poke(false)
         dut.io.load.forwardQuery.valid.poke(false)
@@ -66,6 +67,13 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
         dut.io.response.bits.exception.expect(0)
         dut.clock.step()
         dut.io.busy.expect(false)
+    }
+
+    private def committedStore(dut: AtomicUnit, address: Long): Unit = {
+        dut.io.committedStore.valid.poke(true)
+        dut.io.committedStore.bits.poke(address)
+        dut.clock.step()
+        dut.io.committedStore.valid.poke(false)
     }
 
     "all AMO word operations return the old word and generate the specified new word" in {
@@ -133,6 +141,28 @@ class AtomicUnitSpec extends AnyFreeSpec with ChiselSim with PeekPokeAPI {
             store(dut, 0x2468ace0L)
             response(dut, 0)
 
+            request(dut, op = 3, address = 0x80002000L, data = 0x11111111L)
+            dut.io.store.request.valid.expect(false)
+            response(dut, 1)
+        }
+    }
+
+    "only a committed store to the reserved word invalidates LR" in {
+        simulate(new AtomicUnit) { dut =>
+            initialize(dut)
+            request(dut, op = 2, address = 0x80002000L, data = 0)
+            load(dut, 0x13579bdfL)
+            response(dut, 0x13579bdfL)
+            committedStore(dut, 0x80003000L)
+            dut.clock.step(3)
+            request(dut, op = 3, address = 0x80002000L, data = 0x2468ace0L)
+            store(dut, 0x2468ace0L)
+            response(dut, 0)
+
+            request(dut, op = 2, address = 0x80002000L, data = 0)
+            load(dut, 0x13579bdfL)
+            response(dut, 0x13579bdfL)
+            committedStore(dut, 0x80002001L)
             request(dut, op = 3, address = 0x80002000L, data = 0x11111111L)
             dut.io.store.request.valid.expect(false)
             response(dut, 1)

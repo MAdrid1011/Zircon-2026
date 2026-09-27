@@ -73,6 +73,19 @@ class StoreBuffer(
     io.responseError.valid := responseFire && io.store.response.bits.exception.orR
     io.responseError.bits := io.store.response.bits.exception
 
+    val newerThan = VecInit.tabulate(entries, entries) { (candidate, older) =>
+        if (candidate == older) false.B
+        else {
+            val newestPositions = (0 until entries).filter { newest =>
+                (newest - candidate + entries) % entries < (newest - older + entries) % entries
+            }
+            VecInit(newestPositions.map(newestOH(_))).asUInt.orR
+        }
+    }
+    val forwardingData = Reg(Vec(entries, UInt(32.W)))
+    for (position <- 0 until entries) {
+        forwardingData(position) := storage(position).data
+    }
     for (port <- 0 until 2) {
         val query = io.query(port).request
         val matches = Wire(Vec(entries, Bool()))
@@ -81,29 +94,30 @@ class StoreBuffer(
         }
         val bytes = Wire(Vec(4, UInt(8.W)))
         val mask = Wire(Vec(4, Bool()))
+        val winnerStage = Reg(Vec(4, UInt(entries.W)))
         for (byte <- 0 until 4) {
             val hitMask = VecInit.tabulate(entries) { position =>
                 matches(position) && storage(position).mask(byte) && query.bits.mask(byte)
             }.asUInt
-            val selectedByNewest = VecInit.tabulate(entries) { newest =>
-                val positions = Seq.tabulate(entries)(distance => (newest - distance + entries) % entries)
-                val orderedHits = VecInit(positions.map(hitMask(_)))
-                Mux1H(
-                    PriorityEncoderOH(orderedHits.asUInt).asBools,
-                    positions.map(position => storage(position).data(8 * byte + 7, 8 * byte)),
-                )
+            val winnerOH = VecInit.tabulate(entries) { candidate =>
+                val newerHit = VecInit.tabulate(entries) { other =>
+                    hitMask(other) && newerThan(other)(candidate)
+                }.asUInt.orR
+                hitMask(candidate) && !newerHit
             }
-            bytes(byte) := Mux1H(newestOH.asBools, selectedByNewest)
+            winnerStage(byte) := winnerOH.asUInt
+            bytes(byte) := Mux1H(winnerStage(byte).asBools, (0 until entries).map(position =>
+                forwardingData(position)(8 * byte + 7, 8 * byte)))
             mask(byte) := hitMask.orR
+            assert(PopCount(winnerOH) <= 1.U)
         }
         val resultValid = RegNext(query.valid, false.B)
         // The payload is sampled freely and qualified only by resultValid.
         val resultSlot = RegNext(query.bits.slot)
-        val resultData = RegNext(bytes.asUInt)
         val resultMask = RegNext(mask.asUInt)
         io.query(port).response.valid := resultValid
         io.query(port).response.bits.slot := resultSlot
-        io.query(port).response.bits.data := resultData
+        io.query(port).response.bits.data := bytes.asUInt
         io.query(port).response.bits.mask := resultMask
         io.query(port).response.bits.blocked := false.B
     }

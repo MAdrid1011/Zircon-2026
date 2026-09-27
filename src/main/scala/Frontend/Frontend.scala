@@ -27,7 +27,6 @@ class Frontend(
     val npc = Module(new NPC(p))
     val pr = Module(new Predict(p, ramBackend))
     val ic = Module(new ICache(p, c.copy(tlbEnabled = tlbEnabled)))
-    val fields = Seq.fill(p.fetchWidth)(Module(new PredecodeFields))
     val pd = Module(new PreDecoders(p))
     val fq = Module(new FetchQueue(p, issue.dispatchWidth))
 
@@ -94,7 +93,6 @@ class Frontend(
     val instPkgPDIn = WireDefault(instPkgIF2)
     pr.io.lookup.in := instPkgIF2
     pr.io.lookup.mainTag := instPkgIF2.startPc(31, p.blockBits + log2Ceil(p.btbSets))
-    fields.zip(ic.io.pp.response.bits.inst).foreach { case (decoder, inst) => decoder.io.inst := inst }
     instPkgPDIn.predict.main := pr.io.lookup.prediction
     instPkgPDIn.predict.directions := pr.io.lookup.directions
     instPkgPDIn.predict.meta := pr.io.lookup.meta
@@ -103,9 +101,12 @@ class Frontend(
         inst.inst := ic.io.pp.response.bits.inst(i)
         inst.fault := ic.io.pp.response.bits.fault(i)
     }
-    instPkgPDIn.predict.fields := VecInit(fields.map(_.io.fields))
+    instPkgPDIn.predict.fields := ic.io.pp.response.bits.fields
     pd.io.in := instPkgPDIn
     val instPkgPD = Reg(new FrontendPackage(p))
+    val pdCfiClass = Reg(Vec(p.fetchWidth, UInt(2.W)))
+    val pdPredictedImmediates = Reg(Vec(p.fetchWidth, UInt(32.W)))
+    val pdPredictedTargets = Reg(Vec(p.fetchWidth, UInt(32.W)))
     val pdChanged = Reg(Bool())
     val pdRepair = Reg(new FrontendStateRepair(p))
     val validPD = RegInit(false.B)
@@ -132,6 +133,13 @@ class Frontend(
     // The ICache response still controls validity, not every payload register D.
     when(!validPD || pdFire) {
         instPkgPD := pd.io.out
+        for (slot <- 0 until p.fetchWidth) {
+            instPkgPD.instructions(slot).predictedValue := 0.U
+            instPkgPD.instructions(slot).rinfo := 0.U.asTypeOf(new FrontendRegisterInfo)
+            pdCfiClass(slot) := instPkgPDIn.predict.fields(slot).cfiClass
+            pdPredictedImmediates(slot) := instPkgPDIn.predict.fields(slot).immediate
+            pdPredictedTargets(slot) := pd.io.prediction.targets(slot)
+        }
         pdChanged := pd.io.changed
         pdRepair := pd.io.repair
     }
@@ -144,6 +152,20 @@ class Frontend(
     /* Previous Decode Stage */
     val instPkgFQIn = WireDefault(instPkgPD)
     instPkgFQIn.ftqIdx := 0.U
+    for (slot <- 0 until p.fetchWidth) {
+        val instruction = instPkgPD.instructions(slot)
+        val registerInfo = Module(new RegisterInfoDecoder)
+        registerInfo.io.inst := instruction.inst
+        registerInfo.io.fields.cfiClass := pdCfiClass(slot)
+        registerInfo.io.fields.immediate := 0.U
+        instPkgFQIn.instructions(slot).rinfo := Mux(
+            instruction.fault, 0.U.asTypeOf(new FrontendRegisterInfo), registerInfo.io.rinfo)
+        instPkgFQIn.instructions(slot).predictedValue := Mux(
+            FrontendCfi.indirect(instruction.kind),
+            pdPredictedTargets(slot),
+            Mux(instruction.predictedTaken, pdPredictedImmediates(slot), 4.U),
+        )
+    }
     pdFlush := validPD && pdRepairAllowed && pdChanged && !pdRepairApplied && !cmtFlush
     npc.io.pd.valid := pdFlush
     npc.io.pd.bits.pc := instPkgPD.nextPc

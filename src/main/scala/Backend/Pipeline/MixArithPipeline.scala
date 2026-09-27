@@ -136,7 +136,7 @@ class MixArithPipeline extends Module {
 
     // Cover the cycle in which a new Divide moves from its private EX1 register into EX2.
     val divideEnteringEX2 = RegInit(false.B)
-    val lateBypass = io.bypass.consumer.value.map(_.valid).reduce(_ || _)
+    val lateBypass = io.bypass.consumer.deferred
     val canLaunchEX1 = !divideEnteringEX2 && !divide.io.divBusy && !lateBypass
     val selectedReady = Mux1H(Seq(
         selectCSR -> true.B,
@@ -182,38 +182,36 @@ class MixArithPipeline extends Module {
     // Late WB values terminate at the existing RF/EX1 operand registers. The
     // execution units only consume their Q outputs on the following cycle.
     val sourceValue = sourceEX1
+    def effectiveFpExponent(bits: UInt): UInt = {
+        val raw = bits(30, 23)
+        Mux(raw.orR, raw, 1.U(8.W))
+    }
     when(flush) {
         validEX1 := false.B
     }.elsewhen(advanceRF) {
         packageEX1 := packageRF
-        for (source <- 0 until MixArithConstants.numSources) {
-            val captureValid = io.bypass.consumer.capture(source).valid
-            val captureBits = io.bypass.consumer.capture(source).bits
-            val captured = Mux(
-                captureValid,
-                captureBits,
-                regfileValue(source),
-            )
+        validEX1 := true.B
+    }.elsewhen(fireEX1) {
+        validEX1 := false.B
+    }
+    for (source <- 0 until MixArithConstants.numSources) {
+        val captureValid = io.bypass.consumer.capture(source).valid
+        val captureBits = io.bypass.consumer.capture(source).bits
+        val captured = Mux(captureValid, captureBits, regfileValue(source))
+        val bypassValid = io.bypass.consumer.value(source).valid
+        when(advanceRF) {
             sourceEX1(source) := captured
-            fpExponentEX1(source) := captured(30, 23)
+            fpExponentEX1(source) := effectiveFpExponent(captured)
             fpZeroEX1(source) := Mux(
                 captureValid,
                 io.bypass.consumer.captureFpZero(source),
                 !regfileValue(source)(30, 0).orR,
             )
-        }
-        validEX1 := true.B
-    }.elsewhen(fireEX1) {
-        validEX1 := false.B
-    }.elsewhen(liveEX1) {
-        // Fold a transient WB value into the held package so the next cycle needs only one source mux.
-        for (source <- 0 until MixArithConstants.numSources) {
-            val bypassValid = io.bypass.consumer.value(source).valid
-            when(bypassValid) {
-                sourceEX1(source) := io.bypass.consumer.value(source).bits
-                fpExponentEX1(source) := io.bypass.consumer.value(source).bits(30, 23)
-                fpZeroEX1(source) := io.bypass.consumer.valueFpZero(source)
-            }
+        }.elsewhen(bypassValid) {
+            // A late WB value folds into a held EX1 operand; it cannot launch on this cycle.
+            sourceEX1(source) := io.bypass.consumer.value(source).bits
+            fpExponentEX1(source) := effectiveFpExponent(io.bypass.consumer.value(source).bits)
+            fpZeroEX1(source) := io.bypass.consumer.valueFpZero(source)
         }
     }
 
@@ -267,9 +265,9 @@ class MixArithPipeline extends Module {
     multiply.io.in.bits.fpSrc1 := sourceValue(0)
     multiply.io.in.bits.fpSrc2 := sourceValue(1)
     multiply.io.in.bits.fpSrc3 := sourceValue(2)
-    multiply.io.in.bits.fpExp1 := fpExponentEX1(0)
-    multiply.io.in.bits.fpExp2 := fpExponentEX1(1)
-    multiply.io.in.bits.fpExp3 := fpExponentEX1(2)
+    multiply.io.in.bits.fpEffectiveExp1 := fpExponentEX1(0)
+    multiply.io.in.bits.fpEffectiveExp2 := fpExponentEX1(1)
+    multiply.io.in.bits.fpEffectiveExp3 := fpExponentEX1(2)
     multiply.io.in.bits.fpZero1 := fpZeroEX1(0)
     multiply.io.in.bits.fpZero2 := fpZeroEX1(1)
     multiply.io.in.bits.fpZero3 := fpZeroEX1(2)
@@ -331,7 +329,7 @@ class MixArithPipeline extends Module {
         when(fpLogic.io.out.valid) { packageFpLogic_EX3 := packageFpLogic_EX2 }
     }
 
-    /* FpConvert EX1-EX2 result, then EX3/EX4 alignment --------------------------- */
+    /* FpConvert uses its EX3 rounding stage to reach EX4 directly. --------------- */
     fpConvert.io.in.valid := launchEX1 && selectFpConvert
     fpConvert.io.in.bits.src1 := sourceValue(0)
     fpConvert.io.in.bits.op := packageEX1.op(3, 0)
@@ -341,22 +339,14 @@ class MixArithPipeline extends Module {
     fpConvert.io.in.bits.tag := resultTag(executionPackage).asUInt
     fpConvert.io.flush := flush
 
-    val packageFpConvert_EX4 = Reg(new MixArithResult) // EX3/EX4 boundary
-    val validFpConvert_EX4 = RegInit(false.B)
     fpConvert.io.out.ready := true.B
 
-    val packageFpConvert_EX3 = arithmeticResult(
+    val packageFpConvert_EX4 = arithmeticResult(
         fpConvert.io.out.bits.tag,
         fpConvert.io.out.bits.res,
         fpConvert.io.out.bits.fflags,
     )
-
-    when(flush) {
-        validFpConvert_EX4 := false.B
-    }.otherwise {
-        validFpConvert_EX4 := fpConvert.io.out.valid
-        when(fpConvert.io.out.valid) { packageFpConvert_EX4 := packageFpConvert_EX3 }
-    }
+    val validFpConvert_EX4 = fpConvert.io.out.valid
 
     /* Short-unit EX4/WB alignment ------------------------------------------------ */
     val shortValid = VecInit(Seq(validCSR_EX4, validFpLogic_EX4, validFpConvert_EX4))
@@ -431,7 +421,10 @@ class MixArithPipeline extends Module {
     val destinationFp = packageWB.tag.prd(MixArithConstants.physTagWidth - 1)
     val destination = packageWB.tag.prd(MixArithConstants.localPhysWidth - 1, 0)
 
-    val successfulWrite = !flush && packageWB.tag.rdValid && !packageWB.tag.exception.valid
+    val writeCandidate = packageWB.tag.rdValid && !packageWB.tag.exception.valid
+    val successfulWrite = !flush && writeCandidate
+    io.rf.intReadBypassValid := wakeupWB.valid && !wakeupWB.bits(MixArithConstants.physTagWidth - 1)
+    io.rf.intReadBypassAddr := wakeupWB.bits(MixArithConstants.localPhysWidth - 1, 0)
     io.rf.intWrite.valid := successfulWrite && !destinationFp
     io.rf.intWrite.bits.addr := destination
     io.rf.intWrite.bits.data := bypassDataWB

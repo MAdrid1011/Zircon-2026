@@ -52,7 +52,9 @@ class Predict(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     val fastBtb = Module(new BlockBTB(p, p.fastBtbSets, 1))
     val mainBtb = Module(new MainBTB(p))
     // Fast-BTB and RAS targets are word aligned, so IF1 does not need a post-selection alignment check.
-    val earlySelect = Module(new FrontendPredictionSelect(p, assumeAlignedTargets = true))
+    val earlySelect = Module(new FrontendPredictionSelect(
+        p, assumeAlignedTargets = true, directionsAreSlots = true,
+    ))
     val corrector = Module(new StatisticalCorrector(p))
 
     /* IF1: Fast Prediction */
@@ -73,10 +75,34 @@ class Predict(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     indirect.io.query.folds := state.io.folds
     earlySelect.io.pcBlock := currentPc(31, p.blockBits)
     earlySelect.io.range := FrontendMath.range(currentPc, p)
-    // TAGE/loop selection completes at the IF1/IF2 boundary. Keep IF1's NPC
-    // on the prefetched PHT response so a tagged-table read cannot sit on the
-    // ICache request path; IF2 repairs any differing final direction.
-    earlySelect.io.directions := direction.io.fastDirections
+    // Derive rank from the selected raw row in parallel with its tag match.
+    // A miss still clears every candidate through fastLine.valid below.
+    val rawLine = fastBtb.io.raw.lines(0)
+    val rawConditionals = (0 until p.fetchWidth).map(i =>
+        rawLine.valid(i) && FrontendCfi.conditional(rawLine.kinds(i))
+    )
+    val slotRankOH = Wire(Vec(p.fetchWidth, UInt(p.fetchWidth.W)))
+    for (slot <- 0 until p.fetchWidth) {
+        val rankBefore = if (slot == 0) 0.U else PopCount((0 until slot).map(i =>
+            earlySelect.io.range(i) && rawConditionals(i)
+        ))
+        slotRankOH(slot) := Mux(
+            earlySelect.io.range(slot) && rawConditionals(slot),
+            1.U(p.fetchWidth.W) << rankBefore,
+            0.U,
+        )
+    }
+    direction.io.query.slotRankOH := slotRankOH
+    earlySelect.io.directions := direction.io.phtSlotDirections
+    when(io.fte.accept) {
+        for (slot <- 0 until p.fetchWidth) {
+            assert(PopCount(slotRankOH(slot)) <= 1.U)
+            when(slotRankOH(slot).orR) {
+                assert(direction.io.phtSlotDirections(slot) ===
+                    Mux1H(slotRankOH(slot).asBools, direction.io.phtDirections.asBools))
+            }
+        }
+    }
     earlySelect.io.backward := fastLine.backward.asUInt
     for (i <- 0 until p.fetchWidth) {
         val kind = Mux(fastLine.valid(i), fastLine.kinds(i), 0.U)
@@ -106,7 +132,7 @@ class Predict(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     io.fc.out := io.fc.instPkg
     io.fc.out.predict.range := earlySelect.io.range
     io.fc.out.predict.early := earlySelect.io.prediction
-    io.fc.out.predict.earlyDirections := direction.io.fastDirections
+    io.fc.out.predict.earlyDirections := direction.io.phtDirections
     io.fc.out.predict.meta := direction.io.meta
     // ITTAGE's wide target selection is completed after the IF1/IF2 boundary.
     io.fc.out.predict.meta.ittage := 0.U.asTypeOf(new FrontendIndirectMeta(p))

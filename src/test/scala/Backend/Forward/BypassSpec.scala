@@ -54,9 +54,11 @@ class BypassSpec extends AnyFreeSpec with ChiselSim {
             dut.io.producer(0).result.poke(BigInt("12345678", 16))
             dut.io.producer(4).result.poke(BigInt("87654321", 16))
             dut.io.consumer(0).value(0).valid.expect(true)
+            dut.io.consumer(0).deferred.expect(true)
             dut.io.consumer(0).value(0).bits.expect(BigInt("12345678", 16))
             dut.io.consumer(0).valueFpZero(0).expect(false)
             dut.io.consumer(1).value(1).valid.expect(true)
+            dut.io.consumer(1).deferred.expect(true)
             dut.io.consumer(1).value(1).bits.expect(BigInt("87654321", 16))
             dut.io.consumer(1).valueFpZero(1).expect(false)
         }
@@ -82,6 +84,7 @@ class BypassSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.consumer(0).advance.poke(false)
             dut.io.consumer(0).value(0).valid.expect(false)
+            dut.io.consumer(0).deferred.expect(false)
 
             dut.io.consumer(0).advance.poke(true)
             dut.io.producer(0).nextWb.valid.poke(false)
@@ -93,8 +96,37 @@ class BypassSpec extends AnyFreeSpec with ChiselSim {
             dut.io.producer(1).nextWb.valid.poke(false)
             dut.io.producer(1).result.poke(BigInt("80000000", 16))
             dut.io.consumer(0).value(0).valid.expect(true)
+            dut.io.consumer(0).deferred.expect(true)
             dut.io.consumer(0).value(0).bits.expect(BigInt("80000000", 16))
             dut.io.consumer(0).valueFpZero(0).expect(true)
+        }
+    }
+
+    "defers a promised arithmetic result across the WB register" in {
+        val params = BypassParams(
+            numProducers = 1,
+            consumerSources = Seq(1),
+            captureConsumers = Set(0),
+            guaranteedCaptureProducers = Set(0),
+            deferredCaptureProducers = Set(0),
+        )
+        simulate(new Bypass(params)) { dut =>
+            clear(dut)
+            dut.io.consumer(0).query(0).prs.poke(7)
+            dut.io.consumer(0).advance.poke(true)
+            dut.io.producer(0).nextWb.valid.poke(true)
+            dut.io.producer(0).nextWb.bits.poke(7)
+            dut.io.producer(0).nextResult.valid.poke(true)
+            dut.io.producer(0).nextResult.bits.poke(0x12345678L)
+            dut.io.consumer(0).capture(0).valid.expect(false)
+            dut.clock.step()
+            dut.io.consumer(0).advance.poke(false)
+            dut.io.producer(0).nextWb.valid.poke(false)
+            dut.io.producer(0).nextResult.valid.poke(false)
+            dut.io.producer(0).result.poke(0x12345678L)
+            dut.io.consumer(0).value(0).valid.expect(true)
+            dut.io.consumer(0).deferred.expect(true)
+            dut.io.consumer(0).value(0).bits.expect(0x12345678L)
         }
     }
 }

@@ -48,14 +48,14 @@ class BlockBTB(p: FrontendParams, sets: Int, ways: Int) extends Module {
     val valid = Seq.fill(ways)(RegInit(VecInit.fill(sets)(0.U(p.fetchWidth.W))))
     val replacement = RegInit(VecInit.fill(sets)(false.B))
     /* Prediction Read */
+    assert(PopCount(io.indexOH) <= 1.U)
     for (way <- 0 until ways) {
-        val rowHits = VecInit((0 until sets).map { row =>
-            valid(way)(row).orR && tags(way)(row) === io.lookupTag
-        }).asUInt
-        io.hits(way) := (rowHits & io.indexOH).orR
-        io.raw.tags(way) := Mux1H(io.indexOH.asBools, tags(way))
+        val selectedTag = Mux1H(io.indexOH.asBools, tags(way))
+        val selectedValid = Mux1H(io.indexOH.asBools, valid(way))
+        io.hits(way) := selectedValid.orR && selectedTag === io.lookupTag
+        io.raw.tags(way) := selectedTag
         io.raw.lines(way) := Mux1H(io.indexOH.asBools, payload(way))
-        io.raw.lines(way).valid := Mux1H(io.indexOH.asBools, valid(way))
+        io.raw.lines(way).valid := selectedValid
     }
 
     /* Training Lookup and Way Selection */

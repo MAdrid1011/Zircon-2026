@@ -56,6 +56,33 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
         dut.io.completion(port).bits.fpFlagsValid.poke(false)
     }
 
+    "execution-state CSR writes are decoded once and survive completion" in {
+        simulate(new ReorderBuffer(dispatchWidth = 3)) { dut =>
+            initialize(dut)
+            val identities = dut.io.allocation.map(_.peek().litValue)
+            dut.io.enqueue.valid.poke(7)
+            dut.io.enqueue.writeValid.poke(7)
+            for (lane <- 0 until 3) {
+                enqueueLane(dut, lane, pc = 0x3000 + lane * 4, identities(lane))
+                val instruction = dut.io.enqueue.entries(lane).context.instruction
+                instruction.fu.poke(ZirconConfig.DecodeUnit.System)
+                instruction.op.poke(if (lane == 0) ZirconConfig.SystemOp.CSRRW else ZirconConfig.SystemOp.CSRRS)
+                instruction.inst.poke((ZirconConfig.CSRAddress.mstatus << 20) | ((if (lane == 1) 0 else 2) << 15) | 0x73)
+            }
+            dut.clock.step()
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+            dut.io.head(0).bits.writesExecutionState.expect(true)
+            dut.io.head(1).bits.writesExecutionState.expect(false)
+            dut.io.head(2).bits.writesExecutionState.expect(true)
+
+            complete(dut, 0, identities(0))
+            dut.clock.step()
+            dut.io.completion(0).valid.poke(false)
+            dut.io.head(0).bits.writesExecutionState.expect(true)
+        }
+    }
+
     "out-of-order completion exposes only a completed retirement prefix" in {
         simulate(new ReorderBuffer(dispatchWidth = 3)) { dut =>
             initialize(dut)

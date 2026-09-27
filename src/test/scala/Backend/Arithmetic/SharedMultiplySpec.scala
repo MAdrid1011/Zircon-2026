@@ -30,9 +30,13 @@ class SharedMultiplySpec extends AnyFreeSpec with ChiselSim {
                 dut.io.in.valid.poke(input.nonEmpty); dut.io.out.ready.poke(ready)
                 dut.io.in.bits.src1.poke(x.a); dut.io.in.bits.src2.poke(x.b); dut.io.in.bits.src3.poke(x.c)
                 dut.io.in.bits.fpSrc1.poke(x.a); dut.io.in.bits.fpSrc2.poke(x.b); dut.io.in.bits.fpSrc3.poke(x.c)
-                dut.io.in.bits.fpExp1.poke((x.a >> 23) & 0xff)
-                dut.io.in.bits.fpExp2.poke((x.b >> 23) & 0xff)
-                dut.io.in.bits.fpExp3.poke((x.c >> 23) & 0xff)
+                def effectiveExponent(bits: BigInt): BigInt = {
+                    val raw = (bits >> 23) & 0xff
+                    if (raw == 0) BigInt(1) else raw
+                }
+                dut.io.in.bits.fpEffectiveExp1.poke(effectiveExponent(x.a))
+                dut.io.in.bits.fpEffectiveExp2.poke(effectiveExponent(x.b))
+                dut.io.in.bits.fpEffectiveExp3.poke(effectiveExponent(x.c))
                 dut.io.in.bits.fpZero1.poke((x.a & 0x7fffffffL) == 0)
                 dut.io.in.bits.fpZero2.poke((x.b & 0x7fffffffL) == 0)
                 dut.io.in.bits.fpZero3.poke((x.c & 0x7fffffffL) == 0)

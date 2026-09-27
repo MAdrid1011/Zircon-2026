@@ -19,18 +19,9 @@ class BranchIO extends Bundle {
 
 object BranchLogic {
 
-    /** Four parallel byte sums, the original four-block carry network, then local increments. */
+    /** Carry-prefix addition keeps a forwarded JALR source off a byte-increment chain. */
     def targetSum(a: UInt, b: UInt): UInt = {
-        val left = (0 until 4).map(i => a(i * 8 + 7, i * 8))
-        val right = (0 until 4).map(i => b(i * 8 + 7, i * 8))
-        val sums = left.zip(right).map { case (x, y) => x +& y }
-        val propagate = VecInit(left.zip(right).map { case (x, y) => (x ^ y).andR }).asUInt
-        val generate = VecInit(sums.map(_(8))).asUInt
-        val (_, _, carries) = BLevelCarry4(propagate, generate, 0.U(1.W))
-        VecInit((0 until 4).map { i =>
-            val low = sums(i)(7, 0)
-            if (i == 0) low else low + carries(i - 1)
-        }).asUInt
+        BLevelPAdder32(a, b, 0.U).io.res
     }
 
     def resolve(io: BranchIO, equal: Bool, unsignedLess: Bool, target: UInt, indirectMatch: Bool): Unit = {
@@ -54,14 +45,21 @@ object BranchLogic {
 class Branch extends Module {
     val io = IO(new BranchIO)
     val isJalr = io.op === JALR
-    val rawTarget = BranchLogic.targetSum(Mux(isJalr, io.src1, io.pc), io.imm)
+    val directTarget = BranchLogic.targetSum(io.pc, io.imm)
+    val indirectTarget = BranchLogic.targetSum(io.src1, io.imm)
+    val rawTarget = Mux(isJalr, indirectTarget, directTarget)
     val target = Cat(rawTarget(31, 1), rawTarget(0) && !isJalr)
-    val comparison = BLevelPAdder32(io.src1, ~io.src2, 1.U)
+    // JALR discards target bit 0. Both possible unmasked sums are prepared
+    // from the early prediction and immediate before a forwarded src1 arrives.
+    val expectedEvenSource = io.predOffset - io.imm
+    val expectedOddSource = (io.predOffset | 1.U(32.W)) - io.imm
+    val indirectMatch = !io.predOffset(0) &&
+        (io.src1 === expectedEvenSource || io.src1 === expectedOddSource)
     BranchLogic.resolve(
         io,
-        comparison.io.res === 0.U,
-        !comparison.io.cout.get.asBool,
+        io.src1 === io.src2,
+        io.src1 < io.src2,
         target,
-        target === io.predOffset
+        indirectMatch
     )
 }

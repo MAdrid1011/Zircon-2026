@@ -180,6 +180,7 @@ class IndirectTargetPredictor(
     val readIndexOH = VecInit((0 until p.ittageCount).map { table =>
         UIntToOH(io.trainRead.bits.meta.ittage.indices(table), p.ittageSets)
     })
+    val trainIndex = RegEnable(io.trainRead.bits.meta.ittage.indices, io.trainRead.valid)
     val trainIndexOH = RegEnable(readIndexOH, io.trainRead.valid)
     val trainValidState = Wire(Vec(p.ittageCount, Bool()))
     val writeAlloc = Wire(Vec(p.ittageCount, Bool()))
@@ -198,7 +199,7 @@ class IndirectTargetPredictor(
         tables(table).io.updateReadEnable := io.trainRead.valid
         tables(table).io.updateReadAddress := io.trainRead.bits.meta.ittage.indices(table)
         val pendingHit = pendingWrite(table) &&
-            (pendingIndexOH(table) & trainIndexOH(table)).orR
+            pendingIndex(table) === trainIndex(table)
         Mux(
             pendingHit,
             pendingRows(table),

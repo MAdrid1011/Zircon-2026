@@ -22,6 +22,7 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
         RegfileParams(),
         RegfileParams(numEntries = 7, dataWidth = 16, numReadPorts = 3, numWritePorts = 2),
         RegfileParams(numEntries = 64, dataWidth = 64, numReadPorts = 4, numWritePorts = 3),
+        RegfileParams(numEntries = 72, dataWidth = 32, numReadPorts = 9, numWritePorts = 6),
         RegfileParams(numEntries = 65, dataWidth = 8, numReadPorts = 1, numWritePorts = 3),
         RegfileParams(numEntries = 2, dataWidth = 1, numReadPorts = 1, numWritePorts = 1),
         RegfileParams(numEntries = 7, dataWidth = 32, numReadPorts = 3, numWritePorts = 2, hasZeroReg = false),
@@ -129,6 +130,43 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
                 reset(withWrite = true)
                 info(s"Validated $cycles cycles and all ${p.numReadPorts * p.numWritePorts} WB/read port pairs for $p")
             }
+        }
+    }
+
+    "selected read ports may bypass a canceled write without changing storage" in {
+        val p = RegfileParams(numEntries = 8, numReadPorts = 3, numWritePorts = 2, holdReads = true)
+        simulate(new Regfile(p, readBypassOverridePort = Some(0), overrideReadPorts = Set(0, 2))) { dut =>
+            dut.io.readHold.get.foreach(_.poke(false))
+            dut.io.read.foreach(_.addr.poke(3))
+            dut.io.write.foreach { port =>
+                port.addr.poke(3)
+                port.data.poke(0)
+                port.we.poke(false)
+            }
+            dut.io.readBypassOverride.get.poke(false)
+            dut.io.readBypassOverrideAddr.get.poke(3)
+            dut.reset.poke(true)
+            dut.clock.step()
+            dut.reset.poke(false)
+
+            dut.io.write(0).addr.poke(4)
+            dut.io.write(0).data.poke(0x12345678L)
+            dut.io.readBypassOverride.get.poke(true)
+            dut.io.read(0).data.expect(0x12345678L)
+            dut.io.read(1).data.expect(0)
+            dut.io.read(2).data.expect(0x12345678L)
+            dut.clock.step()
+
+            dut.io.readBypassOverride.get.poke(false)
+            dut.io.read.foreach(_.data.expect(0))
+            dut.io.write(0).addr.poke(3)
+            dut.io.write(0).we.poke(true)
+            dut.io.read(0).data.expect(0)
+            dut.io.read(1).data.expect(0x12345678L)
+            dut.io.read(2).data.expect(0)
+            dut.clock.step()
+            dut.io.write(0).we.poke(false)
+            dut.io.read.foreach(_.data.expect(0x12345678L))
         }
     }
 
