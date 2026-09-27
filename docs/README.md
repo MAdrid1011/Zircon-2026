@@ -1,6 +1,6 @@
-# Zircon-2026 架构与验证文档
+# Zircon-2026 文档
 
-本目录描述当前 RTL 的模块边界、关键状态、流水线数据流和可复现验证。配置数值以
+本目录描述当前 RTL 的架构、模块边界、关键状态、流水线数据流和可复现验证。配置数值以
 `src/main/scala/Config` 的默认参数为准；Nangate45 专用配置会在对应文档中明确标出差异。
 
 ## 推荐阅读顺序
@@ -21,12 +21,13 @@
 
 ## 复现与验证
 
-- [Linux 启动与复现](Linux-Bringup.md)：软件镜像、PGO 仿真、Spike 差分、检查点与限制
-- [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、当前结果与边界
+- [Linux 启动与复现](Linux-Bringup.md)：软件镜像、PGO 仿真、Spike 差分、检查点与交互终端
+- [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、当前结果与评估说明
 
 ## 贡献规范
 
 - [Git message tags](git-msg-tags.md)：提交消息使用的模块标签
 
-文档中的类名、接口名和流水级名称与源码保持一致，便于从设计说明直接定位实现。Git 历史负责
-保存演进过程；本目录只描述当前可用设计和验证入口。
+文档中的类名、接口名和流水级名称与源码保持一致，便于从设计说明直接定位实现。README 说明
+项目入口和常用任务，本目录说明模块职责与验证方法；Git 历史负责保存演进过程，本目录只描述
+当前可用设计和验证入口。

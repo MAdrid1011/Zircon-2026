@@ -30,8 +30,8 @@ DTLB 查询、PMA 属性、对齐检查和 SQ 地址写入均使用该寄存器�
 
 `AtomicUnit` 执行 `LR.W`、`SC.W` 和九条 `AMO.W`。地址与写数据仍经 LS1 的地址和数据任务写入
 SQ；指令到达 ROB 头且更早的存储访问排空后，原子单元复用 DCache 的 LS1 Load 端口与 Store
-端口完成操作。Reservation 以物理字地址记录，普通 Store、成功或失败的 `SC.W` 以及其他 AMO
-会按相应规则清除它。
+端口完成操作。Reservation 以物理字地址记录；已提交 Store 仅在写入该字时使其失效，
+成功或失败的 `SC.W` 以及其他 AMO 也会清除它。
 
 ## PRF、旁路与唤醒
 
