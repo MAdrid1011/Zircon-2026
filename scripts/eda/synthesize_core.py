@@ -217,6 +217,11 @@ def main():
         ),
     )
     parser.add_argument(
+        "--sta-target-ns",
+        type=float,
+        help="logic-only STA period; defaults to the synthesis mapping period",
+    )
+    parser.add_argument(
         "--placement-density",
         type=float,
         help="override the platform placement density for a reproducible physical A/B run",
@@ -233,6 +238,13 @@ def main():
     args = parser.parse_args()
     if not args.yosys:
         parser.error("Yosys was not found; pass --yosys /path/to/yosys")
+    if args.sta_target_ns is not None:
+        if not args.logic_only:
+            parser.error("--sta-target-ns requires --logic-only")
+        try:
+            target_delay_ps(args.sta_target_ns)
+        except ValueError as error:
+            parser.error(str(error))
 
     metadata = validate_platform()
     targets = requested_targets(
@@ -323,7 +335,7 @@ def main():
         )
         logic_only = run_logic_only_sta(
             netlist=target_dir / "ZirconCore-mapped.v",
-            target_ns=target_ns,
+            target_ns=args.sta_target_ns if args.sta_target_ns is not None else target_ns,
             output_dir=target_dir / "logic-only",
             liberty_files=liberty_inputs,
             image=DEFAULT_OPENROAD_IMAGE,

@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -40,6 +42,20 @@ from timing_reports import (
 
 
 class TimingFlowTests(unittest.TestCase):
+    def test_separate_sta_period_requires_logic_only_and_positive_period(self):
+        script = Path(__file__).with_name("synthesize_core.py")
+        for options, message in [
+            (["--sta-target-ns", "1.5"], "requires --logic-only"),
+            (["--logic-only", "--sta-target-ns", "-1"], "positive"),
+        ]:
+            with self.subTest(options=options):
+                result = subprocess.run(
+                    [sys.executable, str(script), "--yosys", sys.executable, *options],
+                    text=True, capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
     def test_closure_gate_counts_only_scoped_family_changes(self):
         audit = {
             "family_count": 3,
@@ -101,6 +117,29 @@ Endpoint: _2_ (rising edge-triggered flip-flop clocked by core_clock)
         self.assertEqual([stage["pin"] for stage in paths[0]["stages"]], [
             "macro.ram/dout1[3]", "_1_/Z", "_2_/D",
         ])
+
+    def test_full_path_parser_skips_boundary_met_path(self):
+        report = """Startpoint: _1_ (rising edge-triggered flip-flop clocked by core_clock)
+Endpoint: _2_ (rising edge-triggered flip-flop clocked by core_clock)
+               0.080000    0.080000 ^ _1_/Q (DFF_X1)
+               0.040000    0.120000 ^ _2_/D (DFF_X1)
+                           0.120000   data arrival time
+                          -0.100000   slack (VIOLATED)
+
+Startpoint: _3_ (rising edge-triggered flip-flop clocked by core_clock)
+Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
+               0.080000    0.080000 ^ _3_/Q (DFF_X1)
+               0.040000    0.120000 ^ _4_/D (DFF_X1)
+                           0.120000   data arrival time
+                           0.000000   slack (MET)
+"""
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "full.rpt"
+            path.write_text(report)
+            paths = list(parse_full_paths(path))
+
+        self.assertEqual(len(paths), 1)
+        self.assertEqual(paths[0]["slack_ns"], -0.1)
 
     def test_every_external_ram_binding_uses_bsg_rising_edge_models(self):
         with tempfile.TemporaryDirectory() as temp:
