@@ -12,6 +12,7 @@ from timing_reports import normalize_register_family, parse_dff_registers
 START = re.compile(r"^Startpoint: (\S+)")
 END = re.compile(r"^Endpoint: (\S+)")
 SLACK = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)\s+slack \(VIOLATED\)\s*$")
+MET_SLACK = re.compile(r"^\s*[-+]?\d+(?:\.\d+)?\s+slack \(MET\)\s*$")
 STAGE = re.compile(
     r"^\s*(?:\d+\.\d+\s+)?([-+]?\d+\.\d+)\s+([-+]?\d+\.\d+)"
     r"\s+[\^v]\s+(\S+)\s+\(([^)]+)\)\s*$"
@@ -58,6 +59,8 @@ def parse_full_paths(report):
                 current["slack_ns"] = float(slack.group(1))
                 yield current
                 current = None
+            elif MET_SLACK.match(line):
+                current = None
     if current is not None:
         raise ValueError("Unterminated violating path")
 
@@ -71,7 +74,7 @@ def audit(report, netlist, clusters):
         if name.startswith("_")
     }
     registers = parse_dff_registers(netlist, instances)
-    families = defaultdict(lambda: {"count": 0, "tns_ns": 0.0, "worst": None})
+    families = defaultdict(lambda: {"count": 0, "over_1p5_count": 0, "tns_ns": 0.0, "worst": None})
     cells = defaultdict(lambda: {"endpoints": 0, "families": set()})
     for path in paths:
         # OpenSTA names a macro endpoint by instance in the header, while the
@@ -99,6 +102,7 @@ def audit(report, netlist, clusters):
         )
         group = families[family]
         group["count"] += 1
+        group["over_1p5_count"] += path["slack_ns"] < -0.5
         group["tns_ns"] += path["slack_ns"]
         if group["worst"] is None or path["slack_ns"] < group["worst"]["slack_ns"]:
             group["worst"] = path
@@ -121,6 +125,7 @@ def audit(report, netlist, clusters):
         {
             "name": name,
             "count": values["count"],
+            "over_1p5_count": values["over_1p5_count"],
             "tns_ns": round(values["tns_ns"], 6),
             "worst_slack_ns": values["worst"]["slack_ns"],
             "representative": values["worst"],
