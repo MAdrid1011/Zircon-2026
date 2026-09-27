@@ -49,7 +49,7 @@ class AtomicUnitIO(p: BackendParams, cache: DCacheParams, observe: Boolean) exte
     val request = Flipped(Decoupled(new AtomicRequest(p)))
     val response = Decoupled(new AtomicResponse(p))
     val writeResult = Output(Bool())
-    val clearReservation = Input(Bool())
+    val committedStore = Flipped(Valid(UInt(34.W)))
     val busy = Output(Bool())
 
     val load = new AtomicLoadIO(cache)
@@ -129,7 +129,7 @@ class AtomicUnit(
     io.store.request.bits.uncache := request.uncache
     io.store.response.ready := state === storeWait
 
-    when(io.clearReservation) {
+    when(io.committedStore.valid && io.committedStore.bits(33, 2) === reservationAddress) {
         reservationValid := false.B
     }
     when(io.request.fire) {

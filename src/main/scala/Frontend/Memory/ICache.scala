@@ -52,6 +52,17 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val missC1 = RegInit(false.B)
     val rbuf = RegInit(0.U(c.lineBits.W))
     val responseWords = RegInit(VecInit.fill(p.fetchWidth)(0.U(32.W)))
+    val responseFields = RegInit(VecInit.fill(p.fetchWidth)(0.U.asTypeOf(new FrontendPredecodeFields)))
+    val hitWordsSnapshot = Reg(Vec(c.ways, Vec(p.fetchWidth, UInt(32.W))))
+    val hitFieldsSnapshot = Reg(Vec(c.ways, Vec(p.fetchWidth, new FrontendPredecodeFields)))
+    val payloadSelect = RegInit(VecInit.fill(p.fetchWidth)(0.U((c.ways + 1).W)))
+    def predecodeWords(words: Vec[UInt]): Vec[FrontendPredecodeFields] = {
+        VecInit((0 until p.fetchWidth).map { slot =>
+            val predecode = Module(new PredecodeFields)
+            predecode.io.inst := words(slot)
+            predecode.io.fields
+        })
+    }
     val dbufFault = RegInit(0.U(p.fetchWidth.W))
     val readSlot = RegInit(0.U(p.slotBits.W))
     io.miss := missC1
@@ -82,7 +93,18 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
 
     /* Stage 2: RAM Output, Translation and Hit Check / IF1 */
     val c1s2 = RegInit(0.U.asTypeOf(new IStage1Signal))
+    val c1s2TlbVaddrInverted = RegInit(~0.U(32.W))
+    val c1s2TlbVaddr = ~c1s2TlbVaddrInverted
+    val fetchBlocksPerLine = c.lineBytes / (p.fetchWidth * 4)
+    val c1s2FragmentOH = RegInit(0.U(fetchBlocksPerLine.W))
     val c1s3 = RegInit(0.U.asTypeOf(new IStage2Signal(p, c)))
+    def fragmentFromOH(line: UInt): UInt = {
+        val words = line.asTypeOf(Vec(c.lineBytes / 4, UInt(32.W)))
+        val blocks = (0 until fetchBlocksPerLine).map { block =>
+            VecInit((0 until p.fetchWidth).map(slot => words(block * p.fetchWidth + slot))).asUInt
+        }
+        Mux1H(c1s2FragmentOH.asBools, blocks)
+    }
     when(invalidateStart) {
         c1s2.rreq := false.B
         c1s3.rreq := false.B
@@ -95,7 +117,7 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val translatedFault = WireDefault(io.mmu.response.bits.fault)
 
     itlb.io.lookup(0).valid := false.B
-    itlb.io.lookup(0).bits.vaddr := c1s2.vaddr(31, p.blockBits)
+    itlb.io.lookup(0).bits.vaddr := c1s2TlbVaddr(31, p.blockBits)
     itlb.io.scopeUpdate.valid := false.B
     itlb.io.scopeUpdate.bits.asid := 0.U
     itlb.io.refill.valid := false.B
@@ -166,7 +188,14 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     c1s3In.uncache := translatedUncache
     c1s3In.fault := faultC1s2
     c1s3In.hit := hitC1s2
-    val hitWords = Mux1H(hitC1s2, dataTab.map(t => fragment(t.dataOut, c1s2.vaddr)))
+    val hitWordsPerWay = dataTab.map(t => fragmentFromOH(t.dataOut))
+    val hitFieldsPerWay = hitWordsPerWay.map { wayWords =>
+        VecInit((0 until p.fetchWidth).map { slot =>
+            val predecode = Module(new PredecodeFields)
+            predecode.io.inst := wayWords.asTypeOf(Vec(p.fetchWidth, UInt(32.W)))(slot)
+            predecode.io.fields
+        })
+    }
     c1s3In.victimWay := lruTab.rdata(0)
     c1s3In.victimData := Mux1H(lruTab.rdata(0), dataTab.map(_.dataOut))
     c1s3In.victimTag := Mux1H(lruTab.rdata(0), tagTab.map(_.dataOut))
@@ -185,7 +214,16 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     }
     io.pp.response.valid := c1s3.rreq && !missC1 && !io.flush
     io.pp.response.bits.mask := FrontendMath.range(c1s3Vaddr, p)
-    io.pp.response.bits.inst := responseWords
+    for (slot <- 0 until p.fetchWidth) {
+        io.pp.response.bits.inst(slot) := Mux1H(
+            payloadSelect(slot).asBools,
+            hitWordsSnapshot.map(_(slot)) :+ responseWords(slot),
+        )
+        io.pp.response.bits.fields(slot) := Mux1H(
+            payloadSelect(slot).asBools,
+            hitFieldsSnapshot.map(_(slot)) :+ responseFields(slot),
+        )
+    }
     io.pp.response.bits.fault := Mux(
         c1s3.fault,
         io.pp.response.bits.mask,
@@ -196,6 +234,10 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     // flush until the lower transaction drains. Keep FSM ready off its wide D enables.
     val payloadMayOverwrite = !missC1 && (!c1s3.rreq || io.pp.response.fire)
     when(payloadMayOverwrite) {
+        for (way <- 0 until c.ways) {
+            hitWordsSnapshot(way) := hitWordsPerWay(way).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+            hitFieldsSnapshot(way) := hitFieldsPerWay(way)
+        }
         c1s3.vaddrWord := c1s3In.vaddrWord
         c1s3.paddrBlock := c1s3In.paddrBlock
         c1s3.uncache := c1s3In.uncache
@@ -212,13 +254,21 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     when(c1s2Go) {
         c1s3.rreq := true.B
         c1s2.rreq := false.B
-        // A hit is ready at the existing IF1/IF2 boundary; a miss replaces these
-        // words as its lower responses arrive, before the response becomes valid.
-        responseWords := hitWords.asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+        val visibleSlots = FrontendMath.range(c1s2.vaddr, p)
+        val hitPayload = hitC1s2.orR && !translatedUncache && !faultC1s2
+        for (slot <- 0 until p.fetchWidth) {
+            payloadSelect(slot) := Mux(visibleSlots(slot),
+                Cat(!hitPayload, hitC1s2 & Fill(c.ways, hitPayload)), 0.U)
+        }
         dbufFault := 0.U
     }
     when(io.flush) { c1s2.rreq := false.B; c1s3.rreq := false.B }
-    when(io.pp.request.fire) { c1s2 := c1s1 }
+    when(io.pp.request.fire) {
+        c1s2 := c1s1
+        c1s2TlbVaddrInverted := ~io.pp.request.bits.pc
+        c1s2FragmentOH := (if (fetchBlocksPerLine == 1) 1.U else
+            UIntToOH(io.pp.request.bits.pc(c.offsetBits - 1, p.blockBits), fetchBlocksPerLine))
+    }
 
     /* FSM Connections */
     fsm.io.cc.rreq := c1s3.rreq
@@ -291,11 +341,17 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         when(c1s3.uncache) {
             if (p.fetchWidth == 1) responseWords(0) := io.l2.response.bits.data(31, 0)
             else responseWords(readSlot) := io.l2.response.bits.data(31, 0)
+            val predecode = Module(new PredecodeFields)
+            predecode.io.inst := io.l2.response.bits.data(31, 0)
+            if (p.fetchWidth == 1) responseFields(0) := predecode.io.fields
+            else responseFields(readSlot) := predecode.io.fields
             dbufFault := dbufFault | Mux(responseError, UIntToOH(readSlot, p.fetchWidth), 0.U)
             readSlot := readSlot + 1.U
         }.otherwise {
             rbuf := io.l2.response.bits.data
-            responseWords := fragment(io.l2.response.bits.data, c1s3Vaddr).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+            val refillWords = fragment(io.l2.response.bits.data, c1s3Vaddr).asTypeOf(Vec(p.fetchWidth, UInt(32.W)))
+            responseWords := refillWords
+            responseFields := predecodeWords(refillWords)
             dbufFault := Fill(p.fetchWidth, responseError)
         }
     }

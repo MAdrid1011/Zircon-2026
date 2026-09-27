@@ -3,9 +3,9 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.FrontendParams
 
-class FrontendPredictionSelectTestTop(p: FrontendParams) extends Module {
+class FrontendPredictionSelectTestTop(p: FrontendParams, directionsAreSlots: Boolean = false) extends Module {
     val io = IO(new FrontendPredictionSelectIO(p))
-    val select = Module(new FrontendPredictionSelect(p))
+    val select = Module(new FrontendPredictionSelect(p, directionsAreSlots = directionsAreSlots))
     select.io.pcBlock := io.pcBlock
     select.io.range := io.range
     select.io.kinds := io.kinds
@@ -18,10 +18,11 @@ class FrontendPredictionSelectTestTop(p: FrontendParams) extends Module {
 }
 
 class FrontendSelectorSpec extends AnyFreeSpec with ChiselSim {
-    for (width <- Seq(1, 4, 8)) {
-        s"select the earliest taken instruction by conditional rank at width $width" in {
+    for ((width, directionsAreSlots) <- Seq(1, 4, 8).flatMap(width =>
+        Seq(false, true).map(directionsAreSlots => (width, directionsAreSlots)))) {
+        s"select the earliest taken instruction at width $width, slot directions $directionsAreSlots" in {
             val p = FrontendParams(fetchWidth = width)
-            simulate(new FrontendPredictionSelectTestTop(p)) { d =>
+            simulate(new FrontendPredictionSelectTestTop(p, directionsAreSlots)) { d =>
                 val rng = new scala.util.Random(20260910 + width)
                 for (caseIndex <- 0 until 400) {
                     val start = rng.nextInt(width)
@@ -32,7 +33,18 @@ class FrontendSelectorSpec extends AnyFreeSpec with ChiselSim {
                     val backwards = targets.zipWithIndex.map { case (target, i) => target <= 0x80000000L + i * 4 }
                     val backwardMask = backwards.zipWithIndex.filter(_._1).map(x => 1 << x._2).sum
                     val range = ((1 << width) - 1) ^ ((1 << start) - 1)
-                    d.io.pcBlock.poke(pc >> p.blockBits); d.io.range.poke(range); d.io.directions.poke(directions)
+                    val slotDirections = if (!directionsAreSlots) directions else {
+                        var nextRank = 0
+                        kinds.indices.foldLeft(0) { (bits, slot) =>
+                            if (slot < start || kinds(slot) != 1) bits
+                            else {
+                                val result = bits | (((directions >> nextRank) & 1) << slot)
+                                nextRank += 1
+                                result
+                            }
+                        }
+                    }
+                    d.io.pcBlock.poke(pc >> p.blockBits); d.io.range.poke(range); d.io.directions.poke(slotDirections)
                     d.io.backward.poke(backwardMask)
                     d.io.control.zip(kinds).foreach { case (port, value) => port.poke(value != 0) }
                     d.io.conditional.zip(kinds).foreach { case (port, value) => port.poke(value == 1) }

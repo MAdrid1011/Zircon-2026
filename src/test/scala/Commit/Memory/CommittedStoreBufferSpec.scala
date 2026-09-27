@@ -134,4 +134,36 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.query(1).response.bits.data.expect(0x44002200)
         }
     }
+
+    "selects the youngest hit for every four-entry ring position and hit set" in {
+        simulate(new StoreBuffer) { dut =>
+            for (rotation <- 0 until 4; hits <- 0 until 16) {
+                initialize(dut)
+                for (_ <- 0 until rotation) {
+                    enqueue(dut, paddr = 0x4000, data = 0, mask = 15)
+                    drainOne(dut)
+                }
+                for (entry <- 0 until 4) {
+                    enqueue(
+                        dut,
+                        paddr = if ((hits & (1 << entry)) != 0) 0x2000 else 0x3000,
+                        data = (entry + 1) * 0x01010101,
+                        mask = 15,
+                    )
+                }
+                val query = dut.io.query(0).request
+                query.valid.poke(true)
+                query.bits.wordAddress.poke(0x2000 >> 2)
+                query.bits.mask.poke(15)
+                dut.clock.step()
+                query.valid.poke(false)
+                dut.io.query(0).response.valid.expect(true)
+                dut.io.query(0).response.bits.mask.expect(if (hits == 0) 0 else 15)
+                val youngest = (0 until 4).reverse.find(entry => (hits & (1 << entry)) != 0)
+                dut.io.query(0).response.bits.data.expect(
+                    youngest.map(entry => (entry + 1) * 0x01010101).getOrElse(0)
+                )
+            }
+        }
+    }
 }

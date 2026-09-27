@@ -87,8 +87,14 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     private val deqBase = RegInit(1.U(n.W))
     private val deqData = if (registeredDeq && !selectDeqAfterRegister) Some(Reg(Vec(dw, gen))) else None
     private val deqAlternatives = if (selectDeqAfterRegister) Some(Reg(Vec(dw, Vec(dw + 1, gen)))) else None
+    private val deqSelectChunks = (gen.getWidth + 63) / 64
     private val deqPopSelect = if (selectDeqAfterRegister) Some(
-        RegInit(VecInit.fill(dw)(0.U((dw + 1).W)))
+        Seq.fill(dw)(Seq.fill(deqSelectChunks) {
+            val copy = RegInit(0.U((dw + 1).W))
+            // Each copy drives at most one 64-bit slice of the wide output.
+            dontTouch(copy)
+            copy
+        })
     ) else None
     private val deqValid = if (registeredDeq) Some(RegInit(VecInit.fill(dw)(false.B))) else None
     private def hasMethod(name: String): Boolean = {
@@ -152,7 +158,13 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
             Mux1H(select, banks.map(_.deq.valid)) && allDeqValid
         )
         io.deq(lane).bits := deqAlternatives.map { alternatives =>
-            Mux1H(deqPopSelect.get(lane).asBools, alternatives(lane))
+            val slices = (0 until deqSelectChunks).map { chunk =>
+                val low = chunk * 64
+                val high = math.min(gen.getWidth, low + 64) - 1
+                Mux1H(deqPopSelect.get(lane)(chunk).asBools,
+                    alternatives(lane).map(_.asUInt(high, low)))
+            }
+            Cat(slices.reverse).asTypeOf(gen)
         }.orElse(deqData.map(_(lane))).getOrElse(Mux1H(select, banks.map(_.deq.bits)))
         if (exposeDeqIndex) {
             io.deqIdx.get(lane).qidx := select
@@ -224,14 +236,14 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
             }
             when(io.flush) {
                 deqValid.get(lane) := false.B
-                deqPopSelect.foreach(_(lane) := 0.U)
+                deqPopSelect.foreach(_(lane).foreach(_ := 0.U))
             }.otherwise {
                 val nextValid = Mux1H(popCountOH, candidates.map(_._1))
                 deqValid.get(lane) := nextValid
                 if (selectDeqAfterRegister) {
-                    // Invalid output data is unobservable. Qualifying each lane
-                    // gives its wide payload mux a distinct registered driver.
-                    deqPopSelect.get(lane) := Mux(nextValid, popCountOH.asUInt, 0.U)
+                    // deqValid alone qualifies the output; selecting an invalid
+                    // payload is unobservable and must not feed this register D.
+                    deqPopSelect.get(lane).foreach(_ := popCountOH.asUInt)
                 }
             }
         }

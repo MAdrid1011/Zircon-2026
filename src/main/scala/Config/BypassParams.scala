@@ -8,6 +8,7 @@ case class BypassParams(
     consumerProducers: Seq[Seq[Seq[Int]]] = Seq.empty,
     captureConsumers: Set[Int] = Set.empty,
     guaranteedCaptureProducers: Set[Int] = Set.empty,
+    deferredCaptureProducers: Set[Int] = Set.empty,
 ) {
     require(numProducers > 0)
     require(consumerSources.nonEmpty && consumerSources.forall(_ > 0))
@@ -24,6 +25,7 @@ case class BypassParams(
         set.forall(producer => producer >= 0 && producer < numProducers)))
     require(captureConsumers.forall(index => index >= 0 && index < consumerSources.size))
     require(guaranteedCaptureProducers.forall(index => index >= 0 && index < numProducers))
+    require(deferredCaptureProducers.forall(index => index >= 0 && index < numProducers))
 }
 
 object BypassParams {
@@ -51,5 +53,6 @@ object BypassParams {
         ),
         captureConsumers = Set(2),
         guaranteedCaptureProducers = Set(0, 1),
+        deferredCaptureProducers = Set(0, 1),
     )
 }

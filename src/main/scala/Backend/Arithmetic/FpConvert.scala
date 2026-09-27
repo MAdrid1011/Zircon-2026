@@ -47,21 +47,40 @@ class FpConvertStage1(tagWidth: Int) extends Bundle {
     val tag = UInt(tagWidth.W)
 }
 
-/** Two elastic stages for all four RV32 FP32/integer conversions. */
+class FpConvertStage2(tagWidth: Int) extends Bundle {
+    val retained = UInt(32.W)
+    val guard = Bool()
+    val sticky = Bool()
+    val toFloat = Bool()
+    val signedInt = Bool()
+    val sign = Bool()
+    val zero = Bool()
+    val nan = Bool()
+    val tooLarge = Bool()
+    val exponent = UInt(8.W)
+    val exponentCarry = UInt(8.W)
+    val rm = UInt(3.W)
+    val tag = UInt(tagWidth.W)
+}
+
+/** Three elastic stages, with conversion completing at the existing EX4 boundary. */
 class FpConvert(val tagWidth: Int = 32) extends Module {
     require(tagWidth > 0)
     val io = IO(new FpConvertIO(tagWidth))
 
     val r1 = Reg(new FpConvertStage1(tagWidth))
-    val r2 = Reg(new FpConvertResponse(tagWidth))
+    val r2 = Reg(new FpConvertStage2(tagWidth))
+    val r3 = Reg(new FpConvertResponse(tagWidth))
     val valid1 = RegInit(false.B)
     val valid2 = RegInit(false.B)
+    val valid3 = RegInit(false.B)
     val active = !reset.asBool && !io.flush
-    val advance2 = !valid2 || io.out.ready
+    val advance3 = !valid3 || io.out.ready
+    val advance2 = !valid2 || advance3
     val advance1 = !valid1 || advance2
     io.in.ready := active && advance1
-    io.out.valid := active && valid2
-    io.out.bits := r2
+    io.out.valid := active && valid3
+    io.out.bits := r3
 
     /* EX1: integer magnitude and leading zeros run in parallel. */
     val req = io.in.bits
@@ -114,55 +133,71 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     val retained = Mux(r1.toFloat, normalized(33, 10).pad(32), integerMagnitude)
     val guard = Mux(r1.toFloat, normalized(9), Mux(r1.small, r1.smallGuard, shifted(1)))
     val sticky = Mux(r1.toFloat, normalized(8, 0).orR, Mux(r1.small, r1.smallSticky, shifted(0)))
-    val inexact = guard || sticky
+    val s2 = Wire(new FpConvertStage2(tagWidth))
+    s2.retained := retained
+    s2.guard := guard
+    s2.sticky := sticky
+    s2.toFloat := r1.toFloat
+    s2.signedInt := r1.signedInt
+    s2.sign := r1.sign
+    s2.zero := r1.zero
+    s2.nan := r1.nan
+    s2.tooLarge := r1.tooLarge
+    s2.exponent := r1.exponent
+    s2.exponentCarry := r1.exponentCarry
+    s2.rm := r1.rm
+    s2.tag := r1.tag
+
+    /* EX3: round the registered shifted result and check its integer range. */
+    val inexact = r2.guard || r2.sticky
     val roundUp =
-        (r1.rm === 0.U && guard && (sticky || retained(0))) ||
-            (r1.rm === 4.U && guard) ||
-            (r1.rm === 2.U && r1.sign && inexact) ||
-            (r1.rm === 3.U && !r1.sign && inexact)
+        (r2.rm === 0.U && r2.guard && (r2.sticky || r2.retained(0))) ||
+            (r2.rm === 4.U && r2.guard) ||
+            (r2.rm === 2.U && r2.sign && inexact) ||
+            (r2.rm === 3.U && !r2.sign && inexact)
 
     // -(q + up) = ~q + !up. A conditional increment has only prefix carries.
-    val negate = !r1.toFloat && r1.sign
-    val roundBase = retained ^ Fill(32, negate)
+    val negate = !r2.toFloat && r2.sign
+    val roundBase = r2.retained ^ Fill(32, negate)
     val increment = roundUp ^ negate
-    val roundCarry = VecInit((0 until 32).map { bit =>
-        if (bit == 0) increment else increment && roundBase(bit - 1, 0).andR
-    }).asUInt
-    val rounded = roundBase ^ roundCarry
-    val floatCarry = retained(23, 0).andR && roundUp
-    val floatExponent = Mux(floatCarry, r1.exponentCarry, r1.exponent)
-    val floatResult = Mux(r1.zero, 0.U(32.W), Cat(r1.sign, floatExponent, rounded(22, 0)))
+    val rounded = BLevelPAdder32.sum(roundBase, 0.U(32.W), increment.asUInt)
+    val floatCarry = r2.retained(23, 0).andR && roundUp
+    val floatExponent = Mux(floatCarry, r2.exponentCarry, r2.exponent)
+    val floatResult = Mux(r2.zero, 0.U(32.W), Cat(r2.sign, floatExponent, rounded(22, 0)))
 
     /* Range checks run beside the incrementer and use the rounded magnitude's limit. */
     val signedOverflow = Mux(
-        r1.sign,
-        retained(31) && (retained(30, 0).orR || roundUp),
-        retained(31) || (retained(30, 0).andR && roundUp)
+        r2.sign,
+        r2.retained(31) && (r2.retained(30, 0).orR || roundUp),
+        r2.retained(31) || (r2.retained(30, 0).andR && roundUp)
     )
-    val unsignedOverflow = retained.andR && roundUp
-    val negativeUnsigned = !r1.signedInt && r1.sign && (retained.orR || roundUp)
-    val invalid = r1.tooLarge || Mux(r1.signedInt, signedOverflow, unsignedOverflow) || negativeUnsigned
-    val saturatePositive = r1.nan || !r1.sign
+    val unsignedOverflow = r2.retained.andR && roundUp
+    val negativeUnsigned = !r2.signedInt && r2.sign && (r2.retained.orR || roundUp)
+    val invalid = r2.tooLarge || Mux(r2.signedInt, signedOverflow, unsignedOverflow) || negativeUnsigned
+    val saturatePositive = r2.nan || !r2.sign
     val saturation = Mux(
         saturatePositive,
-        Mux(r1.signedInt, "h7fffffff".U(32.W), "hffffffff".U(32.W)),
-        Mux(r1.signedInt, "h80000000".U(32.W), 0.U(32.W))
+        Mux(r2.signedInt, "h7fffffff".U(32.W), "hffffffff".U(32.W)),
+        Mux(r2.signedInt, "h80000000".U(32.W), 0.U(32.W))
     )
-    val s2 = Wire(new FpConvertResponse(tagWidth))
-    s2.res := Mux(r1.toFloat, floatResult, Mux(invalid, saturation, rounded))
-    s2.fflags := Cat(!r1.toFloat && invalid, 0.U(3.W), inexact && (r1.toFloat || !invalid))
-    s2.tag := r1.tag
+    val s3 = Wire(new FpConvertResponse(tagWidth))
+    s3.res := Mux(r2.toFloat, floatResult, Mux(invalid, saturation, rounded))
+    s3.fflags := Cat(!r2.toFloat && invalid, 0.U(3.W), inexact && (r2.toFloat || !invalid))
+    s3.tag := r2.tag
 
     /* Each stage can fill a bubble independently while the other stage is blocked. */
     when(io.flush) {
         valid1 := false.B
         valid2 := false.B
+        valid3 := false.B
     }.otherwise {
         when(advance1) { valid1 := io.in.valid }
         when(advance2) { valid2 := valid1 }
+        when(advance3) { valid3 := valid2 }
     }
     when(io.in.fire) { r1 := s1 }
     when(active && advance2 && valid1) { r2 := s2 }
+    when(active && advance3 && valid2) { r3 := s3 }
     when(active && io.in.valid) {
         assert(req.op >= FCVT_W_S.U && req.op <= FCVT_S_WU.U, "FpConvert received a non-conversion operation")
         assert(toFloat === (req.op === FCVT_S_W.U || req.op === FCVT_S_WU.U))

@@ -298,12 +298,12 @@ class Commit(
     val selectedFtqValid = Wire(Vec(cp.width, Bool()))
     val headMatchesFtq = Wire(Vec(cp.width, Bool()))
     for (lane <- 0 until cp.width) {
-        ftq.io.commit.readIndexOH(lane) := rob.io.head(lane).bits.ftqIdxOH
+        ftq.io.commit.readIndexOH(lane) := 0.U
         val packetRank = if (lane == 0) 0.U else PopCount((0 until lane).map { previous =>
             rob.io.head(previous).valid && rob.io.head(previous).bits.packetEnd
         })
         val hits = (0 until cp.width).map(packet => packetRank === packet.U)
-        selectedFtq(lane) := ftq.io.commit.read(lane)
+        selectedFtq(lane) := Mux1H(hits, ftq.io.commit.head.map(_.bits))
         selectedFtqIdx(lane) := rob.io.head(lane).bits.ftqIdx
         val expectedFtqIdx = Mux1H(hits, ftq.io.commit.headIdx)
         selectedFtqValid(lane) := Mux1H(hits, ftq.io.commit.head.map(_.valid))
@@ -322,17 +322,6 @@ class Commit(
             (unconditional || (conditional && instruction(19, 15).orR))
     }
     def writesSatp(entry: ROBEntry): Bool = writesSatpFields(entry.isSystem, entry.systemOp, entry.instruction)
-    def writesExecutionState(entry: ROBEntry): Bool = {
-        val unconditional = entry.systemOp === SystemOp.CSRRW.U || entry.systemOp === SystemOp.CSRRWI.U
-        val conditional = entry.systemOp === SystemOp.CSRRS.U || entry.systemOp === SystemOp.CSRRC.U ||
-            entry.systemOp === SystemOp.CSRRSI.U || entry.systemOp === SystemOp.CSRRCI.U
-        val writes = unconditional || (conditional && entry.instruction(19, 15).orR)
-        val address = entry.instruction(31, 20)
-        val affectsExecution = address === CSRAddress.fflags.U || address === CSRAddress.frm.U ||
-            address === CSRAddress.fcsr.U || address === CSRAddress.sstatus.U ||
-            address === CSRAddress.satp.U || address === CSRAddress.mstatus.U
-        entry.isSystem && writes && affectsExecution
-    }
     var continue = true.B
     for (lane <- 0 until cp.width) {
         val entry = rob.io.head(lane).bits
@@ -345,7 +334,7 @@ class Commit(
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
         val systemException = ecall || ebreak || mretIllegal || sretIllegal
         recoveryCandidate(lane) := entry.exception.valid || entry.mispredicted || commitSystem ||
-            writesExecutionState(entry) || entry.isAtomic || systemException
+            entry.writesExecutionState || entry.isAtomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
         val completed = rob.io.head(lane).valid && entry.complete &&
             (if (lane == 0) systemReady else !headSystem && !entry.isSystem) &&
@@ -661,7 +650,6 @@ class Commit(
     io.backend.mixCSR.frm := csr.io.state.frm
     csr.io.req := io.backend.mixCSR.req
     csr.io.commit := io.backend.mixCSR.commit
-    csr.io.privilege := privilege
     val ordinaryRetired = PopCount(retireFire.zip(rob.io.head).map { case (fire, entry) =>
         fire && !entry.bits.isSystem
     })
@@ -680,10 +668,11 @@ class Commit(
         Mux(fire && entry.bits.fpFlagsValid, entry.bits.fflags, 0.U)
     }.reduce(_ | _)
     csr.io.fp.bits.dirty := csr.io.fp.valid
-    csr.io.trap.valid := recoveryValid && trap
-    csr.io.trap.bits.supervisor := delegatedTrap
-    csr.io.trap.bits.pcWord := selectedPc(31, 2)
-    csr.io.trap.bits.cause := trapCause
+    val acceptedTrap = Wire(Valid(new CSRTrap))
+    acceptedTrap.valid := recoveryValid && trap
+    acceptedTrap.bits.supervisor := delegatedTrap
+    acceptedTrap.bits.pcWord := selectedPc(31, 2)
+    acceptedTrap.bits.cause := trapCause
     val candidateTrapTval = rob.io.head.map { head =>
         val entry = head.bits
         val ecall = entry.isSystem && entry.systemOp === SystemOp.ECALL.U
@@ -694,12 +683,19 @@ class Commit(
         Mux(ecall, 0.U, Mux(ebreak, entry.pc,
             Mux(illegalMret || illegalSret, entry.instruction, entry.exception.tval)))
     }
-    csr.io.trap.bits.tval := Mux(takeInterrupt, 0.U, Mux1H(recoveryPayloadSelect, candidateTrapTval))
-    csr.io.xret.valid := recoveryValid && !trap && (selectedMret || selectedSret)
-    csr.io.xret.bits := selectedSret
-    when(csr.io.trap.valid) {
-        privilege := Mux(delegatedTrap, 1.U, 3.U)
-    }.elsewhen(csr.io.xret.valid) {
+    acceptedTrap.bits.tval := Mux(takeInterrupt, 0.U, Mux1H(recoveryPayloadSelect, candidateTrapTval))
+    val acceptedXret = Wire(Valid(Bool()))
+    acceptedXret.valid := recoveryValid && !trap && (selectedMret || selectedSret)
+    acceptedXret.bits := selectedSret
+    val trapPrivilege = RegEnable(privilege, acceptedTrap.valid)
+    val delayedTrap = RegNext(acceptedTrap, 0.U.asTypeOf(Valid(new CSRTrap)))
+    val delayedXret = RegNext(acceptedXret, 0.U.asTypeOf(Valid(Bool())))
+    csr.io.trap := delayedTrap
+    csr.io.xret := delayedXret
+    csr.io.privilege := Mux(delayedTrap.valid, trapPrivilege, privilege)
+    when(acceptedTrap.valid) {
+        privilege := Mux(acceptedTrap.bits.supervisor, 1.U, 3.U)
+    }.elsewhen(acceptedXret.valid) {
         privilege := Mux(
             selectedSret,
             Mux(csr.io.state.mstatus(8), 1.U, 0.U),
@@ -715,7 +711,7 @@ class Commit(
     when(recoveryValid && !takeInterrupt) {
         assert(PopCount(recovery) === 1.U)
     }
-    when(csr.io.trap.valid) {
+    when(acceptedTrap.valid) {
         assert(!retireFire.asUInt.orR, "Trap acceptance and instruction retirement must not share a cycle")
     }
     for (lane <- 0 until cp.width) {
@@ -793,11 +789,11 @@ class Commit(
     io.debug.robHeadValid := rob.io.head(0).valid
     io.debug.robHeadComplete := rob.io.head(0).bits.complete
     io.debug.robHeadPc := rob.io.head(0).bits.pc
-    io.debug.trap.valid := csr.io.trap.valid
-    io.debug.trap.bits.epc := Cat(csr.io.trap.bits.pcWord, 0.U(2.W))
-    io.debug.trap.bits.cause := csr.io.trap.bits.cause
-    io.debug.trap.bits.tval := csr.io.trap.bits.tval
-    io.debug.trap.bits.targetPrivilege := Mux(csr.io.trap.bits.supervisor, 1.U, 3.U)
+    io.debug.trap.valid := acceptedTrap.valid
+    io.debug.trap.bits.epc := Cat(acceptedTrap.bits.pcWord, 0.U(2.W))
+    io.debug.trap.bits.cause := acceptedTrap.bits.cause
+    io.debug.trap.bits.tval := acceptedTrap.bits.tval
+    io.debug.trap.bits.targetPrivilege := Mux(acceptedTrap.bits.supervisor, 1.U, 3.U)
     io.debug.performance.branch := branchCount
     io.debug.performance.branchFail := branchFailCount
     io.debug.performance.directJump := directJumpCount

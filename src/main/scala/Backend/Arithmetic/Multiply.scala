@@ -5,7 +5,6 @@
 import chisel3._
 import chisel3.util._
 import ZirconConfig.MultiplyOp._
-import ZirconUtil.Log2Rev
 
 class MultiplyRequest(val tagWidth: Int) extends Bundle {
     val src1 = UInt(32.W)
@@ -15,9 +14,10 @@ class MultiplyRequest(val tagWidth: Int) extends Bundle {
     val fpSrc1 = UInt(32.W)
     val fpSrc2 = UInt(32.W)
     val fpSrc3 = UInt(32.W)
-    val fpExp1 = UInt(8.W)
-    val fpExp2 = UInt(8.W)
-    val fpExp3 = UInt(8.W)
+    // Zero-encoded subnormal exponents arrive as one at the EX1 boundary.
+    val fpEffectiveExp1 = UInt(8.W)
+    val fpEffectiveExp2 = UInt(8.W)
+    val fpEffectiveExp3 = UInt(8.W)
     val fpZero1 = Bool()
     val fpZero2 = Bool()
     val fpZero3 = Bool()
@@ -110,6 +110,15 @@ class MulStage3(tagWidth: Int) extends Bundle {
 
 object SharedMultiplyLogic {
     val Width = 80
+    private def topBit8(x: UInt): UInt = {
+        val upper = x(7, 4).orR
+        Cat(
+            upper,
+            x(7, 6).orR || (!upper && x(3, 2).orR),
+            x(7) || (!x(7, 6).orR && x(5)) ||
+                (!upper && x(3)) || (!x(7, 2).orR && x(1)),
+        )
+    }
     // Keep the significand in its encoded scale. For finite values, sig * 2^exp is
     // exact for both normal and subnormal operands. Delaying normalization until the
     // fused result removes three input LZDs from EX1 without changing arithmetic.
@@ -179,8 +188,8 @@ object SharedMultiplyLogic {
             VecInit((0 until 8).map(i => p(i) ^ (if (i == 0) true.B else prefixG(i - 1) || prefixP(i - 1)))).asUInt
         o.generate := prefixG.last; o.propagate := prefixP.last
         o.nonzero0 := o.sum0.orR; o.nonzero1 := o.sum1.orR
-        o.top0 := ~Log2Rev(Reverse(o.sum0))(2, 0)
-        o.top1 := ~Log2Rev(Reverse(o.sum1))(2, 0)
+        o.top0 := topBit8(o.sum0)
+        o.top1 := topBit8(o.sum1)
         o
     }
 
@@ -266,7 +275,14 @@ object SharedMultiplyLogic {
 
     /** Shared FP EX4: normalize, extract GRS, round once and pack. Integer results bypass this. */
     def finish(x: MulStage3): (UInt, UInt) = {
-        val mag = Mux(x.right, rightJam(x.mag, x.shift, 80), leftTruncate(x.mag, x.shift, 80))
+        val coarse = x.shift(6, 3)
+        val coarseSelect = (0 until 10).map(i => coarse === i.U) :+ (coarse >= 10.U)
+        val coarseRight = Mux1H(coarseSelect,
+            (0 to 10).map(i => rightJam(x.mag, (i * 8).U(7.W), 80)))
+        val coarseLeft = Mux1H(coarseSelect,
+            (0 to 10).map(i => leftTruncate(x.mag, (i * 8).U(7.W), 80)))
+        val fine = Cat(0.U(4.W), x.shift(2, 0))
+        val mag = Mux(x.right, rightJam(coarseRight, fine, 80), leftTruncate(coarseLeft, fine, 80))
         val window = mag(26, 0)
         val q = window(26, 3)
         val guard = window(2); val sticky = window(1, 0).orR
@@ -278,7 +294,10 @@ object SharedMultiplyLogic {
                 (rm === 2.U && x.sign && (g || s)) ||
                 (rm === 3.U && !x.sign && (g || s))
         val roundUp = increment(guard, sticky, q(0))
-        val rounded = q + roundUp
+        val roundCarry = VecInit((0 until 24).map { bit =>
+            if (bit == 0) roundUp else roundUp && q(bit - 1, 0).andR
+        }).asUInt
+        val rounded = q ^ roundCarry
         // Predict carry from the unrounded bits, in parallel with the significand increment.
         val carry = q.andR && roundUp
         // Tininess is tested after rounding at unbounded exponent precision. In
@@ -363,9 +382,9 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val a = decode(req.fpSrc1); val b = decode(req.fpSrc2); val c = decode(req.fpSrc3)
     // Encoded exponent zero represents the subnormal exponent field one. Keep
     // this compact scale through alignment; the common -150 bias cancels.
-    val aExp = Cat(0.U(1.W), Mux(req.fpExp1.orR, req.fpExp1, 1.U(8.W)))
-    val bExp = Cat(0.U(1.W), Mux(req.fpExp2.orR, req.fpExp2, 1.U(8.W)))
-    val cExp = Cat(0.U(1.W), Mux(req.fpExp3.orR, req.fpExp3, 1.U(8.W)))
+    val aExp = Cat(0.U(1.W), req.fpEffectiveExp1)
+    val bExp = Cat(0.U(1.W), req.fpEffectiveExp2)
+    val cExp = Cat(0.U(1.W), req.fpEffectiveExp3)
     val bs = b.sign ^ (op === FSUB)
     val ps = a.sign ^ b.sign ^ negProduct
     val cs = c.sign ^ negAddend
@@ -422,23 +441,33 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     // allowing operand exponent and bypass data to reach the R1 shift register
     // even though that result is unused for these operations.
     val addDistance = largeExp - smallExp
+    // c + 153 - a - b fits in signed 11 bits. Compress its four operands before
+    // the only carry-propagating sum, instead of serializing three additions.
+    def compressShift(x: UInt, y: UInt, z: UInt): (UInt, UInt) =
+        (x ^ y ^ z, (((x & y) | (x & z) | (y & z)) << 1)(10, 0))
+    val (fmaSum0, fmaCarry0) = compressShift(cExp.pad(11), ~aExp.pad(11), ~bExp.pad(11))
+    val (fmaSum1, fmaCarry1) = compressShift(fmaSum0, fmaCarry0, 155.U(11.W))
+    val fmaShift = (fmaSum1 + fmaCarry1).asSInt
     val shiftCWithOther = Mux(
         add,
         27.S(11.W) - addDistance.zext,
-        Mux(far, 54.S(11.W), cExp.zext - peRaw.zext + 153.S(11.W)),
+        Mux(far, 54.S(11.W), fmaShift),
     )
     val (alignShiftWithOther, alignRightWithOther) = shiftControl(shiftCWithOther)
     val alignShift = Mux(hasOther, alignShiftWithOther, 0.U(7.W))
     val alignRight = Mux(hasOther, alignRightWithOther, false.B)
-    val lowShift = Cat(0.U(4.W), alignShift(2, 0))
     val otherWindow = Cat(0.U(56.W), other)
+    val signedLowShift = shiftCWithOther.asUInt(2, 0)
+    val negativeLowShift = (0.U(3.W) - signedLowShift)(2, 0)
+    // Saturated shifts are completed by EX2's high stage; their low three bits
+    // do not affect the result. Prepare both directions before the sign arrives.
+    val rightLow = rightJam(otherWindow, Cat(0.U(4.W), negativeLowShift), 80)
+    val leftLow = leftTruncate(otherWindow, Cat(0.U(4.W), signedLowShift), 80)
     val partialOther = Mux(
         alignRight,
-        rightJam(otherWindow, lowShift, 80),
-        leftTruncate(otherWindow, lowShift, 80),
+        rightLow,
+        leftLow,
     )
-    // A 24-bit addend shifted left by at most seven fits in 31 bits; right
-    // alignment and its sticky bit fit there too.
     s1.partialOther := partialOther(30, 0)
     s1.shiftHigh := alignShift(6, 3)
     s1.right := alignRight
@@ -512,8 +541,10 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val (tinyShift, tinyRight) = shiftControl(r2.exp + 152.S)
     val normalRight = topBit >= 26.U
     val normalShift = Mux(normalRight, topBit - 26.U, 26.U - topBit)
-    s3.shift := Mux(top < (-126).S, tinyShift, normalShift)
-    s3.right := Mux(top < (-126).S, tinyRight, normalRight)
+    val subnormalThreshold = (-126).S(11.W) - r2.exp
+    val subnormal = topBit.zext.pad(11) < subnormalThreshold
+    s3.shift := Mux(subnormal, tinyShift, normalShift)
+    s3.right := Mux(subnormal, tinyRight, normalRight)
     s3.zero := zero
     s3.sign := Mux(s3.zero, r2.zeroSign, r2.baseSign ^ d(79))
     s3.top := top

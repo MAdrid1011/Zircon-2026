@@ -45,7 +45,7 @@ object SRT4Logic {
         val y = x ^ Fill(32, negative)
         val lowOnes = !((y >> 1) & ~y).orR
         val leading = leadingZeros(y) - (negative && lowOnes).asUInt
-        (Mux(negative, -x, x), leading)
+        (BLevelPAdder32.sum(y, 0.U(32.W), negative.asUInt), leading)
     }
 
     def rightJam(x: UInt, shift: UInt): UInt = {
@@ -103,7 +103,10 @@ object SRT4Logic {
         val inexact = window(2, 0).orR
         val up = increment(window(2), window(1, 0).orR, q(0))
         val carry = q.andR && up
-        val rounded = q + up
+        val roundCarries = VecInit((0 until 24).map { bit =>
+            if (bit == 0) up else up && q(bit - 1, 0).andR
+        }).asUInt
+        val rounded = q ^ roundCarries
         val sig = Mux(carry, "h800000".U(24.W), rounded)
         // Tininess is checked at unbounded exponent precision, before narrowing
         // to the subnormal grid. This also handles rounding to the smallest normal.
@@ -242,6 +245,7 @@ class DivStage2(tagWidth: Int) extends Bundle {
 /** R34: normalized FP window with sticky, or an unscaled integer magnitude. */
 class DivStage3(tagWidth: Int) extends Bundle {
     val data = UInt(SRT4Logic.Width.W)
+    val integerPrepared = UInt(SRT4Logic.Width.W)
     val exponent = SInt(11.W)
     val roundShift = UInt(5.W)
     val integerShift = UInt(6.W)
@@ -430,6 +434,13 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
         window.pad(Width),
         Mux(r2.meta.op(1), correctedRemainder, correctedResult.pad(Width))
     )
+    val integerLow1 = Mux(r2.integerShift(0), Cat(false.B, s3.data(Width - 1, 1)), s3.data)
+    val integerLow2 = Mux(
+        r2.integerShift(1), Cat(0.U(2.W), integerLow1(Width - 1, 2)), integerLow1
+    )
+    s3.integerPrepared := Mux(
+        r2.integerShift(2), Cat(0.U(4.W), integerLow2(Width - 1, 4)), integerLow2
+    )
     val exponentIfLow = r2.exponent - 1.S
     s3.exponent := Mux(lowerThanOne, exponentIfLow, r2.exponent)
     s3.roundShift := Mux(
@@ -444,7 +455,9 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     val (floatResult, floatFlags) = round(
         r3.data(26, 0), r3.exponent, r3.roundShift, r3.meta.sign, r3.meta.roundingMode
     )
-    val unsignedInteger = SRT4Logic.integerWindow(r3.data, r3.integerShift)
+    val unsignedInteger = SRT4Logic.integerWindow(
+        r3.integerPrepared, Cat(r3.integerShift(5, 3), 0.U(3.W))
+    )
     val negativeBase = ~unsignedInteger
     val negativeCarry = VecInit((0 until 32).map { bit =>
         if (bit == 0) true.B else negativeBase(bit - 1, 0).andR

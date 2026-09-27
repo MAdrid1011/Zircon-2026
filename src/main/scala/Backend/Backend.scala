@@ -86,7 +86,7 @@ class Backend(
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
         numReadPorts = 9,
-        numWritePorts = 5,
+        numWritePorts = 6,
         holdReads = true,
     )
     val fpRfParams = RegfileParams(
@@ -96,7 +96,12 @@ class Backend(
         hasZeroReg = false,
         holdReads = true,
     )
-    val intRf = Module(new Regfile(intRfParams, directWritePort = Some(2)))
+    val intRf = Module(new Regfile(
+        intRfParams,
+        directWritePort = Some(2),
+        readBypassOverridePort = Some(2),
+        overrideReadPorts = Set(6, 7),
+    ))
     val fpRf = Module(new Regfile(fpRfParams, directWritePort = Some(0)))
     val bypass = Module(new Bypass(BypassParams.twoArithBackend(p)))
     val wakeupRouter = Module(new WakeupRouter(p))
@@ -217,7 +222,7 @@ class Backend(
     ls1.io.rf.std.get.fpData := fpRf.io.read(3).data
     fpRf.io.readHold.get := VecInit(Seq(false.B, false.B, false.B, ls1.io.rf.std.get.hold))
 
-    /* Writeback ports are statically assigned; LS1 and Atomic share the final integer port. */
+    /* Writeback ports are statically assigned; LS1 and Atomic remain mutually exclusive. */
     def intWrite(port: Int, valid: Bool, address: UInt, data: UInt): Unit = {
         intRf.io.write(port).we := valid
         intRf.io.write(port).addr := address
@@ -227,6 +232,14 @@ class Backend(
         intWrite(port, pipe.io.rf.write.valid, pipe.io.rf.write.bits.prd, pipe.io.rf.write.bits.data)
     }
     intWrite(2, mixArith.io.rf.intWrite.valid, mixArith.io.rf.intWrite.bits.addr, mixArith.io.rf.intWrite.bits.data)
+    intRf.io.readBypassOverride.get := mixArith.io.rf.intReadBypassValid
+    intRf.io.readBypassOverrideAddr.get := mixArith.io.rf.intReadBypassAddr
+    when(!io.commit.flush) {
+        assert(mixArith.io.rf.intReadBypassValid === mixArith.io.rf.intWrite.valid)
+        when(mixArith.io.rf.intReadBypassValid) {
+            assert(mixArith.io.rf.intReadBypassAddr === mixArith.io.rf.intWrite.bits.addr)
+        }
+    }
     intRf.io.directWrite.get.oneHot := mixArith.io.rf.intWriteOneHot
     intRf.io.directWrite.get.data := mixArith.io.rf.intWriteData
     intWrite(
@@ -240,10 +253,12 @@ class Backend(
     val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)
     intWrite(
         4,
-        atomicIntWrite || ls1IntWrite,
-        Mux(atomicIntWrite, atomic.io.response.bits.prd, ls1.io.rf.wr.bits.prd)(p.physWidth - 1, 0),
-        Mux(atomicIntWrite, atomic.io.response.bits.data, ls1.io.rf.wr.bits.data),
+        ls1IntWrite,
+        ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0),
+        ls1.io.rf.wr.bits.data,
     )
+    intWrite(5, atomicIntWrite, atomic.io.response.bits.prd(p.physWidth - 1, 0),
+        atomic.io.response.bits.data)
     assert(!(atomicIntWrite && ls1IntWrite), "Atomic completion and LS1 must not share a write cycle")
     fpRf.io.write(0).we := mixArith.io.rf.fpWrite.valid
     fpRf.io.write(0).addr := mixArith.io.rf.fpWrite.bits.addr
@@ -341,7 +356,8 @@ class Backend(
     io.commit.store.response <> sharedStore.io.committedResponse
     dcache.io.store.req <> sharedStore.io.cacheRequest
     sharedStore.io.cacheResponse <> dcache.io.store.rsp
-    atomic.io.clearReservation := sharedStore.io.committedRequest.fire
+    atomic.io.committedStore.valid := sharedStore.io.committedRequest.fire
+    atomic.io.committedStore.bits := sharedStore.io.committedRequest.bits.paddr
     when(dcache.io.load(1).rsp.valid) {
         assert(
             atomic.io.load.response.valid ^ ls1.io.cache.rsp.valid,

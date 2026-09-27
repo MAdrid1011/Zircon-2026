@@ -76,23 +76,35 @@ class StatisticalCorrector(p: FrontendParams) extends RawModule {
             2.U -> 16.U(6.W),
         ))
         val componentSum = addTree(components)
-        def candidate(baseDirection: Boolean): (Bool, Bool, Bool) = {
+        val protectThreshold = MuxLookup(io.meta.tageConfidence(rank), 0.U(7.W))(Seq(
+            1.U -> (io.read.scThreshold >> 2),
+            2.U -> (io.read.scThreshold >> 1),
+        ))
+        // The correction decision compares the sum with an early threshold;
+        // score magnitude remains only for the separately reported low-margin bit.
+        val positiveLimit = Mux(
+            protectThreshold.orR,
+            1.S(scoreBits.W) - protectThreshold.zext - baseMagnitude.zext,
+            -baseMagnitude.zext,
+        )
+        val negativeLimit = baseMagnitude.zext + protectThreshold.zext
+        def candidate(baseDirection: Boolean): (Bool, Bool) = {
             val score = Wire(SInt(scoreBits.W))
             score := (if (baseDirection) componentSum +& baseMagnitude.zext
                 else componentSum -& baseMagnitude.zext)
             val magnitude = Mux(score < 0.S, (-score).asUInt, score.asUInt)
             val prediction = score >= 0.S
-            val protect =
-                (io.meta.tageConfidence(rank) === 2.U && magnitude < (io.read.scThreshold >> 1)) ||
-                    (io.meta.tageConfidence(rank) === 1.U && magnitude < (io.read.scThreshold >> 2))
-            val corrected = if (baseDirection) protect || prediction else !protect && prediction
-            (prediction, magnitude < io.read.scThreshold, corrected)
+            (prediction, magnitude < io.read.scThreshold)
         }
         val positive = candidate(true)
         val negative = candidate(false)
         scPredictions(rank) := Mux(biasDirections(rank), positive._1, negative._1)
         scLowMargin(rank) := Mux(biasDirections(rank), positive._2, negative._2)
-        val corrected = Mux(biasDirections(rank), positive._3, negative._3)
+        val corrected = Mux(
+            biasDirections(rank),
+            componentSum >= positiveLimit,
+            componentSum >= negativeLimit,
+        )
         directions(rank) := Mux(io.meta.loopValid(rank), io.meta.loopPredictions(rank), corrected)
     }
 

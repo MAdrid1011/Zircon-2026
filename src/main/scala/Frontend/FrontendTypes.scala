@@ -101,6 +101,7 @@ class FrontendFetchRequest(p: FrontendParams) extends Bundle {
 class FrontendFetchResponse(p: FrontendParams) extends Bundle {
     val mask = UInt(p.fetchWidth.W)
     val inst = Vec(p.fetchWidth, UInt(32.W))
+    val fields = Vec(p.fetchWidth, new FrontendPredecodeFields)
     val fault = UInt(p.fetchWidth.W)
 }
 

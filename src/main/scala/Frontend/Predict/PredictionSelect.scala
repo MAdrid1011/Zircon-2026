@@ -15,14 +15,19 @@ class FrontendPredictionSelectIO(p: FrontendParams) extends Bundle {
 }
 
 /** Select the earliest taken CFI while retaining the untruncated slot descriptions. */
-class FrontendPredictionSelect(p: FrontendParams, assumeAlignedTargets: Boolean = false) extends RawModule {
+class FrontendPredictionSelect(
+    p: FrontendParams,
+    assumeAlignedTargets: Boolean = false,
+    directionsAreSlots: Boolean = false,
+) extends RawModule {
     val io = IO(new FrontendPredictionSelectIO(p))
     /* Conditional Rank to Instruction Slot */
     // Only an in-range conditional branch consumes a direction bit.
     val candidates = Wire(Vec(p.fetchWidth, Bool()))
     for (i <- 0 until p.fetchWidth) {
         // Decode the rank independently; a late PHT result crosses only one selection level.
-        val direction = if (i == 0) io.directions(0)
+        val direction = if (directionsAreSlots) io.directions(i)
+        else if (i == 0) io.directions(0)
         else {
             val rank = PopCount((0 until i).map(j => io.range(j) && io.conditional(j)))
             Mux1H((0 to i).map(value => (rank === value.U) -> io.directions(value)))
@@ -38,7 +43,9 @@ class FrontendPredictionSelect(p: FrontendParams, assumeAlignedTargets: Boolean 
     }
     val prior = if (p.fetchWidth == 1) 0.U(1.W) else Cat(seen(p.fetchWidth - 2, 0), false.B)
     val mask = io.range & ~prior
-    val taken = mask & candidates.asUInt
+    val taken = VecInit((0 until p.fetchWidth).map(i =>
+        candidates(i) && (if (i == 0) true.B else !candidates.take(i).reduce(_ || _))
+    )).asUInt
 
     /* Block Prediction */
     io.prediction.kinds := io.kinds
@@ -46,13 +53,12 @@ class FrontendPredictionSelect(p: FrontendParams, assumeAlignedTargets: Boolean 
     io.prediction.taken := taken
     io.prediction.mask := mask
     io.prediction.backward := io.backward & io.conditional.asUInt
-    val target = Mux1H(taken.asBools, io.targets)
     val sequential = Cat(io.pcBlock + 1.U, 0.U(p.blockBits.W))
     // Execution handles an actually taken misaligned target; do not issue an unaligned speculative fetch.
     io.prediction.nextPc := (if (assumeAlignedTargets) {
         Mux1H(taken.asBools :+ !taken.orR, io.targets :+ sequential)
     } else {
-        val useTarget = taken.orR && target(1, 0) === 0.U
-        Mux(useTarget, target, sequential)
+        val alignedTaken = taken & VecInit(io.targets.map(_(1, 0) === 0.U)).asUInt
+        Mux1H(alignedTaken.asBools :+ !alignedTaken.orR, io.targets :+ sequential)
     })
 }

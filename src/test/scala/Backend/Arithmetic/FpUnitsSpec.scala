@@ -35,9 +35,10 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
         tagWidth: Int,
         convertControls: Option[(Bool, Bool)] = None
     ): Unit = {
-        val vectors = new Random(20260914).shuffle(samples.filter(x => (x.op >= 11) == (depth == 2)))
-        assert(vectors.map(_.op).toSet == (if (depth == 2) (11 to 14).toSet else (0 to 10).toSet))
-        if (depth == 2) for (code <- 11 to 14) {
+        val converting = convertControls.nonEmpty
+        val vectors = new Random(20260914).shuffle(samples.filter(x => (x.op >= 11) == converting))
+        assert(vectors.map(_.op).toSet == (if (converting) (11 to 14).toSet else (0 to 10).toSet))
+        if (converting) for (code <- 11 to 14) {
             assert(vectors.filter(_.op == code).map(_.rm).toSet == (0 to 4).toSet)
         }
         var pipe = Vector.fill[Option[(Sample, Int)]](depth)(None)
@@ -58,8 +59,12 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
                 signedInt.poke(data.op == 11 || data.op == 13)
             }
             val active = !rst && !kill
-            val lastReady = pipe.last.isEmpty || ready
-            val firstReady = if (depth == 1) lastReady else pipe.head.isEmpty || lastReady
+            val stageReady = Array.fill(depth)(false)
+            stageReady(depth - 1) = pipe.last.isEmpty || ready
+            for (stage <- depth - 2 to 0 by -1) {
+                stageReady(stage) = pipe(stage).isEmpty || stageReady(stage + 1)
+            }
+            val firstReady = stageReady(0)
             inReady.expect((active && firstReady).B, s"input ready, cycle $cycle")
             outValid.expect((active && pipe.last.nonEmpty).B, s"output valid, cycle $cycle")
             if (active) pipe.last.foreach { case (expected, expectedTag) =>
@@ -75,7 +80,9 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
             } else {
                 if (ready && pipe.last.nonEmpty) retired += 1
                 if (!ready && pipe.last.nonEmpty) stalls += 1
-                if (depth == 2 && lastReady) pipe = pipe.updated(1, pipe.head)
+                for (stage <- depth - 1 to 1 by -1) {
+                    if (stageReady(stage)) pipe = pipe.updated(stage, pipe(stage - 1))
+                }
                 if (firstReady) pipe = pipe.updated(0, input.map(_ -> tag))
                 if (fire) accepted += 1
             }
@@ -139,7 +146,7 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "FpConvert is a two-stage elastic pipeline for every conversion and rounding mode" in {
+    "FpConvert is a three-stage elastic pipeline for every conversion and rounding mode" in {
         simulate(new FpConvert(tagWidth = 7)) { dut =>
             exercise(
                 dut.clock,
@@ -157,7 +164,7 @@ class FpUnitsSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.out.bits.res,
                 dut.io.out.bits.fflags,
                 dut.io.out.bits.tag,
-                depth = 2,
+                depth = 3,
                 tagWidth = 7,
                 convertControls = Some(dut.io.in.bits.toFloat -> dut.io.in.bits.signedInt)
             )

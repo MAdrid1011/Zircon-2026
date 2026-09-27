@@ -164,7 +164,7 @@ class LoadPipeline(
     io.iq.instPkg.ready := acceptedUnit && !io.blockIssue && (storeIS || free.orR) &&
         (!validRF || addressAccept)
 
-    io.rf.rd.prj := Mux(instPkgRF.prj(p.physWidth), 0.U, instPkgRF.prj(p.intWidth - 1, 0))
+    io.rf.rd.prj := instPkgRF.prj(p.intWidth - 1, 0)
     io.rf.rd.hold := heldRF
     agu.io.src1 := io.rf.rd.prjData
     agu.io.src2 := instPkgRF.imm
@@ -496,17 +496,17 @@ class LoadPipeline(
     val contextValidD2WB = VecInit((0 until p.entries).map(i =>
         selectD2WB(i) && valid(i) && sent(i) && !killed(pending(i))
     )).asUInt.orR
-    val instPkgWB = RegEnable(contextD2WB, io.cache.wbSelect.valid)
-    val addressWB = RegEnable(Mux1H(selectD2WB, address), io.cache.wbSelect.valid)
-    val indexWB = RegEnable(indexD2WB, io.cache.wbSelect.valid)
-    val contextValidWB = RegEnable(contextValidD2WB, false.B, io.cache.wbSelect.valid)
-    val exceptionWB = RegEnable(io.cache.wbSelect.bits.exception, io.cache.wbSelect.valid)
-    val retryWB = RegEnable(io.cache.wbSelect.bits.retry, false.B, io.cache.wbSelect.valid)
-    val uncacheWB = RegEnable(io.cache.wbSelect.bits.uncache, false.B, io.cache.wbSelect.valid)
-    val writeResultWB = RegEnable(
+    // Cache response.valid qualifies these payloads after the edge; idle values are unobservable.
+    val instPkgWB = RegNext(contextD2WB)
+    val addressWB = RegNext(Mux1H(selectD2WB, address))
+    val indexWB = RegNext(indexD2WB)
+    val contextValidWB = RegNext(io.cache.wbSelect.valid && contextValidD2WB, false.B)
+    val exceptionWB = RegNext(io.cache.wbSelect.bits.exception)
+    val retryWB = RegNext(io.cache.wbSelect.bits.retry, false.B)
+    val uncacheWB = RegNext(io.cache.wbSelect.bits.uncache, false.B)
+    val writeResultWB = RegNext(
         contextD2WB.rdVld && io.cache.wbSelect.bits.exception === 0.U && !io.cache.wbSelect.bits.retry,
         false.B,
-        io.cache.wbSelect.valid
     )
     val validWB = io.cache.rsp.valid && contextValidWB && !killed(instPkgWB)
 

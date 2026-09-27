@@ -14,6 +14,7 @@ class BypassConsumerPort(val numSources: Int, val p: BackendParams = BackendPara
     val query = Output(Vec(numSources, new BypassQuery(p)))
     val advance = Output(Bool())
     val value = Input(Vec(numSources, Valid(UInt(32.W))))
+    val deferred = Input(Bool())
     val capture = Input(Vec(numSources, Valid(UInt(32.W))))
     val valueFpZero = Input(Vec(numSources, Bool()))
     val captureFpZero = Input(Vec(numSources, Bool()))
