@@ -1,4 +1,4 @@
-"""Generate the existing Vivado project's RTL with Xilinx RAM inference enabled."""
+"""Generate ZirconCore RTL for the VU13P Vivado project."""
 
 import argparse
 import os
@@ -10,7 +10,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT = ROOT / "build/vivado-2025-xc7a200t-bram/rtl"
+DEFAULT_OUTPUT = ROOT / "build/eda/vivado-vu13p/rtl"
 RAM_MODULES = (
     "XilinxSinglePortRamReadFirst",
     "XilinxTrueDualPortReadFirst1ClockRam",
@@ -30,9 +30,10 @@ def validate(output):
     missing_ram = [name for name in RAM_MODULES if name not in text]
     if missing_ram or "BsgFakeram" in text or "PredictorBsgFakeram" in text:
         raise RuntimeError(f"Vivado RTL has the wrong RAM backend: missing {missing_ram}")
-    adder = (output / "BLevelPAdder32.sv").read_text()
-    if not re.search(r"\bio_src1\s*\+\s*io_src2\b", adder):
-        raise RuntimeError("Vivado RTL did not select native 32-bit addition")
+    for width in (32, 36):
+        adder = (output / f"BLevelPAdder{width}.sv").read_text()
+        if not re.search(r"\bio_src1\s*\+\s*io_src2\b", adder):
+            raise RuntimeError(f"Vivado RTL did not select native {width}-bit addition")
 
 
 def main():

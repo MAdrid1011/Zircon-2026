@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from eda.adder_mapping import quote
+from adder_mapping import quote
 
 
 def file_sha256(path):
@@ -54,7 +54,7 @@ def boundaries(module):
             if clock != module['ports']['clock']['bits']:
                 raise ValueError('Expected one ungated positive-edge clock')
             registers[cell['connections']['Q'][0]] = (name, cell['connections']['D'][0])
-        elif kind.startswith(('fakeram45_', 'openram45_')):
+        elif kind.startswith('fakeram45_'):
             memories[name] = cell
         elif 'DFF' in kind or 'LATCH' in kind:
             raise ValueError(f'Unsupported state: {name} {kind}')

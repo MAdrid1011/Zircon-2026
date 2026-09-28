@@ -424,11 +424,10 @@ def summarize_target(target_dir, target_ns):
             "bsg_sram_output_violators": str(target_dir / "bsg-sram-output-violators.rpt"),
         },
     })
-    for kind in ("openram", "fakeram"):
-        path = target_dir / f"{kind}-output-violators.rpt"
-        summary[f"{kind}_violating_output_paths"] = len(
-            parse_ram_edge_paths(path.read_text(errors="replace"))
-        ) if path.is_file() else None
+    path = target_dir / "fakeram-output-violators.rpt"
+    summary["fakeram_violating_output_paths"] = len(
+        parse_ram_edge_paths(path.read_text(errors="replace"))
+    ) if path.is_file() else None
     return summary
 
 
