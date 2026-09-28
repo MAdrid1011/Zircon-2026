@@ -8,7 +8,6 @@ class L2InstructionStageRequest(c: ICacheParams) extends Bundle {
     val uncache = Bool()
     val victimValid = Bool()
     val victimLine = UInt((34 - c.offsetBits).W)
-    val victimData = UInt(c.lineBits.W)
 }
 
 class L2DataStageRequest(p: L2CacheParams) extends Bundle {
@@ -21,7 +20,6 @@ class L2DataStageRequest(p: L2CacheParams) extends Bundle {
     val mask = UInt(4.W)
     val victimValid = Bool()
     val victimLine = UInt((34 - p.offsetBits).W)
-    val victimData = UInt(p.lineBits.W)
     val victimDirty = Bool()
     val victimOnly = Bool()
 }
@@ -165,6 +163,14 @@ class L2Cache(
     val dS3Result = Reg(UInt(p.lineBits.W))
     val dS3ResultDirty = RegInit(false.B)
     val dS3Error = RegInit(false.B)
+    // Only victim-bearing requests use these sideband payloads. Their metadata
+    // can still overlap ordinary requests in the three-stage lookup pipeline.
+    val iVictimData = Reg(UInt(p.lineBits.W))
+    val dVictimData = Reg(UInt(p.lineBits.W))
+    val iVictimPending = RegInit(false.B)
+    val dVictimPending = RegInit(false.B)
+    val iVictimRelease = WireDefault(false.B)
+    val dVictimRelease = WireDefault(false.B)
 
     io.icache.response.valid := iS3Valid && iS3Done && !iS3.ptw
     def selectPteBits(line: UInt, address: UInt): UInt = Mux1H(
@@ -210,9 +216,11 @@ class L2Cache(
     val dPtwDeferred = RegInit(false.B)
     val iPtwPriority = iPtwDeferred && io.iptw.req.valid
     val dPtwPriority = dPtwDeferred && io.dptw.req.valid
-    io.icache.request.ready := iS1Available && !iPtwPriority
+    io.icache.request.ready := iS1Available && !iPtwPriority &&
+        (!io.icache.request.bits.victimValid || !iVictimPending)
     io.iptw.req.ready := iS1Available && (iPtwPriority || !io.icache.request.valid)
-    io.dcache.req.ready := dS1Available && !dPtwPriority
+    io.dcache.req.ready := dS1Available && !dPtwPriority &&
+        (!io.dcache.req.bits.victimValid || !dVictimPending)
     io.dptw.req.ready := dS1Available && (dPtwPriority || !io.dcache.req.valid)
 
     when(!io.iptw.req.valid || io.iptw.req.fire) {
@@ -234,7 +242,6 @@ class L2Cache(
         iInput.uncache := io.icache.request.bits.uncache
         iInput.victimValid := io.icache.request.bits.victimValid
         iInput.victimLine := io.icache.request.bits.victimLine
-        iInput.victimData := io.icache.request.bits.victimData
     }.elsewhen(io.iptw.req.fire) {
         iInput.ptw := true.B
         iInput.paddr := io.iptw.req.bits.paddr
@@ -251,13 +258,22 @@ class L2Cache(
         dInput.mask := io.dcache.req.bits.mask
         dInput.victimValid := io.dcache.req.bits.victimValid
         dInput.victimLine := io.dcache.req.bits.victimLine
-        dInput.victimData := io.dcache.req.bits.victimData
         dInput.victimDirty := io.dcache.req.bits.victimDirty
         dInput.victimOnly := io.dcache.req.bits.victimOnly
     }.elsewhen(io.dptw.req.fire) {
         dInput.ptw := true.B
         dInput.paddr := io.dptw.req.bits.paddr
         dInput.size := 2.U
+    }
+    when(io.icache.request.fire && io.icache.request.bits.victimValid) {
+        assert(!iVictimPending)
+        iVictimData := io.icache.request.bits.victimData
+        iVictimPending := true.B
+    }
+    when(io.dcache.req.fire && io.dcache.req.bits.victimValid) {
+        assert(!dVictimPending)
+        dVictimData := io.dcache.req.bits.victimData
+        dVictimPending := true.B
     }
 
     when(iS1Advance) {
@@ -362,6 +378,9 @@ class L2Cache(
     val selectD = dWaiting && !selectI
     val selectInstructionVictim = !iWaiting && !dWaiting && instructionVictimValid
     instructionVictimPop := engineState === engineIdle && selectInstructionVictim
+    iVictimRelease := (iS2Advance && iFast && !iS2.ptw && iS2.victimValid) ||
+        (engineState === engineIdle && selectI && iS3.victimValid && !iS3.ptw)
+    dVictimRelease := engineState === engineIdle && selectD && dS3.victimValid
     val selectedPtw = Mux(selectInstructionVictim, false.B, Mux(selectI, iS3.ptw, dS3.ptw))
     val selectedPaddr = Mux(
         selectInstructionVictim,
@@ -390,10 +409,9 @@ class L2Cache(
             Cat(dS3.victimLine, 0.U(p.offsetBits.W)),
         )
     )
-    val selectedVictimData = Mux(
-        selectInstructionVictim,
-        instructionVictimData,
-        Mux(selectI, iS3.victimData, dS3.victimData)
+    val selectedVictimData = Mux1H(
+        Seq(selectInstructionVictim, selectI, selectD),
+        Seq(instructionVictimData, iVictimData, dVictimData),
     )
     val selectedVictimDirty = !selectInstructionVictim && !selectI && dS3.victimDirty
     val selectedVictimOnly = selectInstructionVictim || (!selectI && dS3.victimOnly)
@@ -406,6 +424,7 @@ class L2Cache(
     )
 
     when(engineState === engineIdle && (selectI || selectD || selectInstructionVictim)) {
+        assert(PopCount(Seq(selectInstructionVictim, selectI, selectD)) === 1.U)
         engineSourceI := selectI || selectInstructionVictim
         engineBackground := selectInstructionVictim
         enginePtw := selectedPtw
@@ -449,7 +468,6 @@ class L2Cache(
     val engineDirtyWays = VecInit(dirtyTab.map(_.rdata(2))).asUInt
     val engineInstructionWays = VecInit(instructionTab.map(_.rdata(2))).asUInt
     val engineTags = Mux(engineSourceI, iTags, dTags)
-    val engineLines = Mux(engineSourceI, iLines, dLines)
     val engineLookupHit = VecInit((0 until p.ways).map { way =>
         engineValidWays(way) && engineTags(way) === tag(engineVictimAddress)
     }).asUInt
@@ -572,7 +590,11 @@ class L2Cache(
                 index(engineVictimAddress),
                 0.U(p.offsetBits.W)
             )
-            engineWritebackData := Mux1H(engineVictimWay, engineLines)
+            engineWritebackData := Mux(
+                engineSourceI,
+                Mux1H(engineVictimWay, iLines),
+                Mux1H(engineVictimWay, dLines),
+            )
             engineState := engineWritebackSend
         }
         is(engineWritebackSend) {
@@ -648,7 +670,15 @@ class L2Cache(
     when(iS2Advance && iFast && !iS2.ptw && iS2.victimValid) {
         instructionVictimValid := true.B
         instructionVictimLine := iS2.victimLine
-        instructionVictimData := iS2.victimData
+        instructionVictimData := iVictimData
+    }
+    when(iVictimRelease) {
+        assert(iVictimPending)
+        iVictimPending := false.B
+    }
+    when(dVictimRelease) {
+        assert(dVictimPending)
+        dVictimPending := false.B
     }
 
     // ==================== Array ports and metadata updates ====================

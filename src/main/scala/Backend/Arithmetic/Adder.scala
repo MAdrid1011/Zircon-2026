@@ -118,34 +118,40 @@ class BLevelPAdder33 extends RawModule {
 
 class BLevelPAdder36(carryOut: Boolean = true) extends RawModule {
     val io = IO(new AdderIO(36, carryOut))
-    val pi = io.src1 | io.src2
-    val gi = io.src1 & io.src2
-    val p0 = Wire(Vec(9, Bool()))
-    val g0 = Wire(Vec(9, Bool()))
-    val c0 = Wire(Vec(9, UInt(4.W)))
-    val p1 = Wire(Vec(3, Bool()))
-    val g1 = Wire(Vec(3, Bool()))
-    val c1 = Wire(Vec(3, UInt(4.W)))
+    if (sys.env.get("ZIRCON_VIVADO_NATIVE_ADDERS").contains("1")) {
+        val sum = (io.src1 +& io.src2) +& io.cin
+        io.res := sum(35, 0)
+        io.cout.foreach(_ := sum(36))
+    } else {
+        val pi = io.src1 | io.src2
+        val gi = io.src1 & io.src2
+        val p0 = Wire(Vec(9, Bool()))
+        val g0 = Wire(Vec(9, Bool()))
+        val c0 = Wire(Vec(9, UInt(4.W)))
+        val p1 = Wire(Vec(3, Bool()))
+        val g1 = Wire(Vec(3, Bool()))
+        val c1 = Wire(Vec(3, UInt(4.W)))
 
-    for (i <- 0 until 9) {
-        val cin = if (i == 0) io.cin else if (i % 4 == 0) c1(i / 4 - 1)(3) else c1(i / 4)(i % 4 - 1)
-        val (pn, gn, cn) = BLevelCarry4(pi(i * 4 + 3, i * 4), gi(i * 4 + 3, i * 4), cin)
-        p0(i) := pn
-        g0(i) := gn
-        c0(i) := cn
-    }
-    val groupP = Seq(p0.asUInt(3, 0), p0.asUInt(7, 4), Cat(0.U(3.W), p0(8)))
-    val groupG = Seq(g0.asUInt(3, 0), g0.asUInt(7, 4), Cat(0.U(3.W), g0(8)))
-    for (i <- 0 until 3) {
-        val cin = if (i == 0) io.cin else c1(i - 1)(3)
-        val (pn, gn, cn) = BLevelCarry4(groupP(i), groupG(i), cin)
-        p1(i) := pn
-        g1(i) := gn
-        c1(i) := cn
-    }
+        for (i <- 0 until 9) {
+            val cin = if (i == 0) io.cin else if (i % 4 == 0) c1(i / 4 - 1)(3) else c1(i / 4)(i % 4 - 1)
+            val (pn, gn, cn) = BLevelCarry4(pi(i * 4 + 3, i * 4), gi(i * 4 + 3, i * 4), cin)
+            p0(i) := pn
+            g0(i) := gn
+            c0(i) := cn
+        }
+        val groupP = Seq(p0.asUInt(3, 0), p0.asUInt(7, 4), Cat(0.U(3.W), p0(8)))
+        val groupG = Seq(g0.asUInt(3, 0), g0.asUInt(7, 4), Cat(0.U(3.W), g0(8)))
+        for (i <- 0 until 3) {
+            val cin = if (i == 0) io.cin else c1(i - 1)(3)
+            val (pn, gn, cn) = BLevelCarry4(groupP(i), groupG(i), cin)
+            p1(i) := pn
+            g1(i) := gn
+            c1(i) := cn
+        }
 
-    io.res := io.src1 ^ io.src2 ^ Cat(c0.asUInt(34, 0), io.cin)
-    io.cout.foreach(_ := c0(8)(3))
+        io.res := io.src1 ^ io.src2 ^ Cat(c0.asUInt(34, 0), io.cin)
+        io.cout.foreach(_ := c0(8)(3))
+    }
 }
 
 object BLevelAdder4 {

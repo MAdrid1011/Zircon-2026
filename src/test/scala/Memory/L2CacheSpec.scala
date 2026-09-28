@@ -426,6 +426,53 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                 drain()
             }
         }
+
+        s"$name: consecutive D victims retain distinct sideband lines" in {
+            val params = ZirconConfig.L2CacheParams(sets = 16)
+            simulate(new L2Cache(backend, p = params)) { dut =>
+                val d = new L2CacheDriver(dut)
+                import d._
+                tick()
+
+                def offer(target: Long, victim: Long): Unit = {
+                    dut.io.dcache.req.valid.poke(true)
+                    dut.io.dcache.req.bits.paddr.poke(target)
+                    dut.io.dcache.req.bits.write.poke(false)
+                    dut.io.dcache.req.bits.uncache.poke(false)
+                    dut.io.dcache.req.bits.size.poke(2)
+                    dut.io.dcache.req.bits.data.poke(0)
+                    dut.io.dcache.req.bits.mask.poke(0)
+                    dut.io.dcache.req.bits.victimValid.poke(true)
+                    dut.io.dcache.req.bits.victimLine.poke(victim >> params.offsetBits)
+                    dut.io.dcache.req.bits.victimData.poke(line(victim))
+                    dut.io.dcache.req.bits.victimDirty.poke(false)
+                    dut.io.dcache.req.bits.victimOnly.poke(true)
+                }
+
+                val first = 0xb0000L
+                val second = 0xb0040L
+                offer(0xa0000L, first)
+                assert(dut.io.dcache.req.ready.peek().litToBoolean)
+                tick()
+                offer(0xa0040L, second)
+                assert(!dut.io.dcache.req.ready.peek().litToBoolean)
+                var stalled = 0
+                while (!dut.io.dcache.req.ready.peek().litToBoolean) {
+                    tick()
+                    stalled += 1
+                    assert(stalled < 30)
+                }
+                tick()
+                dut.io.dcache.req.valid.poke(false)
+                dut.io.dcache.req.bits.victimOnly.poke(false)
+                drain()
+
+                val lowerReads = reads
+                assert(dcache(first)._1 == line(first))
+                assert(dcache(second)._1 == line(second))
+                assert(reads == lowerReads, "victim line was not retained in L2")
+            }
+        }
     }
 
     "dual channels accept I/D and I/D PTWs together, prioritize L1 requests, and hold responses" in {

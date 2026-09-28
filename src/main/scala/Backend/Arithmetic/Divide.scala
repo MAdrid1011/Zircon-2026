@@ -183,26 +183,19 @@ class SRT4Iteration extends RawModule {
     val sumXorCarry = io.sum ^ io.carry
     val sumAndCarry = io.sum & io.carry
     val addends = (0 until 5).map(i => Mux(io.sqrt, rootTerms(i), divTerms(i)))
-    val nextSums = addends.map(term => ((sumXorCarry ^ term) << 2)(Width - 1, 0))
-    val nextCarries = addends.map(term =>
-        ((sumAndCarry | (sumXorCarry & term)) << 3)(Width - 1, 0))
-    io.nextSum := Mux1H(digit.asBools, nextSums)
-    io.nextCarry := Mux1H(digit.asBools, nextCarries)
+    // The digit is one-hot, so select the multiple before the shared carry-save update.
+    val selectedAddend = Mux1H(digit.asBools, addends)
+    io.nextSum := ((sumXorCarry ^ selectedAddend) << 2)(Width - 1, 0)
+    io.nextCarry := ((sumAndCarry | (sumXorCarry & selectedAddend)) << 3)(Width - 1, 0)
     val two = (bit << 1)(ResultWidth - 1, 0)
-    io.nextResult := Mux1H(Seq(
-        digit(0) -> (io.resultMinus | two),
-        digit(1) -> (io.resultMinus | two | bit),
-        digit(2) -> io.result,
-        digit(3) -> (io.result | bit),
-        digit(4) -> (io.result | two)
-    ))
-    io.nextMinus := Mux1H(Seq(
-        digit(0) -> (io.resultMinus | bit),
-        digit(1) -> (io.resultMinus | two),
-        digit(2) -> (io.resultMinus | two | bit),
-        digit(3) -> io.result,
-        digit(4) -> (io.result | bit)
-    ))
+    val resultBase = Mux(digit(0) || digit(1), io.resultMinus, io.result)
+    val minusBase = Mux(digit(3) || digit(4), io.result, io.resultMinus)
+    io.nextResult := resultBase |
+        Mux(digit(0) || digit(1) || digit(4), two, 0.U) |
+        Mux(digit(1) || digit(3), bit, 0.U)
+    io.nextMinus := minusBase |
+        Mux(digit(1) || digit(2), two, 0.U) |
+        Mux(digit(0) || digit(2) || digit(4), bit, 0.U)
     io.nextPosition := position
 }
 
