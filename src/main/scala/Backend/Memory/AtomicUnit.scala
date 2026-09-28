@@ -77,21 +77,22 @@ class AtomicUnit(
     val isLr = request.op === 2.U
     val isSc = request.op === 3.U
     val reservationHit = reservationValid && reservationAddress === request.paddr(33, 2)
-    val signedLess = request.data.asSInt < result.asSInt
     val unsignedLess = request.data < result
+    val signedLess = Mux(request.data(31) ^ result(31), request.data(31), unsignedLess)
     val operationCodes = Seq(0, 4, 8, 12, 16, 20, 24, 28)
     val operationSelect = VecInit(operationCodes.map(op => request.op === op.U)).asUInt
+    val minMaxSelect = operationSelect(7, 4).orR
+    val minMaxLess = Mux(request.op(3), unsignedLess, signedLess)
+    val minMaxData = Mux(minMaxLess ^ request.op(2), request.data, result)
     val operationData = Seq(
         BLevelPAdder32.sum(result, request.data, 0.U),
         result ^ request.data,
         result | request.data,
         result & request.data,
-        Mux(signedLess, request.data, result),
-        Mux(signedLess, result, request.data),
-        Mux(unsignedLess, request.data, result),
-        Mux(unsignedLess, result, request.data),
+        minMaxData,
     )
-    val storeData = Mux1H(operationSelect.asBools :+ !operationSelect.orR, operationData :+ request.data)
+    val storeData = Mux1H(operationSelect(3, 0).asBools :+ minMaxSelect :+ !operationSelect.orR,
+        operationData :+ request.data)
     assert(PopCount(operationSelect) <= 1.U, "AMO operation selects must be disjoint")
 
     io.request.ready := state === idle

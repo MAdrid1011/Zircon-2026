@@ -12,13 +12,14 @@ class AdderHarness(width: Int) extends Module {
         case 5 => io <> Module(new BLevelAdder5).io
         case 32 => io <> Module(new BLevelPAdder32).io
         case 33 => io <> Module(new BLevelPAdder33).io
+        case 36 => io <> Module(new BLevelPAdder36).io
         case 64 => io <> Module(new BLevelPAdder64).io
         case _ => throw new IllegalArgumentException(s"Unsupported adder width: $width")
     }
 }
 
 class AdderSpec extends AnyFreeSpec with ChiselSim {
-    for (width <- Seq(4, 5, 32, 33, 64)) {
+    for (width <- Seq(4, 5, 32, 33, 36, 64)) {
         s"${width}-bit adder matches unsigned addition including carry-out" in {
             simulate(new AdderHarness(width)) { dut =>
                 val mask = (BigInt(1) << width) - 1

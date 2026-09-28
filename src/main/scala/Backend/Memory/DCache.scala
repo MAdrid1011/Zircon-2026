@@ -414,7 +414,6 @@ class DCache(
         Mux(selectedMissLane, execute(1).victimValid, execute(0).victimValid) && !selectedExecute.uncache
     missUnit.io.allocate.bits.victimLine :=
         Cat(Mux(selectedMissLane, laneVictimTag(1), laneVictimTag(0)), index(selectedExecute.paddr))
-    missUnit.io.allocate.bits.victimData := Mux(selectedMissLane, laneVictimData(1), laneVictimData(0))
     missUnit.io.allocate.bits.victimDirty := Mux(selectedMissLane, laneVictimDirty(1), laneVictimDirty(0))
 
     val storeNeedsMiss = storeState === storeResolve && storeException === 0.U &&
@@ -432,9 +431,12 @@ class DCache(
         missUnit.io.allocate.bits.storeSize := storeRequest.size
         missUnit.io.allocate.bits.victimValid := storeLookupResult.victimValid && !storeRequest.uncache
         missUnit.io.allocate.bits.victimLine := storeLookupResult.victimLine
-        missUnit.io.allocate.bits.victimData := storeLookupResult.victimData
         missUnit.io.allocate.bits.victimDirty := storeLookupResult.victimDirty
     }
+    missUnit.io.allocate.bits.victimData := Mux1H(
+        Seq(!storeNeedsMiss && !selectedMissLane, !storeNeedsMiss && selectedMissLane, storeNeedsMiss),
+        Seq(laneVictimData(0), laneVictimData(1), storeLookupResult.victimData),
+    )
 
     val missCompletionForLane = VecInit((0 until 2).map { lane =>
         missUnit.io.complete.valid && !missUnit.io.complete.bits.store &&
