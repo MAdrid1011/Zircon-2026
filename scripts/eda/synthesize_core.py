@@ -197,7 +197,7 @@ def _synthesis_summary(target_dir, version, target_ns, elapsed, memory_bindings)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "build/nangate45-core")
+    parser.add_argument("--output", type=Path, default=ROOT / "build/eda/nangate45")
     default_yosys = next(
         (
             str(candidate)
@@ -262,6 +262,8 @@ def main():
     if not args.skip_elaboration:
         env = os.environ.copy()
         env["ZIRCON_USE_EXTERNAL_BSG_RAM"] = "true"
+        env.pop("ZIRCON_USE_EXTERNAL_VIVADO_RAM", None)
+        env.pop("ZIRCON_INCLUDE_VIVADO_RAM_SOURCE", None)
         env.pop("ZIRCON_VIVADO_NATIVE_ADDERS", None)
         command = elaboration_command(rtl)
         elapsed["elaboration_seconds"] = run(

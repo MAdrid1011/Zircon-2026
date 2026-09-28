@@ -1,17 +1,16 @@
-# synthesize_core.py
+# Nangate45 综合入口
 
-Elaborates the BSG SRAM ZirconCore configuration and runs constrained Nangate45 mapping and timing repair.
-
-## External Interface
+在仓库根目录运行纯逻辑时序评估：
 
 ```sh
-python3 scripts/eda/synthesize_core.py [--sweep | --target-ns NS] [--sta-target-ns NS] [--output DIR] [--yosys PATH] [--skip-elaboration] [--logic-only] [--placement-density DENSITY] [--max-repairs-per-pass COUNT]
+python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target-ns 1.5
 ```
 
-`--sweep` currently evaluates only the 1.0 ns target. Lower-period experiments are out of scope.
+默认输出位于 `build/eda/nangate45/`，包含 BSG 配置 RTL、SRAM 绑定、标准单元网表、
+`results.json` 和时序报告。`--target-ns` 指定 Yosys/ABC 映射周期；`--sta-target-ns`
+指定纯逻辑 STA 周期，仅与 `--logic-only` 同用。不带 `--logic-only` 时还会运行
+OpenROAD 布局估算与修复。
 
-`--target-ns` selects the Yosys/ABC mapping period and defaults to 1.0 ns. Each target writes mapped netlists, logs, timing reports, and `results.json` under `target-<period>ns/`; `sweep-results.json` collects the targets. `--skip-elaboration` requires generated RTL at the output root. `--logic-only` still performs complete Yosys synthesis and Nangate45 mapping, then runs zero-interconnect STA and stops before placement and physical repair. `--sta-target-ns` sets the logic-only STA period independently; it defaults to the mapping period and requires `--logic-only`. The 1.5 ns published result uses `--target-ns 1.0 --sta-target-ns 1.5`. Without `--logic-only`, the flow also writes the repaired netlist and physical reports. `--placement-density` selects a reproducible placement density. `--max-repairs-per-pass` defaults to one and exposes OpenROAD's standard setup-repair batching knob for formal A/B runs. The runner prefers the Yosys 0.68 installation extracted from the pinned ORFS image, then falls back to the legacy local installation or `PATH`. OpenROAD uses `-threads max` by default; `OPENROAD_THREADS` can set a positive count. A nonzero max-capacitance or max-slew count is retained as a failed electrical gate and suppresses WNS/TNS and path interpretation.
-
-## Internal Helpers
-
-`run()` captures subprocess output and elapsed time. `build_yosys_script()` preserves and directly maps BLevel adders before flattening and mapping the rest with the target ABC delay. Platform input hashes are verified before the flow. The flow checks that all BSG Fakeram instances survive mapping and that no internal unmapped cells remain. `openroad_resizer.py` can also run independently on a saved mapped netlist so physical settings can be evaluated without repeating elaboration and technology mapping.
+`--output DIR` 指定输出目录，`--yosys PATH` 指定 Yosys，`--skip-elaboration` 复用该目录
+已有 RTL。`--sweep` 评估平台配置中的周期集合。脚本检查库文件摘要、综合结构和 BSG
+Fakeram 实例；目标结果保存在 `target-<周期>ns/`，汇总保存在 `sweep-results.json`。

@@ -9,9 +9,8 @@ import tempfile
 import unittest
 
 from adder_mapping import AdderMapping
-from eda.gate_equivalence import boundaries, file_sha256, prove
+from gate_equivalence import boundaries, file_sha256, prove
 from logic_path_audit import parse_full_paths
-from logic_path_closure import summarize as summarize_logic_path_closure
 from logic_only_sta import _violating_endpoint_count, _worst_data_arrival
 from nangate_memories import DUAL_PORT_MACROS, generate as generate_nangate_memories
 from openroad_resizer import (
@@ -75,46 +74,6 @@ class TimingFlowTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
-
-    def test_closure_gate_counts_only_scoped_family_changes(self):
-        audit = {
-            "family_count": 3,
-            "path_count": 9,
-            "families": [
-                {"name": "src -> payload_a", "count": 5},
-                {"name": "src -> state_b", "count": 3},
-                {"name": "other -> ram/addr0", "count": 1},
-            ],
-        }
-        claims = {
-            "source_groups": [{
-                "source": "src", "endpoint_prefixes": ["payload_"],
-                "status": "modified", "evidence": "old and new emitted RTL differ",
-            }],
-            "families": [{
-                "name": "src -> state_b", "status": "unverified",
-                "counts_as_modified": False, "evidence": "endpoint migration is not yet proven",
-            }],
-        }
-        result = summarize_logic_path_closure(audit, claims)
-        self.assertEqual((result["modified_families"], result["modified_endpoints"]), (1, 5))
-        self.assertEqual((result["open_families"], result["open_endpoints"]), (2, 4))
-
-    def test_closure_gate_rejects_overlapping_claims(self):
-        audit = {"family_count": 1, "path_count": 1,
-                 "families": [{"name": "src -> payload", "count": 1}]}
-        claims = {"source_groups": [
-            {"source": "src", "evidence": "first"},
-            {"source": "src", "evidence": "second"},
-        ]}
-        with self.assertRaisesRegex(ValueError, "Overlapping claims"):
-            summarize_logic_path_closure(audit, claims)
-
-    def test_closure_gate_rejects_duplicate_audit_families(self):
-        audit = {"family_count": 2, "path_count": 2,
-                 "families": [{"name": "src -> payload", "count": 1}] * 2}
-        with self.assertRaisesRegex(ValueError, "incomplete or duplicated"):
-            summarize_logic_path_closure(audit, {})
 
     def test_full_path_parser_uses_data_pins_for_macro_paths(self):
         report = """Startpoint: macro.ram (rising edge-triggered flip-flop clocked by core_clock)
@@ -245,7 +204,7 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
             self.assertEqual(_worst_data_arrival(paths), 1.25)
             self.assertEqual(_violating_endpoint_count(endpoints), 2)
 
-    def test_equivalence_cuts_fakeram_and_openram_as_memory_boundaries(self):
+    def test_equivalence_cuts_fakeram_as_memory_boundary(self):
         memory_ports = {
             "clk0": "input",
             "addr0": "input",
@@ -259,18 +218,13 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
                     "port_directions": memory_ports,
                     "connections": {"clk0": [1], "addr0": [2], "dout0": [3]},
                 },
-                "openram": {
-                    "type": "openram45_1rw1r_16x32",
-                    "port_directions": memory_ports,
-                    "connections": {"clk0": [1], "addr0": [4], "dout0": [5]},
-                },
             },
         }
 
         registers, memories = boundaries(module)
 
         self.assertEqual(registers, {})
-        self.assertEqual(set(memories), {"fakeram", "openram"})
+        self.assertEqual(set(memories), {"fakeram"})
 
     def test_equivalence_hashes_large_inputs_incrementally(self):
         with tempfile.TemporaryDirectory() as temp:

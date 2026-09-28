@@ -1,16 +1,11 @@
-# test_timing_flow.py
+# EDA 接口测试
 
-Unit tests for the Nangate45 synthesis, physical repair, and timing-report contract.
+`test_timing_flow.py` 检查加法器映射命令、目标周期换算、BSG SRAM 绑定、等价检查边界、
+OpenROAD 调用参数，以及电气和时序报告的解析规则。测试同时核对纯逻辑报告中的数据到达
+时间、违例端点和存储宏路径。
 
-## Test Cases
+在仓库根目录运行：
 
-- Verify BLevel discovery, hierarchy preservation, ABC delay/constraint arguments, and the standard direct-mapping sequence.
-- Verify mapping-period conversion and reject invalid targets.
-- Verify a separate logic-only STA period requires `--logic-only` and a positive value.
-- Verify generated ABC commands include BLevel direct mapping, the requested `-D` target, `-constr`, and the standard buffer/upsize/downsize sequence.
-- Verify the OpenROAD command script uses ordinary placement repair and contains no false-path, multicycle, or relaxed-clock exceptions.
-- Verify report parsing counts max-cap/max-transition violations and preserves worst-path-per-endpoint inventory rows.
-- Verify a rounded-zero summary row remains in the logic-only inventory when its endpoint is marked `VIOLATED`.
-- Verify the full-path parser excludes boundary paths reported as `MET`.
-- Verify RAM reports retain falling-edge launch information.
-- Verify the electrical gate rejects path interpretation until both violation counts are zero.
+```sh
+PYTHONPATH=.:scripts/eda python3 -m unittest scripts.eda.test_timing_flow
+```

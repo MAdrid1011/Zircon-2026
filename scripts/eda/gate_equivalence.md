@@ -1,11 +1,8 @@
-# gate_equivalence.py
+# 门级等价检查接口
 
-Builds and proves a partitioned sequential equivalence miter between reference and mapped netlists. It first flattens project hierarchy while preserving standard-cell and RAM black boxes, then caches the flattened JSON by content hash.
+`prove(reference, mapped, top, library, directory, run, yosys, partition_width=None, workers=4)`
+比较参考网表与映射网表的顶层输出、寄存器下一状态和存储器输入。寄存器状态与 BSG Fakeram
+输出作为分区边界；返回证明范围、分区数量和结果。`workers` 指定并行证明任务数。
 
-## External Interface
-
-`prove(reference, mapped, top, library, directory, run, yosys, partition_width=None, workers=4)` verifies top-level outputs, every named next-state bit, and every memory input while treating register states and both Fakeram and OpenRAM outputs as explicit cut points. Independent partitions use the requested worker count and stop dispatching after the first failed proof. It returns proof scope, partition count, and status.
-
-## Internal Helpers
-
-`boundaries()` discovers register and memory cut points. `make_cuts()` builds matching cut modules and checks state correspondence. `partition()` makes proof cones. `prove_cut()` creates a Yosys SAT miter and validates cached proof inputs by hash.
+`boundaries()` 识别寄存器和存储器边界，`make_cuts()` 建立对应的切分模块，`partition()`
+生成证明锥，`prove_cut()` 使用 Yosys SAT 验证分区。展开后的网表按输入内容摘要缓存。

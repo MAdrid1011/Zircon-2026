@@ -8,4 +8,4 @@
 
 FPGA 路径由 `SinglePortMaskedRam.scala` 按 lane 例化 `Utils/Xilinx/XilinxSinglePortRamReadFirst.scala`，沿用 Zircon-2024 的 `ram_style="block"`、寄存地址、数组输出和配置初始化写法，不使用上述估算模型。ASIC 绑定整体替换外层封装，Xilinx 子模块不被例化；ASIC 数组初始内容仍未定义，BTB 依靠独立复位的有效位屏蔽未训练数据。
 
-[openram-1rw1r/](openram-1rw1r/README.md) 仅保留早期 FreePDK45 1RW+1R 实验资产，不进入活动综合或 STA 输入。当前 ASIC 后端、Cache 和 Predictor SRAM 均由 `scripts/eda/nangate_memories.py` 绑定到 BSG Fakeram；综合脚本会拒绝任何残留的非 `fakeram45_*` RAM 单元。
+ASIC 后端、Cache 和 Predictor SRAM 均由 `scripts/eda/nangate_memories.py` 绑定到 BSG Fakeram；综合脚本会拒绝任何残留的非 `fakeram45_*` RAM 单元。
