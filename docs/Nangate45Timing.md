@@ -1,8 +1,8 @@
 # Nangate45 逻辑时序评估
 
 Zircon-2026 使用固定的 Nangate45 typical 工艺库和 BSG Fakeram 时序模型评估整核组合逻辑。
-当前发布结果是 zero-interconnect logic-only STA，使用 1.5 ns 时钟评估映射后的标准单元和
-BSG Fakeram 组合逻辑。路径审计保留每个违例端点，方便复现实验和比较优化结果。
+当前结果采用零互连寄生的纯逻辑时序分析，以 1.5 ns 时钟评估映射后的标准单元和
+BSG Fakeram 组合逻辑。
 
 ## 评估配置
 
@@ -18,7 +18,7 @@ BSG Fakeram 组合逻辑。路径审计保留每个违例端点，方便复现�
 | STA | OpenSTA，理想时钟，零互连寄生 |
 
 综合入口使用 `Elaborate --bsg`，综合顶层包含处理器执行所需逻辑；退休观测、性能计数器和
-仿真调试接口属于 simulation 顶层。
+仿真观测接口由独立的仿真顶层提供。
 
 Cache、BTB 和 Predictor 阵列均保留为 SRAM 宏。原生单读写阵列映射到对应深度的 BSG
 Fakeram；Cache 使用的 `1RW+1R` 接口采用同深度 BSG 模型派生的双读口时序抽象。普通仿真和
@@ -41,16 +41,16 @@ Nangate45 标准单元映射。
 
 | 指标 | 结果 |
 | --- | ---: |
-| 最长数据到达时间 | 1.437394 ns |
-| 固定网表最高逻辑频率 | 约 680 MHz |
-| 映射单元数 | 441680 |
-| 触发器单元数 | 67869 |
-| 估算面积 | 1104488.13 um2 |
+| 最长数据到达时间 | 1.430775 ns |
+| 固定网表最高逻辑频率 | 约 686 MHz |
+| 映射单元数 | 424556 |
+| 触发器单元数 | 65167 |
+| 估算面积 | 1079054.004 um2 |
 | SRAM 宏实例 | 172 |
 | Yosys 检查问题 | 0 / 0 / 0 |
-| 展开 / 综合 / STA | 10.89 s / 201.96 s / 12.52 s |
+| 展开 / 综合 / STA | 8.54 s / 150.08 s / 12.08 s |
 
-当前纯逻辑最长数据到达时间为 1.437394 ns；结合单元 setup 时间，固定网表频率约 680 MHz。
+当前纯逻辑最长数据到达时间为 1.430775 ns；结合单元 setup 时间，固定网表频率约 686 MHz。
 面积包含 BSG Fakeram 模型面积，用于相同配置下的设计比较。
 
 ## 评估说明
@@ -61,7 +61,7 @@ Logic-only STA 使用理想时钟和零互连寄生，适合观察综合后的�
 - SRAM 使用 BSG Fakeram 时序与面积模型；
 - 完整布局布线频率需要在目标 PDK 中加入宏视图、CTS、布线和寄生提取。
 
-1.437394 ns 是当前映射网表的纯逻辑数据到达时间。
+1.430775 ns 是当前映射网表的纯逻辑数据到达时间。
 
 ## 复现
 
@@ -74,9 +74,9 @@ python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target
 默认输出位于：
 
 ```text
-build/nangate45-core/rtl/
-build/nangate45-core/target-1ns/results.json
-build/nangate45-core/target-1ns/logic-only/
+build/eda/nangate45/rtl/
+build/eda/nangate45/target-1ns/results.json
+build/eda/nangate45/target-1ns/logic-only/
 ```
 
 `results.json` 是机器可读摘要；`logic-only-worst-paths.rpt`、

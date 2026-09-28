@@ -1,35 +1,22 @@
-# Reproducible CoreMark cross-core comparison
+# CoreMark 跨处理器比较
 
-This harness runs the Zircon CoreMark workload on Zircon, XiangShan Yanqihu,
-BOOM Small, and BOOM Medium. External repositories and generated simulators stay
-under the ignored `work/` directory; only ports, version locks, patches, scripts,
-and compact reference results are tracked by Git.
+本目录在 Zircon、香山雁栖湖、BOOM Small 和 BOOM Medium 上运行同一 CoreMark
+工作负载，并按计时周期报告 CoreMark/MHz。外部仓库和生成的仿真器位于忽略的 `work/`；
+仓库只保存移植层、版本锁定、运行脚本和参考结果。
 
-## Quick start
+## 运行
 
-From a fresh clone, start the full comparison with:
+从 Zircon-2026 仓库根目录执行：
 
 ```sh
-git clone https://github.com/MAdrid1011/Zircon-2026.git
-cd Zircon-2026
 make -C benchmarks/coremark-crosscore compare
 ```
 
-The harness initializes the two Zircon submodules and fetches the pinned external
-cores automatically.
+脚本会初始化 Zircon 子模块并获取锁定版本的外部处理器。默认使用两个构建任务、一个
+Verilator 运行线程和较低主机调度优先级；资源充足时可指定 `JOBS=4`。首次运行需要下载
+并构建多个仿真器，应预留数小时和至少 8 GiB 磁盘空间。
 
-The default is deliberately conservative: two build jobs, one Verilator runtime
-thread, and `nice -n 15`. Override only when the machine has enough memory:
-
-```sh
-make -C benchmarks/coremark-crosscore compare JOBS=4
-```
-
-The first run downloads several upstream repositories and generates multiple
-Verilator simulators. Allow several hours and at least 8 GiB of free disk space.
-The tracked harness is small; the generated `work/` directory is normally 3-10 GiB.
-
-Run only one target when a full rebuild is unnecessary:
+也可只运行一个目标：
 
 ```sh
 make -C benchmarks/coremark-crosscore run-zircon
@@ -38,81 +25,38 @@ make -C benchmarks/coremark-crosscore run-boom-small
 make -C benchmarks/coremark-crosscore run-boom-medium
 ```
 
-Results are written to `results/current/results.csv` and
-`results/current/report.md`. Every run must contain the CoreMark validation marker,
-all five expected CRC values, and a score that agrees with the measured cycle count.
+当前结果写入 `results/current/results.csv` 和 `results/current/report.md`。结果校验包括
+CoreMark 验证标记、五个 CRC 和计时周期与分数的一致性。
 
-## Host requirements
+## 主机依赖
 
-The scripts check prerequisites before a full run and stop with a concrete missing
-dependency. The tested environment is macOS on Apple Silicon; Linux uses the same
-entry points.
+需要 Git、GNU Make、CMake 3.25、Python 3、curl、Verilator 5、sbt 和 Java。
+LLVM 需要包含 RISC-V 后端、LLD、`llvm-objcopy` 与 `llvm-objdump`；Spike/FESVR 开发
+库通过 `riscv-riscv.pc` 或 `RISCV` 提供。BOOM 构建使用 JDK 11，可通过
+`COREMARK_JAVA_HOME` 指定。`LLVM_BIN` 可指定 LLVM 工具目录。
 
-- Git, GNU Make, CMake 3.25 or newer, Python 3, and curl
-- Clang/LLVM with the RISC-V backend, LLD, llvm-objcopy, and llvm-objdump
-- Verilator 5
-- sbt and a Java runtime; BOOM specifically uses JDK 11
-- Spike/FESVR headers and libraries, discoverable through `riscv-riscv.pc` or `RISCV`
-- `realpath` on macOS; the harness supplies the small `greadlink` compatibility wrapper
+## 测量方法
 
-When JDK 11 is not the default Java, point the harness at it:
+- 使用 CoreMark v1.01，默认运行 30 轮，算法文件均以 Clang `-O2` 编译。
+- 在 `iterate()` 前后读取 `mcycle`，以 `轮数 × 1,000,000 / 计时周期` 计算 CoreMark/MHz。
+- 仿真器随机种子固定为 `1`；每个目标都校验 CoreMark 的结果标记和 CRC。
+- 香山与两个 BOOM 配置使用 RV64GC/LP64D 构建；Zircon 使用对应的 RV32IMAF/ILP32F
+  构建。工作负载源码与测量方法相同，目标 ELF 不按字节相同。
 
-```sh
-COREMARK_JAVA_HOME=/path/to/jdk-11 \
-    make -C benchmarks/coremark-crosscore run-boom-small
-```
+此分数衡量每周期吞吐，不代表面积、功耗或最高时钟频率。EEMBC 正式提交还要求在目标实现
+上运行至少十秒。参考分数与配置见[结果](results/reference/2026-09-18/report.md)和
+[配置说明](results/reference/2026-09-18/CONFIGURATION.md)。
 
-The XiangShan Mill launcher is downloaded automatically from a pinned URL and
-verified by SHA-256.
+## 文件组织
 
-The LLVM tools are selected from `llvm-config --bindir`, which avoids accidentally
-using Apple's system Clang without a RISC-V backend. Set `LLVM_BIN` to override that
-directory when multiple LLVM installations are present.
+| 路径 | 内容 |
+| --- | --- |
+| `configs/revisions.lock` | 外部源码版本 |
+| `patches/chipyard/` | Chipyard 主机构建兼容补丁 |
+| `workloads/coremark/` | RV64 平台移植层 |
+| `scripts/` | 获取、构建、运行与结果校验 |
+| `results/reference/` | 固定的参考结果 |
+| `results/current/` | 最近一次运行的结果 |
+| `work/` | 外部源码与构建产物 |
 
-## Benchmark contract
-
-- CoreMark v1.01 sources come from the repository's pinned `RV-Software` submodule.
-- 30 iterations and validation seeds are used by default.
-- Every algorithm file is compiled with Clang `-O2`.
-- `mcycle` is sampled immediately around `iterate()`.
-- The host simulator seed is fixed to `1` for repeatable reset and memory behavior.
-- `CoreMark/MHz = iterations * 1,000,000 / timed_cycles`.
-- XiangShan and both BOOM configurations share the same RV64GC/LP64D algorithm build.
-- Zircon uses the analogous RV32IMAF/ILP32F build, so it is source- and
-  methodology-equivalent but not a byte-identical ELF.
-
-The 30-iteration simulation is intended for cycle-normalized architectural
-comparison. It is not an official EEMBC submission because the official reporting
-rules also require a minimum wall-clock duration on an implemented target.
-
-## Reproducibility boundaries
-
-Pinned revisions live in `configs/revisions.lock`. Compatibility changes for the
-historical Chipyard checkout are explicit patches under `patches/chipyard/`; they
-change dependency resolution and host simulation compatibility, not BOOM RTL or the
-timed workload region.
-
-Generated data is separated as follows:
-
-```text
-benchmarks/coremark-crosscore/
-├── configs/                 # benchmark contract and pinned revisions
-├── patches/chipyard/        # reproducible host compatibility patches
-├── workloads/coremark/      # target-specific RV64 platform layer
-├── scripts/                 # fetch, build, run, validate, and report
-├── results/reference/       # compact, reviewed reference evidence
-├── results/current/         # generated by the latest run, ignored
-└── work/                    # checkouts and build products, ignored
-```
-
-Use `make validate-reference` to reparse the committed logs without rebuilding any
-simulator. Use `make clean` only when the downloaded checkouts and all generated
-simulators should be removed.
-
-## Interpreting the result
-
-CoreMark/MHz measures throughput per clock cycle. It does not measure area, maximum
-frequency, power, or energy efficiency. Comparing resource efficiency requires the
-same synthesis library, cache boundary, timing target, and reporting methodology.
-See [the reference report](results/reference/2026-09-18/report.md) for the verified
-baseline and detailed configuration table.
+上游来源与许可见[来源说明](PROVENANCE.md)。

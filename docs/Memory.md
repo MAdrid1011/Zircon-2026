@@ -41,6 +41,9 @@ L2 默认 4 路、32 set、64 B line，总容量 8 KiB。I 侧和 D 侧各有独
 流水；ICache 与 ITLB PTW 共享只读端口，DCache 与 DTLB PTW 共享读写端口。L1 请求具有首次
 优先级，deferred 标志保证持续 Cache 流量不会饿死 PTW。
 
+每侧的 victim line 数据保存在独立旁路寄存器中，直到快速命中将其转入后台缓冲，或维护引擎
+接管该行。同侧下一条携带 victim 的请求在此前等待；普通查询和 PTW 请求仍可经过命中流水。
+
 L2 主要保存 L1 替换出的 victim。L1 与 L2 同时 miss 时，外部填充直接返回 L1；只有 L1 victim
 进入 L2。L2 命中后通常将数据所有权交给请求方并使条目失效。ICache 读取 dirty 数据时，L2
 保留唯一 dirty 所有权。
@@ -58,11 +61,10 @@ I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、un
 Cache RAM 通过统一封装选择寄存器、Vivado 双口 BRAM 或 ASIC `1RW+1R` 接口。Vivado 配置
 保留两个可读写物理端口；ASIC 分析配置将 I 侧绑定到只读端口，将 D 侧和安装写绑定到读写端口。
 
-日常 Chisel 与 Verilator 回归使用同周期的 Chisel 行为模型，因此不依赖宏文件。Nangate45
-logic-only 综合把所有 Cache 和 Predictor SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
+Chisel 与 Verilator 仿真使用同周期的行为模型。Nangate45 纯逻辑综合把 Cache 和 Predictor
+SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
 拆分到固定版本 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
-都是上升沿 clock-to-Q；活动综合和 STA 输入不再包含 OpenRAM Liberty 或 LEF。Vivado 后端仍
-使用原有外部 Verilog BRAM 模板，不经过该 ASIC 绑定路径。
+都是上升沿 clock-to-Q。Vivado 后端使用独立的 Verilog BRAM 模板。
 
 PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
 属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和 uncached 请求绕过

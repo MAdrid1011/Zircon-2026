@@ -1,4 +1,4 @@
-# ZirconCore
+# 处理器顶层
 
 `ZirconCore` 是处理器集成顶层，例化 `Frontend`、`Middleend`、`Backend`、
 `Commit`、`PageTableWalker`、`L2Cache` 和 `L2AXI4Bridge`。顶层负责连接模块接口、
