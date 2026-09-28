@@ -1,5 +1,4 @@
-# Scripts
+# 项目脚本
 
-This directory contains reproducible project utilities. EDA scripts and their
-interfaces are documented in the [EDA scripts index](eda/README.md); build and
-verification helpers are grouped by subsystem.
+本目录保存 RTL 生成、综合、时序评估和验证所需的项目脚本。EDA 入口及参数说明见
+[EDA 脚本](eda/README.md)；其他构建和验证脚本按所属子系统放置。

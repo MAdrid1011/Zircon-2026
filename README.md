@@ -21,55 +21,59 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 项目同时面向两类实现环境：Vivado 路径使用可推断双口 BRAM，ASIC 静态分析路径将全部 SRAM
 统一绑定到 BSG Fakeram 时序模型。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
 
+本项目延续早期的 [Zircon](https://github.com/MAdrid1011/Zircon) 与
+[Zircon-2024](https://github.com/MAdrid1011/Zircon-2024) 处理器工作，在取指预测、乱序执行和
+存储层次上形成当前实现。两个早期仓库保留各自的设计和实验资料，可用于了解这一研究方向的背景。
+
 > [!NOTE]
 > 当前版本已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
-> 输入、文件系统挂载和定时器路径验证。Nangate45 BSG logic-only STA 测得最长纯逻辑
-> 数据到达时间为 1.437394 ns，固定网表最高逻辑频率约 680 MHz。
+> 输入、文件系统挂载和定时器路径验证。Nangate45 BSG 纯逻辑时序分析测得最长数据到达时间
+> 为 1.430775 ns，固定网表最高逻辑频率约 686 MHz。
 
 ## 架构概览
 
 ```mermaid
 flowchart LR
-    subgraph FE[Frontend · 4-wide fetch]
-        PF["PF<br/>NPC select"] --> IF1["IF1<br/>early BP + ICache request"]
-        IF1 --> IF2["IF2<br/>ICache/BTB response"]
-        IF2 --> PD["PD<br/>predecode and repair"]
-        PD --> FQ["Fetch Queue<br/>8 entries"]
+    subgraph FE[前端 · 四指令取指]
+        PF["PF<br/>下一取指地址"] --> IF1["IF1<br/>早期预测与 ICache 请求"]
+        IF1 --> IF2["IF2<br/>ICache/BTB 响应"]
+        IF2 --> PD["PD<br/>预译码与修正"]
+        PD --> FQ["取指队列<br/>8 项"]
     end
 
-    subgraph ME[Middleend · 3-wide]
-        DR["Decode + Rename<br/>parallel combinational"]
-        RND["Rename-to-Dispatch<br/>register"]
-        DISP["ReadyBoard + Dispatch"]
+    subgraph ME[中端 · 三宽]
+        DR["译码与重命名"]
+        RND["重命名至派发寄存器"]
+        DISP["就绪表与派发"]
         DR --> RND --> DISP
     end
 
-    subgraph BE[Backend · issue and execution]
-        IQ["Six issue queues"]
+    subgraph BE[后端 · 发射与执行]
+        IQ["六个发射队列"]
         ARRF["Arith0/1 RF"] --> AREX["Arith0/1 EX"] --> ARWB["Arith0/1 WB"]
         MIXRF["MixArith RF"] --> M1["EX1"] --> M2["EX2"] --> M3["EX3"] --> M4["EX4"] --> MIXWB["MixArith WB"]
-        LSRF["LS0/LS1 RF + AGU"] --> D1["D1<br/>SQ/SB forwarding"] --> D2["D2<br/>DCache select"] --> LSWB["Load WB"]
-        STD["Store Data RF"]
+        LSRF["LS0/LS1 RF + AGU"] --> D1["D1<br/>SQ/SB 前递"] --> D2["D2<br/>DCache 选择"] --> LSWB["访存写回"]
+        STD["存储数据读取"]
         IQ --> ARRF
         IQ --> MIXRF
         IQ --> LSRF
         IQ --> STD
     end
 
-    subgraph CMT[Commit · 3-wide]
-        ROB["ROB / Commit"]
+    subgraph CMT[提交 · 三宽]
+        ROB["ROB / 提交"]
         FTQ["FTQ"]
-        SQ["Store Queue"]
-        SB["Store Buffer"]
-        CSR["CSR / Trap"]
+        SQ["存储队列"]
+        SB["存储缓冲"]
+        CSR["CSR / 陷入"]
         ROB --> CSR
         SQ --> SB
     end
 
-    DCache["L1 DCache<br/>3-stage"]
+    DCache["L1 DCache<br/>三级流水"]
     L2["L2 Cache<br/>8 KiB"]
-    PTW["Shared Sv32 PTW"]
-    AXI[("AXI4 Memory<br/>64-bit data")]
+    PTW["共享 Sv32 PTW"]
+    AXI[("AXI4 存储接口<br/>64 位数据")]
 
     FQ --> DR
     ARWB --> ROB
@@ -79,12 +83,12 @@ flowchart LR
     DISP --> IQ
     D2 --> DCache
     DCache --> L2
-    IF2 -. ICache miss .-> L2
+    IF2 -. ICache 缺失 .-> L2
     PTW --> L2
     L2 --> AXI
-    ROB -. recovery / flush .-> PF
-    ROB -. recovery / flush .-> FQ
-    FTQ -. predictor training .-> PF
+    ROB -. 恢复与清空 .-> PF
+    ROB -. 恢复与清空 .-> FQ
+    FTQ -. 预测器训练 .-> PF
 ```
 
 ### 默认配置
@@ -196,16 +200,26 @@ sbt "runMain Elaborate generated"
 sbt "runMain Elaborate --simulation generated"
 ```
 
-现有 Vivado 2025 工程使用独立的 Xilinx BRAM RTL 目录：
+Vivado 2025 核心工程面向 SCARF Stage-B 的 `xcvu13p-fhgb2104-2-i`。裸核使用
+Xilinx BRAM，在默认流程下完成 100 MHz 综合与布线：路由后 setup WNS 为
+`+0.892 ns`，使用 115,602 LUT（6.69%）、59,634 FF、135 BRAM tile 和 0 DSP。
+生成并运行工程：
 
 ```sh
 python3 scripts/eda/prepare_vivado_rtl.py
+vivado -mode batch -source eda/vivado/create_project.tcl -nolog -nojournal
 ```
 
-使用 BSG Fakeram-only 配置生成 Nangate45 纯逻辑时序结果：
+上板工程由 SCARF 的 PCIe/DDR4 wrapper 和板级 XDC 提供外设及管脚连接；这里的
+`ZirconCore` 工程用于独立的核心实现评估。
+工程定义与 100 MHz 时钟约束保存在 [`eda/vivado/`](eda/vivado/README.md)，生成的
+RTL、工程和报告位于忽略的 `build/eda/vivado-vu13p/` 下。使用 `-tclargs --create-only`
+可只创建工程。Nangate45 的 BSG Fakeram RTL 与结果独立位于 `build/eda/nangate45/`。
+
+使用 BSG Fakeram 配置生成 Nangate45 纯逻辑时序结果：
 
 ```sh
-python3 scripts/eda/synthesize_core.py --logic-only
+python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target-ns 1.5
 ```
 
 脚本会生成外部宏版 RTL，再运行 Yosys 标准单元映射。该配置将 Cache、BTB 和 Predictor
@@ -218,13 +232,13 @@ python3 scripts/eda/synthesize_core.py --logic-only
 
 | 验证层级 | 当前状态 |
 | --- | --- |
-| CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.334128，CoreMark/MHz 5.153 |
+| CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.324128，CoreMark/MHz 5.114 |
 | RISC-V Architecture Test 149 项 + Spike 提交级差分 | 通过 |
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
 | Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
-| Nangate45 BSG logic-only STA | 最长纯逻辑数据到达 1.437394 ns，固定网表最高逻辑频率约 680 MHz |
+| Nangate45 BSG 纯逻辑时序分析 | 最长数据到达 1.430775 ns，固定网表最高逻辑频率约 686 MHz |
 | 特权架构 | M/S 模式、Sv32、定时器中断、原子操作和 `FENCE.I`/`SFENCE.VMA` |
 
 ## 模块文档
@@ -259,17 +273,6 @@ Zircon-2026/
 ```
 
 生成 RTL、构建产物、波形和运行报告分别写入 `generated/`、`build/` 与 `reports/`，不会进入版本库。
-
-## 波形调试
-
-普通构建关闭波形支持。需要调试时应使用独立构建目录，并限制波形起始周期和持续长度：
-
-```sh
-cmake -S . -B build/wave -DZIRCON_SIM_ENABLE_VCD=ON
-cmake --build build/wave --target zircon-sim --parallel
-build/wave/bin/zircon-sim --elf program.elf --wave trace.vcd \
-    --wave-start 10000 --wave-cycles 2000
-```
 
 ## 开源许可
 

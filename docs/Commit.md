@@ -1,4 +1,4 @@
-# Commit
+# 提交与恢复
 
 `Commit` 是顺序状态的所有者，例化 `ReorderBuffer`、`FetchTargetQueue`、`StoreQueue`、
 `StoreBuffer` 和 `CSR`。默认每拍最多退休三条指令，并统一产生恢复、分支训练、寄存器释放、

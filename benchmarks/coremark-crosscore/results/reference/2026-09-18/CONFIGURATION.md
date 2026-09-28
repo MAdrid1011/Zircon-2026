@@ -1,37 +1,25 @@
-# Reference configuration details
+# 参考配置
 
-The architectural values below were taken from the generated or default
-configuration source used by the verified run. They are descriptive; only the
-CoreMark scores and CRCs are validated automatically by this harness.
+以下架构数据来自参考运行所使用的生成配置或默认配置；自动校验覆盖 CoreMark 分数与 CRC。
+主机工具为 Clang/LLVM 23.1.1、Verilator 5.052、Mill 0.12.15、sbt 1.5.5 和
+Temurin JDK 11.0.32.1。源码版本见 `configs/revisions.lock`。
 
-Reference host tools were Clang/LLVM 23.1.1, Verilator 5.052, Mill 0.12.15,
-sbt 1.5.5, and Temurin JDK 11.0.32.1. Source revisions are recorded separately in
-`configs/revisions.lock`.
-
-| Item | Zircon | XiangShan Yanqihu | BOOM Small | BOOM Medium |
+| 项目 | Zircon | 香山雁栖湖 | BOOM Small | BOOM Medium |
 | --- | --- | --- | --- | --- |
 | CoreMark/MHz | **3.799** | **7.781** | **3.140** | **5.322** |
-| Relative to Zircon | baseline | **+104.8%** | **-17.3%** | **+40.1%** |
-| Timed cycles, 30 iterations | not retained | 3,855,514 | 9,551,518 | 5,636,123 |
-| ISA / ABI | RV32IMAF, ILP32F | RV64GC, LP64D | RV64GC, LP64D | RV64GC, LP64D |
-| Fetch width | 4 | 8 | 4 | 4 |
-| Decode / dispatch width | 2 | 6 | 1 | 2 |
-| Retire width | 3 | 6 | 1 | 2 |
-| ROB entries | 48 | 192 | 32 | 64 |
-| Integer / FP physical registers | 72 / 48 | 160 / 160 | 52 / 48 | 80 / 64 |
-| Issue queue entries | 40 across specialized queues | Multiple 16-entry queues | 8 / 8 / 8 MEM/INT/FP | 12 / 20 / 16 MEM/INT/FP |
-| Load / store queue | 4 tracking slots / 12 SQ | 64 / 48 | 8 / 8 | 16 / 16 |
-| Speculative branch window | 8 | 32 | 8 | 12 |
-| FTQ / instruction buffer | 16 / 8 | 64 / 48 | 16 / 8 | 32 / 16 |
-| L1 ICache / DCache | 2 KiB / 2 KiB, 2-way | 16 KiB / 32 KiB, 4-way / 8-way | 16 KiB / 16 KiB, 4-way | 16 KiB / 16 KiB, 4-way |
-| Resource interpretation | comparison baseline | substantially larger | smaller backend, larger RV64/cache boundary | probably larger overall |
+| 相对 Zircon | 基准 | **+104.8%** | **-17.3%** | **+40.1%** |
+| 30 轮计时周期 | 未保留 | 3,855,514 | 9,551,518 | 5,636,123 |
+| ISA / ABI | RV32IMAF / ILP32F | RV64GC / LP64D | RV64GC / LP64D | RV64GC / LP64D |
+| 取指宽度 | 4 | 8 | 4 | 4 |
+| 译码 / 派发宽度 | 2 | 6 | 1 | 2 |
+| 退休宽度 | 3 | 6 | 1 | 2 |
+| ROB 项数 | 48 | 192 | 32 | 64 |
+| 整数 / 浮点物理寄存器 | 72 / 48 | 160 / 160 | 52 / 48 | 80 / 64 |
+| 发射队列项数 | 专用队列合计 40 | 多个 16 项队列 | MEM/INT/FP 各 8 | MEM/INT/FP 为 12/20/16 |
+| Load / Store 队列 | 4 个跟踪槽 / 12 个 SQ 项 | 64 / 48 | 8 / 8 | 16 / 16 |
+| 推测分支窗口 | 8 | 32 | 8 | 12 |
+| FTQ / 指令缓冲 | 16 / 8 | 64 / 48 | 16 / 8 | 32 / 16 |
+| L1 ICache / DCache | 各 2 KiB，2 路 | 16 / 32 KiB，4 / 8 路 | 各 16 KiB，4 路 | 各 16 KiB，4 路 |
 
-BOOM Medium and XiangShan use more structural resources than Zircon in this
-comparison, but CoreMark/MHz alone cannot establish area efficiency. A defensible
-area comparison needs a common technology library, cache boundary, synthesis flow,
-and timing constraint.
-
-The first exploratory runs, before the simulator seed was pinned, measured 7.782 for
-XiangShan and 3.143 for BOOM Small. The committed reference uses simulator seed 1;
-the resulting changes of 0.001 and 0.003 CoreMark/MHz are reset/memory-model
-variation, not a workload or RTL change. BOOM Medium remained at 5.322.
+CoreMark/MHz 只反映每周期吞吐。面积效率还需要在相同标准单元库、缓存统计边界、
+时序约束和报告方法下比较。
