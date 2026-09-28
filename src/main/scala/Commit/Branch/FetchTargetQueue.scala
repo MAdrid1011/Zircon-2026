@@ -38,7 +38,7 @@ class FrontendFtqEntry(p: FrontendParams) extends Bundle {
 }
 
 class FtqBranchUpdate(p: FrontendParams) extends Bundle {
-    val ftqIdxOH = UInt(p.ftqDepth.W)
+    val ftqIdx = UInt(p.ftqBits.W)
     val slot = UInt(p.slotBits.W)
     val taken = Bool()
     val target = UInt(32.W)
@@ -139,7 +139,7 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
     }
 
     val sameBranchRow = io.commit.branch(0).valid && io.commit.branch(1).valid &&
-        io.commit.branch(0).bits.ftqIdxOH === io.commit.branch(1).bits.ftqIdxOH
+        io.commit.branch(0).bits.ftqIdx === io.commit.branch(1).bits.ftqIdx
     for (port <- 0 until 2) {
         val branch = io.commit.branch(port)
         val slotMask = UIntToOH(branch.bits.slot, p.fetchWidth)
@@ -157,7 +157,7 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
             )
         }
         queue.io.wen(port) := branch.valid && (if (port == 0) true.B else !sameBranchRow)
-        queue.io.widx(port) := clusterIndex(branch.bits.ftqIdxOH)
+        queue.io.widx(port) := clusterIndex(UIntToOH(branch.bits.ftqIdx, p.ftqDepth))
         queue.io.wdata(port) := update
     }
 
@@ -169,7 +169,7 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
     for (left <- 0 until 2; right <- left + 1 until 2) {
         when(io.commit.branch(left).valid && io.commit.branch(right).valid && !flush) {
             assert(
-                !(io.commit.branch(left).bits.ftqIdxOH & io.commit.branch(right).bits.ftqIdxOH).orR ||
+                io.commit.branch(left).bits.ftqIdx =/= io.commit.branch(right).bits.ftqIdx ||
                     io.commit.branch(left).bits.slot =/= io.commit.branch(right).bits.slot,
                 "Two Branch pipes cannot resolve the same FTQ slot",
             )
@@ -177,12 +177,11 @@ class FetchTargetQueue(p: FrontendParams, allocateWidth: Int = 3, commitWidth: I
     }
     for (port <- 0 until 2) {
         when(io.commit.branch(port).valid && !flush) {
-            assert(PopCount(io.commit.branch(port).bits.ftqIdxOH) === 1.U)
             assert(io.commit.branch(port).bits.slot < p.fetchWidth.U)
             for (lane <- 0 until allocateWidth) {
                 assert(
                     !(writeAllocations(lane) &&
-                        io.commit.branch(port).bits.ftqIdxOH(io.allocateIdx(lane))),
+                        io.commit.branch(port).bits.ftqIdx === io.allocateIdx(lane)),
                     "FTQ allocation and branch write collided",
                 )
             }

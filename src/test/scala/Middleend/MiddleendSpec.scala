@@ -71,6 +71,7 @@ class MiddleendTestHarness(
     })
     middleend.io.backend.wakeup.foreach { wakeup => wakeup.prd := 0.U; wakeup.specMask := 0.U }
     middleend.io.backend.wakeup(0) := io.memoryWakeup
+    middleend.io.backend.loadWakeupBeforeD1.foreach(_ := 0.U)
     middleend.io.backend.memoryWakeup.zipWithIndex.foreach { case (wakeup, index) =>
         wakeup := Mux(index.U === 0.U, io.memoryWakeup, 0.U.asTypeOf(new BackendWakeup(bp)))
     }

@@ -24,6 +24,8 @@ class ArithCompletion extends Bundle {
 
 class ArithBranchUpdate extends Bundle {
     val robIdx = UInt(ArithConstants.robAddressWidth.W)
+    val ftqIdx = UInt(ZirconConfig.FrontendParams().ftqBits.W)
+    val slot = UInt(ZirconConfig.FrontendParams().slotBits.W)
     val taken = Bool()
     val target = UInt(32.W)
     val predFail = Bool()
@@ -41,10 +43,12 @@ class ArithRegfileIO extends Bundle {
 
 class ArithRobIO extends Bundle {
     val complete = Output(Valid(new ArithCompletion))
+    val writeValid = Output(Bool())
 }
 
 class ArithBranchContextIO extends Bundle {
     val update = Output(Valid(new ArithBranchUpdate))
+    val writeValid = Output(Bool())
 }
 
 class ArithWakeupIO extends Bundle {

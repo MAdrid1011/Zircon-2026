@@ -50,7 +50,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
 
     def write(data: Data): Unit = {
         val incoming = data.asInstanceOf[ROBEntry]
-        complete := incoming.complete
+        when(incoming.complete) { complete := true.B }
         mispredicted := incoming.mispredicted
         exception := incoming.exception
         fflags := incoming.fflags
@@ -61,6 +61,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
 /** Completion payload after Commit has reduced the ROB identity to a physical slot. */
 class ROBWrite(addressWidth: Int) extends Bundle {
     val address = UInt(addressWidth.W)
+    val complete = Bool()
     val data = UInt(32.W)
     val mispredicted = Bool()
     val exception = new BackendException
@@ -82,9 +83,6 @@ class ReorderBufferIO(
     val enqueue = Input(new MiddleendCommitEnqueue(fp, bp, dispatchWidth))
 
     val completion = Input(Vec(cp.completionPorts, Valid(new ROBWrite(addressWidth))))
-    val readIdx = Input(Vec(cp.robReadPorts, UInt(addressWidth.W)))
-    val readEntry = Output(Vec(cp.robReadPorts, new ROBEntry(fp, bp)))
-
     val head = Output(Vec(cp.width, Valid(new ROBEntry(fp, bp))))
     val pop = Input(UInt(cp.width.W))
     val clear = Input(Bool())
@@ -110,7 +108,7 @@ class ReorderBuffer(
         cp.robEntries,
         dispatchWidth,
         cp.width,
-        cp.robReadPorts,
+        0,
         cp.completionPorts,
         writePayloadOnFlush = true,
         registeredDeq = false,
@@ -188,7 +186,7 @@ class ReorderBuffer(
     for (port <- 0 until cp.completionPorts) {
         val completion = io.completion(port)
         val update = WireDefault(0.U.asTypeOf(new ROBEntry(fp, bp)))
-        update.complete := true.B
+        update.complete := completion.bits.complete
         update.mispredicted := completion.bits.mispredicted
         update.exception := completion.bits.exception
         update.fflags := completion.bits.fflags
@@ -196,12 +194,6 @@ class ReorderBuffer(
         queue.io.wen(port) := completion.valid
         queue.io.widx(port) := CommitIndex.decodeAddress(completion.bits.address, cp.robEntries, banks)
         queue.io.wdata(port) := update
-    }
-
-    for (port <- 0 until cp.robReadPorts) {
-        queue.io.ridx(port) := CommitIndex.decodeAddress(io.readIdx(port), cp.robEntries, banks)
-        io.readEntry(port) := queue.io.rdata(port)
-        io.readEntry(port).robIdx := io.readIdx(port)
     }
 
     for (lane <- 0 until cp.width) {
@@ -236,7 +228,7 @@ class ReorderBuffer(
         ))
 
         for (port <- 0 until cp.completionPorts) {
-            resultMemory.io.wen(port) := io.completion(port).valid && !io.clear
+            resultMemory.io.wen(port) := io.completion(port).valid && io.completion(port).bits.complete && !io.clear
             resultMemory.io.waddr(port) := io.completion(port).bits.address
             resultMemory.io.wdata(port) := io.completion(port).bits.data
         }

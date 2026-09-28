@@ -10,7 +10,6 @@ final case class CommitParams(width: Int = 3) {
     val sqEntries = 12
     val storeBufferEntries = 4
     val completionPorts = 7
-    val robReadPorts = 2
 }
 
 /** Capacity of the committed store drain buffer. */

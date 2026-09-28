@@ -69,8 +69,16 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     val rowSelectedWayOH = (0 until p.btbSets).map { r =>
         Mux(rowHits(r).orR, rowHits(r), rowAllocationWayOH(r))
     }
-    val selectedRowHasHit = Mux1H(train.indexOH.asBools, rowHits.map(_.orR))
-    val selectedWayOH = Mux1H(train.indexOH.asBools, rowSelectedWayOH)
+    val selectedRowHasHit = if (tagMem.isDefined) selectedTagHits.asUInt.orR
+        else Mux1H(train.indexOH.asBools, rowHits.map(_.orR))
+    val selectedWayOH = if (tagMem.isDefined) {
+        val occupied = VecInit(valid.map(way => FrontendMath.read(way.toSeq, trainIndex).orR))
+        val replacementWay = FrontendMath.read(replacement.toSeq, trainIndex)
+        val allocationWay = if (p.btbWays == 1) 1.U(1.W) else
+            Mux(!occupied(0), 1.U(p.btbWays.W),
+                Mux(!occupied(1), 2.U(p.btbWays.W), Cat(replacementWay, !replacementWay)))
+        Mux(selectedRowHasHit, selectedTagHits.asUInt, allocationWay)
+    } else Mux1H(train.indexOH.asBools, rowSelectedWayOH)
     val write = io.train.valid && (train.cfi.orR || selectedRowHasHit)
     when(io.train.valid) {
         assert(PopCount(train.indexOH) === 1.U, "Main BTB training index must be one-hot")
@@ -90,9 +98,11 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
                     tags.get(w)(r) := io.trainTagGroups(r / rowsPerTagGroup)
                 }
             }
-            when(io.train.valid && train.indexOH(r) && rowSelectedWayOH(r)(w) &&
-                (train.cfi.orR || rowHits(r).orR)) {
-                valid(w)(r) := (Mux(rowHits(r)(w), valid(w)(r), 0.U) & ~train.mask) | train.cfi
+            val rowSelected = if (tagMem.isDefined) selectedWayOH(w) else rowSelectedWayOH(r)(w)
+            val rowHit = if (tagMem.isDefined) selectedTagHits(w) else rowHits(r)(w)
+            when(io.train.valid && train.indexOH(r) && rowSelected &&
+                (train.cfi.orR || selectedRowHasHit)) {
+                valid(w)(r) := (Mux(rowHit, valid(w)(r), 0.U) & ~train.mask) | train.cfi
                 replacement(r) := (w == 0).B
             }
         }

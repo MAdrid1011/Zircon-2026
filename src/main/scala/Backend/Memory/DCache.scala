@@ -389,14 +389,19 @@ class DCache(
     val storeResolveHit = storeState === storeResolve && storeException === 0.U &&
         !storeRequest.uncache && storeLookupResult.hit.orR
     storeArrayWrite := storeResolveHit
-    val storeWriteVictimConflict = storeResolveHit &&
-        index(selectedExecute.paddr) === index(storeRequest.paddr) &&
-        (victimWay & storeLookupResult.hit).orR
-    val storeResolveAllowsLoadMiss = storeState === storeResolve &&
-        (storeException =/= 0.U || (storeResolveHit && !storeWriteVictimConflict))
-    val canAllocateMiss = !missUnit.io.busy &&
-        (storeState === storeIdle || storeResolveAllowsLoadMiss) && !storeDirectLookup && !io.flush
-    val offerMiss = needsMiss.asUInt.orR && canAllocateMiss
+    val laneStoreVictimConflict = VecInit((0 until 2).map { lane =>
+        index(execute(lane).paddr) === index(storeRequest.paddr) &&
+            (laneVictimWay(lane) & storeLookupResult.hit).orR
+    })
+    val storeResolveAllowsLoadMiss = VecInit((0 until 2).map { lane =>
+        storeState === storeResolve &&
+            (storeException =/= 0.U || (storeResolveHit && !laneStoreVictimConflict(lane)))
+    })
+    val missAdmission = VecInit((0 until 2).map { lane =>
+        needsMiss(lane) && !missUnit.io.busy && !storeDirectLookup && !io.flush &&
+            (storeState === storeIdle || storeResolveAllowsLoadMiss(lane))
+    })
+    val offerMiss = Mux(selectedMissLane, missAdmission(1), missAdmission(0))
     missUnit.io.allocate.valid := offerMiss
     missUnit.io.allocate.bits := 0.U.asTypeOf(new DCacheMissAllocate(p))
     InheritFields(missUnit.io.allocate.bits, selectedExecute)
@@ -443,7 +448,7 @@ class DCache(
     val responseInput = Wire(Vec(2, new DLoadResponse(p)))
 
     for (lane <- 0 until 2) {
-        val selectedForAllocation = offerMiss && selectedMissLane === (lane == 1).B
+        val selectedForAllocation = missAdmission(lane) && selectedMissLane === (lane == 1).B
         val alignedWord = Mux1H(
             execute(lane).hit,
             execute(lane).words,
@@ -1034,7 +1039,7 @@ class DCache(
                     loadRetryStaleLookup(lane) := loadRetryStaleLookup(lane) + 1.U
                 }.elsewhen(missUnit.io.busy) {
                     loadRetryMissBusy(lane) := loadRetryMissBusy(lane) + 1.U
-                }.elsewhen(storeState =/= storeIdle && !storeResolveAllowsLoadMiss) {
+                }.elsewhen(storeState =/= storeIdle && !storeResolveAllowsLoadMiss(lane)) {
                     loadRetryStoreConflict(lane) := loadRetryStoreConflict(lane) + 1.U
                 }.otherwise {
                     loadRetryLaneConflict(lane) := loadRetryLaneConflict(lane) + 1.U

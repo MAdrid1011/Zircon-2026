@@ -12,6 +12,7 @@ class BackendMiddleendIO(p: BackendParams, issue: IssueParams) extends Bundle {
     val freePrefix = Output(Vec(IssueQueueIndex.Count, UInt(issue.dispatchWidth.W)))
     val wakeup = Output(Vec(issue.wakeupPorts, new BackendWakeup(p)))
     val memoryWakeup = Output(Vec(issue.wakeupPorts, new BackendWakeup(p)))
+    val loadWakeupBeforeD1 = Output(Vec(2, UInt(p.specWidth.W)))
     val speculation = Output(new SpeculationResolution(p))
 }
 
@@ -166,6 +167,7 @@ class Backend(
     // The RF-stage copy preserves readiness for consumers that arrive later.
     io.middleend.wakeup := registeredComputeWakeup
     io.middleend.memoryWakeup := wakeupRouter.io.memory
+    io.middleend.loadWakeupBeforeD1 := VecInit(Seq(ls0, ls1).map(_.io.wk.wakeRF.specMask))
     io.middleend.speculation := loadSpeculation.io.resolution
 
     /* Loads reserve speculation tags before early wakeup and resolve them at cache response. */

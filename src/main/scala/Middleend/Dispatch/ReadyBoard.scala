@@ -12,11 +12,15 @@ class ReadyBoardState(p: BackendParams, numSources: Int) extends Bundle {
     val specMask = Vec(numSources, UInt(p.specWidth.W))
 }
 
-class ReadyBoardIO(p: BackendParams, width: Int, wakeupPorts: Int, numSources: Int, dualMemory: Boolean) extends Bundle {
+class ReadyBoardIO(
+    p: BackendParams, width: Int, wakeupPorts: Int, numSources: Int,
+    dualMemory: Boolean, replicateLoadMasks: Boolean,
+) extends Bundle {
     val query = Input(Vec(width, new ReadyBoardQuery(p, numSources)))
     val allocate = Input(Vec(width, Valid(UInt(p.tagWidth.W))))
     val wakeup = Input(Vec(wakeupPorts, new BackendWakeup(p)))
     val memoryWakeup = if (dualMemory) Some(Input(new BackendWakeup(p))) else None
+    val loadWakeupBeforeD1 = if (replicateLoadMasks) Some(Input(Vec(2, UInt(p.specWidth.W)))) else None
     val speculation = Input(new SpeculationResolution(p))
     val flush = Input(Bool())
     val state = Output(Vec(width, new ReadyBoardState(p, numSources)))
@@ -34,11 +38,20 @@ class ReadyBoard(
     val wakeupPorts: Int = 7,
     val numSources: Int = 3,
     val dualMemory: Boolean = false,
+    val replicateLoadMasks: Boolean = false,
 ) extends Module {
     require(width > 0 && wakeupPorts > 0 && numSources > 0)
     require(!dualMemory || wakeupPorts > 2)
+    require(!replicateLoadMasks || wakeupPorts > 5)
 
-    val io = IO(new ReadyBoardIO(p, width, wakeupPorts, numSources, dualMemory))
+    val io = IO(new ReadyBoardIO(p, width, wakeupPorts, numSources, dualMemory, replicateLoadMasks))
+    private val loadMaskCopies = if (replicateLoadMasks) Some(Seq.tabulate(2) { lane =>
+        Seq.fill(8) {
+            val copy = RegNext(io.loadWakeupBeforeD1.get(lane), 0.U)
+            dontTouch(copy)
+            copy
+        }
+    }) else None
     private val intReady = RegInit(VecInit.fill(p.numIntPhys)(true.B))
     private val fpReady = RegInit(VecInit.fill(p.numFpPhys)(true.B))
     // MixArith wakes compute at EX2 and memory at EX3. Only the intervening
@@ -83,12 +96,18 @@ class ReadyBoard(
         }.reduce(_ | _)
         val wakeRows = io.wakeup.map(wakeup => rowMask(wakeup.prd))
         for (row <- 0 until rows) {
+            val region = (if (isFp) 4 else 0) + row * 4 / rows
+            val rowWakeMasks = io.wakeup.zipWithIndex.map { case (wakeup, port) =>
+                if (replicateLoadMasks && (port == 4 || port == 5))
+                    loadMaskCopies.get(port - 4)(region)
+                else wakeup.specMask
+            }
             val hits = wakeRows.map(_(row))
             val wake = hits.reduce(_ || _)
-            val wakeMask = Mux1H(hits, io.wakeup.map(_.specMask))
+            val wakeMask = Mux1H(hits, rowWakeMasks)
             val failed = (spec(row) & io.speculation.failedMask).orR
-            val wakeReady = hits.zip(io.wakeup).map { case (hit, wakeup) =>
-                hit && !(wakeup.specMask & io.speculation.failedMask).orR
+            val wakeReady = hits.zip(rowWakeMasks).map { case (hit, mask) =>
+                hit && !(mask & io.speculation.failedMask).orR
             }.reduce(_ || _)
             ready(row) := Mux(io.flush, true.B,
                 (ready(row) && !failed && !allocated(row) && !wake) || wakeReady)

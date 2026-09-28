@@ -1,5 +1,5 @@
 import chisel3._
-import ZirconConfig.BackendParams
+import ZirconConfig.{BackendParams, FrontendParams}
 
 /** Exception state carried by every backend pipeline. */
 class BackendException extends Bundle {
@@ -35,6 +35,8 @@ class BackendPackage(val p: BackendParams = BackendParams()) extends Bundle {
 
     // Ordered backend identities and memory attributes.
     val robIdx = UInt(p.robWidth.W)
+    val ftqIdx = UInt(FrontendParams().ftqBits.W)
+    val ftqSlot = UInt(FrontendParams().slotBits.W)
     val sqTail = UInt(p.sqWidth.W)
     val sqIdx = UInt(p.sqWidth.W)
     val exception = new BackendException

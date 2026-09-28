@@ -141,6 +141,10 @@ class ArithBranch extends Module {
     /* WB stage ------------------------------------------------------------------- */
     val packageWB = Reg(new BackendPackage) // EX/WB boundary
     val validWB = RegInit(false.B)
+    val branchWriteWB = RegNext(
+        liveEX && packageEX.fu === DecodeUnit.Branch.U && !packageAfterEX.exception.valid,
+        false.B,
+    )
     val bypassDataWB = Reg(UInt(32.W))
     val liveWB = validWB && !killed(packageWB)
 
@@ -181,6 +185,7 @@ class ArithBranch extends Module {
     io.wakeup.wakeWB.specMask := 0.U
 
     io.cmt.rob.complete.valid := liveWB
+    io.cmt.rob.writeValid := validWB
     io.cmt.rob.complete.bits.robIdx := packageWB.robIdx
     io.cmt.rob.complete.bits.data := bypassDataWB
     io.cmt.rob.complete.bits.exception := packageWB.exception
@@ -194,7 +199,12 @@ class ArithBranch extends Module {
     io.cmt.branch.update.valid := validWB && !specFailed(packageWB) &&
         packageWB.fu === DecodeUnit.Branch.U &&
         !packageWB.exception.valid
+    // A failed attempt cannot retire; its target is overwritten by replay or
+    // discarded by FTQ flush. Keep failure resolution off the wide FTQ write cone.
+    io.cmt.branch.writeValid := branchWriteWB
     io.cmt.branch.update.bits.robIdx := packageWB.robIdx
+    io.cmt.branch.update.bits.ftqIdx := packageWB.ftqIdx
+    io.cmt.branch.update.bits.slot := packageWB.ftqSlot
     io.cmt.branch.update.bits.taken := packageWB.branchTaken
     io.cmt.branch.update.bits.target := packageWB.branchTarget
     io.cmt.branch.update.bits.predFail := packageWB.predFail

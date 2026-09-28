@@ -92,11 +92,13 @@ class Commit(
     sq.io.request := io.middleend.request
     rob.io.enqueue := io.middleend.enqueue
     sq.io.enqueue := io.middleend.enqueue
-    val ftqFree = fp.ftqDepth.U - ftq.io.used
     val ftqAvailable = VecInit((0 until issue.dispatchWidth).map { lane =>
-        PopCount((0 to lane).map { previous =>
+        val packetStarts = PopCount((0 to lane).map { previous =>
             io.middleend.request.packetStart(previous)
-        }) <= ftqFree
+        })
+        VecInit((0 to lane + 1).map { count =>
+            packetStarts === count.U && ftq.io.used <= (fp.ftqDepth - count).U
+        }).asUInt.orR
     })
     io.middleend.resourcePrefix := rob.io.availablePrefix & sq.io.availablePrefix & ftqAvailable.asUInt
     for (lane <- 0 until issue.dispatchWidth) {
@@ -105,14 +107,10 @@ class Commit(
         io.middleend.allocation(lane).sqIdx := sq.io.allocation(lane).index
     }
 
-    /* Branch completion reads only its packet identity from the ROB. */
-    io.backend.arith.zipWithIndex.foreach { case (port, index) =>
-        rob.io.readIdx(index) := port.branch.update.bits.robIdx
-    }
-
     /* Normalize heterogeneous execution results into the ROB completion format. */
     def completion(
         valid: Bool,
+        payloadWrite: Bool,
         robIdx: UInt,
         data: UInt,
         exception: BackendException,
@@ -121,8 +119,9 @@ class Commit(
         mispredicted: Bool = false.B,
     ): Valid[ROBWrite] = {
         val result = Wire(Valid(new ROBWrite(CommitIndex.addressWidth(cp.robEntries))))
-        result.valid := valid
+        result.valid := payloadWrite
         result.bits.address := robIdx(CommitIndex.addressWidth(cp.robEntries) - 1, 0)
+        result.bits.complete := valid
         result.bits.data := data
         result.bits.mispredicted := mispredicted
         result.bits.exception := exception
@@ -134,6 +133,7 @@ class Commit(
     for ((port, index) <- io.backend.arith.zipWithIndex) {
         rob.io.completion(index) := completion(
             port.rob.complete.valid,
+            port.rob.writeValid,
             port.rob.complete.bits.robIdx,
             port.rob.complete.bits.data,
             port.rob.complete.bits.exception,
@@ -145,10 +145,9 @@ class Commit(
     val branchInputs = io.backend.arith.map(_.branch.update)
     for (port <- branchInputs.indices) {
         val input = branchInputs(port)
-        ftq.io.commit.branch(port).valid := input.valid
-        ftq.io.commit.branch(port).bits.ftqIdxOH :=
-            UIntToOH(rob.io.readEntry(port).ftqIdx, fp.ftqDepth)
-        ftq.io.commit.branch(port).bits.slot := rob.io.readEntry(port).slot
+        ftq.io.commit.branch(port).valid := io.backend.arith(port).branch.writeValid
+        ftq.io.commit.branch(port).bits.ftqIdx := input.bits.ftqIdx
+        ftq.io.commit.branch(port).bits.slot := input.bits.slot
         ftq.io.commit.branch(port).bits.taken := input.bits.taken
         ftq.io.commit.branch(port).bits.target := input.bits.target
         when(input.valid && !delayedBackendRecovery) {
@@ -158,6 +157,7 @@ class Commit(
     }
     /* Atomic shares LS1's completion port while the memory pipelines are quiescent. */
     rob.io.completion(2) := completion(
+        io.backend.mixRob.complete.valid,
         io.backend.mixRob.complete.valid,
         io.backend.mixRob.complete.bits.robIdx,
         io.backend.mixRob.complete.bits.data,
@@ -170,6 +170,7 @@ class Commit(
     ls0Exception.cause := io.backend.ls0.rob.bits.exception
     ls0Exception.tval := io.backend.ls0.rob.bits.vaddr
     rob.io.completion(3) := completion(
+        io.backend.ls0.rob.valid,
         io.backend.ls0.rob.valid,
         io.backend.ls0.rob.bits.robIdx,
         io.backend.ls0.rob.bits.data,
@@ -185,6 +186,7 @@ class Commit(
     atomicException.cause := atomicResponse.bits.exception
     atomicException.tval := atomicResponse.bits.vaddr
     rob.io.completion(4) := completion(
+        io.backend.ls1.rob.valid || atomicResponse.fire,
         io.backend.ls1.rob.valid || atomicResponse.fire,
         Mux(io.backend.ls1.rob.valid, io.backend.ls1.rob.bits.robIdx, atomicResponse.bits.robIdx),
         Mux(io.backend.ls1.rob.valid, io.backend.ls1.rob.bits.data, atomicResponse.bits.data),
