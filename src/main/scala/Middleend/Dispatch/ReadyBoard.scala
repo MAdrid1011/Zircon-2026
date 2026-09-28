@@ -49,6 +49,9 @@ class ReadyBoard(
         Seq.fill(8) {
             val copy = RegNext(io.loadWakeupBeforeD1.get(lane), 0.U)
             dontTouch(copy)
+            if (sys.env.get("ZIRCON_USE_EXTERNAL_VIVADO_RAM").contains("true")) {
+                addAttribute(copy, "DONT_TOUCH = \"TRUE\"")
+            }
             copy
         }
     }) else None
