@@ -179,14 +179,13 @@ class LoadStorePipelineDriver(dut: LoadPipelineSystem) extends LoadPipelineDrive
         }
         if (a.valid.peek().litToBoolean && staReady && d.valid.peek().litToBoolean && stdReady)
             count("sta_std_parallel")
-        if (
-            dut.io.request.valid.peek().litToBoolean && dut.io.requestReady.peek().litToBoolean &&
-            d.valid.peek().litToBoolean && stdReady
-        ) count("ld_std_parallel")
         staFired = sta.nonEmpty && dut.io.iq.instPkg.valid.peek().litToBoolean &&
             dut.io.iq.instPkg.ready.peek().litToBoolean
         stdFired = std.nonEmpty && dut.io.iq.std.get.valid.peek().litToBoolean &&
             dut.io.iq.std.get.ready.peek().litToBoolean
+        if (input.nonEmpty && dut.io.iq.instPkg.valid.peek().litToBoolean &&
+            dut.io.iq.instPkg.ready.peek().litToBoolean && stdFired)
+            count("ld_std_parallel")
         if (staFired) { assert(sq.contains(sta.get)); pendingSTA += sta.get }
         if (stdFired) { assert(sq.contains(std.get)); pendingSTD += std.get }
         if (dut.io.store.req.valid.peek().litToBoolean && dut.io.store.req.ready.peek().litToBoolean) {

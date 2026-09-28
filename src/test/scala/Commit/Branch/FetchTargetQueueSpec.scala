@@ -196,12 +196,12 @@ class FetchTargetQueueSpec extends AnyFreeSpec with ChiselSim {
             }
 
             dut.io.commit.branch(0).valid.poke(true)
-            dut.io.commit.branch(0).bits.ftqIdxOH.poke("b0001".U)
+            dut.io.commit.branch(0).bits.ftqIdx.poke(0.U)
             dut.io.commit.branch(0).bits.slot.poke(1)
             dut.io.commit.branch(0).bits.taken.poke(true)
             dut.io.commit.branch(0).bits.target.poke(0x1234)
             dut.io.commit.branch(1).valid.poke(true)
-            dut.io.commit.branch(1).bits.ftqIdxOH.poke("b0010".U)
+            dut.io.commit.branch(1).bits.ftqIdx.poke(1.U)
             dut.io.commit.branch(1).bits.slot.poke(2)
             dut.io.commit.branch(1).bits.taken.poke(false)
             dut.io.commit.branch(1).bits.target.poke(0x5678)
@@ -261,7 +261,7 @@ class FetchTargetQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.allocate(0).bits.writeValid.poke(false)
             for (port <- 0 until 2) {
                 dut.io.commit.branch(port).valid.poke(true)
-                dut.io.commit.branch(port).bits.ftqIdxOH.poke(1.U)
+                dut.io.commit.branch(port).bits.ftqIdx.poke(0.U)
                 dut.io.commit.branch(port).bits.slot.poke((port + 1).U)
                 dut.io.commit.branch(port).bits.taken.poke(port == 0)
                 dut.io.commit.branch(port).bits.target.poke((0x1234 + port * 4).U)

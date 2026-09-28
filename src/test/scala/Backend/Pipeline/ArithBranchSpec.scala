@@ -90,8 +90,39 @@ class ArithBranchSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step(2)
 
             dut.io.cmt.branch.update.valid.expect(true)
+            dut.io.cmt.branch.writeValid.expect(true)
             dut.io.cmt.branch.update.bits.target.expect(0x80001008L)
             dut.io.cmt.branch.update.bits.predFail.expect(false)
+        }
+    }
+
+    "a WB speculation failure suppresses completion but not the FTQ prewrite" in {
+        simulate(new ArithBranch) { dut =>
+            initialize(dut)
+            dut.reset.poke(true)
+            dut.clock.step(2)
+            dut.reset.poke(false)
+
+            BackendPackageTestUtils.clear(dut.io.iq.bits)
+            dut.io.iq.bits.fu.poke(DecodeUnit.Branch)
+            dut.io.iq.bits.op.poke(ZirconConfig.EXEOp.JAL)
+            dut.io.iq.bits.pc.poke(0x80001000L)
+            dut.io.iq.bits.imm.poke(8)
+            dut.io.iq.bits.ftqIdx.poke(3)
+            dut.io.iq.bits.ftqSlot.poke(2)
+            dut.io.iq.bits.sourceSpecMask(0).poke(1)
+            dut.io.iq.valid.poke(true)
+            dut.clock.step()
+            dut.io.iq.valid.poke(false)
+            dut.clock.step(2)
+
+            dut.io.speculation.failedMask.poke(1)
+            dut.io.cmt.rob.complete.valid.expect(false)
+            dut.io.cmt.branch.update.valid.expect(false)
+            dut.io.cmt.branch.writeValid.expect(true)
+            dut.io.cmt.branch.update.bits.ftqIdx.expect(3)
+            dut.io.cmt.branch.update.bits.slot.expect(2)
+            dut.io.cmt.branch.update.bits.target.expect(0x80001008L)
         }
     }
 

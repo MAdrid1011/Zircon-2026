@@ -233,7 +233,8 @@ class IssueQueue(
                     Mux(hit, mask, 0.U)
                 })
                 val wakeRemainingMask = selectedMask & ~maintenanceResolvedMask
-                val wakeFailed = (selectedMask & maintenanceFailedMask).orR
+                val wakeFailed = (selectedMask &
+                    (maintenanceFailedMask | io.speculation.failedMask)).orR
                 val failed = (item.sourceSpecMask(source) & maintenanceFailedMask).orR
                 val remainingMask = item.sourceSpecMask(source) & ~maintenanceResolvedMask
                 updated.sourceSpecMask(source) := remainingMask
@@ -417,11 +418,13 @@ class IssueQueue(
     // Select only the wakeup fields, not the full issued payload, before
     // broadcasting one candidate per arithmetic producer queue.
     io.issueWakeup.foreach { output =>
-        val failedMask = io.speculation.failedMask | maintenanceFailedMask
         def candidate(item: BackendPackage): BackendWakeupCandidate = {
             val wakeup = Wire(new BackendWakeupCandidate(p))
             val mask = speculationMask(item)
-            wakeup.valid := !(mask & failedMask).orR && item.rdValid && !item.exception.valid
+            // Consumers test the mask against the current failure locally.
+            // Keeping this candidate independent of failure cuts the cross-IQ
+            // selection and wakeup feedback path.
+            wakeup.valid := item.rdValid && !item.exception.valid
             wakeup.prd := item.prd
             wakeup.specMask := mask
             wakeup

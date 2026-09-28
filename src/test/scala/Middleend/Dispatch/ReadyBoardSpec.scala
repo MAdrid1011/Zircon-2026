@@ -47,12 +47,44 @@ class ReadyBoardSpec extends AnyFreeSpec with ChiselSim {
         }
         dut.io.allocate.foreach { entry => entry.valid.poke(false); entry.bits.poke(0) }
         dut.io.wakeup.foreach { wakeup => wakeup.prd.poke(0); wakeup.specMask.poke(0) }
+        dut.io.loadWakeupBeforeD1.foreach(_.foreach(_.poke(0)))
         dut.io.speculation.resolvedMask.poke(0)
         dut.io.speculation.failedMask.poke(0)
         dut.io.flush.poke(false)
         dut.reset.poke(true)
         dut.clock.step(2)
         dut.reset.poke(false)
+    }
+
+    "regional Load mask copies align with the D1 wakeup tag" in {
+        simulate(new ReadyBoard(width = 1, wakeupPorts = 8, replicateLoadMasks = true)) { dut =>
+            initialize(dut)
+            val physical = tag(isFp = false, 33)
+            val floating = tag(isFp = true, 31)
+            dut.io.query(0).valid(0).poke(true)
+            dut.io.query(0).prs(0).poke(physical)
+            dut.io.query(0).valid(1).poke(true)
+            dut.io.query(0).prs(1).poke(floating)
+            dut.io.loadWakeupBeforeD1.get(0).poke(4)
+            dut.io.loadWakeupBeforeD1.get(1).poke(8)
+            dut.clock.step()
+            dut.io.loadWakeupBeforeD1.get(0).poke(0)
+            dut.io.loadWakeupBeforeD1.get(1).poke(0)
+            dut.io.wakeup(4).prd.poke(physical)
+            dut.io.wakeup(4).specMask.poke(0)
+            dut.io.wakeup(5).prd.poke(floating)
+            dut.io.wakeup(5).specMask.poke(0)
+            dut.clock.step()
+            dut.io.wakeup(4).prd.poke(0)
+            dut.io.wakeup(5).prd.poke(0)
+            dut.io.state(0).ready(0).expect(true)
+            dut.io.state(0).specMask(0).expect(4)
+            dut.io.state(0).ready(1).expect(true)
+            dut.io.state(0).specMask(1).expect(8)
+            dut.io.speculation.failedMask.poke(12)
+            dut.io.state(0).ready(0).expect(false)
+            dut.io.state(0).ready(1).expect(false)
+        }
     }
 
     "allocation, wakeup, speculation resolution and flush preserve readiness" in {

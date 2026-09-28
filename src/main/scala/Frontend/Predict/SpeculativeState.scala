@@ -56,15 +56,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
         val next = WireDefault(before)
         val prediction = event.prediction
         val selected = taken.asBools
-        val pc = Cat(event.pcWord, 0.U(2.W))
-
-        // Decode each slot before selecting the RAS operation.
-        val returnPc = Mux1H(
-            selected,
-            (0 until p.fetchWidth).map(i =>
-                FrontendMath.slotPc(pc, i, p)(31, 2) + 1.U
-            )
-        )
+        val returnPc = returnPcWord(event, taken)
         val pop = selected.zip(prediction.kinds).map { case (taken, kind) =>
             taken && FrontendCfi.pop(kind)
         }.reduce(_ || _) && before.count =/= 0.U
@@ -179,18 +171,21 @@ class SpeculativeState(p: FrontendParams) extends Module {
             pointerOH((row + 1) % p.rasDepth) && VecInit(replacePrevious).asUInt.orR, returnPc)
     }
 
-    def returnPcWord(event: FrontendStateEvent): UInt = {
+    def returnPcWord(event: FrontendStateEvent, taken: UInt): UInt = {
         val slotBits = log2Ceil(p.fetchWidth)
         if (slotBits == 0) event.pcWord + 1.U
         else {
             val block = event.pcWord(29, slotBits)
             val nextBlock = (block + 1.U)(block.getWidth - 1, 0)
-            val selected = event.prediction.taken.asBools
+            val selected = taken.asBools
             val low = Mux1H(selected.dropRight(1),
                 (1 until p.fetchWidth).map(_.U(slotBits.W)))
             Cat(Mux(selected.last, nextBlock, block), low)
         }
     }
+
+    def returnPcWord(event: FrontendStateEvent): UInt =
+        returnPcWord(event, event.prediction.taken)
 
     /* Early Prediction Transition */
     // TAGE arrives late. Build every legal RAS result first, then use taken only in the final one-hot selection.
@@ -207,7 +202,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
         }
         val next = advanceHistory(before, event, taken)
         val returnPcs = (0 until p.fetchWidth).map(slot =>
-            FrontendMath.slotPc(Cat(event.pcWord, 0.U(2.W)), slot, p)(31, 2) + 1.U
+            returnPcWord(event, (1 << slot).U(p.fetchWidth.W))
         )
         val pushOnly = event.prediction.kinds.map(kind =>
             FrontendCfi.push(kind) && (!FrontendCfi.pop(kind) || before.count === 0.U)

@@ -7,10 +7,10 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
         dut.io.enqueue.writeValid.poke(0)
         dut.io.pop.poke(0)
         dut.io.clear.poke(false)
-        dut.io.readIdx.foreach(_.poke(0))
         dut.io.completion.foreach { port =>
             port.valid.poke(false)
             port.bits.address.poke(0)
+            port.bits.complete.poke(true)
             port.bits.mispredicted.poke(false)
             port.bits.exception.valid.poke(false)
             port.bits.exception.cause.poke(0)
@@ -47,6 +47,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
     private def complete(dut: ReorderBuffer, port: Int, robIdx: BigInt): Unit = {
         dut.io.completion(port).valid.poke(true)
         dut.io.completion(port).bits.address.poke(robIdx)
+        dut.io.completion(port).bits.complete.poke(true)
         dut.io.completion(port).bits.data.poke(0)
         dut.io.completion(port).bits.mispredicted.poke(false)
         dut.io.completion(port).bits.exception.valid.poke(false)
@@ -54,6 +55,32 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
         dut.io.completion(port).bits.exception.tval.poke(0)
         dut.io.completion(port).bits.fflags.poke(0)
         dut.io.completion(port).bits.fpFlagsValid.poke(false)
+    }
+
+    "a failed speculative payload prewrite cannot mark its ROB entry complete" in {
+        simulate(new ReorderBuffer(dispatchWidth = 3)) { dut =>
+            initialize(dut)
+            val identity = dut.io.allocation(0).peek().litValue
+            dut.io.enqueue.valid.poke(1)
+            dut.io.enqueue.writeValid.poke(1)
+            enqueueLane(dut, 0, pc = 0x1000, identity)
+            dut.clock.step()
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+
+            complete(dut, 0, identity)
+            dut.io.completion(0).bits.complete.poke(false)
+            dut.io.completion(0).bits.exception.tval.poke(0x1234)
+            dut.clock.step()
+            dut.io.completion(0).valid.poke(false)
+            dut.io.head(0).bits.complete.expect(false)
+
+            complete(dut, 0, identity)
+            dut.clock.step()
+            dut.io.completion(0).valid.poke(false)
+            dut.io.head(0).bits.complete.expect(true)
+            dut.io.head(0).bits.exception.tval.expect(0)
+        }
     }
 
     "execution-state CSR writes are decoded once and survive completion" in {
@@ -101,9 +128,8 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.enqueue.valid.poke(0)
             dut.io.enqueue.writeValid.poke(0)
-            dut.io.readIdx(0).poke(identities(2))
-            dut.io.readEntry(0).slot.expect(2)
-            dut.io.readEntry(0).robIdx.expect(identities(2))
+            dut.io.head(2).bits.slot.expect(2)
+            dut.io.head(2).bits.robIdx.expect(identities(2))
 
             complete(dut, 0, identities(1))
             complete(dut, 1, identities(2))

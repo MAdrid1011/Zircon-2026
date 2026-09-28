@@ -266,8 +266,12 @@ class Middleend(
     }
 
     /* ReadyBoard lookup and backend package construction. */
-    val readyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts, dualMemory = true))
+    val readyBoard = Module(new ReadyBoard(
+        backendParams, width, issueParams.wakeupPorts,
+        dualMemory = true, replicateLoadMasks = true,
+    ))
     readyBoard.io.wakeup := io.backend.wakeup
+    readyBoard.io.loadWakeupBeforeD1.get := io.backend.loadWakeupBeforeD1
     readyBoard.io.memoryWakeup.get := io.backend.memoryWakeup(2)
     readyBoard.io.speculation := io.backend.speculation
     readyBoard.io.flush := io.commit.flush
@@ -300,17 +304,31 @@ class Middleend(
         physicalInfo(lane).prd := stored.prd
     }
 
+    /* A fetch packet may span dispatch groups, so continuation lanes reuse its allocated FTQ index. */
+    val openPacketValid = RegInit(false.B)
+    val openPacketFtqIdx = RegInit(0.U(frontendParams.ftqBits.W))
+    val dispatchedFtqIdx = Wire(Vec(width, UInt(frontendParams.ftqBits.W)))
+    var precedingFtqIdx = openPacketFtqIdx
+    for (lane <- 0 until width) {
+        val context = renameStageEntries(lane).context
+        dispatchedFtqIdx(lane) := Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
+        precedingFtqIdx = Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
+    }
+
     /* Dispatch sees complete backend packages and emits one indexed group per issue queue. */
     val dispatcher = Module(new Dispatcher(backendParams, issueParams))
     dispatcher.io.in.valid := renameStageValid
     dispatcher.io.dispatchClass := VecInit(renameStageEntries.map(_.dispatchClass))
     for (lane <- 0 until width) {
-        dispatcher.io.in.entries(lane) := BackendPackage.fromFrontend(
+        val packageForDispatch = BackendPackage.fromFrontend(
             renameStageEntries(lane).context.instruction,
             physicalInfo(lane),
             io.commit.allocation(lane),
             backendParams,
         )
+        packageForDispatch.ftqIdx := dispatchedFtqIdx(lane)
+        packageForDispatch.ftqSlot := renameStageEntries(lane).context.slot
+        dispatcher.io.in.entries(lane) := packageForDispatch
     }
     dispatcher.io.resourcePrefix := io.commit.resourcePrefix
     dispatcher.io.freePrefix := io.backend.freePrefix
@@ -331,16 +349,6 @@ class Middleend(
         rename.io.writeback(lane).bits.prd := rename.io.preview(lane).bits.prd
     }
 
-    /* A fetch packet may span dispatch groups, so continuation lanes reuse its allocated FTQ index. */
-    val openPacketValid = RegInit(false.B)
-    val openPacketFtqIdx = RegInit(0.U(frontendParams.ftqBits.W))
-    val dispatchedFtqIdx = Wire(Vec(width, UInt(frontendParams.ftqBits.W)))
-    var precedingFtqIdx = openPacketFtqIdx
-    for (lane <- 0 until width) {
-        val context = renameStageEntries(lane).context
-        dispatchedFtqIdx(lane) := Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
-        precedingFtqIdx = Mux(context.packetStart, io.commit.ftqIdx(lane), precedingFtqIdx)
-    }
     /* Accepted lanes update readiness and enter Commit atomically with their backend issue tasks. */
     // Commit queues guard prewrites with their own free space. Stage validity
     // controls visibility only, so it need not fan out to every payload bit.

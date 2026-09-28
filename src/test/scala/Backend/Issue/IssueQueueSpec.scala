@@ -198,6 +198,26 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "a same-cycle failed direct wakeup cannot make its consumer ready" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>
+            initialize(dut)
+            enqueue(dut, Seq((1, DecodeUnit.ALU, 0, Some(9), false)))
+            dut.io.directWakeup.get(0).valid.poke(true)
+            dut.io.directWakeup.get(0).prd.poke(9)
+            dut.io.directWakeup.get(0).specMask.poke(1)
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.io.speculation.failedMask.poke(1)
+            dut.clock.step()
+            dut.io.directWakeup.get(0).valid.poke(false)
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.speculation.failedMask.poke(0)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
+            dut.io.issue.valid.expect(false)
+        }
+    }
+
     "arithmetic issue wakeup follows the selected and locked instruction" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
         simulate(new IssueQueue(backend, q)) { dut =>

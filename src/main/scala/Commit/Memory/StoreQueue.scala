@@ -133,7 +133,9 @@ class StoreQueue(
         io.allocation(lane).index := extended(allocationPointer)
         allocationPointer = Mux(request, next(allocationPointer), allocationPointer)
         val storesThroughLane = PopCount(requestStores.take(lane + 1))
-        available(lane) := allocated + storesThroughLane <= entries.U
+        available(lane) := VecInit((0 to lane + 1).map { count =>
+            storesThroughLane === count.U && allocated <= (entries - count).U
+        }).asUInt.orR
     }
     io.availablePrefix := available.asUInt
 
@@ -217,6 +219,7 @@ class StoreQueue(
     completionNext(0).valid := io.address.fire && !addressEntry.atomic &&
         (io.address.bits.exception.orR || addressEntry.dataValid || addressGetsData)
     completionNext(0).bits.address := io.address.bits.robIdx
+    completionNext(0).bits.complete := true.B
     completionNext(0).bits.data := 0.U
     completionNext(0).bits.mispredicted := false.B
     completionNext(0).bits.exception.valid := io.address.bits.exception.orR
@@ -227,6 +230,7 @@ class StoreQueue(
     completionNext(1).valid := io.data.fire && !dataEntry.atomic && dataEntry.addressValid &&
         !dataEntry.exception.orR && !(io.address.fire && io.address.bits.sqIdx === io.data.bits.sqIdx)
     completionNext(1).bits.address := io.data.bits.robIdx
+    completionNext(1).bits.complete := true.B
     completionNext(1).bits.data := 0.U
     completionNext(1).bits.mispredicted := false.B
     completionNext(1).bits.exception := 0.U.asTypeOf(new BackendException)
@@ -391,23 +395,21 @@ class StoreQueue(
         val wordMatch = VecInit((0 until entries).map { index =>
             queryAddressValid(index) && queryPaddr(index)(33, 2) === query.bits.wordAddress
         })
-        val hitStage = Reg(Vec(4, UInt(entries.W)))
-        val beforeBoundaryStage = Reg(UInt(entries.W))
-        val winnerStage = Wire(Vec(4, UInt(entries.W)))
+        val winnerStage = Reg(Vec(4, UInt(entries.W)))
         val unknownStage = Reg(Bool())
         val resultSlot = Reg(chiselTypeOf(query.bits.slot))
         val resultValid = RegInit(false.B)
-        beforeBoundaryStage := VecInit((0 until entries).map { index =>
+        val beforeBoundary = VecInit((0 until entries).map { index =>
             if (index == entries - 1) false.B
             else boundarySlotOH(entries - 1, index + 1).orR
         }).asUInt
         for (byte <- 0 until 4) {
-            hitStage(byte) := VecInit((0 until entries).map { index =>
+            val hits = VecInit((0 until entries).map { index =>
                 active(index) && wordMatch(index) && queryMask(index)(byte) && query.bits.mask(byte)
             }).asUInt
-            val lowerHits = hitStage(byte) & beforeBoundaryStage
+            val lowerHits = hits & beforeBoundary
             val lowerWinner = Reverse(PriorityEncoderOH(Reverse(lowerHits)))
-            val wrapWinner = Reverse(PriorityEncoderOH(Reverse(hitStage(byte))))
+            val wrapWinner = Reverse(PriorityEncoderOH(Reverse(hits)))
             winnerStage(byte) := Mux(lowerHits.orR, lowerWinner, wrapWinner)
         }
         unknownStage := VecInit((0 until entries).map { index =>

@@ -426,23 +426,35 @@ class LoadPipeline(
         val instDataRF = Reg(new BackendPackage(p.backend))
         val validDataRF = RegInit(false.B)
         val heldDataRF = RegInit(false.B)
+        val dataStage = Reg(new StoreDataResult(p))
+        val dataStageValid = RegInit(false.B)
         val killedDataRF = io.cmt.flush
         val std = io.iq.std.get
         val rf = io.rf.std.get
         val data = io.cmt.storeData.get
         val storeDataUnit = std.bits.fu === ZirconConfig.DecodeUnit.Store.U ||
             std.bits.fu === ZirconConfig.DecodeUnit.Atomic.U
-        std.ready := storeDataUnit && !io.blockIssue && (!validDataRF || data.fire)
+        val dataStageReady = !dataStageValid || data.fire
+        std.ready := storeDataUnit && !io.blockIssue && (!validDataRF || dataStageReady)
         rf.intAddr := Mux(instDataRF.prs(0)(p.physWidth), 0.U, instDataRF.prs(0)(p.physWidth - 1, 0))
         rf.fpAddr := Mux(instDataRF.prs(0)(p.physWidth), instDataRF.prs(0)(p.physWidth - 1, 0), 0.U)
         rf.hold := heldDataRF
-        data.valid := validDataRF && !killedDataRF
-        data.bits.sqIdx := instDataRF.sqIdx
-        data.bits.robIdx := instDataRF.robIdx
-        data.bits.size := instDataRF.size
-        data.bits.data := Mux(instDataRF.prs(0)(p.physWidth), rf.fpData, rf.intData)
-        when(data.valid && !data.ready && !heldDataRF) { heldDataRF := true.B }
-        when(data.fire || (validDataRF && killedDataRF)) {
+        data.valid := dataStageValid && !killedDataRF
+        data.bits := dataStage
+        when(validDataRF && !dataStageReady && !heldDataRF) { heldDataRF := true.B }
+        when(data.fire || killedDataRF) {
+            dataStageValid := false.B
+        }
+        when(validDataRF && dataStageReady && !killedDataRF) {
+            dataStage.sqIdx := instDataRF.sqIdx
+            dataStage.robIdx := instDataRF.robIdx
+            dataStage.size := instDataRF.size
+            dataStage.data := Mux(instDataRF.prs(0)(p.physWidth), rf.fpData, rf.intData)
+            dataStageValid := true.B
+            validDataRF := false.B
+            heldDataRF := false.B
+        }
+        when(validDataRF && killedDataRF) {
             validDataRF := false.B
             heldDataRF := false.B
         }
@@ -507,6 +519,12 @@ class LoadPipeline(
         contextD2WB.rdVld && io.cache.wbSelect.bits.exception === 0.U && !io.cache.wbSelect.bits.retry,
         false.B,
     )
+    val wakeTagWB = RegNext(Mux(
+        io.cache.wbSelect.valid && contextD2WB.rdVld &&
+            io.cache.wbSelect.bits.exception === 0.U && !io.cache.wbSelect.bits.retry,
+        contextD2WB.prd,
+        0.U(p.tagWidth.W),
+    ), 0.U)
     val validWB = io.cache.rsp.valid && contextValidWB && !killed(instPkgWB)
 
     io.rf.wr.valid := validWB && writeResultWB
@@ -524,8 +542,12 @@ class LoadPipeline(
 
     // Queue and ReadyBoard flush priority discards a coincident wakeup, so the
     // event does not need the RF/ROB flush and context-valid guards.
-    io.wk.wakeWB.prd := Mux(io.cache.rsp.valid && writeResultWB, instPkgWB.prd, 0.U)
+    io.wk.wakeWB.prd := wakeTagWB
     io.wk.wakeWB.specMask := 0.U
+    when(io.cache.rsp.valid) {
+        assert(wakeTagWB === Mux(writeResultWB, instPkgWB.prd, 0.U),
+            "Registered Load WB wakeup must match the response context")
+    }
     // The speculative RF wake predicts a fixed response cycle. A miss or retry kills
     // dependent consumers through the same token instead of extending this timing path.
     io.bypass.nextWb.valid := expectedValid(1) && !io.cmt.flush
