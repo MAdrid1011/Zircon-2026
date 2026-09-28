@@ -12,33 +12,48 @@ class ReadyBoardState(p: BackendParams, numSources: Int) extends Bundle {
     val specMask = Vec(numSources, UInt(p.specWidth.W))
 }
 
-class ReadyBoardIO(p: BackendParams, width: Int, wakeupPorts: Int, numSources: Int) extends Bundle {
+class ReadyBoardIO(p: BackendParams, width: Int, wakeupPorts: Int, numSources: Int, dualMemory: Boolean) extends Bundle {
     val query = Input(Vec(width, new ReadyBoardQuery(p, numSources)))
     val allocate = Input(Vec(width, Valid(UInt(p.tagWidth.W))))
     val wakeup = Input(Vec(wakeupPorts, new BackendWakeup(p)))
+    val memoryWakeup = if (dualMemory) Some(Input(new BackendWakeup(p))) else None
     val speculation = Input(new SpeculationResolution(p))
     val flush = Input(Bool())
     val state = Output(Vec(width, new ReadyBoardState(p, numSources)))
+    val memoryState = if (dualMemory) Some(Output(Vec(width, new ReadyBoardState(p, numSources)))) else None
 }
 
 /** Readiness of integer and floating-point physical registers.
   *
   * Queries read registered state. IssueQueue applies current-cycle wakeups to
-  * incoming entries, while accepted destinations take priority at this boundary.
+  * incoming entries; a wakeup wins if it targets a delayed allocation at this edge.
   */
 class ReadyBoard(
     val p: BackendParams = BackendParams(),
     val width: Int = 2,
     val wakeupPorts: Int = 7,
     val numSources: Int = 3,
+    val dualMemory: Boolean = false,
 ) extends Module {
     require(width > 0 && wakeupPorts > 0 && numSources > 0)
+    require(!dualMemory || wakeupPorts > 2)
 
-    val io = IO(new ReadyBoardIO(p, width, wakeupPorts, numSources))
-    private val intReady = RegInit(VecInit(Seq.fill(p.numIntPhys)(true.B)))
-    private val fpReady = RegInit(VecInit(Seq.fill(p.numFpPhys)(true.B)))
-    private val intSpec = RegInit(VecInit(Seq.fill(p.numIntPhys)(0.U(p.specWidth.W))))
-    private val fpSpec = RegInit(VecInit(Seq.fill(p.numFpPhys)(0.U(p.specWidth.W))))
+    val io = IO(new ReadyBoardIO(p, width, wakeupPorts, numSources, dualMemory))
+    private val intReady = RegInit(VecInit.fill(p.numIntPhys)(true.B))
+    private val fpReady = RegInit(VecInit.fill(p.numFpPhys)(true.B))
+    // MixArith wakes compute at EX2 and memory at EX3. Only the intervening
+    // cycle needs a distinct memory view; the tag is held at this Q boundary.
+    private val earlyMixTag = if (dualMemory) Some(RegInit(0.U(p.tagWidth.W))) else None
+    earlyMixTag.foreach { tag =>
+        tag := Mux(io.flush || io.wakeup(2).prd === io.memoryWakeup.get.prd,
+            0.U, io.wakeup(2).prd)
+        when(!io.flush && tag =/= 0.U) {
+            assert(io.memoryWakeup.get.prd === tag,
+                "Memory MixArith wakeup must follow the compute wakeup")
+        }
+    }
+    private val intSpec = RegInit(VecInit.fill(p.numIntPhys)(0.U(p.specWidth.W)))
+    private val fpSpec = RegInit(VecInit.fill(p.numFpPhys)(0.U(p.specWidth.W)))
     // Allocation is consumed one edge after Rename accepts it. Queries bypass
     // this narrow pending register, preserving the original externally visible
     // not-ready cycle without placing admission on every scoreboard D-input.
@@ -56,32 +71,37 @@ class ReadyBoard(
         spec: Vec[UInt],
         isFp: Boolean,
     ): Unit = {
-        val indexWidth = log2Ceil(if (isFp) p.numFpPhys else p.numIntPhys)
-        // Wakeup destinations are mutually exclusive. Decode every port in
-        // parallel so a late producer valid does not traverse eight writes.
-        for (index <- ready.indices) {
-            val allocated = delayedAllocate.map { entry =>
-                entry.valid && entry.bits(p.tagWidth - 1) === isFp.B &&
-                    entry.bits(indexWidth - 1, 0) === index.U
+        val rows = if (isFp) p.numFpPhys else p.numIntPhys
+        val indexWidth = log2Ceil(rows)
+        def belongs(tag: UInt): Bool = tag =/= 0.U && tag(p.tagWidth - 1) === isFp.B
+        def index(tag: UInt): UInt = tag(indexWidth - 1, 0)
+        def rowMask(tag: UInt): UInt = Mux(belongs(tag), UIntToOH(index(tag), rows), 0.U(rows.W))
+        def storedMask(tag: UInt): UInt = spec(index(tag))
+
+        val allocated = delayedAllocate.map { allocation =>
+            Mux(allocation.valid, rowMask(allocation.bits), 0.U(rows.W))
+        }.reduce(_ | _)
+        val wakeRows = io.wakeup.map(wakeup => rowMask(wakeup.prd))
+        for (row <- 0 until rows) {
+            val hits = wakeRows.map(_(row))
+            val wake = hits.reduce(_ || _)
+            val wakeMask = Mux1H(hits, io.wakeup.map(_.specMask))
+            val failed = (spec(row) & io.speculation.failedMask).orR
+            val wakeReady = hits.zip(io.wakeup).map { case (hit, wakeup) =>
+                hit && !(wakeup.specMask & io.speculation.failedMask).orR
             }.reduce(_ || _)
-            val wakeHits = io.wakeup.map { wakeup =>
-                wakeup.prd =/= 0.U && wakeup.prd(p.tagWidth - 1) === isFp.B &&
-                    wakeup.prd(indexWidth - 1, 0) === index.U
+            ready(row) := Mux(io.flush, true.B,
+                (ready(row) && !failed && !allocated(row) && !wake) || wakeReady)
+            spec(row) := Mux(io.flush, 0.U,
+                Mux(wake, wakeMask, Mux(allocated(row), 0.U, spec(row))) &
+                    ~io.speculation.resolvedMask)
+        }
+        if (dualMemory) {
+            when(!io.flush && belongs(io.memoryWakeup.get.prd)) {
+                assert(storedMask(io.memoryWakeup.get.prd) === 0.U)
             }
-            val wakeAny = wakeHits.reduce(_ || _)
-            val wakeMask = Mux1H(wakeHits, io.wakeup.map(_.specMask))
-            when(io.flush) {
-                ready(index) := true.B
-                spec(index) := 0.U
-            }.elsewhen(wakeAny) {
-                ready(index) := !(wakeMask & io.speculation.failedMask).orR
-                spec(index) := wakeMask & ~io.speculation.resolvedMask
-            }.elsewhen(allocated) {
-                ready(index) := false.B
-                spec(index) := 0.U
-            }.otherwise {
-                ready(index) := ready(index) && !(spec(index) & io.speculation.failedMask).orR
-                spec(index) := spec(index) & ~io.speculation.resolvedMask
+            when(!io.flush && belongs(io.wakeup(2).prd)) {
+                assert(storedMask(io.wakeup(2).prd) === 0.U)
             }
         }
     }
@@ -111,6 +131,13 @@ class ReadyBoard(
             storedMask & ~io.speculation.resolvedMask,
             0.U,
         )
+        io.memoryState.foreach { state =>
+            val earlyMix = earlyMixTag.get =/= 0.U && earlyMixTag.get === query.prs(source)
+            state(lane).ready(source) :=
+                !query.valid(source) || !pendingAllocation && storedReady && !earlyMix &&
+                    !(storedMask & io.speculation.failedMask).orR
+            state(lane).specMask(source) := io.state(lane).specMask(source)
+        }
         when(query.valid(source)) {
             assert(
                 index < Mux(isFp, p.numFpPhys.U, p.numIntPhys.U),
@@ -137,6 +164,14 @@ class ReadyBoard(
             val isFp = wakeup.prd(p.tagWidth - 1)
             val index = wakeup.prd(p.physWidth - 1, 0)
             assert(index < Mux(isFp, p.numFpPhys.U, p.numIntPhys.U), "Wakeup physical index is out of range")
+        }
+    }
+    io.memoryWakeup.foreach { wakeup =>
+        assert(wakeup.specMask === 0.U)
+        when(wakeup.prd =/= 0.U) {
+            val isFp = wakeup.prd(p.tagWidth - 1)
+            val index = wakeup.prd(p.physWidth - 1, 0)
+            assert(index < Mux(isFp, p.numFpPhys.U, p.numIntPhys.U))
         }
     }
     for (port <- 0 until wakeupPorts) {

@@ -275,12 +275,9 @@ object SharedMultiplyLogic {
 
     /** Shared FP EX4: normalize, extract GRS, round once and pack. Integer results bypass this. */
     def finish(x: MulStage3): (UInt, UInt) = {
-        val coarse = x.shift(6, 3)
-        val coarseSelect = (0 until 10).map(i => coarse === i.U) :+ (coarse >= 10.U)
-        val coarseRight = Mux1H(coarseSelect,
-            (0 to 10).map(i => rightJam(x.mag, (i * 8).U(7.W), 80)))
-        val coarseLeft = Mux1H(coarseSelect,
-            (0 to 10).map(i => leftTruncate(x.mag, (i * 8).U(7.W), 80)))
+        val coarse = Cat(x.shift(6, 3), 0.U(3.W))
+        val coarseRight = rightJam(x.mag, coarse, 80)
+        val coarseLeft = leftTruncate(x.mag, coarse, 80)
         val fine = Cat(0.U(4.W), x.shift(2, 0))
         val mag = Mux(x.right, rightJam(coarseRight, fine, 80), leftTruncate(coarseLeft, fine, 80))
         val window = mag(26, 0)

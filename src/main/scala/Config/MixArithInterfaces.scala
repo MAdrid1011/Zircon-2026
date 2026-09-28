@@ -128,8 +128,6 @@ class MixArithRegfileIO extends Bundle {
 }
 
 class MixArithRobIO extends Bundle {
-    val readIdx = Output(UInt(MixArithConstants.robAddressWidth.W))
-    val pc = Input(UInt(32.W))
     val complete = Output(Valid(new MixArithCompletion))
 }
 

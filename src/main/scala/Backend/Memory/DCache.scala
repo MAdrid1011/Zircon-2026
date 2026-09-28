@@ -7,14 +7,14 @@ import ZirconUtil.InheritFields
 
 class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
     val hit = UInt(l1Way.W)
-    val tags = Vec(l1Way, UInt((34 - l1Index - l1Offset).W))
-    val lines = Vec(l1Way, UInt(l1LineBits.W))
     val words = Vec(l1Way, UInt(32.W))
     val byteEnable = UInt(4.W)
     val setOH = UInt(l1IndexNum.W)
-    val validWays = UInt(l1Way.W)
-    val dirtyWays = UInt(l1Way.W)
-    val lruWay = UInt(l1Way.W)
+    val victimWay = UInt(l1Way.W)
+    val victimValid = Bool()
+    val victimTag = UInt((34 - l1Index - l1Offset).W)
+    val victimData = UInt(l1LineBits.W)
+    val victimDirty = Bool()
     val generation = Vec(l1Way, UInt(8.W))
     val forwardValid = Bool()
     val forwardData = UInt(32.W)
@@ -128,7 +128,9 @@ class DCache(
     val dirtyTab = VecInit.fill(l1Way)(
         Module(new AsyncRegRam(Bool(), l1IndexNum, 2, 3, Some(false.B))).io
     )
-    val lruTab = Module(new AsyncRegRam(UInt(l1Way.W), l1IndexNum, 4, 3, Some(1.U(l1Way.W)))).io
+    // Two ways have one bit of replacement state; expand it only at the consumers.
+    val lruTab = Module(new AsyncRegRam(Bool(), l1IndexNum, 4, 3, Some(false.B))).io
+    def lruWay(bit: Bool): UInt = Cat(bit, !bit)
     val cacheGeneration = RegInit(VecInit.fill(l1IndexNum)(VecInit.fill(l1Way)(0.U(8.W))))
 
     // ==================== Registered interface boundaries ====================
@@ -179,6 +181,10 @@ class DCache(
         dirtyTab.foreach(_.raddr(lane) := lookup(lane).cacheIndex)
         lruTab.raddr(lane) := lookup(lane).cacheIndex
     }
+    val victimWayNow = VecInit((0 until 2).map { lane =>
+        val invalidWays = ~validWaysNow(lane) & ((BigInt(1) << l1Way) - 1).U(l1Way.W)
+        Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), lruWay(lruTab.rdata(lane)))
+    })
 
     // ==================== Miss and store state ====================
     val missUnit = Module(new DCacheMissUnit(p))
@@ -221,7 +227,7 @@ class DCache(
     val storeValidWays = VecInit(validTab.map(_.rdata(2))).asUInt
     val storeDirtyWays = VecInit(dirtyTab.map(_.rdata(2))).asUInt
     val storeInvalidWays = ~storeValidWays & ((BigInt(1) << l1Way) - 1).U(l1Way.W)
-    val storeVictimWay = Mux(storeInvalidWays.orR, PriorityEncoderOH(storeInvalidWays), lruTab.rdata(2))
+    val storeVictimWay = Mux(storeInvalidWays.orR, PriorityEncoderOH(storeInvalidWays), lruWay(lruTab.rdata(2)))
     val storeVictimValid = (storeVictimWay & storeValidWays).orR
     val storeVictimDirty = Mux1H(storeVictimWay, storeDirtyWays.asBools)
     val storeVictimPaddr = Cat(Mux1H(storeVictimWay, tagTab.map(_.doutb)), index(storeRequest.paddr), 0.U(l1Offset.W))
@@ -375,17 +381,11 @@ class DCache(
     val bothNeedMiss = needsMiss.asUInt.andR
     val selectedMissLane = Mux(bothNeedMiss, missRoundRobin, needsMiss(1))
     val selectedExecute = Mux(selectedMissLane, execute(1), execute(0))
-    val selectedValidWays = Mux(selectedMissLane, execute(1).validWays, execute(0).validWays)
-    val laneVictimWay = VecInit((0 until 2).map { lane =>
-        val invalidWays = ~execute(lane).validWays & ((BigInt(1) << l1Way) - 1).U(l1Way.W)
-        Mux(invalidWays.orR, PriorityEncoderOH(invalidWays), execute(lane).lruWay)
-    })
+    val laneVictimWay = VecInit((0 until 2).map(lane => execute(lane).victimWay))
     val victimWay = Mux(selectedMissLane, laneVictimWay(1), laneVictimWay(0))
-    val laneVictimTag = VecInit((0 until 2).map(lane => Mux1H(laneVictimWay(lane), execute(lane).tags)))
-    val laneVictimData = VecInit((0 until 2).map(lane => Mux1H(laneVictimWay(lane), execute(lane).lines)))
-    val laneVictimDirty = VecInit((0 until 2).map(lane =>
-        Mux1H(laneVictimWay(lane), execute(lane).dirtyWays.asBools)
-    ))
+    val laneVictimTag = VecInit((0 until 2).map(lane => execute(lane).victimTag))
+    val laneVictimData = VecInit((0 until 2).map(lane => execute(lane).victimData))
+    val laneVictimDirty = VecInit((0 until 2).map(lane => execute(lane).victimDirty))
     val storeResolveHit = storeState === storeResolve && storeException === 0.U &&
         !storeRequest.uncache && storeLookupResult.hit.orR
     storeArrayWrite := storeResolveHit
@@ -405,7 +405,8 @@ class DCache(
     missUnit.io.allocate.bits.forwardData := Mux(selectedMissLane, effectiveForwardData(1), effectiveForwardData(0))
     missUnit.io.allocate.bits.forwardMask :=
         Mux(selectedMissLane, effectiveForwardMask(1), effectiveForwardMask(0)) & selectedExecute.byteEnable
-    missUnit.io.allocate.bits.victimValid := (victimWay & selectedValidWays).orR && !selectedExecute.uncache
+    missUnit.io.allocate.bits.victimValid :=
+        Mux(selectedMissLane, execute(1).victimValid, execute(0).victimValid) && !selectedExecute.uncache
     missUnit.io.allocate.bits.victimLine :=
         Cat(Mux(selectedMissLane, laneVictimTag(1), laneVictimTag(0)), index(selectedExecute.paddr))
     missUnit.io.allocate.bits.victimData := Mux(selectedMissLane, laneVictimData(1), laneVictimData(0))
@@ -731,9 +732,9 @@ class DCache(
                 execute(lane) := 0.U.asTypeOf(new DCacheExecuteStage(p))
                 InheritFields(execute(lane), resolvedLookup(lane))
                 execute(lane).hit := hitNow(lane)
-                execute(lane).validWays := validWaysNow(lane)
-                execute(lane).dirtyWays := dirtyWaysNow(lane)
-                execute(lane).lruWay := lruTab.rdata(lane)
+                execute(lane).victimWay := victimWayNow(lane)
+                execute(lane).victimValid := (victimWayNow(lane) & validWaysNow(lane)).orR
+                execute(lane).victimDirty := Mux1H(victimWayNow(lane), dirtyWaysNow(lane).asBools)
                 execute(lane).generation := cacheGeneration(index(resolvedLookup(lane).paddr))
                 execute(lane).byteEnable := accessMask(resolvedLookup(lane))
                 execute(lane).setOH := UIntToOH(index(resolvedLookup(lane).paddr), l1IndexNum)
@@ -780,8 +781,8 @@ class DCache(
         // while excluding flush and lookupValid from these wide D-input muxes.
         val captureLookupPayload = lookupFresh(lane) && executeAvailable(lane)
         when(captureLookupPayload) {
-            execute(lane).tags := tagsNow(lane)
-            execute(lane).lines := linesNow(lane)
+            execute(lane).victimTag := Mux1H(victimWayNow(lane), tagsNow(lane))
+            execute(lane).victimData := Mux1H(victimWayNow(lane), linesNow(lane))
             execute(lane).words := VecInit(linesNow(lane).map(line => lineWord(line, resolvedLookup(lane).paddr)))
         }
         when(lookupFresh(lane)) {
@@ -955,14 +956,17 @@ class DCache(
         }
         lruTab.wen(lane) := hitCompletion
         lruTab.waddr(lane) := index(execute(lane).paddr)
-        lruTab.wdata(lane) := ~execute(lane).hit
+        lruTab.wdata(lane) := !execute(lane).hit(1)
+        when(hitCompletion) { assert(PopCount(execute(lane).hit) === 1.U) }
     }
     lruTab.wen(2) := storeArrayWrite && storeLookupResult.hit.orR
     lruTab.waddr(2) := index(storeRequest.paddr)
-    lruTab.wdata(2) := ~storeLookupResult.hit
+    lruTab.wdata(2) := !storeLookupResult.hit(1)
     lruTab.wen(3) := installFire
     lruTab.waddr(3) := index(installAddress)
-    lruTab.wdata(3) := ~missUnit.io.install.bits.way
+    lruTab.wdata(3) := !missUnit.io.install.bits.way(1)
+    when(lruTab.wen(2).asBool) { assert(PopCount(storeLookupResult.hit) === 1.U) }
+    when(installFire) { assert(PopCount(missUnit.io.install.bits.way) === 1.U) }
     when(installFire) {
         val installSet = index(installAddress)
         for (way <- 0 until l1Way) {

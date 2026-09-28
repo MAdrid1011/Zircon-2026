@@ -20,6 +20,7 @@ from openroad_resizer import (
     run as run_openroad_resizer,
 )
 from synthesize_core import (
+    _synthesis_summary,
     build_yosys_script,
     elaboration_command,
     requested_targets,
@@ -42,6 +43,25 @@ from timing_reports import (
 
 
 class TimingFlowTests(unittest.TestCase):
+    def test_unused_predictor_macro_does_not_fail_synthesis_summary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "ZirconCore-mapped.json").write_text(json.dumps({
+                "modules": {"ZirconCore": {"cells": {
+                    "memory": {"type": "fakeram45_32x32"},
+                }}},
+            }))
+            (root / "synthesis.log").write_text(
+                "Found and reported 0 problems.\n"
+                "Chip area for module '\\ZirconCore': 42.0\n"
+            )
+            bindings = {"libraries": {
+                "fakeram45_32x32": {},
+                "fakeram45_1rw1r_64x24": {},
+            }, "bindings": []}
+            result = _synthesis_summary(root, "test", 1.0, {}, bindings)
+            self.assertEqual(result["fakeram_instances"]["fakeram45_1rw1r_64x24"], 0)
+
     def test_separate_sta_period_requires_logic_only_and_positive_period(self):
         script = Path(__file__).with_name("synthesize_core.py")
         for options, message in [
@@ -279,6 +299,7 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
 
     def test_target_sweep_is_ordered_and_converts_to_picoseconds(self):
         self.assertEqual(requested_targets(sweep=True), [1.0])
+        self.assertEqual(requested_targets(), [1.0])
         self.assertEqual(target_delay_ps(1.0), 1000)
         with self.assertRaises(ValueError):
             target_delay_ps(0)

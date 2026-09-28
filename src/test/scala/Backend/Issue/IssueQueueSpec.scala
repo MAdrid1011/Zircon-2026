@@ -162,6 +162,25 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "prewritten empty slots stay invisible and are replaced on allocation" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            packageEntry(dut.io.enq.candidates(0), 42, DecodeUnit.ALU)
+            dut.clock.step(2)
+            dut.io.occupancy.expect(0)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.enq.valid.poke(1)
+            packageEntry(dut.io.enq.candidates(0), 7, DecodeUnit.ALU)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.occupancy.expect(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(7)
+        }
+    }
+
     "candidate-level arithmetic wakeup updates a waiting source in the issue cycle" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
         simulate(new IssueQueue(backend, q, directWakeupCandidates = 2)) { dut =>
@@ -176,6 +195,34 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(1)
+        }
+    }
+
+    "arithmetic issue wakeup follows the selected and locked instruction" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.enq.valid.poke(3)
+            packageEntry(dut.io.enq.candidates(0), 1, DecodeUnit.ALU)
+            packageEntry(dut.io.enq.candidates(1), 2, DecodeUnit.ALU)
+            dut.io.enq.candidates(0).rdValid.poke(true)
+            dut.io.enq.candidates(0).prd.poke(9)
+            dut.io.enq.candidates(1).rdValid.poke(true)
+            dut.io.enq.candidates(1).prd.poke(10)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+
+            dut.io.issue.bits.robIdx.expect(1)
+            dut.io.issueWakeup.get.valid.expect(true)
+            dut.io.issueWakeup.get.prd.expect(9)
+            dut.clock.step()
+            dut.io.issueWakeup.get.prd.expect(9)
+
+            dut.io.issue.ready.poke(true)
+            dut.clock.step()
+            dut.io.issue.bits.robIdx.expect(2)
+            dut.io.issueWakeup.get.valid.expect(true)
+            dut.io.issueWakeup.get.prd.expect(10)
         }
     }
 

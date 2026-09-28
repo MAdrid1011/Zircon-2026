@@ -19,7 +19,7 @@ class DualLoadPipelineSpec extends AnyFreeSpec with ChiselSim {
         s"$name: real LS0/LS1 and PRFs share fixed DCache ports under dual loads and SB traffic" in {
             simulate(new DualLoadPipelineSystem(backend)) { dut =>
                 case class Load(lane: Int, id: Int, address: Long, fp: Boolean) {
-                    val rd: Int = 4 + lane * 24 + id % 16
+                    val rd: Int = 4 + lane * 16 + id % 16
                     val tag: Int = rd | (if (fp) 1 << dut.p.physWidth else 0)
                     val rob: Int = id & ((1 << dut.p.robWidth) - 1)
                 }

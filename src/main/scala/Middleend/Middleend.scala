@@ -203,6 +203,12 @@ class Middleend(
             decoded.exception.cause := DecodeException.IllegalInstruction.U
             decoded.exception.tval := decoded.inst
         }
+        // An invalid exception payload is unobservable; bypass legality decode on its wide value.
+        decoded.exception.tval := Mux(
+            instruction.fault,
+            instruction.pc,
+            Mux(instruction.exception.valid, instruction.exception.tval, instruction.inst),
+        )
         renameIncoming(lane).context.instruction := decoded
         val system = decoded.fu === DecodeUnit.System.U
         val csr = system && decoded.op >= SystemOp.CSRRW.U && decoded.op <= SystemOp.CSRRCI.U
@@ -260,19 +266,20 @@ class Middleend(
     }
 
     /* ReadyBoard lookup and backend package construction. */
-    val readyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts))
-    val memoryReadyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts, numSources = 2))
+    val readyBoard = Module(new ReadyBoard(backendParams, width, issueParams.wakeupPorts, dualMemory = true))
     readyBoard.io.wakeup := io.backend.wakeup
-    memoryReadyBoard.io.wakeup := io.backend.memoryWakeup
+    readyBoard.io.memoryWakeup.get := io.backend.memoryWakeup(2)
     readyBoard.io.speculation := io.backend.speculation
-    memoryReadyBoard.io.speculation := io.backend.speculation
     readyBoard.io.flush := io.commit.flush
-    memoryReadyBoard.io.flush := io.commit.flush
+    for (port <- 0 until issueParams.wakeupPorts if port != 2) {
+        assert(io.backend.wakeup(port).asUInt === io.backend.memoryWakeup(port).asUInt)
+    }
     val physicalInfo = Wire(Vec(width, new BackendRenameInfo(backendParams)))
-    val memoryPhysicalInfo = Wire(Vec(width, new BackendRenameInfo(backendParams)))
     for (lane <- 0 until width) {
         val instruction = renameStageEntries(lane).context.instruction
         val stored = renameStageEntries(lane).physical
+        val memoryClass = renameStageEntries(lane).dispatchClass.load ||
+            renameStageEntries(lane).dispatchClass.storeOrAtomic
         for (source <- 0 until 3) {
             val operand = instruction.rinfo.src(source)
             readyBoard.io.query(lane).prs(source) := stored.prs(source)
@@ -280,22 +287,17 @@ class Middleend(
             // Dispatch, so every live source observes the current ReadyBoard state.
             readyBoard.io.query(lane).valid(source) := renameStageValid(lane) && operand.valid
         }
-        for (source <- 0 until 2) {
-            memoryReadyBoard.io.query(lane).prs(source) := stored.prs(source)
-            memoryReadyBoard.io.query(lane).valid(source) := readyBoard.io.query(lane).valid(source)
-        }
         physicalInfo(lane).prs := stored.prs
-        physicalInfo(lane).sourceReady := readyBoard.io.state(lane).ready
-        physicalInfo(lane).sourceSpecMask := readyBoard.io.state(lane).specMask
+        for (source <- 0 until 3) {
+            val memoryReady = if (source == 2) true.B else readyBoard.io.memoryState.get(lane).ready(source)
+            val memoryMask = if (source == 2) 0.U(backendParams.specWidth.W) else
+                readyBoard.io.memoryState.get(lane).specMask(source)
+            physicalInfo(lane).sourceReady(source) := Mux(
+                memoryClass, memoryReady, readyBoard.io.state(lane).ready(source))
+            physicalInfo(lane).sourceSpecMask(source) := Mux(
+                memoryClass, memoryMask, readyBoard.io.state(lane).specMask(source))
+        }
         physicalInfo(lane).prd := stored.prd
-        memoryPhysicalInfo(lane).prs := stored.prs
-        memoryPhysicalInfo(lane).sourceReady := VecInit(
-            memoryReadyBoard.io.state(lane).ready :+ true.B
-        )
-        memoryPhysicalInfo(lane).sourceSpecMask := VecInit(
-            memoryReadyBoard.io.state(lane).specMask :+ 0.U(backendParams.specWidth.W)
-        )
-        memoryPhysicalInfo(lane).prd := stored.prd
     }
 
     /* Dispatch sees complete backend packages and emits one indexed group per issue queue. */
@@ -306,12 +308,6 @@ class Middleend(
         dispatcher.io.in.entries(lane) := BackendPackage.fromFrontend(
             renameStageEntries(lane).context.instruction,
             physicalInfo(lane),
-            io.commit.allocation(lane),
-            backendParams,
-        )
-        dispatcher.io.memoryEntries(lane) := BackendPackage.fromFrontend(
-            renameStageEntries(lane).context.instruction,
-            memoryPhysicalInfo(lane),
             io.commit.allocation(lane),
             backendParams,
         )
@@ -353,7 +349,6 @@ class Middleend(
         val incomingDestination = instructions(lane).rinfo.dest
         readyBoard.io.allocate(lane).valid := decodeGrant(lane) && incomingDestination.valid
         readyBoard.io.allocate(lane).bits := renameIncoming(lane).physical.prd
-        memoryReadyBoard.io.allocate(lane) := readyBoard.io.allocate(lane)
         io.commit.enqueue.entries(lane).context := renameStageEntries(lane).context
         io.commit.enqueue.entries(lane).context.ftqIdx := dispatchedFtqIdx(lane)
         io.commit.enqueue.entries(lane).destination.rd := destination.index

@@ -2,6 +2,44 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
 class LoadSpeculationTrackerSpec extends AnyFreeSpec with ChiselSim {
+    "exhausted tokens suppress early wakeup until a result releases one" in {
+        simulate(new LoadSpeculationTracker) { dut =>
+            dut.io.request.foreach(_.poke(false))
+            dut.io.allocate.foreach(_.poke(false))
+            dut.io.result.foreach { result =>
+                result.valid.poke(false)
+                result.bits.mask.poke(0)
+                result.bits.failedMask.poke(0)
+            }
+            dut.io.flush.poke(false)
+            dut.reset.poke(true)
+            dut.clock.step(2)
+            dut.reset.poke(false)
+
+            for (pair <- 0 until 2) {
+                dut.io.request.foreach(_.poke(true))
+                dut.io.grant(0).expect(1 << (pair * 2))
+                dut.io.grant(1).expect(2 << (pair * 2))
+                dut.io.allocate.foreach(_.poke(true))
+                dut.clock.step()
+            }
+            dut.io.active.expect(15)
+            dut.io.allocate.foreach(_.poke(false))
+            dut.io.grant(0).expect(0)
+            dut.io.grant(1).expect(0)
+
+            dut.io.result(0).valid.poke(true)
+            dut.io.result(0).bits.mask.poke(2)
+            dut.io.request.foreach(_.poke(false))
+            dut.clock.step()
+            dut.io.active.expect(13)
+            dut.io.result(0).valid.poke(false)
+            dut.io.result(0).bits.mask.poke(0)
+            dut.io.request(1).poke(true)
+            dut.io.grant(1).expect(2)
+        }
+    }
+
     "dual allocation is unique and results release tokens on the following cycle" in {
         simulate(new LoadSpeculationTracker) { dut =>
             dut.io.request.foreach(_.poke(false))

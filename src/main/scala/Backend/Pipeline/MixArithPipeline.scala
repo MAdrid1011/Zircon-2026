@@ -58,7 +58,6 @@ class MixArithPipeline extends Module {
         regfileValue(source) := value
     }
 
-    io.cmt.rob.readIdx := packageRF.robIdx
 
     val issueReady = Wire(Bool())
     io.iq.ready := issueReady
@@ -448,7 +447,7 @@ class MixArithPipeline extends Module {
     io.cmt.rob.complete.valid := validWB
     io.cmt.rob.complete.bits.prd := packageWB.tag.prd
     io.cmt.rob.complete.bits.rdValid := packageWB.tag.rdValid
-    io.cmt.rob.complete.bits.data := packageWB.data
+    io.cmt.rob.complete.bits.data := bypassDataWB
     io.cmt.rob.complete.bits.fflags := packageWB.fflags
     io.cmt.rob.complete.bits.fpFlagsValid := packageWB.tag.fpFlagsValid
     io.cmt.rob.complete.bits.robIdx := packageWB.tag.robIdx

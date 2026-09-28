@@ -135,6 +135,46 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "recycles a full buffer head while requesting the next store" in {
+        simulate(new StoreBuffer) { dut =>
+            initialize(dut)
+            for (entry <- 0 until 4) {
+                enqueue(dut, 0x5000 + entry * 4, entry + 1, 15)
+            }
+            dut.io.enqueue.ready.expect(false)
+            dut.io.store.request.ready.poke(true)
+            dut.io.store.request.valid.expect(true)
+            dut.io.store.request.bits.data.expect(1)
+            dut.clock.step()
+
+            dut.io.store.response.valid.poke(true)
+            dut.io.enqueue.valid.poke(true)
+            dut.io.enqueue.bits.paddr.poke(0x5010)
+            dut.io.enqueue.bits.data.poke(5)
+            dut.io.enqueue.bits.mask.poke(15)
+            dut.io.enqueue.bits.size.poke(0)
+            dut.io.enqueue.bits.uncache.poke(false)
+            dut.io.enqueue.ready.expect(true)
+            dut.io.store.request.valid.expect(true)
+            dut.io.store.request.bits.data.expect(2)
+            dut.clock.step()
+
+            dut.io.enqueue.valid.poke(false)
+            dut.io.store.response.valid.poke(false)
+            dut.io.enqueue.ready.expect(false)
+            dut.io.store.request.valid.expect(false)
+            dut.io.store.response.valid.poke(true)
+            dut.io.store.request.valid.expect(true)
+            dut.io.store.request.bits.data.expect(3)
+            dut.clock.step()
+            dut.io.store.response.valid.poke(false)
+            dut.io.store.response.valid.poke(true)
+            dut.io.store.request.bits.data.expect(4)
+            dut.clock.step()
+            dut.io.store.request.bits.data.expect(5)
+        }
+    }
+
     "selects the youngest hit for every four-entry ring position and hit set" in {
         simulate(new StoreBuffer) { dut =>
             for (rotation <- 0 until 4; hits <- 0 until 16) {

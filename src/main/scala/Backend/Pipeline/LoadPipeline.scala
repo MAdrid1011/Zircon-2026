@@ -300,7 +300,7 @@ class LoadPipeline(
          * register keeps translation and permission logic off SQ/ROB write enables. */
         val addressStages = Reg(Vec(2, new StoreAddressStage(p)))
         // Keep the DTLB/PTW address fanout separate from the local SQ result path.
-        val translationVaddr = RegInit(VecInit.fill(2)(0.U(32.W)))
+        val translationVaddr = Reg(Vec(2, UInt(32.W)))
         val addressStageCount = RegInit(0.U(2.W))
         val addressStageValid = addressStageCount =/= 0.U
         val addressStageFull = addressStageCount === 2.U
@@ -380,7 +380,6 @@ class LoadPipeline(
         when(io.cmt.flush) {
             addressStageCount := 0.U
             resolvedAddressValid := false.B
-            translationVaddr := VecInit.fill(2)(0.U)
         }.otherwise {
             when(addressStageRemove) {
                 resolvedAddress := nextResolvedAddress

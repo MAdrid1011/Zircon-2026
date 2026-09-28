@@ -38,6 +38,10 @@ class FrontendPredecoderTestTop extends Module {
         packet.predict.fields(i) := fields.io.fields
         packet.instructions(i).inst := io.instructions(i)
         packet.instructions(i).fault := io.faults(i)
+        packet.predict.meta.ittage.providers(i) := (i + 1).U
+        packet.predict.meta.ittage.providerTargets(i) := (0x1000 + i * 16).U
+        packet.predict.meta.ittage.alternateTargets(i) := (0x2000 + i * 16).U
+        packet.predict.meta.ittage.predictedTargets(i) := (0x3000 + i * 16).U
     }
     pd.io.in := packet
     io.out := pd.io.out
@@ -50,6 +54,33 @@ class FrontendPredecoderTestTop extends Module {
 }
 
 class FrontendPredecoderSpec extends AnyFreeSpec with ChiselSim {
+    "PD retains only the indirect slot needed for commit training" in {
+        simulate(new FrontendPredecoderTestTop) { d =>
+            d.io.pc.poke(0x80001000L)
+            d.io.directions.poke(0)
+            d.io.rasTop.poke(0)
+            d.io.rasValid.poke(false)
+            d.io.earlyNext.poke(0x80001010L)
+            d.io.earlyTaken.poke(0)
+            d.io.earlyMask.poke(15)
+            d.io.earlyKinds.foreach(_.poke(0))
+            for (slot <- 0 until 4) {
+                d.io.faults.poke(0)
+                d.io.instructions.zipWithIndex.foreach { case (word, i) =>
+                    word.poke(if (i == slot) 0x10067 else 0x13)
+                }
+                val meta = d.io.out.record.train.meta.ittage
+                meta.provider.expect(slot + 1)
+                meta.providerTarget.expect(0x1000 + slot * 16)
+                meta.alternateTarget.expect(0x2000 + slot * 16)
+                meta.predictedTarget.expect(0x3000 + slot * 16)
+                d.io.faults.poke(1 << slot)
+                meta.provider.expect(0)
+                meta.providerTarget.expect(0)
+            }
+        }
+    }
+
     "PD handles signed return offsets, address carries, empty RAS, and fetch faults" in {
         simulate(new FrontendPredecoderTestTop) { d =>
             d.io.directions.poke(0)

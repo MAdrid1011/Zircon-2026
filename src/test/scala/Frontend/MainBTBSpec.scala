@@ -4,7 +4,7 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.FrontendParams
 
-class MainBTBComparison(p: FrontendParams) extends Module {
+class MainBTBComparison(p: FrontendParams, backend: DualPortRamBackend) extends Module {
     val io = IO(new Bundle {
         val query = Flipped(Valid(UInt(32.W)))
         val train = Flipped(Valid(new Bundle {
@@ -17,7 +17,7 @@ class MainBTBComparison(p: FrontendParams) extends Module {
         val parallelHitEqual = Output(Bool())
         val readSkipped = Output(Bool())
     })
-    val dut = Module(new MainBTB(p))
+    val dut = Module(new MainBTB(p, backend))
     val reference = Module(new BlockBTB(p, p.btbSets, p.btbWays))
     dut.io.query.valid := io.query.valid
     dut.io.query.bits := io.query.bits(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
@@ -93,10 +93,11 @@ class MainBTBComparison(p: FrontendParams) extends Module {
 }
 
 class MainBTBSpec extends AnyFreeSpec with ChiselSim {
-    for ((sets, ways, width) <- Seq((2, 1, 1), (8, 2, 4), (64, 2, 8))) {
-        s"synchronous BTB matches the register reference through collisions and held responses ($sets/$ways/$width)" in {
+    for (backend <- Seq(DualPortRamBackend.Vivado, DualPortRamBackend.BSG);
+         (sets, ways, width) <- Seq((2, 1, 1), (8, 2, 4), (64, 2, 8))) {
+        s"synchronous BTB matches the register reference through collisions and held responses ($backend/$sets/$ways/$width)" in {
             val p = FrontendParams(fetchWidth = width, btbSets = sets, btbWays = ways, observe = true)
-            simulate(new MainBTBComparison(p)) { d =>
+            simulate(new MainBTBComparison(p, backend)) { d =>
                 val random = new scala.util.Random(0x2026 + sets)
                 val base = BigInt("80000000", 16)
                 var collisions = 0

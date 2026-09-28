@@ -52,7 +52,7 @@ class Frontend(
     val fastBtbIndexOHIF1 = Reg(UInt(p.fastBtbSets.W))
     val fastBtbTagIF1 = Reg(UInt((32 - p.blockBits - log2Ceil(p.fastBtbSets)).W))
     val mainBtbIndexIF1 = Reg(UInt(log2Ceil(p.btbSets).W))
-    val directionPcHashesIF1 = RegInit(0.U.asTypeOf(new MorslPcHashes(p)))
+    val directionPcHashesIF1 = Reg(new MorslPcHashes(p))
     val validIF1 = RegInit(false.B)
     npc.io.cmt <> io.commit.rob.redirect
     npc.io.pr.valid := if1Fire
@@ -105,8 +105,6 @@ class Frontend(
     pd.io.in := instPkgPDIn
     val instPkgPD = Reg(new FrontendPackage(p))
     val pdCfiClass = Reg(Vec(p.fetchWidth, UInt(2.W)))
-    val pdPredictedImmediates = Reg(Vec(p.fetchWidth, UInt(32.W)))
-    val pdPredictedTargets = Reg(Vec(p.fetchWidth, UInt(32.W)))
     val pdChanged = Reg(Bool())
     val pdRepair = Reg(new FrontendStateRepair(p))
     val validPD = RegInit(false.B)
@@ -137,8 +135,6 @@ class Frontend(
             instPkgPD.instructions(slot).predictedValue := 0.U
             instPkgPD.instructions(slot).rinfo := 0.U.asTypeOf(new FrontendRegisterInfo)
             pdCfiClass(slot) := instPkgPDIn.predict.fields(slot).cfiClass
-            pdPredictedImmediates(slot) := instPkgPDIn.predict.fields(slot).immediate
-            pdPredictedTargets(slot) := pd.io.prediction.targets(slot)
         }
         pdChanged := pd.io.changed
         pdRepair := pd.io.repair
@@ -160,11 +156,8 @@ class Frontend(
         registerInfo.io.fields.immediate := 0.U
         instPkgFQIn.instructions(slot).rinfo := Mux(
             instruction.fault, 0.U.asTypeOf(new FrontendRegisterInfo), registerInfo.io.rinfo)
-        instPkgFQIn.instructions(slot).predictedValue := Mux(
-            FrontendCfi.indirect(instruction.kind),
-            pdPredictedTargets(slot),
-            Mux(instruction.predictedTaken, pdPredictedImmediates(slot), 4.U),
-        )
+        // FQ reconstructs this field from the instruction and packet record.
+        instPkgFQIn.instructions(slot).predictedValue := 0.U
     }
     pdFlush := validPD && pdRepairAllowed && pdChanged && !pdRepairApplied && !cmtFlush
     npc.io.pd.valid := pdFlush

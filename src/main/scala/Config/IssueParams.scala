@@ -65,13 +65,13 @@ final case class IssueQueueParams(
 final case class IssueParams(
     dispatchWidth: Int = 3,
     wakeupPorts: Int = 8,
-    arith0Entries: Int = 7,
-    arith1Entries: Int = 7,
-    mixArithEntries: Int = 8,
-    loadEntries: Int = 6,
-    loadStoreAddressEntries: Int = 8,
-    storeDataEntries: Int = 6,
-    arithReplayEntries: Int = 4,
+    arith0Entries: Int = 6,
+    arith1Entries: Int = 6,
+    mixArithEntries: Int = 6,
+    loadEntries: Int = 5,
+    loadStoreAddressEntries: Int = 6,
+    storeDataEntries: Int = 5,
+    arithReplayEntries: Int = 3,
 ) {
     require(dispatchWidth >= 1 && dispatchWidth <= 4, "Dispatch width must be between one and four")
     require(wakeupPorts > 0 && arithReplayEntries > 0)

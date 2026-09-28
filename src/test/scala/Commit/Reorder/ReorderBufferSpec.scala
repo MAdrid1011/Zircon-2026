@@ -67,7 +67,8 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
                 val instruction = dut.io.enqueue.entries(lane).context.instruction
                 instruction.fu.poke(ZirconConfig.DecodeUnit.System)
                 instruction.op.poke(if (lane == 0) ZirconConfig.SystemOp.CSRRW else ZirconConfig.SystemOp.CSRRS)
-                instruction.inst.poke((ZirconConfig.CSRAddress.mstatus << 20) | ((if (lane == 1) 0 else 2) << 15) | 0x73)
+                val address = if (lane == 0) ZirconConfig.CSRAddress.mstatus else ZirconConfig.CSRAddress.satp
+                instruction.inst.poke((address << 20) | ((if (lane == 1) 0 else 2) << 15) | 0x73)
             }
             dut.clock.step()
             dut.io.enqueue.valid.poke(0)
@@ -75,6 +76,9 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.head(0).bits.writesExecutionState.expect(true)
             dut.io.head(1).bits.writesExecutionState.expect(false)
             dut.io.head(2).bits.writesExecutionState.expect(true)
+            dut.io.head(0).bits.writesSatp.expect(false)
+            dut.io.head(1).bits.writesSatp.expect(false)
+            dut.io.head(2).bits.writesSatp.expect(true)
 
             complete(dut, 0, identities(0))
             dut.clock.step()
@@ -98,7 +102,8 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enqueue.valid.poke(0)
             dut.io.enqueue.writeValid.poke(0)
             dut.io.readIdx(0).poke(identities(2))
-            dut.io.readPc(0).expect(0x1008)
+            dut.io.readEntry(0).slot.expect(2)
+            dut.io.readEntry(0).robIdx.expect(identities(2))
 
             complete(dut, 0, identities(1))
             complete(dut, 1, identities(2))
@@ -144,7 +149,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "completion forwards into an entry entering the registered head window" in {
+    "completion is visible when an entry enters the head window" in {
         simulate(new ReorderBuffer(dispatchWidth = 3)) { dut =>
             initialize(dut)
             val first = dut.io.allocation.map(_.peek().litValue)
@@ -264,7 +269,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enqueue.valid.poke(0)
             dut.io.enqueue.writeValid.poke(0)
             dut.io.head(0).valid.expect(true)
-            dut.io.head(0).bits.pc.expect(0x4000)
+            dut.io.head(0).bits.slot.expect(0)
             dut.io.head(0).bits.complete.expect(false)
         }
     }
@@ -284,7 +289,7 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enqueue.valid.poke(0)
             dut.io.enqueue.writeValid.poke(0)
             dut.io.head(0).valid.expect(true)
-            dut.io.head(0).bits.pc.expect(0x6000)
+            dut.io.head(0).bits.slot.expect(0)
             dut.io.head(0).bits.robIdx.expect(first)
         }
     }

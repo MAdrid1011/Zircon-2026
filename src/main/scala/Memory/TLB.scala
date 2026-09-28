@@ -153,13 +153,8 @@ class TLB(val p: TLBParams = TLBParams(), val paddrLowBits: Int = 0) extends Mod
         response.paddr := physicalAddress(p.paddrBits - 1, paddrLowBits)
         response.pma := Mux(superHit, superPayload.pma, normalPayload.pma)
         response.permissions := Mux(superHit, superPayload.permissions, normalPayload.permissions)
-        // Payload is meaningful only when hit is asserted. Keep request.valid out
-        // of the translated payload so downstream invalid data can be sampled freely.
-        when(!matched) {
-            response.paddr := 0.U
-            response.pma := 0.U
-            response.permissions := 0.U.asTypeOf(new TLBPermissions)
-        }
+        // Payload is consumed only on a hit. Keep the match reduction off all
+        // payload bits so a miss need not clear their output paths.
 
         when(request.valid) {
             assert(PopCount(normalLookupHit(port)) <= 1.U, "TLB: multiple 4 KiB entries matched")

@@ -319,6 +319,22 @@ class CSRSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "retirement increments zero through three carry exactly across the low-word boundary" in {
+        simulate(new CSR) { dut =>
+            val d = new Driver(dut)
+            for (low <- 0xfffffffcL to 0xffffffffL; retired <- 0 to 3) {
+                d.write(0xb82, 9)
+                d.write(0xb02, low)
+                dut.io.retired.poke(retired)
+                dut.clock.step()
+                dut.io.retired.poke(0)
+                val sum = low + retired
+                d.expect(0xc02, sum & 0xffffffffL)
+                d.expect(0xc82, 9 + (sum >>> 32))
+            }
+        }
+    }
+
     "floating aliases and retired flags preserve precise state and FS dirty tracking" in {
         simulate(new CSR) { dut =>
             val d = new Driver(dut)

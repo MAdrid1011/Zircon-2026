@@ -15,6 +15,16 @@ class FrontendIndirectMeta(p: FrontendParams) extends Bundle {
     val aheadValid = Bool()
 }
 
+class FrontendIndirectTrainingMeta(p: FrontendParams) extends Bundle {
+    val indices = Vec(p.ittageCount, UInt(p.ittageIndexBits.W))
+    val tags = Vec(p.ittageCount, UInt(p.ittageTagBits.W))
+    val provider = UInt(p.ittageProviderBits.W)
+    val providerTarget = UInt(32.W)
+    val alternateTarget = UInt(32.W)
+    val predictedTarget = UInt(32.W)
+    val aheadValid = Bool()
+}
+
 class FrontendDirectionMeta(p: FrontendParams) extends Bundle {
     // Lookup-time keys are retained for delayed commit training.
     val phtIndex = UInt(p.phtIndexBits.W)
@@ -50,7 +60,7 @@ class FrontendTrainingMeta(p: FrontendParams) extends Bundle {
     val loopIndex = UInt(p.loopIndexBits.W)
     val loopValid = UInt(p.fetchWidth.W)
     val loopPredictions = UInt(p.fetchWidth.W)
-    val ittage = new FrontendIndirectMeta(p)
+    val ittage = new FrontendIndirectTrainingMeta(p)
 }
 
 class FrontendTrainingRecord(p: FrontendParams) extends Bundle {

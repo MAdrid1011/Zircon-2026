@@ -7,6 +7,7 @@ import ZirconConfig._
 class MiddleendTestInput(p: FrontendParams) extends Bundle {
     val ftqIdx = UInt(p.ftqBits.W)
     val mask = UInt(p.fetchWidth.W)
+    val fault = UInt(p.fetchWidth.W)
     val pc = UInt(32.W)
     val instructions = Vec(p.fetchWidth, UInt(32.W))
 }
@@ -38,6 +39,7 @@ class MiddleendTestHarness(
     packet.ftqIdx := io.in.bits.ftqIdx
     packet.startPc := io.in.bits.pc
     packet.mask := io.in.bits.mask
+    packet.record.train.pcWord := io.in.bits.pc(31, 2)
     val fields = Seq.fill(fp.fetchWidth)(Module(new PredecodeFields))
     val registers = Seq.fill(fp.fetchWidth)(Module(new RegisterInfoDecoder))
     for (slot <- 0 until fp.fetchWidth) {
@@ -46,6 +48,7 @@ class MiddleendTestHarness(
         registers(slot).io.fields := fields(slot).io.fields
         packet.instructions(slot).inst := io.in.bits.instructions(slot)
         packet.instructions(slot).pc := io.in.bits.pc + (slot * 4).U
+        packet.instructions(slot).fault := io.in.bits.fault(slot)
         packet.instructions(slot).rinfo := registers(slot).io.rinfo
     }
     for (slot <- 0 until fp.fetchWidth) {
@@ -67,6 +70,7 @@ class MiddleendTestHarness(
         VecInit((1 to issue.dispatchWidth).map(amount => count >= amount.U)).asUInt
     })
     middleend.io.backend.wakeup.foreach { wakeup => wakeup.prd := 0.U; wakeup.specMask := 0.U }
+    middleend.io.backend.wakeup(0) := io.memoryWakeup
     middleend.io.backend.memoryWakeup.zipWithIndex.foreach { case (wakeup, index) =>
         wakeup := Mux(index.U === 0.U, io.memoryWakeup, 0.U.asTypeOf(new BackendWakeup(bp)))
     }
@@ -90,6 +94,12 @@ class MiddleendTestHarness(
 }
 
 class MiddleendSpec extends AnyFreeSpec with ChiselSim {
+    private def selected(route: RoutedIssueEnqueueGroup, position: Int): BackendPackage = {
+        val selection = route.selection(position).peek().litValue.toInt
+        assert(Integer.bitCount(selection) == 1)
+        route.candidates(Integer.numberOfTrailingZeros(selection))
+    }
+
     private def addi(rd: Int, rs1: Int = 0, immediate: Int = 0): BigInt =
         ((BigInt(immediate) & 0xfff) << 20) | (BigInt(rs1) << 15) | (BigInt(rd) << 7) | 0x13
     private def add(rd: Int, rs1: Int, rs2: Int): BigInt =
@@ -105,6 +115,7 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
         dut.io.in.valid.poke(false)
         dut.io.in.bits.ftqIdx.poke(0)
         dut.io.in.bits.mask.poke(0)
+        dut.io.in.bits.fault.poke(0)
         dut.io.in.bits.pc.poke(0)
         dut.io.in.bits.instructions.foreach(_.poke(0))
         dut.io.freeCount.zip(dut.issue.queueParams).foreach { case (count, queue) => count.poke(queue.entries) }
@@ -123,9 +134,16 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
         dut.reset.poke(false)
     }
 
-    private def offer(dut: MiddleendTestHarness, packetId: Int, words: Seq[BigInt], mask: Int = 15): Unit = {
+    private def offer(
+        dut: MiddleendTestHarness,
+        packetId: Int,
+        words: Seq[BigInt],
+        mask: Int = 15,
+        fault: Int = 0,
+    ): Unit = {
         dut.io.in.bits.ftqIdx.poke(packetId & 15)
         dut.io.in.bits.mask.poke(mask)
+        dut.io.in.bits.fault.poke(fault)
         dut.io.in.bits.pc.poke(0x80000000L + packetId * 16L)
         dut.io.in.bits.instructions.zip(words.padTo(dut.fp.fetchWidth, BigInt(0))).foreach { case (port, word) =>
             port.poke(word)
@@ -160,6 +178,23 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
 
             dut.clock.step()
             dut.io.enqueue.valid.expect(3)
+        }
+    }
+
+    "Rename preserves illegal-instruction and fetch-fault trap values" in {
+        simulate(new MiddleendTestHarness) { dut =>
+            initialize(dut)
+            offer(dut, 6, Seq(BigInt("ffffffff", 16), addi(1)), mask = 3, fault = 2)
+            while (dut.io.enqueue.valid.peek().litValue == 0) dut.clock.step()
+            dut.io.enqueue.valid.expect(3)
+            val illegal = dut.io.enqueue.entries(0).context.instruction.exception
+            illegal.valid.expect(true)
+            illegal.cause.expect(DecodeException.IllegalInstruction.U)
+            illegal.tval.expect(BigInt("ffffffff", 16))
+            val fetchFault = dut.io.enqueue.entries(1).context.instruction.exception
+            fetchFault.valid.expect(true)
+            fetchFault.cause.expect(DecodeException.InstructionPageFault.U)
+            fetchFault.tval.expect(0x80000064L)
         }
     }
 
@@ -220,11 +255,11 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
             while (dut.io.enqueue.valid.peek().litValue == 0) dut.clock.step()
             dut.io.enqueue.valid.expect(3)
             val queues = Seq(dut.io.arith0, dut.io.arith1)
-            val selected = queues.find(_.entries(0).inst.peek().litValue == dependent).get
-            selected.entries(0).sourceValid(0).expect(true)
-            selected.entries(0).sourceReady(0).expect(false)
-            selected.entries(0).sourceSpecMask(0).expect(0)
-            selected.entries(0).prs(0).expect(dut.io.enqueue.entries(0).destination.prd.peek().litValue)
+            val route = queues.find(queue => selected(queue, 0).inst.peek().litValue == dependent).get
+            selected(route, 0).sourceValid(0).expect(true)
+            selected(route, 0).sourceReady(0).expect(false)
+            selected(route, 0).sourceSpecMask(0).expect(0)
+            selected(route, 0).prs(0).expect(dut.io.enqueue.entries(0).destination.prd.peek().litValue)
         }
     }
 
@@ -255,7 +290,7 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enqueue.entries(0).context.instruction.inst.expect(dependent)
             dut.io.enqueue.valid.expect(1)
             val route = Seq(dut.io.arith0, dut.io.arith1).find(_.valid.peek().litValue == 1).get
-            route.entries(0).prs(0).expect(producerTag)
+            selected(route, 0).prs(0).expect(producerTag)
         }
     }
 
@@ -267,7 +302,8 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
             while (dut.io.request.valid.peek().litValue == 0) dut.clock.step()
 
             val producer = Seq(dut.io.arith0, dut.io.arith1)
-                .map(_.entries(0))
+                .filter(_.selection(0).peek().litValue != 0)
+                .map(selected(_, 0))
                 .find(_.inst.peek().litValue == addi(5)).get
                 .prd.peek().litValue
             dut.io.memoryWakeup.prd.poke(producer)
@@ -276,8 +312,8 @@ class MiddleendSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.freeCount(IssueQueueIndex.LoadStoreAddress).poke(dut.issue.loadStoreAddressEntries)
             while (dut.io.loadStoreAddress.valid.peek().litValue == 0) dut.clock.step()
-            dut.io.loadStoreAddress.entries(0).prs(0).expect(producer)
-            dut.io.loadStoreAddress.entries(0).sourceReady(0).expect(true)
+            selected(dut.io.loadStoreAddress, 0).prs(0).expect(producer)
+            selected(dut.io.loadStoreAddress, 0).sourceReady(0).expect(true)
         }
     }
 

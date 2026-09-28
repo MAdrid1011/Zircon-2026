@@ -29,10 +29,9 @@ class IssueEnqueueGroup(p: BackendParams, width: Int) extends Bundle {
     val entries = Vec(width, new BackendPackage(p))
 }
 
-/** A packed enqueue group plus its pre-compaction candidates and one-hot sources. */
+/** A packed enqueue group with pre-compaction candidates and one-hot sources. */
 class RoutedIssueEnqueueGroup(p: BackendParams, width: Int) extends Bundle {
     val valid = UInt(width.W)
-    val entries = Vec(width, new BackendPackage(p))
     val candidates = Vec(width, new BackendPackage(p))
     val selection = Vec(width, UInt(width.W))
 }
@@ -66,8 +65,8 @@ class IssueQueueIO(p: BackendParams, q: IssueQueueParams, directWakeupCandidates
     val directWakeup = if (directWakeupCandidates > 0) {
         Some(Input(Vec(directWakeupCandidates, new BackendWakeupCandidate(p))))
     } else None
-    val issueWakeupCandidates = if (q.profile == IssueQueueProfile.ArithBranch) {
-        Some(Output(Vec(q.entries + math.max(q.replayEntries, 1) + 1, new BackendWakeupCandidate(p))))
+    val issueWakeup = if (q.profile == IssueQueueProfile.ArithBranch) {
+        Some(Output(new BackendWakeupCandidate(p)))
     } else None
     val speculation = Input(new SpeculationResolution(p))
     val flush = Input(Bool())
@@ -230,13 +229,11 @@ class IssueQueue(
                 val wakeMasks = io.wakeup.toSeq.map(_.specMask) ++
                     io.directWakeup.toSeq.flatten.map(_.specMask)
                 val wake = balancedOr(hits.map(_.asUInt)).orR
-                val selectedRemainingMasks = wakeMasks.zip(hits).map { case (mask, hit) =>
-                    Mux(hit, mask & ~maintenanceResolvedMask, 0.U)
-                }
-                val wakeRemainingMask = balancedOr(selectedRemainingMasks)
-                val wakeFailed = balancedOr(wakeMasks.zip(hits).map { case (mask, hit) =>
-                    (hit && (mask & maintenanceFailedMask).orR).asUInt
-                }).orR
+                val selectedMask = balancedOr(wakeMasks.zip(hits).map { case (mask, hit) =>
+                    Mux(hit, mask, 0.U)
+                })
+                val wakeRemainingMask = selectedMask & ~maintenanceResolvedMask
+                val wakeFailed = (selectedMask & maintenanceFailedMask).orR
                 val failed = (item.sourceSpecMask(source) & maintenanceFailedMask).orR
                 val remainingMask = item.sourceSpecMask(source) & ~maintenanceResolvedMask
                 updated.sourceSpecMask(source) := remainingMask
@@ -417,28 +414,29 @@ class IssueQueue(
     // clear from entering every resident entry D-input.
     val payloadIssueFire = io.issue.ready && !lockedFailed && selectedExists
 
-    // Expose each possible arithmetic issue tag before the selected payload mux.
-    // Consumer comparisons therefore overlap the age selection instead of
-    // following selectedItem.prd through another tag comparator.
-    io.issueWakeupCandidates.foreach { output =>
+    // Select only the wakeup fields, not the full issued payload, before
+    // broadcasting one candidate per arithmetic producer queue.
+    io.issueWakeup.foreach { output =>
         val failedMask = io.speculation.failedMask | maintenanceFailedMask
-        def drive(position: Int, item: BackendPackage, selected: Bool): Unit = {
+        def candidate(item: BackendPackage): BackendWakeupCandidate = {
+            val wakeup = Wire(new BackendWakeupCandidate(p))
             val mask = speculationMask(item)
-            // Flush clears all consumers' valid state at this edge; wakeup
-            // payload updates on that edge cannot become visible afterward.
-            output(position).valid := selected &&
-                !(mask & failedMask).orR && item.rdValid && !item.exception.valid
-            output(position).prd := item.prd
-            output(position).specMask := mask
+            wakeup.valid := !(mask & failedMask).orR && item.rdValid && !item.exception.valid
+            wakeup.prd := item.prd
+            wakeup.specMask := mask
+            wakeup
         }
-        for (position <- 0 until q.entries) {
-            drive(position, entries(position).item, !selectionLocked && selectedMain(position))
-        }
-        for (position <- 0 until replayDepth) {
-            drive(q.entries + position, replayEntries(position).item,
-                !selectionLocked && selectedReplay(position))
-        }
-        drive(q.entries + replayDepth, lockedItem, selectionLocked && selectedExists)
+        val selections = (0 until q.entries).map(position =>
+            !selectionLocked && selectedMain(position)) ++
+            (0 until replayDepth).map(position =>
+                !selectionLocked && selectedReplay(position)) :+
+            (selectionLocked && selectedExists)
+        val wakeups = entries.map(entry => candidate(entry.item)).toSeq ++
+            replayEntries.map(entry => candidate(entry.item)).toSeq :+ candidate(lockedItem)
+        assert(PopCount(VecInit(selections)) <= 1.U)
+        output.valid := Mux1H(selections, wakeups.map(_.valid))
+        output.prd := Mux1H(selections, wakeups.map(_.prd))
+        output.specMask := Mux1H(selections, wakeups.map(_.specMask))
     }
 
     // Update each possible source before payload movement. Dispatch and removal
@@ -457,6 +455,10 @@ class IssueQueue(
     val incomingCandidates = Wire(Vec(q.enqueueWidth, new IQEntry(p)))
     for (lane <- 0 until q.enqueueWidth) {
         incomingCandidates(lane).item := updateReady(io.enq.candidates(lane))
+        // Decode exceptions complete in ROB and never enter an issue queue.
+        // Execution exceptions are generated after issue, so storing the
+        // dispatch exception payload in every queue entry is unnecessary.
+        incomingCandidates(lane).item.exception := 0.U.asTypeOf(new BackendException)
         incomingCandidates(lane).isSystem := (if (q.profile == IssueQueueProfile.MixArith) {
             io.enq.candidates(lane).fu === DecodeUnit.System.U
         } else false.B)
@@ -627,7 +629,10 @@ class IssueQueue(
             })
         })
         assert(PopCount(sourceSelect) <= 1.U)
-        when(sourceSelect.asUInt.orR) {
+        // Only previously free slots can be allocated. Their payload may be
+        // prewritten even when no source is selected; valid alone controls
+        // whether a queue entry is observable.
+        when(!valid(position)) {
             installedRaw(position) := Mux1H(sourceSelect, incomingCandidates)
         }
     }
@@ -664,21 +669,20 @@ class IssueQueue(
     entries := installed
     olderSlots := nextOlderSlots
     replayEntries := nextReplay
+    // Checkpoint payload is ignored whenever its valid bit is clear, including
+    // the cycle after flush. Sampling it avoids a flush mux on these fields.
+    checkpointPendingPosition.foreach(_ := selectedMainRaw)
+    checkpointPendingFailed.foreach(_ := checkpointMainFailed)
+    checkpointPendingReserved.foreach(_ := checkpointMainSpeculative || checkpointMainFailed)
+    checkpointPendingMask.foreach(_ := speculationMask(checkpointMainItem) & ~maintenanceResolvedMask)
     when(io.flush) {
         count := 0.U
         freeCountState := q.entries.U
         freeAvailability := ((BigInt(1) << q.entries) - 1).U
         valid := 0.U
-        olderSlots := VecInit.fill(q.entries)(0.U)
         replayValid := VecInit.fill(replayDepth)(false.B)
         checkpointPendingValid.foreach(_ := false.B)
-        checkpointPendingPosition.foreach(_ := 0.U)
-        checkpointPendingFailed.foreach(_ := false.B)
-        checkpointPendingReserved.foreach(_ := false.B)
-        checkpointPendingMask.foreach(_ := 0.U)
         selectionLocked := false.B
-        lockedMainPosition := 0.U
-        lockedReplayPosition := 0.U
     }.otherwise {
         count := nextCount
         freeCountState := nextFreeCount
@@ -686,13 +690,6 @@ class IssueQueue(
         valid := nextValid
         replayValid := nextReplayValid
         checkpointPendingValid.foreach(_ := checkpointCapture)
-        // Pending payload is observable only when checkpointPendingValid was
-        // captured. Sampling it unconditionally removes a self-hold mux from
-        // each issue-selection path without changing the checkpoint protocol.
-        checkpointPendingPosition.foreach(_ := selectedMainRaw)
-        checkpointPendingFailed.foreach(_ := checkpointMainFailed)
-        checkpointPendingReserved.foreach(_ := checkpointMainSpeculative || checkpointMainFailed)
-        checkpointPendingMask.foreach(_ := speculationMask(checkpointMainItem) & ~maintenanceResolvedMask)
         when(lockedFailed) {
             selectionLocked := false.B
             lockedMainPosition := 0.U
@@ -740,6 +737,10 @@ class IssueQueue(
                             allowed(incomingCandidates(source).item),
                             "Dispatch routed an operation to an incompatible queue",
                         )
+                        assert(
+                            !io.enq.candidates(source).exception.valid,
+                            "Decode exceptions must complete in ROB without entering an issue queue",
+                        )
                     }
                 }
             }
@@ -747,9 +748,9 @@ class IssueQueue(
     }
     for (position <- 0 until q.entries) {
         assert(!olderSlots(position)(position), "An IQ slot cannot be older than itself")
-        assert((olderSlots(position) & ~valid) === 0.U, "IQ age relations must name live slots")
-        when(!valid(position)) {
-            assert(olderSlots(position) === 0.U, "An invalid IQ slot cannot retain age relations")
+        // Flush may leave stale age bits in invalid slots; their next update clears them.
+        when(valid(position)) {
+            assert((olderSlots(position) & ~valid) === 0.U, "IQ age relations must name live slots")
         }
         for (other <- position + 1 until q.entries) {
             when(valid(position) && valid(other)) {
@@ -763,8 +764,10 @@ class IssueQueue(
     assert(count <= q.entries.U)
     assert(!pendingNeedsReplay || replayAvailable, "A pending speculative issue requires a free replay slot")
     assert(!selectionLocked || PopCount(lockedMainPosition) +& PopCount(lockedReplayPosition) === 1.U)
-    assert((lockedMainPosition & ~valid) === 0.U)
-    assert((lockedReplayPosition & ~replayValid.asUInt) === 0.U)
+    when(selectionLocked) {
+        assert((lockedMainPosition & ~valid) === 0.U)
+        assert((lockedReplayPosition & ~replayValid.asUInt) === 0.U)
+    }
     for (left <- 0 until replayDepth; right <- left + 1 until replayDepth) {
         when(replayValid(left) && replayValid(right)) {
             assert(

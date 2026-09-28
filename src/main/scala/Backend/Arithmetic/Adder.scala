@@ -44,32 +44,38 @@ class BLevelAdder5 extends RawModule {
 
 class BLevelPAdder32(carryOut: Boolean = true) extends RawModule {
     val io = IO(new AdderIO(32, carryOut))
-    val pi = io.src1 | io.src2;
-    val gi = io.src1 & io.src2;
+    if (sys.env.get("ZIRCON_VIVADO_NATIVE_ADDERS").contains("1")) {
+        val sum = (io.src1 +& io.src2) +& io.cin
+        io.res := sum(31, 0)
+        io.cout.foreach(_ := sum(32))
+    } else {
+        val pi = io.src1 | io.src2
+        val gi = io.src1 & io.src2
 
-    val p = Wire(MixedVec(Vec(8, UInt(1.W)), Vec(2, UInt(1.W))))
-    val g = Wire(MixedVec(Vec(8, UInt(1.W)), Vec(2, UInt(1.W))))
-    val c = Wire(MixedVec(Vec(8, UInt(4.W)), Vec(2, UInt(4.W)), Vec(1, UInt(4.W))))
+        val p = Wire(MixedVec(Vec(8, UInt(1.W)), Vec(2, UInt(1.W))))
+        val g = Wire(MixedVec(Vec(8, UInt(1.W)), Vec(2, UInt(1.W))))
+        val c = Wire(MixedVec(Vec(8, UInt(4.W)), Vec(2, UInt(4.W)), Vec(1, UInt(4.W))))
 
-    for (i <- 0 until 8) {
-        val cin = if (i == 0) io.cin else if (i == 4) c(2).asUInt(0) else c(1).asUInt(i - 1)
-        val (p0n, g0n, c0n) = BLevelCarry4(pi(i * 4 + 3, i * 4), gi(i * 4 + 3, i * 4), cin)
-        p(0)(i) := p0n
-        g(0)(i) := g0n
-        c(0)(i) := c0n
+        for (i <- 0 until 8) {
+            val cin = if (i == 0) io.cin else if (i == 4) c(2).asUInt(0) else c(1).asUInt(i - 1)
+            val (p0n, g0n, c0n) = BLevelCarry4(pi(i * 4 + 3, i * 4), gi(i * 4 + 3, i * 4), cin)
+            p(0)(i) := p0n
+            g(0)(i) := g0n
+            c(0)(i) := c0n
+        }
+        for (i <- 0 until 2) {
+            val cin = if (i == 0) io.cin else c(2).asUInt(i - 1)
+            val (p1n, g1n, c1n) = BLevelCarry4(p(0).asUInt(i * 4 + 3, i * 4), g(0).asUInt(i * 4 + 3, i * 4), cin)
+            p(1)(i) := p1n
+            g(1)(i) := g1n
+            c(1)(i) := c1n
+        }
+
+        val (_, _, c2n) = BLevelCarry4(0.U(2.W) ## p(1).asUInt, 0.U(2.W) ## g(1).asUInt, io.cin)
+        c(2)(0) := c2n
+        io.res := io.src1 ^ io.src2 ^ (c(0).asUInt(30, 0) ## io.cin)
+        io.cout.foreach(_ := c(0).asUInt(31))
     }
-    for (i <- 0 until 2) {
-        val cin = if (i == 0) io.cin else c(2).asUInt(i - 1)
-        val (p1n, g1n, c1n) = BLevelCarry4(p(0).asUInt(i * 4 + 3, i * 4), g(0).asUInt(i * 4 + 3, i * 4), cin)
-        p(1)(i) := p1n
-        g(1)(i) := g1n
-        c(1)(i) := c1n
-    }
-
-    val (p2n, g2n, c2n) = BLevelCarry4(0.U(2.W) ## p(1).asUInt, 0.U(2.W) ## g(1).asUInt, io.cin)
-    c(2)(0) := c2n
-    io.res := io.src1 ^ io.src2 ^ (c(0).asUInt(30, 0) ## io.cin)
-    io.cout.foreach(_ := c(0).asUInt(31))
 }
 
 class BLevelPAdder64(carryOut: Boolean = true) extends RawModule {

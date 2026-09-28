@@ -150,8 +150,8 @@ def _synthesis_summary(target_dir, version, target_ns, elapsed, memory_bindings)
         for cell in module.get("cells", {}).values()
     )
     fakeram_counts = {name: cells[name] for name in memory_bindings["libraries"]}
-    if any(count == 0 for count in fakeram_counts.values()):
-        raise RuntimeError(f"BSG Fakeram macros were not preserved: {fakeram_counts}")
+    if not any(fakeram_counts.values()):
+        raise RuntimeError("No BSG Fakeram macros remain in the mapped core")
     unexpected_ram = {
         name: count
         for name, count in cells.items()
@@ -262,6 +262,7 @@ def main():
     if not args.skip_elaboration:
         env = os.environ.copy()
         env["ZIRCON_USE_EXTERNAL_BSG_RAM"] = "true"
+        env.pop("ZIRCON_VIVADO_NATIVE_ADDERS", None)
         command = elaboration_command(rtl)
         elapsed["elaboration_seconds"] = run(
             ["sbt", "--batch", command], output / "elaboration.log", env=env

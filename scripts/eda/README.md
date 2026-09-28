@@ -8,6 +8,7 @@ point has a companion Markdown interface document.
 | File | Purpose |
 | --- | --- |
 | [`synthesize_core.py`](synthesize_core.md) | Elaborate, map, repair, and sweep timing targets |
+| [`prepare_vivado_rtl.py`](prepare_vivado_rtl.md) | Generate and validate Xilinx BRAM RTL for the existing Vivado project |
 | [`adder_mapping.py`](adder_mapping.md) | Configure direct BLevel mapping and ABC delay constraints |
 | [`openroad_resizer.py`](openroad_resizer.md) | Invoke the pinned container or a native OpenROAD binary |
 | [`openroad_resizer.tcl`](openroad_resizer.tcl.md) | Place and repair the mapped netlist |

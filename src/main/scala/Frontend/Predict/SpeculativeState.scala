@@ -126,18 +126,12 @@ class SpeculativeState(p: FrontendParams) extends Module {
         next
     }
 
-    /**
-      * Apply one retired packet to committed state. The externally visible
-      * snapshot remains binary, while the committed RAS control state stays
-      * one-hot across multiple same-cycle retirements.
-      */
-    def advanceCommitted(
-        before: FrontendStateSnapshot,
+    /** Advance only the RAS control state; stack rows are written once per cycle. */
+    def advanceCommittedControl(
         pointerOH: UInt,
         countOH: UInt,
         event: FrontendStateEvent,
-        returnPc: UInt,
-    ): (FrontendStateSnapshot, UInt, UInt) = {
+    ): (UInt, UInt, Bool, Bool) = {
         val selected = event.prediction.taken.asBools
         val popRequested = selected.zip(event.prediction.kinds).map { case (taken, kind) =>
             taken && FrontendCfi.pop(kind)
@@ -159,22 +153,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
             countIncremented,
             Mux(popOnly, countDecremented, countOH),
         )
-        val previousTop = Mux1H((0 until p.rasDepth).map(slot =>
-            pointerOH((slot + 2) % p.rasDepth) -> before.ras(slot)
-        ))
-
-        val historyNext = advanceHistory(before, event, event.prediction.taken)
-        val next = WireDefault(before)
-        next.history := historyNext.history
-        next.folds := historyNext.folds
-        next.top := Mux(push, returnPc, Mux(pop, Mux(!countOH(0) && !countOH(1), previousTop, 0.U), before.top))
-        next.pointer := OHToUInt(nextPointerOH)
-        next.count := OHToUInt(nextCountOH)
-        for (slot <- 0 until p.rasDepth) {
-            val (write, data) = committedRasRowWrite(pointerOH, countOH, event, returnPc, slot)
-            when(write) { next.ras(slot) := data }
-        }
-        (next, nextPointerOH, nextCountOH)
+        (nextPointerOH, nextCountOH, pop, push)
     }
 
     def committedRasRowWrite(
@@ -258,56 +237,62 @@ class SpeculativeState(p: FrontendParams) extends Module {
     val retireValid = VecInit(io.retire.map(_.valid))
     val retireReturnPcs = (0 until 3).map(port => returnPcWord(io.retire(port).bits))
     val recoveryReturnPc = returnPcWord(io.recovery.bits)
-    val normalCommitted = Wire(Vec(4, new FrontendStateSnapshot(p)))
+    val normalTop = Wire(Vec(4, UInt(30.W)))
     val normalPointerOH = Wire(Vec(4, UInt(p.rasDepth.W)))
     val normalCountOH = Wire(Vec(4, UInt((p.rasDepth + 1).W)))
-    normalCommitted(0) := committed
+    val normalPop = Wire(Vec(3, Bool()))
+    val normalPush = Wire(Vec(3, Bool()))
+    normalTop(0) := committed.top
     normalPointerOH(0) := committedPointerOH
     normalCountOH(0) := committedCountOH
     for (port <- 0 until 3) {
-        val advanced = advanceCommitted(
-            normalCommitted(port),
-            normalPointerOH(port),
-            normalCountOH(port),
-            io.retire(port).bits,
-            retireReturnPcs(port),
+        val (pointer, count, pop, push) = advanceCommittedControl(
+            normalPointerOH(port), normalCountOH(port), io.retire(port).bits,
         )
-        normalCommitted(port + 1) := Mux(
-            retireValid(port),
-            advanced._1,
-            normalCommitted(port),
-        )
-        normalPointerOH(port + 1) := Mux(retireValid(port), advanced._2, normalPointerOH(port))
-        normalCountOH(port + 1) := Mux(retireValid(port), advanced._3, normalCountOH(port))
+        normalPointerOH(port + 1) := Mux(retireValid(port), pointer, normalPointerOH(port))
+        normalCountOH(port + 1) := Mux(retireValid(port), count, normalCountOH(port))
+        normalPop(port) := pop
+        normalPush(port) := push
     }
-    // Recovery may follow at most two normal retirement packets. Build that
-    // legal three-transition path independently, so an inactive recovery does
-    // not create a fourth RAS transition in the normal flush path.
-    val recoveryCommitted = Wire(Vec(3, new FrontendStateSnapshot(p)))
-    val recoveryPointerOH = Wire(Vec(3, UInt(p.rasDepth.W)))
-    val recoveryCountOH = Wire(Vec(3, UInt((p.rasDepth + 1).W)))
-    recoveryCommitted(0) := committed
-    recoveryPointerOH(0) := committedPointerOH
-    recoveryCountOH(0) := committedCountOH
-    for (port <- 0 until 2) {
-        val advanced = advanceCommitted(
-            recoveryCommitted(port),
-            recoveryPointerOH(port),
-            recoveryCountOH(port),
-            io.retire(port).bits,
-            retireReturnPcs(port),
-        )
-        recoveryCommitted(port + 1) := Mux(retireValid(port), advanced._1, recoveryCommitted(port))
-        recoveryPointerOH(port + 1) := Mux(retireValid(port), advanced._2, recoveryPointerOH(port))
-        recoveryCountOH(port + 1) := Mux(retireValid(port), advanced._3, recoveryCountOH(port))
+    val normalWrites = (0 until 3).map { port =>
+        (0 until p.rasDepth).map { row =>
+            committedRasRowWrite(normalPointerOH(port), normalCountOH(port),
+                io.retire(port).bits, retireReturnPcs(port), row)
+        }
     }
-    val recovered = advanceCommitted(
-        recoveryCommitted(2),
-        recoveryPointerOH(2),
-        recoveryCountOH(2),
-        io.recovery.bits,
-        recoveryReturnPc,
+    val (recoveryPointerOH, recoveryCountOH, recoveryPop, recoveryPush) = advanceCommittedControl(
+        normalPointerOH(2), normalCountOH(2), io.recovery.bits,
     )
+    val recoveryWrites = (0 until p.rasDepth).map { row =>
+        committedRasRowWrite(normalPointerOH(2), normalCountOH(2),
+            io.recovery.bits, recoveryReturnPc, row)
+    }
+    // A later return reads the committed stack with only earlier same-cycle
+    // row writes forwarded. No intermediate full-stack copies are needed.
+    def previousCommittedTop(pointerOH: UInt, earlierPorts: Seq[Int]): UInt = {
+        val rowSelect = (0 until p.rasDepth).map(row => pointerOH((row + 2) % p.rasDepth))
+        val base = Mux1H(rowSelect, committed.ras)
+        earlierPorts.foldLeft(base) { (value, port) =>
+            val hit = rowSelect.indices.map(row => rowSelect(row) && normalWrites(port)(row)._1)
+                .reduce(_ || _) && retireValid(port)
+            Mux(hit, retireReturnPcs(port), value)
+        }
+    }
+    def committedTopAfter(
+        before: UInt, countOH: UInt, pop: Bool, push: Bool, returnPc: UInt, previousTop: UInt,
+    ): UInt = Mux(push, returnPc,
+        Mux(pop, Mux(!countOH(0) && !countOH(1), previousTop, 0.U), before))
+
+    for (port <- 0 until 3) {
+        val advanced = committedTopAfter(normalTop(port), normalCountOH(port),
+            normalPop(port), normalPush(port), retireReturnPcs(port),
+            previousCommittedTop(normalPointerOH(port), 0 until port))
+        normalTop(port + 1) := Mux(retireValid(port), advanced, normalTop(port))
+    }
+    // Recovery replaces the third normal retirement, after at most two packets.
+    val recoveryTop = committedTopAfter(normalTop(2), normalCountOH(2),
+        recoveryPop, recoveryPush, recoveryReturnPc,
+        previousCommittedTop(normalPointerOH(2), 0 until 2))
     // History is independent of RAS pointer/count. Compute each legal event
     // prefix without valid muxes, then select once at the register input.
     val historyPrefixes = Wire(Vec(4, new FrontendStateSnapshot(p)))
@@ -334,7 +319,12 @@ class SpeculativeState(p: FrontendParams) extends Module {
     val historySelect = normalHistorySelect ++ recoveryHistorySelect
     assert(PopCount(historySelect) === 1.U)
     val historyChoices = historyPrefixes.toSeq ++ recoveryHistories
-    val committedNext = WireDefault(Mux(io.recovery.valid, recovered._1, normalCommitted(3)))
+    val committedNext = WireDefault(committed)
+    committedNext.top := Mux(io.recovery.valid, recoveryTop, normalTop(3))
+    val committedPointerOHNext = Mux(io.recovery.valid, recoveryPointerOH, normalPointerOH(3))
+    val committedCountOHNext = Mux(io.recovery.valid, recoveryCountOH, normalCountOH(3))
+    committedNext.pointer := OHToUInt(committedPointerOHNext)
+    committedNext.count := OHToUInt(committedCountOHNext)
     committedNext.history := Mux1H(historySelect, historyChoices.map(_.history))
     for (fold <- 0 until p.tageCount) {
         committedNext.folds(fold) := Mux1H(historySelect, historyChoices.map(_.folds(fold)))
@@ -342,17 +332,10 @@ class SpeculativeState(p: FrontendParams) extends Module {
     // The three normal packets and optional recovery have independent return
     // PCs. Only their row-write controls depend on earlier pointer transitions.
     for (row <- 0 until p.rasDepth) {
-        val normalWrites = (0 until 3).map { port =>
-            committedRasRowWrite(normalPointerOH(port), normalCountOH(port), io.retire(port).bits,
-                retireReturnPcs(port), row)
-        }
-        val recoveryWrite = committedRasRowWrite(
-            normalPointerOH(2), normalCountOH(2), io.recovery.bits, recoveryReturnPc, row,
-        )
-        val w0 = retireValid(0) && normalWrites(0)._1
-        val w1 = retireValid(1) && normalWrites(1)._1
-        val w2 = retireValid(2) && !io.recovery.valid && normalWrites(2)._1
-        val wr = io.recovery.valid && recoveryWrite._1
+        val w0 = retireValid(0) && normalWrites(0)(row)._1
+        val w1 = retireValid(1) && normalWrites(1)(row)._1
+        val w2 = retireValid(2) && !io.recovery.valid && normalWrites(2)(row)._1
+        val wr = io.recovery.valid && recoveryWrites(row)._1
         val selected = Seq(
             !(w0 || w1 || w2 || wr),
             w0 && !w1 && !w2 && !wr,
@@ -362,11 +345,9 @@ class SpeculativeState(p: FrontendParams) extends Module {
         )
         committedNext.ras(row) := Mux1H(
             selected,
-            Seq(committed.ras(row)) ++ normalWrites.map(_._2) :+ recoveryWrite._2,
+            Seq(committed.ras(row)) ++ normalWrites.map(_(row)._2) :+ recoveryWrites(row)._2,
         )
     }
-    val committedPointerOHNext = Mux(io.recovery.valid, recovered._2, normalPointerOH(3))
-    val committedCountOHNext = Mux(io.recovery.valid, recovered._3, normalCountOH(3))
     // Keep flush as the final selector. It must not be decoded through every
     // normal speculative candidate before reaching the state registers.
     val repaired = advance(io.repair.bits.before, io.repair.bits.event)

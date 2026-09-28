@@ -111,6 +111,8 @@ class CSR extends Module {
     val cycleHighIncrement = BLevelPAdder32.sum(cycleHigh, 1.U, 0.U)
     val instretLowIncrement = BLevelPAdder32(instretLow, io.retired, 0.U)
     val instretHighIncrement = BLevelPAdder32.sum(instretHigh, 1.U, 0.U)
+    val instretCarry = instretLow(31, 2).andR &&
+        (instretLow(1, 0) +& io.retired)(2)
     val cycleWrite = WireDefault(false.B)
     val instretWrite = WireDefault(false.B)
 
@@ -153,7 +155,7 @@ class CSR extends Module {
     }
     when(!inhibit(2) && !instretWrite) {
         instretLow := instretLowIncrement.io.res
-        when(instretLowIncrement.io.cout.get.asBool) { instretHigh := instretHighIncrement }
+        when(instretCarry) { instretHigh := instretHighIncrement }
     }
 
     csr(CSRAddress.mstatus, statusRead, Some(status)) { w =>

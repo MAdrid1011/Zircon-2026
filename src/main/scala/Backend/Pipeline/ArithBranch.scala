@@ -33,7 +33,7 @@ class ArithBranch extends Module {
     def killed(x: BackendPackage): Bool = io.cmt.flush || specFailed(x)
 
     /* Issue and RF stage --------------------------------------------------------- */
-    val packageRF = RegInit(0.U.asTypeOf(new BackendPackage)) // Issue/RF boundary
+    val packageRF = Reg(new BackendPackage) // Issue/RF boundary
     val validRF = RegInit(false.B)
     val liveRF = validRF && !killed(packageRF)
     val inputKilled = specFailed(io.iq.bits)
@@ -43,7 +43,6 @@ class ArithBranch extends Module {
     io.iq.ready := true.B
     io.rf.read(0).addr := packageRF.prj(ArithConstants.physWidth - 1, 0)
     io.rf.read(1).addr := packageRF.prk(ArithConstants.physWidth - 1, 0)
-    io.cmt.rob.readIdx := packageRF.robIdx
 
     // Flush clears every wakeup consumer with final priority. Use the ordinary
     // handshake capacity here so flush does not feed back through wakeup into IQ.
@@ -85,7 +84,7 @@ class ArithBranch extends Module {
     }
 
     /* EX stage ------------------------------------------------------------------- */
-    val packageEX = RegInit(0.U.asTypeOf(new BackendPackage)) // RF/EX boundary
+    val packageEX = Reg(new BackendPackage) // RF/EX boundary
     val validEX = RegInit(false.B)
     val liveEX = validEX && !killed(packageEX)
 
@@ -94,7 +93,7 @@ class ArithBranch extends Module {
         packageEX := packageRF
         packageEX.source1 := io.rf.read(0).data
         packageEX.source2 := io.rf.read(1).data
-        packageEX.pc := io.cmt.rob.pc
+        packageEX.pc := packageRF.pc
         for (source <- 0 until 3) {
             packageEX.sourceSpecMask(source) := packageRF.sourceSpecMask(source) &
                 ~io.speculation.resolvedMask
@@ -140,7 +139,7 @@ class ArithBranch extends Module {
     }
 
     /* WB stage ------------------------------------------------------------------- */
-    val packageWB = RegInit(0.U.asTypeOf(new BackendPackage)) // EX/WB boundary
+    val packageWB = Reg(new BackendPackage) // EX/WB boundary
     val validWB = RegInit(false.B)
     val bypassDataWB = Reg(UInt(32.W))
     val liveWB = validWB && !killed(packageWB)
@@ -169,7 +168,7 @@ class ArithBranch extends Module {
         !packageWB.exception.valid
     io.rf.write.valid := successfulWrite
     io.rf.write.bits.prd := packageWB.prd(ArithConstants.physWidth - 1, 0)
-    io.rf.write.bits.data := packageWB.result
+    io.rf.write.bits.data := bypassDataWB
     // Every Bypass field is a direct WB register output. Eligibility is computed in EX.
     io.bypass.producer.result := bypassDataWB
     io.bypass.producer.nextWb.valid := liveEX && packageAfterEX.rdValid && !packageAfterEX.exception.valid
@@ -183,8 +182,12 @@ class ArithBranch extends Module {
 
     io.cmt.rob.complete.valid := liveWB
     io.cmt.rob.complete.bits.robIdx := packageWB.robIdx
-    io.cmt.rob.complete.bits.data := packageWB.result
+    io.cmt.rob.complete.bits.data := bypassDataWB
     io.cmt.rob.complete.bits.exception := packageWB.exception
+
+    when(validWB) {
+        assert(bypassDataWB === packageWB.result, "Arith WB data must match the registered bypass result")
+    }
 
     // FTQ occupancy is cleared by flush, so a coincident payload update is
     // unobservable. Keep flush out of this wide payload write-enable cone.

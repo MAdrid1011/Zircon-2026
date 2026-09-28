@@ -66,7 +66,8 @@ class AtomicUnit(
     val io = IO(new AtomicUnitIO(p, cache, observe))
     val idle :: loadRequest :: loadWait :: storeRequest :: storeWait :: respond :: Nil = Enum(6)
     val state = RegInit(idle)
-    val request = RegInit(0.U.asTypeOf(new AtomicRequest(p)))
+    // The state machine exposes this payload only after a request writes it.
+    val request = Reg(new AtomicRequest(p))
     val result = RegInit(0.U(32.W))
     val exception = RegInit(0.U(4.W))
     val responseWritesResult = RegInit(false.B)

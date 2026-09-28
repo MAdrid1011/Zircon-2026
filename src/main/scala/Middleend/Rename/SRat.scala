@@ -38,19 +38,14 @@ class SRat(
         val hits = ports.map(port => port.valid && port.bits.addr === row.U)
         hits.indices.map(index => hits(index) && !hits.drop(index + 1).foldLeft(false.B)(_ || _))
     }
-    def writeRows(table: Vec[UInt], ports: Seq[ValidIO[RatWrite]], includeHold: Boolean): Unit = {
+    def writeRows(table: Vec[UInt], ports: Seq[ValidIO[RatWrite]]): Unit = {
         for (row <- first until 32) {
             val selected = winners(ports, row)
-            if (includeHold) {
-                val hold = !selected.reduce(_ || _)
-                table(row) := Mux1H(selected :+ hold, ports.map(_.bits.data) :+ table(row))
-            } else {
-                when(selected.reduce(_ || _)) { table(row) := Mux1H(selected, ports.map(_.bits.data)) }
-            }
+            when(selected.reduce(_ || _)) { table(row) := Mux1H(selected, ports.map(_.bits.data)) }
         }
     }
-    writeRows(ratRnm, io.rename.toSeq, includeHold = true)
-    writeRows(ratCmt, io.commit.toSeq, includeHold = false)
+    writeRows(ratRnm, io.rename.toSeq)
+    writeRows(ratCmt, io.commit.toSeq)
 
     when(io.restore) {
         for (row <- first until 32) {

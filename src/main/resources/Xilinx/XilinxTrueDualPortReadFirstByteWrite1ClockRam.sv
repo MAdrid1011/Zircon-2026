@@ -39,6 +39,8 @@ module XilinxTrueDualPortReadFirstByteWrite1ClockRam #(
             always @(posedge clka) begin
                 if (ena && wea[i])
                     BRAM[addra][(i+1)*COLWIDTH-1:i*COLWIDTH] <= dina[(i+1)*COLWIDTH-1:i*COLWIDTH];
+            end
+            always @(posedge clka) begin
                 if (enb && web[i])
                     BRAM[addrb][(i+1)*COLWIDTH-1:i*COLWIDTH] <= dinb[(i+1)*COLWIDTH-1:i*COLWIDTH];
             end

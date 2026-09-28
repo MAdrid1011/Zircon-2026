@@ -7,7 +7,6 @@ import ZirconConfig.{BypassParams, DecodeSource, DecodeUnit, DivideOp, FpMiscOp,
 class MixArithPipelineTestTop extends Module {
     val io = IO(new Bundle {
         val issue = Flipped(Decoupled(new BackendPackage))
-        val pc = Input(UInt(32.W))
         val flush = Input(Bool())
         val intSeed = Flipped(Valid(new MixArithLocalWrite(MixArithConstants.localPhysWidth)))
         val fpSeed = Flipped(Valid(new MixArithLocalWrite(MixArithConstants.fpPhysWidth)))
@@ -42,7 +41,6 @@ class MixArithPipelineTestTop extends Module {
     pipeline.io.iq.valid := io.issue.valid
     pipeline.io.iq.bits := MixArithIssue.fromBackend(io.issue.bits)
     io.issue.ready := pipeline.io.iq.ready
-    pipeline.io.cmt.rob.pc := io.pc
     pipeline.io.cmt.flush := io.flush
     pipeline.io.csr.frm := 0.U
     pipeline.io.csr.rsp := 0.U.asTypeOf(pipeline.io.csr.rsp)
@@ -151,7 +149,6 @@ class MixArithPipelineSpec extends AnyFreeSpec with ChiselSim {
     private def initialize(dut: MixArithPipelineTestTop): Unit = {
         dut.io.issue.valid.poke(false)
         pokePackage(dut.io.issue.bits, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt)
-        dut.io.pc.poke(0)
         dut.io.flush.poke(false)
         dut.io.intSeed.valid.poke(false)
         dut.io.intSeed.bits.addr.poke(1)

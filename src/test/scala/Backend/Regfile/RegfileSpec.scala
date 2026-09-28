@@ -20,6 +20,7 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
 
     private val configurations = Seq(
         RegfileParams(),
+        RegfileParams(numEntries = 64, dataWidth = 32, numReadPorts = 9, numWritePorts = 5),
         RegfileParams(numEntries = 7, dataWidth = 16, numReadPorts = 3, numWritePorts = 2),
         RegfileParams(numEntries = 64, dataWidth = 64, numReadPorts = 4, numWritePorts = 3),
         RegfileParams(numEntries = 72, dataWidth = 32, numReadPorts = 9, numWritePorts = 6),
@@ -167,6 +168,80 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.write(0).we.poke(false)
             dut.io.read.foreach(_.data.expect(0x12345678L))
+        }
+    }
+
+    "memory reads exclude Atomic bypass but retain the shared LS1 write port" in {
+        val p = RegfileParams(numEntries = 8, numReadPorts = 3, numWritePorts = 2)
+        simulate(new Regfile(p, selectiveReadBypassPort = Some(1), selectiveReadPorts = Set(1, 2))) { dut =>
+            dut.io.read.foreach(_.addr.poke(3))
+            dut.io.write.foreach { write =>
+                write.we.poke(false)
+                write.addr.poke(3)
+                write.data.poke(0)
+            }
+            val memoryBypass = dut.io.selectiveReadBypass.get
+            memoryBypass.we.poke(false)
+            memoryBypass.addr.poke(3)
+            memoryBypass.data.poke(0)
+            dut.reset.poke(true)
+            dut.clock.step()
+            dut.reset.poke(false)
+
+            dut.io.write(1).we.poke(true)
+            dut.io.write(1).data.poke(0x12345678L)
+            dut.io.read(0).data.expect(0x12345678L)
+            dut.io.read(1).data.expect(0)
+            dut.io.read(2).data.expect(0)
+            dut.clock.step()
+
+            dut.io.write(1).data.poke(0xabcdef01L)
+            memoryBypass.we.poke(true)
+            memoryBypass.data.poke(0xabcdef01L)
+            dut.io.read.foreach(_.data.expect(0xabcdef01L))
+            dut.clock.step()
+            dut.io.write(1).we.poke(false)
+            memoryBypass.we.poke(false)
+            dut.io.read.foreach(_.data.expect(0xabcdef01L))
+        }
+    }
+
+    "direct write and ordinary ports update distinct rows together" in {
+        val p = RegfileParams(numEntries = 8, numReadPorts = 3, numWritePorts = 3)
+        simulate(new Regfile(p, directWritePort = Some(1))) { dut =>
+            dut.io.read.zip(Seq(2, 3, 4)).foreach { case (port, address) => port.addr.poke(address) }
+            dut.io.write.foreach { port =>
+                port.addr.poke(1)
+                port.data.poke(0)
+                port.we.poke(false)
+            }
+            dut.io.directWrite.get.oneHot.poke(0)
+            dut.io.directWrite.get.data.poke(0)
+            dut.reset.poke(true)
+            dut.clock.step()
+            dut.reset.poke(false)
+
+            for ((port, address, value) <- Seq((0, 2, 22), (1, 3, 33), (2, 4, 44))) {
+                dut.io.write(port).addr.poke(address)
+                dut.io.write(port).data.poke(value)
+                dut.io.write(port).we.poke(true)
+            }
+            dut.io.directWrite.get.oneHot.poke(1 << 3)
+            dut.io.directWrite.get.data.poke(99)
+            dut.clock.step()
+            dut.io.write.foreach(_.we.poke(false))
+            dut.io.directWrite.get.oneHot.poke(0)
+            dut.io.read(0).data.expect(22)
+            dut.io.read(1).data.expect(99)
+            dut.io.read(2).data.expect(44)
+
+            dut.io.write(1).addr.poke(5)
+            dut.io.write(1).data.poke(55)
+            dut.io.write(1).we.poke(true)
+            dut.clock.step()
+            dut.io.write(1).we.poke(false)
+            dut.io.read(1).addr.poke(5)
+            dut.io.read(1).data.expect(55)
         }
     }
 
