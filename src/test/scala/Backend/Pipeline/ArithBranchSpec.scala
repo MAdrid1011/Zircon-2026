@@ -7,7 +7,6 @@ class ArithBranchSpec extends AnyFreeSpec with ChiselSim {
         dut.io.iq.valid.poke(false)
         BackendPackageTestUtils.clear(dut.io.iq.bits)
         dut.io.rf.read.foreach(_.data.poke(0))
-        dut.io.cmt.rob.pc.poke(0)
         dut.io.cmt.flush.poke(false)
         dut.io.speculation.resolvedMask.poke(0)
         dut.io.speculation.failedMask.poke(0)
@@ -69,6 +68,30 @@ class ArithBranchSpec extends AnyFreeSpec with ChiselSim {
             dut.io.cmt.flush.poke(true)
             dut.io.cmt.rob.complete.valid.expect(false)
             dut.io.cmt.branch.update.valid.expect(true)
+        }
+    }
+
+    "a direct jump uses the PC carried through Issue and RF" in {
+        simulate(new ArithBranch) { dut =>
+            initialize(dut)
+            dut.reset.poke(true)
+            dut.clock.step(2)
+            dut.reset.poke(false)
+
+            dut.io.iq.bits.fu.poke(DecodeUnit.Branch)
+            dut.io.iq.bits.op.poke(ZirconConfig.EXEOp.JAL)
+            dut.io.iq.bits.pc.poke(0x80001000L)
+            dut.io.iq.bits.imm.poke(8)
+            dut.io.iq.bits.predictedTaken.poke(true)
+            dut.io.iq.bits.predictedValue.poke(8)
+            dut.io.iq.valid.poke(true)
+            dut.clock.step()
+            dut.io.iq.valid.poke(false)
+            dut.clock.step(2)
+
+            dut.io.cmt.branch.update.valid.expect(true)
+            dut.io.cmt.branch.update.bits.target.expect(0x80001008L)
+            dut.io.cmt.branch.update.bits.predFail.expect(false)
         }
     }
 

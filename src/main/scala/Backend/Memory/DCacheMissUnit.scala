@@ -61,8 +61,9 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
 
     val idle :: send :: waitResponse :: install :: respond :: Nil = Enum(5)
     val state = RegInit(idle)
-    val entry = RegInit(0.U.asTypeOf(new DCacheMissEntry(p)))
-    val line = RegInit(0.U(l1LineBits.W))
+    // The idle state prewrites both payloads before any request can observe them.
+    val entry = Reg(new DCacheMissEntry(p))
+    val line = Reg(UInt(l1LineBits.W))
     val lineDirty = RegInit(false.B)
     val error = RegInit(false.B)
     val discard = RegInit(false.B)

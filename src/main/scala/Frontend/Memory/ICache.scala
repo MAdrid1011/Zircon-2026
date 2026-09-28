@@ -50,9 +50,9 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val fsm = Module(new ICacheFSM)
     val itlb = Module(new InstructionTLB(paddrLowBits = p.blockBits))
     val missC1 = RegInit(false.B)
-    val rbuf = RegInit(0.U(c.lineBits.W))
-    val responseWords = RegInit(VecInit.fill(p.fetchWidth)(0.U(32.W)))
-    val responseFields = RegInit(VecInit.fill(p.fetchWidth)(0.U.asTypeOf(new FrontendPredecodeFields)))
+    val rbuf = Reg(UInt(c.lineBits.W))
+    val responseWords = Reg(Vec(p.fetchWidth, UInt(32.W)))
+    val responseFields = Reg(Vec(p.fetchWidth, new FrontendPredecodeFields))
     val hitWordsSnapshot = Reg(Vec(c.ways, Vec(p.fetchWidth, UInt(32.W))))
     val hitFieldsSnapshot = Reg(Vec(c.ways, Vec(p.fetchWidth, new FrontendPredecodeFields)))
     val payloadSelect = RegInit(VecInit.fill(p.fetchWidth)(0.U((c.ways + 1).W)))
@@ -92,12 +92,12 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     c1s1.vaddr := io.pp.request.bits.pc
 
     /* Stage 2: RAM Output, Translation and Hit Check / IF1 */
-    val c1s2 = RegInit(0.U.asTypeOf(new IStage1Signal))
-    val c1s2TlbVaddrInverted = RegInit(~0.U(32.W))
+    val c1s2 = Reg(new IStage1Signal)
+    val c1s2TlbVaddrInverted = Reg(UInt(32.W))
     val c1s2TlbVaddr = ~c1s2TlbVaddrInverted
     val fetchBlocksPerLine = c.lineBytes / (p.fetchWidth * 4)
-    val c1s2FragmentOH = RegInit(0.U(fetchBlocksPerLine.W))
-    val c1s3 = RegInit(0.U.asTypeOf(new IStage2Signal(p, c)))
+    val c1s2FragmentOH = Reg(UInt(fetchBlocksPerLine.W))
+    val c1s3 = Reg(new IStage2Signal(p, c))
     def fragmentFromOH(line: UInt): UInt = {
         val words = line.asTypeOf(Vec(c.lineBytes / 4, UInt(32.W)))
         val blocks = (0 until fetchBlocksPerLine).map { block =>
@@ -269,6 +269,8 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         c1s2FragmentOH := (if (fetchBlocksPerLine == 1) 1.U else
             UIntToOH(io.pp.request.bits.pc(c.offsetBits - 1, p.blockBits), fetchBlocksPerLine))
     }
+    // Only request validity needs reset; payload is written before it can be observed.
+    when(reset.asBool) { c1s2.rreq := false.B; c1s3.rreq := false.B }
 
     /* FSM Connections */
     fsm.io.cc.rreq := c1s3.rreq

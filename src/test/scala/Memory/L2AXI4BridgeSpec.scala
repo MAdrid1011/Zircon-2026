@@ -247,9 +247,18 @@ class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
             val d = new L2AXI4BridgeDriver(dut)
             d.initialize()
 
+            val lineWords = dut.p.lineBytes / 8
+            val previousAddress = BigInt("100005000", 16)
+            val previousWords = (0 until lineWords).map(i => BigInt("fedc000000000000", 16) + i)
+            d.request(previousAddress, write = false, uncached = false)
+            d.acceptReadAddress(previousAddress, length = lineWords - 1, size = 3, cached = true, stalls = 0)
+            previousWords.zipWithIndex.foreach { case (word, i) =>
+                d.sendReadBeat(word, last = i == lineWords - 1)
+            }
+            d.acceptResponse(line(previousWords), error = false, stalls = 0)
+
             val readAddress = BigInt("100006000", 16)
             d.request(readAddress, write = false, uncached = false)
-            val lineWords = dut.p.lineBytes / 8
             d.acceptReadAddress(readAddress, length = lineWords - 1, size = 3, cached = true, stalls = 0)
             d.sendReadBeat(BigInt("12345678", 16), last = true)
             d.acceptResponse(BigInt("12345678", 16), error = true, stalls = 2)

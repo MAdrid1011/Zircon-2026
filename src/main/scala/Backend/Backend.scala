@@ -44,7 +44,7 @@ class BackendIO(
 class Backend(
     val p: BackendParams = BackendParams(),
     val issueParams: IssueParams = IssueParams(),
-    val loadParams: LoadPipelineParams = LoadPipelineParams(numIntPhys = 72, numFpPhys = 48),
+    val loadParams: LoadPipelineParams = LoadPipelineParams(numIntPhys = 64, numFpPhys = 40),
     val ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
     val tlbEnabled: Boolean = true,
     val observe: Boolean = false,
@@ -57,11 +57,8 @@ class Backend(
     val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe))
 
     /* IssueQueueIndex is the shared ordering contract for dispatch, counters and execution pipes. */
-    private val arithIssueCandidateCount =
-        issueParams.arith0.entries + math.max(issueParams.arith0.replayEntries, 1) + 1 +
-        issueParams.arith1.entries + math.max(issueParams.arith1.replayEntries, 1) + 1
     val queues = issueParams.queueParams.zipWithIndex.map { case (params, index) =>
-        val directCandidates = if (index <= IssueQueueIndex.MixArith) arithIssueCandidateCount else 0
+        val directCandidates = if (index <= IssueQueueIndex.MixArith) 2 else 0
         Module(new IssueQueue(p, params, directCandidates))
     }
     val arith0IQ = queues(IssueQueueIndex.Arith0)
@@ -86,7 +83,7 @@ class Backend(
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
         numReadPorts = 9,
-        numWritePorts = 6,
+        numWritePorts = 5,
         holdReads = true,
     )
     val fpRfParams = RegfileParams(
@@ -101,6 +98,8 @@ class Backend(
         directWritePort = Some(2),
         readBypassOverridePort = Some(2),
         overrideReadPorts = Set(6, 7),
+        selectiveReadBypassPort = Some(4),
+        selectiveReadPorts = Set(6, 7, 8),
     ))
     val fpRf = Module(new Regfile(fpRfParams, directWritePort = Some(0)))
     val bypass = Module(new Bypass(BypassParams.twoArithBackend(p)))
@@ -150,10 +149,10 @@ class Backend(
         wakeupRouter.io.loadWB(lane) := pipe.io.wk.wakeWB
     }
 
-    val arithIssueCandidates = VecInit(
-        arith0IQ.io.issueWakeupCandidates.get.toSeq ++
-        arith1IQ.io.issueWakeupCandidates.get.toSeq
-    )
+    val arithIssueCandidates = VecInit(Seq(
+        arith0IQ.io.issueWakeup.get,
+        arith1IQ.io.issueWakeup.get,
+    ))
     val registeredComputeWakeup = WireDefault(wakeupRouter.io.compute)
     for (lane <- 0 until 2) {
         registeredComputeWakeup(lane) := arithPipes(lane).io.wakeup.wakeRF
@@ -222,7 +221,7 @@ class Backend(
     ls1.io.rf.std.get.fpData := fpRf.io.read(3).data
     fpRf.io.readHold.get := VecInit(Seq(false.B, false.B, false.B, ls1.io.rf.std.get.hold))
 
-    /* Writeback ports are statically assigned; LS1 and Atomic remain mutually exclusive. */
+    /* Atomic shares LS1's integer write port; the other producers remain fixed. */
     def intWrite(port: Int, valid: Bool, address: UInt, data: UInt): Unit = {
         intRf.io.write(port).we := valid
         intRf.io.write(port).addr := address
@@ -251,15 +250,22 @@ class Backend(
     // AtomicUnit captures the result-write decision alongside its response.
     val atomicIntWrite = atomic.io.writeResult
     val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)
+    intRf.io.selectiveReadBypass.get.we := ls1IntWrite
+    intRf.io.selectiveReadBypass.get.addr := ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0)
+    intRf.io.selectiveReadBypass.get.data := ls1.io.rf.wr.bits.data
     intWrite(
         4,
-        ls1IntWrite,
-        ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0),
-        ls1.io.rf.wr.bits.data,
+        ls1IntWrite || atomicIntWrite,
+        Mux(atomicIntWrite,
+            atomic.io.response.bits.prd(p.physWidth - 1, 0),
+            ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0)),
+        Mux(atomicIntWrite, atomic.io.response.bits.data, ls1.io.rf.wr.bits.data),
     )
-    intWrite(5, atomicIntWrite, atomic.io.response.bits.prd(p.physWidth - 1, 0),
-        atomic.io.response.bits.data)
     assert(!(atomicIntWrite && ls1IntWrite), "Atomic completion and LS1 must not share a write cycle")
+    when(atomicIntWrite) {
+        assert(io.commit.atomic.blockMemoryIssue && ls0.io.idle && ls1.io.idle,
+            "Atomic writeback must not overlap a memory operand read")
+    }
     fpRf.io.write(0).we := mixArith.io.rf.fpWrite.valid
     fpRf.io.write(0).addr := mixArith.io.rf.fpWrite.bits.addr
     fpRf.io.write(0).data := mixArith.io.rf.fpWrite.bits.data
@@ -349,7 +355,12 @@ class Backend(
         dcache.io.tlb.get.flush := io.dtlb.get.flush
         io.dtlbMiss.get := dcache.io.tlbMiss.get
     }
-    sharedStore.io.reserveAtomic := atomic.io.busy || io.commit.atomic.request.valid
+    // Atomic launch requires an empty StoreBuffer, so no committed store can
+    // request this port until the atomic unit becomes busy on the next edge.
+    when(io.commit.atomic.request.valid && !atomic.io.busy) {
+        assert(!io.commit.store.request.valid)
+    }
+    sharedStore.io.reserveAtomic := atomic.io.busy
     sharedStore.io.atomicRequest <> atomic.io.store.request
     atomic.io.store.response <> sharedStore.io.atomicResponse
     sharedStore.io.committedRequest <> io.commit.store.request

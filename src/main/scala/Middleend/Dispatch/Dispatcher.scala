@@ -13,7 +13,6 @@ class DispatchClass extends Bundle {
 
 class DispatcherIO(p: BackendParams, issue: IssueParams) extends Bundle {
     val in = Input(new IssueEnqueueGroup(p, issue.dispatchWidth))
-    val memoryEntries = Input(Vec(issue.dispatchWidth, new BackendPackage(p)))
     val dispatchClass = Input(Vec(issue.dispatchWidth, new DispatchClass))
     // Bit n permits the ordered prefix through instruction n.
     val resourcePrefix = Input(UInt(issue.dispatchWidth.W))
@@ -90,20 +89,9 @@ class Dispatcher(
     // Both vectors are prefixes: a parallel subset check replaces last-lane
     // selection on the Dispatch-to-Rename writeback path.
     val resourceReady = (io.in.valid & ~io.resourcePrefix) === 0.U
-    // Capacity for each possible live prefix is independent of the late valid
-    // bits. Only the final prefix choice depends on the held stage occupancy.
-    val capacityByPrefix = (0 to width).map { prefix =>
-        classRequests.zipWithIndex.map { case (requests, index) =>
-            hasCapacity(index, requests.take(prefix))
-        }.reduce(_ && _)
-    }
-    val prefixSelect = (0 to width).map { prefix =>
-        if (prefix == 0) !active(0)
-        else if (prefix == width) active(width - 1)
-        else active(prefix - 1) && !active(prefix)
-    }
-    val queueReady = Mux1H(prefixSelect, capacityByPrefix)
-    assert(PopCount(prefixSelect) === 1.U, "Dispatch valid must identify one ordered prefix")
+    val queueReady = queueRequests.zipWithIndex.map { case (requests, index) =>
+        hasCapacity(index, requests)
+    }.reduce(_ && _)
     val groupReady = resourceReady && queueReady
 
     // The fixed Rename-to-Dispatch register is either consumed as an ordered
@@ -120,15 +108,7 @@ class Dispatcher(
     }
 
     for ((output, index) <- io.enqueue.zipWithIndex) {
-        val inputEntries = if (
-            index == IssueQueueIndex.Load || index == IssueQueueIndex.LoadStoreAddress ||
-                index == IssueQueueIndex.StoreData
-        ) {
-            io.memoryEntries
-        } else {
-            io.in.entries
-        }
-        val entries = inputEntries.map { entry =>
+        val entries = io.in.entries.map { entry =>
             if (index == IssueQueueIndex.StoreData) BackendPackage.forStoreData(entry) else entry
         }
         val hits = queueRequests(index)
@@ -139,7 +119,6 @@ class Dispatcher(
                 hits(lane) && PopCount(hits.take(lane)) === position.U
             }).asUInt
             output.selection(position) := selection
-            output.entries(position) := Mux1H(selection.asBools, entries)
             assert(PopCount(selection) <= 1.U, "Dispatch queue selection must be one-hot or zero-hot")
         }
     }

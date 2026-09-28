@@ -62,14 +62,12 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
                     d.io.train.bits.meta.ittage.indices(i).poke(meta.indices(i))
                     d.io.train.bits.meta.ittage.tags(i).poke(meta.tags(i))
                 }
-                for (i <- 0 until p.fetchWidth) {
-                    d.io.train.bits.meta.ittage.providers(i).poke(meta.providers(i))
-                    d.io.train.bits.meta.ittage.providerTargets(i).poke(meta.providerTargets(i))
-                    d.io.train.bits.meta.ittage.alternateTargets(i).poke(
-                        if (((meta.alternateValid >> i) & 1) != 0) meta.alternateTargets(i) else baseTarget
-                    )
-                    d.io.train.bits.meta.ittage.predictedTargets(i).poke(if (i == 0) predicted else BigInt(0))
-                }
+                d.io.train.bits.meta.ittage.provider.poke(meta.providers.head)
+                d.io.train.bits.meta.ittage.providerTarget.poke(meta.providerTargets.head)
+                d.io.train.bits.meta.ittage.alternateTarget.poke(
+                    if ((meta.alternateValid & 1) != 0) meta.alternateTargets.head else baseTarget
+                )
+                d.io.train.bits.meta.ittage.predictedTarget.poke(predicted)
                 d.io.trainRead.bits.poke(d.io.train.bits.peek())
                 d.io.trainRead.valid.poke(true)
                 d.clock.step()
@@ -81,9 +79,9 @@ class IndirectTargetPredictorSpec extends AnyFreeSpec with ChiselSim {
                     // and row on the next edge, so this provider hit trains
                     // confidence instead of silently missing the row.
                     d.io.trainRead.valid.poke(false)
-                    d.io.train.bits.meta.ittage.providers(0).poke(1)
-                    d.io.train.bits.meta.ittage.providerTargets(0).poke(actual)
-                    d.io.train.bits.meta.ittage.predictedTargets(0).poke(actual)
+                    d.io.train.bits.meta.ittage.provider.poke(1)
+                    d.io.train.bits.meta.ittage.providerTarget.poke(actual)
+                    d.io.train.bits.meta.ittage.predictedTarget.poke(actual)
                     d.clock.step()
                 }
                 clearTrain()

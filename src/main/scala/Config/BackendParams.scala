@@ -4,11 +4,11 @@ import chisel3.util.log2Ceil
 
 /** Width-defining parameters shared by all backend pipelines. */
 case class BackendParams(
-    numIntPhys: Int = 72,
-    numFpPhys: Int = 48,
+    numIntPhys: Int = 64,
+    numFpPhys: Int = 40,
     robWidth: Int = 6,
     sqWidth: Int = 5,
-    specWidth: Int = 8,
+    specWidth: Int = 4,
 ) {
     require(numIntPhys >= 2 && numFpPhys >= 2)
     require(robWidth > 0 && sqWidth > 0 && specWidth > 0)

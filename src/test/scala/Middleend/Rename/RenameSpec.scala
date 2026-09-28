@@ -2,6 +2,7 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.{BackendParams, RenameParams}
+import scala.util.Random
 
 class CommitDestinationPolicyHarness extends Module {
     private val backend = BackendParams()
@@ -208,6 +209,67 @@ class RenameSpec extends AnyFreeSpec with ChiselSim {
             dut.io.prd(0).expect(38)
             dut.io.prd(1).expect(39)
             dut.io.prd(2).expect(37)
+        }
+    }
+
+    "free-list preserves sparse order through depletion and recovery" in {
+        simulate(new PRegFreeList(40, 3, 3)) { dut =>
+            dut.io.request.foreach(_.poke(false))
+            dut.io.previewAllocate.foreach(_.poke(false))
+            dut.io.allocate.foreach(_.poke(false))
+            dut.io.release.foreach { port =>
+                port.valid.poke(false)
+                port.bits.poke(0)
+            }
+            dut.io.restore.poke(false)
+            dut.reset.poke(true)
+            dut.clock.step(2)
+            dut.reset.poke(false)
+
+            val random = new Random(75)
+            val ring = Array.tabulate(8)(index => 32 + index)
+            var head = 0
+            var tail = 0
+            var count = 8
+            for (cycle <- 0 until 300) {
+                val allocate = if (cycle < 4) math.min(3, count) else random.nextInt(math.min(3, count) + 1)
+                val release = if (cycle < 4) 0 else random.nextInt(math.min(3, 8 - count + allocate) + 1)
+                val releaseLanes = random.shuffle((0 until 3).toList).take(release).sorted
+                val preview = random.nextInt(4)
+                val requests = Array.fill(3)(random.nextBoolean())
+                val restoring = cycle > 0 && cycle % 37 == 0
+                dut.io.restore.poke(restoring)
+                for (lane <- 0 until 3) {
+                    dut.io.allocate(lane).poke(lane < allocate)
+                    dut.io.previewAllocate(lane).poke(lane < preview)
+                    dut.io.request(lane).poke(requests(lane))
+                    dut.io.release(lane).valid.poke(releaseLanes.contains(lane))
+                    dut.io.release(lane).bits.poke(32 + (cycle + lane) % 8)
+                }
+                val requested = requests.count(identity)
+                dut.io.available.expect(count >= preview + requested)
+                for (lane <- 0 until 3) {
+                    val rank = requests.take(lane).count(identity)
+                    dut.io.prd(lane).expect(if (requests(lane)) ring((head + preview + rank) % 8) else 0)
+                }
+                val prefix = (0 until 3).map { lane =>
+                    if (count >= preview + requests.take(lane + 1).count(identity)) 1 << lane else 0
+                }.sum
+                dut.io.availablePrefix.expect(prefix)
+
+                for ((lane, rank) <- releaseLanes.zipWithIndex) {
+                    ring((tail + rank) % 8) = 32 + (cycle + lane) % 8
+                }
+                tail = (tail + release) % 8
+                if (restoring) {
+                    head = tail
+                    count = 8
+                } else {
+                    head = (head + allocate) % 8
+                    count += release - allocate
+                }
+                dut.clock.step()
+            }
         }
     }
 }

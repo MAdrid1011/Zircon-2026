@@ -12,15 +12,20 @@ class MainBTBIO(p: FrontendParams) extends Bundle {
     val readSkipped = if (p.observe) Some(Output(Bool())) else None
 }
 
-/** Synchronous main BTB. Metadata stays in flops; two interleaved RAM banks hold masked slot payloads. */
-class MainBTB(p: FrontendParams) extends Module {
+/** Synchronous main BTB. Valid/replacement stay in flops; two RAM banks hold slot payloads. */
+class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado) extends Module {
     val io = IO(new MainBTBIO(p))
 
     /* Tag and Valid Storage */
     val indexBits = log2Ceil(p.btbSets)
     val tagBits = 32 - p.blockBits - indexBits
     val rowsPerTagGroup = p.btbSets / math.min(8, p.btbSets)
-    val tags = Seq.fill(p.btbWays)(Reg(Vec(p.btbSets, UInt(tagBits.W))))
+    val tagMem = if (ramBackend == DualPortRamBackend.Vivado) {
+        Some(Seq.fill(p.btbWays)(Mem(p.btbSets, UInt(tagBits.W))))
+    } else None
+    val tags = if (tagMem.isEmpty) {
+        Some(Seq.fill(p.btbWays)(Reg(Vec(p.btbSets, UInt(tagBits.W)))))
+    } else None
     val valid = Seq.fill(p.btbWays)(RegInit(VecInit.fill(p.btbSets)(0.U(p.fetchWidth.W))))
     val replacement = RegInit(VecInit.fill(p.btbSets)(false.B))
     def row(idx: UInt): UInt = if (p.btbSets == 2) 0.U(1.W) else idx(indexBits - 1, 1)
@@ -29,12 +34,23 @@ class MainBTB(p: FrontendParams) extends Module {
     // Metadata updates immediately, so consecutive partial updates see the newest allocation.
     val train = io.train.bits
     val trainIndex = train.index
-    // Keep the entire metadata update cone local to each set.  A global
-    // train-index lookup is still needed for the pipelined payload RAM write,
-    // but must not become the enable of every tag or valid D input.
+    val trainTagGroup = FrontendMath.read(
+        io.trainTagGroups.toSeq,
+        if (rowsPerTagGroup == 1) trainIndex
+        else trainIndex(indexBits - 1, log2Ceil(rowsPerTagGroup)),
+    )
+    val selectedTagHits = if (tagMem.isDefined) {
+        VecInit((0 until p.btbWays).map(w =>
+            FrontendMath.read(valid(w).toSeq, trainIndex).orR &&
+                tagMem.get(w).read(trainIndex) === trainTagGroup
+        ))
+    } else VecInit(Seq.fill(p.btbWays)(false.B))
+    // Register tags use row-local comparison; Vivado tag RAM compares only
+    // the selected row through its separate asynchronous training read port.
     val rowHits = (0 until p.btbSets).map { r =>
         VecInit((0 until p.btbWays).map(w =>
-            valid(w)(r).orR && tags(w)(r) === io.trainTagGroups(r / rowsPerTagGroup)
+            if (tagMem.isDefined) train.indexOH(r) && selectedTagHits(w)
+            else valid(w)(r).orR && tags.get(w)(r) === io.trainTagGroups(r / rowsPerTagGroup)
         )).asUInt
     }
     val rowOccupied = (0 until p.btbSets).map { r =>
@@ -68,14 +84,23 @@ class MainBTB(p: FrontendParams) extends Module {
     }
     for (r <- 0 until p.btbSets) {
         for (w <- 0 until p.btbWays) {
-            when(io.train.valid && train.cfi.orR && train.indexOH(r) &&
-                !rowHits(r).orR && rowAllocationWayOH(r)(w)) {
-                tags(w)(r) := io.trainTagGroups(r / rowsPerTagGroup)
+            if (tags.isDefined) {
+                when(io.train.valid && train.cfi.orR && train.indexOH(r) &&
+                    !rowHits(r).orR && rowAllocationWayOH(r)(w)) {
+                    tags.get(w)(r) := io.trainTagGroups(r / rowsPerTagGroup)
+                }
             }
             when(io.train.valid && train.indexOH(r) && rowSelectedWayOH(r)(w) &&
                 (train.cfi.orR || rowHits(r).orR)) {
                 valid(w)(r) := (Mux(rowHits(r)(w), valid(w)(r), 0.U) & ~train.mask) | train.cfi
                 replacement(r) := (w == 0).B
+            }
+        }
+    }
+    tagMem.foreach { memories =>
+        for (w <- 0 until p.btbWays) {
+            when(io.train.valid && train.cfi.orR && !selectedRowHasHit && selectedWayOH(w)) {
+                memories(w).write(trainIndex, trainTagGroup)
             }
         }
     }
@@ -125,7 +150,8 @@ class MainBTB(p: FrontendParams) extends Module {
     val data = Mux(readIssued, readData, heldData)
     val hit = Wire(Vec(p.btbWays, Bool()))
     for (w <- 0 until p.btbWays) {
-        val selectedTag = FrontendMath.read(tags(w).toSeq, queryIndex)
+        val selectedTag = if (tagMem.isDefined) tagMem.get(w).read(queryIndex)
+            else FrontendMath.read(tags.get(w).toSeq, queryIndex)
         val selectedValid = FrontendMath.read(valid(w).toSeq, queryIndex)
         io.raw.tags(w) := RegEnable(selectedTag, read)
         io.raw.lines(w).valid := RegEnable(

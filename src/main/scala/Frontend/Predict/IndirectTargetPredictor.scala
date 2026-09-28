@@ -211,15 +211,15 @@ class IndirectTargetPredictor(
             trainRows(table).tag === train.meta.ittage.tags(table) &&
             (trainRows(table).slotOH & trainSlots).orR
     })
-    val requestedProvider = train.meta.ittage.providers(trainSlot)
+    val requestedProvider = train.meta.ittage.provider
     val providerMatches = VecInit((0 until p.ittageCount).map { table =>
         trainMatches(table) && requestedProvider === (table + 1).U
     })
     val providerPresent = providerMatches.asUInt.orR
     val provider = Mux(providerPresent, requestedProvider, 0.U)
-    val providerTarget = train.meta.ittage.providerTargets(trainSlot)
-    val alternateTarget = train.meta.ittage.alternateTargets(trainSlot)
-    val predictedTarget = train.meta.ittage.predictedTargets(trainSlot)
+    val providerTarget = train.meta.ittage.providerTarget
+    val alternateTarget = train.meta.ittage.alternateTarget
+    val predictedTarget = train.meta.ittage.predictedTarget
     val providerCorrect = providerPresent && providerTarget === actualTarget
     val mispredicted = predictedTarget =/= actualTarget
     val needAllocation = mispredicted && !providerCorrect

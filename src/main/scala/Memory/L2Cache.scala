@@ -85,7 +85,6 @@ class L2Cache(
     val engineWrite = Reg(Bool())
     val engineUncache = Reg(Bool())
     val engineSize = Reg(UInt(2.W))
-    val engineData = Reg(UInt(p.lineBits.W))
     val engineMask = Reg(UInt(8.W))
     val engineVictimValid = Reg(Bool())
     val engineVictimLine = Reg(UInt((34 - p.offsetBits).W))
@@ -99,7 +98,6 @@ class L2Cache(
     val engineInstallWriteWay = RegInit(0.U(p.ways.W))
     val engineWritebackPaddr = Reg(UInt(34.W))
     val engineWritebackData = Reg(UInt(p.lineBits.W))
-    val engineResponseData = Reg(UInt(p.lineBits.W))
     val engineResponseDirty = RegInit(false.B)
     val engineResponseError = RegInit(false.B)
     val engineBackground = RegInit(false.B)
@@ -147,7 +145,6 @@ class L2Cache(
     val iS3 = Reg(new L2InstructionStageRequest(c))
     val iS3Hit = RegInit(false.B)
     val iS3Way = Reg(UInt(p.ways.W))
-    val iS3Lines = Reg(Vec(p.ways, UInt(p.lineBits.W)))
     val iS3DirtyWays = Reg(UInt(p.ways.W))
     val iS3Started = RegInit(false.B)
     val iS3Done = RegInit(false.B)
@@ -162,7 +159,6 @@ class L2Cache(
     val dS3 = Reg(new L2DataStageRequest(p))
     val dS3Hit = RegInit(false.B)
     val dS3Way = Reg(UInt(p.ways.W))
-    val dS3Lines = Reg(Vec(p.ways, UInt(p.lineBits.W)))
     val dS3DirtyWays = Reg(UInt(p.ways.W))
     val dS3Started = RegInit(false.B)
     val dS3Done = RegInit(false.B)
@@ -171,31 +167,29 @@ class L2Cache(
     val dS3Error = RegInit(false.B)
 
     io.icache.response.valid := iS3Valid && iS3Done && !iS3.ptw
-    val iS3SelectedData = Mux1H(iS3Way, iS3Lines)
     def selectPteBits(line: UInt, address: UInt): UInt = Mux1H(
         VecInit.tabulate(p.lineBytes / 4)(word => address(p.offsetBits - 1, 2) === word.U),
         line.asTypeOf(Vec(p.lineBytes / 4, UInt(32.W))).map(word => Cat(word(31, 10), word(7, 0))),
     )
-    val dS3SelectedData = Mux1H(dS3Way, dS3Lines)
     val dS3SelectedDirty = dS3Hit && Mux1H(dS3Way, dS3DirtyWays.asBools)
-    io.icache.response.bits.data := Mux(iS3Started, iS3Result, iS3SelectedData)
+    io.icache.response.bits.data := iS3Result
     io.icache.response.bits.error := iS3Error
     io.iptw.rsp.valid := iS3Valid && iS3Done && iS3.ptw
     io.iptw.rsp.bits.pte := Mux(
         iS3Started,
         Cat(iS3Result(31, 10), iS3Result(7, 0)),
-        selectPteBits(iS3SelectedData, iS3.paddr)
+        selectPteBits(iS3Result, iS3.paddr)
     ).asTypeOf(new Sv32Pte)
     io.iptw.rsp.bits.error := iS3Error
     io.dcache.rsp.valid := dS3Valid && dS3Done && !dS3.ptw
-    io.dcache.rsp.bits.data := Mux(dS3Started, dS3Result, dS3SelectedData)
+    io.dcache.rsp.bits.data := dS3Result
     io.dcache.rsp.bits.dirty := Mux(dS3Started, dS3ResultDirty, dS3SelectedDirty)
     io.dcache.rsp.bits.error := dS3Error
     io.dptw.rsp.valid := dS3Valid && dS3Done && dS3.ptw
     io.dptw.rsp.bits.pte := Mux(
         dS3Started,
         Cat(dS3Result(31, 10), dS3Result(7, 0)),
-        selectPteBits(dS3SelectedData, dS3.paddr)
+        selectPteBits(dS3Result, dS3.paddr)
     ).asTypeOf(new Sv32Pte)
     io.dptw.rsp.bits.error := dS3Error
 
@@ -339,11 +333,10 @@ class L2Cache(
         iS3 := iS2
         iS3Hit := iHit.orR
         iS3Way := iHit
-        iS3Lines := iLines
+        iS3Result := Mux1H(iHit, iLines)
         iS3DirtyWays := iDirtyWays
         iS3Started := false.B
         iS3Done := iFast
-        iS3Result := 0.U
         iS3Error := false.B
     }
     when(dS3ResponseFire && !dS2Advance) {
@@ -354,11 +347,10 @@ class L2Cache(
         dS3 := dS2
         dS3Hit := dHit.orR
         dS3Way := dHit
-        dS3Lines := dLines
+        dS3Result := Mux1H(dHit, dLines)
         dS3DirtyWays := dDirtyWays
         dS3Started := false.B
         dS3Done := dFast
-        dS3Result := 0.U
         dS3ResultDirty := false.B
         dS3Error := false.B
     }
@@ -384,12 +376,6 @@ class L2Cache(
         0.U(8.W),
         Mux(dS3.paddr(2), Cat(dS3.mask, 0.U(4.W)), Cat(0.U(4.W), dS3.mask))
     )
-    val selectedRequestData = Mux(
-        selectInstructionVictim || selectI,
-        0.U,
-        Mux(dS3.paddr(2), dS3.data << 32, dS3.data)
-    )
-    val selectedData = Mux(selectInstructionVictim || selectI, 0.U, dS3.data)
     val selectedVictimValid = Mux(
         selectInstructionVictim,
         true.B,
@@ -413,8 +399,6 @@ class L2Cache(
     val selectedVictimOnly = selectInstructionVictim || (!selectI && dS3.victimOnly)
     val selectedHit = !selectInstructionVictim && Mux(selectI, iS3Hit, dS3Hit)
     val selectedWay = Mux(selectInstructionVictim, 0.U, Mux(selectI, iS3Way, dS3Way))
-    val selectedHitData = Mux1H(iS3Way & Fill(p.ways, selectI), iS3Lines) |
-        Mux1H(dS3Way & Fill(p.ways, selectD), dS3Lines)
     val selectedHitDirty = Mux(
         selectInstructionVictim,
         false.B,
@@ -429,7 +413,6 @@ class L2Cache(
         engineWrite := selectedWrite
         engineUncache := selectedUncache
         engineSize := selectedSize
-        engineData := selectedRequestData
         engineMask := selectedMask
         engineVictimValid := selectedVictimValid
         engineVictimLine := selectedVictimPaddr(33, p.offsetBits)
@@ -438,7 +421,6 @@ class L2Cache(
         engineTargetHit := selectedHit && !selectedVictimOnly
         engineTargetWay := selectedWay
         engineTargetDirty := selectedHitDirty
-        engineResponseData := selectedHitData
         engineResponseDirty := selectedHit && selectedHitDirty && !selectI && !selectedPtw
         engineResponseError := false.B
         engineInstallWriteWay := 0.U
@@ -475,7 +457,6 @@ class L2Cache(
     val engineConsumeTarget = engineTargetHit && (!engineSourceI || !engineTargetDirty)
 
     val engineComplete = WireDefault(false.B)
-    val engineCompleteData = WireDefault(engineResponseData)
     val engineCompleteDirty = WireDefault(engineResponseDirty)
     val engineCompleteError = WireDefault(engineResponseError)
 
@@ -489,7 +470,18 @@ class L2Cache(
     io.memory.req.bits.write := Mux(engineState === engineWritebackSend, true.B, engineWrite)
     io.memory.req.bits.uncache := engineState =/= engineWritebackSend && (engineUncache || enginePtw)
     io.memory.req.bits.size := Mux(engineState === engineWritebackSend, 2.U, engineSize)
-    io.memory.req.bits.data := Mux(engineState === engineWritebackSend, engineWritebackData, engineData)
+    // The D-side S3 entry cannot advance until this engine completes its
+    // response, so its request data remains stable across lower-memory stalls.
+    val dRequestData = Mux(dS3.paddr(2), dS3.data << 32, dS3.data)
+    io.memory.req.bits.data := Mux(
+        engineState === engineWritebackSend,
+        engineWritebackData,
+        Mux(engineSourceI, 0.U, dRequestData),
+    )
+    when(engineState === engineMemorySend && !engineSourceI) {
+        assert(dS3Valid && dS3Started && !dS3Done,
+            "D-side S3 must hold the lower-memory request payload")
+    }
     io.memory.req.bits.mask := Mux(
         engineState === engineWritebackSend,
         255.U,
@@ -610,7 +602,14 @@ class L2Cache(
         }
         is(engineMemoryWait) {
             when(io.memory.rsp.fire) {
-                engineResponseData := io.memory.rsp.bits.data
+                // The owning S3 result is not visible until engineFinish.
+                when(!engineBackground) {
+                    when(engineSourceI) {
+                        iS3Result := io.memory.rsp.bits.data
+                    }.otherwise {
+                        dS3Result := io.memory.rsp.bits.data
+                    }
+                }
                 engineResponseError := io.memory.rsp.bits.error
                 engineResponseDirty := false.B
                 when(!io.memory.rsp.bits.error && !engineUncache && !enginePtw && engineVictimValid) {
@@ -630,13 +629,13 @@ class L2Cache(
 
     when(engineComplete) {
         when(!engineBackground) {
+            assert(!(engineSourceI && iS2Advance) && !(!engineSourceI && dS2Advance),
+                "L2 S3 result cannot complete while accepting the next request")
             when(engineSourceI) {
                 iS3Done := true.B
-                iS3Result := engineCompleteData
                 iS3Error := engineCompleteError
             }.otherwise {
                 dS3Done := true.B
-                dS3Result := engineCompleteData
                 dS3ResultDirty := engineCompleteDirty
                 dS3Error := engineCompleteError
             }

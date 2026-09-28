@@ -33,6 +33,7 @@ class ClusterIndexFIFOIO[T <: Data](
     val enq = Vec(ew, Flipped(Decoupled(gen)))
     val enqWrite = if (separateEnqWrite) Some(Input(Vec(ew, Bool()))) else None
     val enqIdx = Output(Vec(ew, new ClusterEntry(len, n)))
+    val enqWriteIdx = if (separateEnqWrite) Some(Output(Vec(ew, new ClusterEntry(len, n)))) else None
     val deq = Vec(dw, Decoupled(gen))
     val deqIdx = if (exposeDeqIndex) Some(Output(Vec(dw, new ClusterEntry(len, n)))) else None
     val ridx = Input(Vec(rw, new ClusterEntry(len, n)))
@@ -61,10 +62,15 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     registeredDeq: Boolean = false,
     separateEnqWrite: Boolean = false,
     selectDeqAfterRegister: Boolean = false,
+    externallyGuardedCapacity: Boolean = false,
+    partialFreeListDeq: Boolean = false,
+    resetPayload: Boolean = true,
 ) extends Module {
     require(num > 0 && ew > 0 && dw > 0, "ClusterIndexFIFO depth and transfer widths must be positive")
     require(rw >= 0 && ww >= 0, "ClusterIndexFIFO random port counts must be nonnegative")
+    require(resetPayload || rw == 0, "Unreset FIFO payload cannot have random readers")
     require(!selectDeqAfterRegister || registeredDeq)
+    require(!partialFreeListDeq || isFlst)
     val n: Int = math.max(ew, dw)
     require(num % n == 0, "ClusterIndexFIFO depth must be divisible by bank count")
     require(rstVal.forall(_.size == num), "ClusterIndexFIFO reset contents must match depth")
@@ -81,6 +87,8 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
             rstVal.map(_.slice(bank * len, (bank + 1) * len)),
             writePayloadOnFlush,
             registeredDeq,
+            externallyGuardedCapacity,
+            resetPayload,
         )).io
     }
     private val enqBase = RegInit(1.U(n.W))
@@ -103,7 +111,9 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     }
     private val hasWrite = hasMethod("write")
     private val allEnqReady = banks.map(_.enq.ready).reduce(_ && _)
-    private val allDeqValid = if (isFlst) banks.map(_.deq.valid).reduce(_ && _) else true.B
+    private val allDeqValid = if (isFlst && !partialFreeListDeq)
+        banks.map(_.deq.valid).reduce(_ && _)
+    else true.B
 
     // Sparse mode moves only a narrow one-hot selector through the input lanes.
     // Payload travels directly from its original input to a single bank mux.
@@ -150,6 +160,11 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         idx.offset := Mux1H(select, banks.map(_.enqIdx))
         idx.high := Mux1H(select, banks.map(_.enqHigh))
     }
+    io.enqWriteIdx.foreach(_.zip(writeSelect).foreach { case (idx, select) =>
+        idx.qidx := select
+        idx.offset := Mux1H(select, banks.map(_.enqIdx))
+        idx.high := Mux1H(select, banks.map(_.enqHigh))
+    })
 
     private val deqSelect = Seq.tabulate(dw)(lane => FIFOUtil.rotate(deqBase, lane))
     for (lane <- 0 until dw) {

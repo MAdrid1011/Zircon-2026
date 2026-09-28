@@ -257,6 +257,29 @@ class ClusterIndexFIFOSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "unreset payload remains hidden until enqueue after reset and flush" in {
+        simulate(new ClusterIndexFIFO(UInt(8.W), 4, 2, 2, 0, 0, resetPayload = false)) { d =>
+            init(d)
+            d.io.deq(0).valid.expect(false)
+            d.io.enq(0).valid.poke(true)
+            d.io.enq(0).bits.poke(41)
+            d.clock.step()
+            d.io.enq(0).valid.poke(false)
+            d.io.deq(0).valid.expect(true)
+            d.io.deq(0).bits.expect(41)
+            d.io.flush.poke(true)
+            d.clock.step()
+            d.io.flush.poke(false)
+            d.io.deq(0).valid.expect(false)
+            d.io.enq(0).valid.poke(true)
+            d.io.enq(0).bits.poke(77)
+            d.clock.step()
+            d.io.enq(0).valid.poke(false)
+            d.io.deq(0).valid.expect(true)
+            d.io.deq(0).bits.expect(77)
+        }
+    }
+
     for (violation <- Seq("enqueue", "dequeue", "duplicate writes", "write bank", "write offset")) {
         s"contract assertions reject $violation" in {
             val error = intercept[AssertionFailed] {

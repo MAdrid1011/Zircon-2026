@@ -15,9 +15,9 @@ RAM 数据返回时，DTLB 使用 lookup 中的虚拟地址产生物理地址，
 命中信息和翻译结果随后写入 execute 寄存器。末级完成 SQ/Store Buffer 转发合并、Load 响应和
 miss 分配。DTLB miss、权限异常和对齐异常沿相同寄存边界返回，不会访问下级存储器。
 
-LS1 Load 与 Store Address 共享 DTLB lane 1。已进入 lookup 的 Load 先完成当拍翻译；Store Address
-等待翻译期间，DCache 不再用新的 Load 替换该 lookup，因而 Store 可在已有请求排空后取得 DTLB，
-年轻 Load 暂存在请求缓冲中。
+两路 Load 与 Store Address 使用独立的 DTLB 查询口，可在同一拍完成地址翻译。若 LS1 Load 与
+Store Address 同时发生 TLB miss，共享的缺页请求通道先服务 Load；Store Address 保持在流水
+寄存器中等待后续处理。
 
 DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；Store miss 先取得整行
 再合并字节 mask。DCache 使用单项 miss 单元，支持无冲突命中的 hit-under-miss；同一资源冲突
@@ -28,7 +28,7 @@ DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；S
 
 ## 地址翻译
 
-ITLB 有一个查询口，DTLB 有两个查询口。每个 TLB 的 4 KiB 页表项采用 4 set x 4 way 组织，
+ITLB 有一个查询口，DTLB 有三个查询口。每个 TLB 的 4 KiB 页表项采用 4 set x 4 way 组织，
 另有 4 项全相连的 4 MiB superpage 表。表项保存 VPN、PPN、权限、页大小、PMA 属性和当前
 ASID 范围结果；查询路径使用 `VPN + inScope` 匹配。
 

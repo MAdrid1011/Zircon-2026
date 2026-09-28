@@ -140,7 +140,16 @@ class PreDecoders(p: FrontendParams) extends RawModule {
     io.record.train.meta.loopIndex := predInfo.meta.loopIndex
     io.record.train.meta.loopValid := predInfo.meta.loopValid
     io.record.train.meta.loopPredictions := predInfo.meta.loopPredictions
-    io.record.train.meta.ittage := predInfo.meta.ittage
+    val indirectSlots = VecInit((0 until p.fetchWidth).map { slot =>
+        instPkgOut.mask(slot) && instPkgOut.instructions(slot).kind === FrontendCfi.Indirect.U
+    })
+    io.record.train.meta.ittage.indices := predInfo.meta.ittage.indices
+    io.record.train.meta.ittage.tags := predInfo.meta.ittage.tags
+    io.record.train.meta.ittage.provider := Mux1H(indirectSlots, predInfo.meta.ittage.providers)
+    io.record.train.meta.ittage.providerTarget := Mux1H(indirectSlots, predInfo.meta.ittage.providerTargets)
+    io.record.train.meta.ittage.alternateTarget := Mux1H(indirectSlots, predInfo.meta.ittage.alternateTargets)
+    io.record.train.meta.ittage.predictedTarget := Mux1H(indirectSlots, predInfo.meta.ittage.predictedTargets)
+    io.record.train.meta.ittage.aheadValid := predInfo.meta.ittage.aheadValid
     io.record.train.earlyDirections := predInfo.meta.tageDirections
     instPkgOut.record := io.record
 }

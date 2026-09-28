@@ -23,8 +23,8 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 
 > [!NOTE]
 > 当前版本已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
-> 输入、文件系统挂载和定时器路径验证。Nangate45 BSG logic-only STA 在 1.5 ns 约束下通过，
-> 最长纯逻辑到达时间为 1.437663 ns，固定网表最高逻辑频率约 682.9 MHz。
+> 输入、文件系统挂载和定时器路径验证。Nangate45 BSG logic-only STA 测得最长纯逻辑
+> 数据到达时间为 1.437394 ns，固定网表最高逻辑频率约 680 MHz。
 
 ## 架构概览
 
@@ -93,8 +93,8 @@ flowchart LR
 | --- | --- |
 | ISA | `RV32IMAF_Zicsr_Zifencei_Zaamo_Zalrsc` |
 | 取指 / 译码与派发 / 退休宽度 | 4 / 3 / 3 |
-| 整数 / 浮点物理寄存器 | 72 / 48 |
-| ROB / SQ / Store Buffer | 48 / 12 / 4 项 |
+| 整数 / 浮点物理寄存器 | 64 / 40 |
+| ROB / SQ / Store Buffer | 36 / 12 / 4 项 |
 | FTQ / Fetch Queue | 16 / 8 项 |
 | 计算流水线 | 2 x `ArithBranch` + 1 x `MixArithPipeline` |
 | 访存流水线 | LS0 Load + LS1 Load/Store Address，Store Data 独立发射 |
@@ -117,7 +117,7 @@ flowchart LR
   直接回到前级关键路径。
 - **偏非包含式 L2**：L2 主要接收 L1 victim；L1/L2 同时 miss 时，外部填充直接返回 L1，
   减少 L1 与 L2 的重复数据。
-- **Sv32 地址翻译**：独立 ITLB、双查询端口 DTLB 和共享硬件 PTW 已接入整核，PTW 的 I/D
+- **Sv32 地址翻译**：独立 ITLB、三查询端口 DTLB 和共享硬件 PTW 已接入整核，PTW 的 I/D
   请求分别复用 L2 的指令侧与数据侧通道。
 
 ## 快速开始
@@ -196,10 +196,16 @@ sbt "runMain Elaborate generated"
 sbt "runMain Elaborate --simulation generated"
 ```
 
+现有 Vivado 2025 工程使用独立的 Xilinx BRAM RTL 目录：
+
+```sh
+python3 scripts/eda/prepare_vivado_rtl.py
+```
+
 使用 BSG Fakeram-only 配置生成 Nangate45 纯逻辑时序结果：
 
 ```sh
-python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target-ns 1.5
+python3 scripts/eda/synthesize_core.py --logic-only
 ```
 
 脚本会生成外部宏版 RTL，再运行 Yosys 标准单元映射。该配置将 Cache、BTB 和 Predictor
@@ -212,13 +218,13 @@ python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target
 
 | 验证层级 | 当前状态 |
 | --- | --- |
-| CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.380156，CoreMark/MHz 5.338 |
+| CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.334128，CoreMark/MHz 5.153 |
 | RISC-V Architecture Test 149 项 + Spike 提交级差分 | 通过 |
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
 | Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
-| Nangate45 BSG logic-only STA | 1.5 ns 约束通过，WNS `+0.035637 ns`，最长纯逻辑到达 1.437663 ns |
+| Nangate45 BSG logic-only STA | 最长纯逻辑数据到达 1.437394 ns，固定网表最高逻辑频率约 680 MHz |
 | 特权架构 | M/S 模式、Sv32、定时器中断、原子操作和 `FENCE.I`/`SFENCE.VMA` |
 
 ## 模块文档

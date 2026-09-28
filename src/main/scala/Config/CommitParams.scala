@@ -6,11 +6,11 @@ import chisel3.util.log2Ceil
 final case class CommitParams(width: Int = 3) {
     require(width == 3, "Zircon-2026 uses three-wide retirement")
 
-    val robEntries = 48
+    val robEntries = 36
     val sqEntries = 12
     val storeBufferEntries = 4
-    val completionPorts = 8
-    val robReadPorts = 5
+    val completionPorts = 7
+    val robReadPorts = 2
 }
 
 /** Capacity of the committed store drain buffer. */

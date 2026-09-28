@@ -104,8 +104,10 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.commit(0).valid.poke(false)
             dut.io.flush.poke(true)
+            dut.io.enqueue.writeValid.poke(15)
             dut.clock.step()
             dut.io.flush.poke(false)
+            dut.io.enqueue.writeValid.poke(0)
             dut.io.drain.valid.expect(true)
             dut.io.drain.bits.paddr.expect(0x1001)
             dut.io.drain.bits.data.expect(0x0000aa00)
@@ -162,6 +164,42 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "same-cycle address forwarding matches only the new word on both query ports" in {
+        simulate(new StoreQueue(dispatchWidth = 2)) { dut =>
+            initialize(dut)
+            dut.io.request.valid.poke(1)
+            dut.io.request.store.poke(1)
+            val sqIdx = dut.io.allocation(0).index.peek().litValue
+            dut.io.enqueue.valid.poke(1)
+            dut.io.enqueue.writeValid.poke(1)
+            dut.io.enqueue.entries(0).context.instruction.fu.poke(ZirconConfig.DecodeUnit.Store)
+            dut.io.enqueue.entries(0).allocation.robIdx.poke(9)
+            dut.io.enqueue.entries(0).allocation.sqIdx.poke(sqIdx)
+            dut.clock.step()
+            dut.io.request.valid.poke(0)
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+
+            data(dut, sqIdx, robIdx = 9, value = 0x5a)
+            dut.clock.step()
+            dut.io.data.valid.poke(false)
+            address(dut, sqIdx, robIdx = 9, paddr = 0x2000, mask = 1)
+            for (port <- 0 until 2) {
+                val query = dut.io.query(port).request
+                query.valid.poke(true)
+                query.bits.wordAddress.poke((if (port == 0) 0x2000 else 0x3000) >> 2)
+                query.bits.mask.poke(1)
+                query.bits.sqTailOH.poke(1 << 1)
+            }
+            dut.clock.step()
+            dut.io.query(0).response.valid.expect(true)
+            dut.io.query(0).response.bits.mask.expect(1)
+            dut.io.query(0).response.bits.data.expect(0x5a)
+            dut.io.query(1).response.valid.expect(true)
+            dut.io.query(1).response.bits.mask.expect(0)
+        }
+    }
+
     "youngest matching store wins each forwarded byte without another response cycle" in {
         simulate(new StoreQueue(dispatchWidth = 2)) { dut =>
             initialize(dut)
@@ -199,6 +237,133 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "two load ports share store data while respecting different age boundaries" in {
+        simulate(new StoreQueue(dispatchWidth = 2)) { dut =>
+            initialize(dut)
+            dut.io.request.valid.poke(3)
+            dut.io.request.store.poke(3)
+            val indices = dut.io.allocation.map(_.index.peek().litValue)
+            dut.io.enqueue.valid.poke(3)
+            dut.io.enqueue.writeValid.poke(3)
+            for (lane <- 0 until 2) {
+                dut.io.enqueue.entries(lane).context.instruction.fu.poke(ZirconConfig.DecodeUnit.Store)
+                dut.io.enqueue.entries(lane).allocation.robIdx.poke(20 + lane)
+                dut.io.enqueue.entries(lane).allocation.sqIdx.poke(indices(lane))
+            }
+            dut.clock.step()
+            dut.io.request.valid.poke(0)
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+
+            address(dut, indices(0), 20, 0x6000, 1)
+            data(dut, indices(0), 20, 0x11)
+            dut.clock.step()
+            dut.io.data.valid.poke(false)
+            address(dut, indices(1), 21, 0x6000, 1)
+            dut.clock.step()
+            dut.io.address.valid.poke(false)
+
+            for (port <- 0 until 2) {
+                val query = dut.io.query(port).request
+                query.valid.poke(true)
+                query.bits.wordAddress.poke(0x6000 >> 2)
+                query.bits.mask.poke(1)
+                query.bits.sqTailOH.poke(1 << (port + 1))
+            }
+            data(dut, indices(1), 21, 0x22)
+            dut.clock.step()
+            dut.io.data.valid.poke(false)
+            for (port <- 0 until 2) {
+                dut.io.query(port).response.valid.expect(true)
+                dut.io.query(port).response.bits.mask.expect(1)
+                dut.io.query(port).response.bits.data.expect(if (port == 0) 0x11 else 0x22)
+                dut.io.query(port).response.bits.blocked.expect(false)
+            }
+        }
+    }
+
+    "both load ports choose the newest older store at every full-ring boundary" in {
+        simulate(new StoreQueue(dispatchWidth = 1)) { dut =>
+            initialize(dut)
+            for (number <- 0 until 12) {
+                dut.io.request.valid.poke(1)
+                dut.io.request.store.poke(1)
+                val index = dut.io.allocation(0).index.peek().litValue
+                dut.io.enqueue.valid.poke(1)
+                dut.io.enqueue.writeValid.poke(1)
+                dut.io.enqueue.entries(0).context.instruction.fu.poke(ZirconConfig.DecodeUnit.Store)
+                dut.io.enqueue.entries(0).allocation.robIdx.poke(number)
+                dut.io.enqueue.entries(0).allocation.sqIdx.poke(index)
+                dut.clock.step()
+                dut.io.request.valid.poke(0)
+                dut.io.enqueue.valid.poke(0)
+                dut.io.enqueue.writeValid.poke(0)
+                address(dut, index, number, 0x6800, 1)
+                data(dut, index, number, number + 1)
+                dut.clock.step()
+                dut.io.address.valid.poke(false)
+                dut.io.data.valid.poke(false)
+            }
+            for (boundary <- 1 to 12) {
+                for (port <- 0 until 2) {
+                    val tail = if (port == 0) boundary else 13 - boundary
+                    val query = dut.io.query(port).request
+                    query.valid.poke(true)
+                    query.bits.wordAddress.poke(0x6800 >> 2)
+                    query.bits.mask.poke(1)
+                    query.bits.sqTailOH.poke(1 << tail)
+                }
+                dut.clock.step()
+                dut.io.query(0).response.bits.data.expect(boundary)
+                dut.io.query(1).response.bits.data.expect(13 - boundary)
+                for (port <- 0 until 2) {
+                    dut.io.query(port).response.valid.expect(true)
+                    dut.io.query(port).response.bits.mask.expect(1)
+                    dut.io.query(port).response.bits.blocked.expect(false)
+                }
+            }
+        }
+    }
+
+    "a query excludes stores allocated at or after its captured tail" in {
+        simulate(new StoreQueue(dispatchWidth = 2)) { dut =>
+            initialize(dut)
+            dut.io.request.valid.poke(3)
+            dut.io.request.store.poke(3)
+            val indices = dut.io.allocation.map(_.index.peek().litValue)
+            dut.io.enqueue.valid.poke(3)
+            dut.io.enqueue.writeValid.poke(3)
+            for (lane <- 0 until 2) {
+                dut.io.enqueue.entries(lane).context.instruction.fu.poke(ZirconConfig.DecodeUnit.Store)
+                dut.io.enqueue.entries(lane).allocation.robIdx.poke(30 + lane)
+                dut.io.enqueue.entries(lane).allocation.sqIdx.poke(indices(lane))
+            }
+            dut.clock.step()
+            dut.io.request.valid.poke(0)
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+
+            for (lane <- 0 until 2) {
+                address(dut, indices(lane), 30 + lane, 0x7000, 1)
+                data(dut, indices(lane), 30 + lane, 0x51 + lane)
+                dut.clock.step()
+            }
+            dut.io.address.valid.poke(false)
+            dut.io.data.valid.poke(false)
+            for (port <- 0 until 2) {
+                val query = dut.io.query(port).request
+                query.valid.poke(true)
+                query.bits.wordAddress.poke(0x7000 >> 2)
+                query.bits.mask.poke(1)
+                query.bits.sqTailOH.poke(1 << port)
+            }
+            dut.clock.step()
+            dut.io.query(0).response.bits.mask.expect(0)
+            dut.io.query(1).response.bits.mask.expect(1)
+            dut.io.query(1).response.bits.data.expect(0x51)
+        }
+    }
+
     "forwarding keeps youngest-store order across the SQ identity wrap" in {
         simulate(new StoreQueue(dispatchWidth = 1)) { dut =>
             initialize(dut)
@@ -224,7 +389,7 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
                 index
             }
 
-            for (n <- 0 until 12) {
+            for (n <- 0 until 11) {
                 val index = enqueueStore(n, n)
                 dut.io.commit(0).valid.poke(true)
                 dut.io.commit(0).bits.poke(index)
@@ -234,17 +399,24 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
                 dut.clock.step()
                 dut.io.drain.ready.poke(false)
             }
-            enqueueStore(12, 0x41)
-            enqueueStore(13, 0x42)
+            enqueueStore(11, 0x41)
             dut.io.query(0).request.valid.poke(true)
             dut.io.query(0).request.bits.wordAddress.poke(0x5000 >> 2)
             dut.io.query(0).request.bits.mask.poke(1)
-            dut.io.query(0).request.bits.sqTailOH.poke(1 << 14)
+            dut.io.query(0).request.bits.sqTailOH.poke(1 << 12)
+            dut.clock.step()
+            dut.io.query(0).response.bits.data.expect(0x41)
+            enqueueStore(12, 0x42)
+            dut.io.query(0).request.bits.sqTailOH.poke(1 << 13)
             dut.clock.step()
             dut.io.query(0).response.valid.expect(true)
             dut.io.query(0).response.bits.mask.expect(1)
             dut.io.query(0).response.bits.data.expect(0x42)
             dut.io.query(0).response.bits.blocked.expect(false)
+            enqueueStore(13, 0x43)
+            dut.io.query(0).request.bits.sqTailOH.poke(1 << 14)
+            dut.clock.step()
+            dut.io.query(0).response.bits.data.expect(0x43)
         }
     }
 

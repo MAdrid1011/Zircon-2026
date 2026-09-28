@@ -15,13 +15,16 @@ ICache 和预测表结果。PD 对返回指令执行预译码，校验控制流�
 
 ## 分支预测
 
-`Predict` 包含基础 PHT、六张带标签历史表、Tagged Corrector、小 BTB、两路同步主 BTB、
-RAS 和推测历史。IF1 产生早期方向和目标，IF2 合并同步表结果。PD 发现预测范围或目标错误时
-产生局部修正；提交阶段通过 FTQ 提供最终训练信息。
+`Predict` 包含基础 PHT、六张带标签历史表、小 BTB、两路同步主 BTB、RAS 和推测历史。
+IF1 使用 PHT 和小 BTB 产生早期方向与目标；IF2 使用 TAGE 方向和主 BTB 目标形成最终预测，
+返回指令的目标由 RAS 提供。PD 发现预测范围或目标错误时产生局部修正；提交阶段通过 FTQ
+提供最终训练信息。
 
-PHT、带标签历史表、Tagged Corrector、Loop Predictor 和间接目标表通过 `PredictorTableRam`
-实现。每张表提供一个预测读口和一个流水化训练读改写通路；Vivado 配置可推断 BRAM，
-Nangate45 配置绑定对应深度和宽度的 BSG Fakeram。
+小 BTB 的目标载荷在 PF 接受请求时从同步 SRAM 读取，IF1 使用该读数与寄存器中的 tag、valid
+完成早期预测；训练按指令槽独立写入。Vivado 将载荷实现为 BRAM，Nangate45 使用 BSG SRAM 模型。
+
+PHT 和带标签历史表通过 `PredictorTableRam` 实现。每张表提供一个预测读口和一个流水化训练
+读改写通路；Vivado 配置可推断 BRAM，Nangate45 配置绑定对应深度和宽度的 BSG Fakeram。
 
 ## ICache 与 ITLB
 
@@ -34,4 +37,5 @@ ICache 为 2 路、16 set、64 B line，总容量 2 KiB。虚拟地址在 IF1 �
 `FetchQueue` 默认保存 8 个四指令取指块的容量。入队时移除无效槽，出队时直接提供全局最老的
 三条指令，因此一个三宽组可以跨越相邻 fetch packet。FTQ 位于 `Commit`，默认 16 项；
 `packetStart` 和 `packetEnd` 标记确保每个 packet 只分配一个 FTQ 表项。提交重定向优先于 PD
-修正，并同时清空前端流水和 Fetch Queue。
+修正，并同时清空前端流水和 Fetch Queue。FQ 每条只保存操作数的有效位与整数/浮点类型；
+寄存器编号和直接分支位移由保存的指令位在出口直接还原，间接跳转目标取自 packet 的预测下一 PC。

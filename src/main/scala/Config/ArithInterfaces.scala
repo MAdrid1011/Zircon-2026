@@ -40,8 +40,6 @@ class ArithRegfileIO extends Bundle {
 }
 
 class ArithRobIO extends Bundle {
-    val readIdx = Output(UInt(ArithConstants.robAddressWidth.W))
-    val pc = Input(UInt(32.W))
     val complete = Output(Valid(new ArithCompletion))
 }
 

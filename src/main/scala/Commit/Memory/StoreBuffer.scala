@@ -26,44 +26,63 @@ class StoreBuffer(
     val cache: DCacheParams = DCacheParams(),
 ) extends Module {
     private val entries = cp.storeBufferEntries
-    private val indexWidth = log2Ceil(entries)
+    require(entries >= 2 && entries % 2 == 0)
     val io = IO(new StoreBufferIO(cp, cache))
 
-    val storage = Reg(Vec(entries, new CommittedStore))
+    val queue = Module(new ClusterIndexFIFO(
+        new CommittedStore,
+        entries,
+        2,
+        2,
+        entries,
+        0,
+        exposeDeqIndex = true,
+        externallyGuardedCapacity = true,
+    ))
+    queue.io.flush := false.B
+    queue.io.enq(0).valid := io.enqueue.fire
+    queue.io.enq(0).bits := io.enqueue.bits
+    queue.io.enq(1).valid := false.B
+    queue.io.enq(1).bits := DontCare
+    queue.io.deq(1).ready := false.B
+    for (position <- 0 until entries) {
+        queue.io.ridx(position).qidx := (1 << (position % 2)).U(2.W)
+        queue.io.ridx(position).offset := (1 << (position / 2)).U((entries / 2).W)
+        queue.io.ridx(position).high := false.B
+    }
+    val storage = queue.io.rdata
+    def positionOH(index: ClusterEntry): UInt = VecInit((0 until entries).map { position =>
+        index.qidx(position % 2) && index.offset(position / 2)
+    }).asUInt
+    val headOH = positionOH(queue.io.deqIdx.get(0))
+    val tailOH = positionOH(queue.io.enqIdx(0))
     val valid = RegInit(VecInit.fill(entries)(false.B))
-    val head = RegInit(0.U(indexWidth.W))
-    val tail = RegInit(0.U(indexWidth.W))
     val newestOH = RegInit(1.U(entries.W))
     val count = RegInit(0.U(log2Ceil(entries + 1).W))
     val outstanding = RegInit(false.B)
 
-    private def next(index: UInt): UInt = Mux(index === (entries - 1).U, 0.U, index + 1.U)
     val responseFire = io.store.response.fire
-    val followingHead = next(head)
     val replaceOutstanding = responseFire && count > 1.U
     io.enqueue.ready := count < entries.U || responseFire
-    io.store.request.valid := valid(head) && !outstanding || replaceOutstanding
-    val requestIndex = Mux(replaceOutstanding, followingHead, head)
-    io.store.request.bits.paddr := storage(requestIndex).paddr
-    io.store.request.bits.data := storage(requestIndex).data
-    io.store.request.bits.mask := storage(requestIndex).mask
-    io.store.request.bits.size := storage(requestIndex).size
-    io.store.request.bits.uncache := storage(requestIndex).uncache
+    io.store.request.valid := (headOH & valid.asUInt).orR && !outstanding || replaceOutstanding
+    val request = Mux(replaceOutstanding, queue.io.deq(1).bits, queue.io.deq(0).bits)
+    io.store.request.bits.paddr := request.paddr
+    io.store.request.bits.data := request.data
+    io.store.request.bits.mask := request.mask
+    io.store.request.bits.size := request.size
+    io.store.request.bits.uncache := request.uncache
     io.store.response.ready := outstanding
     when(io.store.request.fire =/= responseFire) {
         outstanding := io.store.request.fire
     }
-    when(responseFire) {
-        valid(head) := false.B
-        head := followingHead
+    queue.io.deq(0).ready := responseFire
+    for (position <- 0 until entries) {
+        when(responseFire && headOH(position)) { valid(position) := false.B }
+        // A full buffer may recycle its old head on the same edge.
+        when(io.enqueue.fire && tailOH(position)) { valid(position) := true.B }
     }
-    // When a full buffer pops and pushes together, the new tail reuses the old
-    // head slot. Keep this write after the response clear so the new entry wins.
     when(io.enqueue.fire) {
-        storage(tail) := io.enqueue.bits
-        valid(tail) := true.B
-        newestOH := UIntToOH(tail, entries)
-        tail := next(tail)
+        newestOH := tailOH
     }
 
     when(io.enqueue.fire =/= responseFire) {
@@ -124,5 +143,5 @@ class StoreBuffer(
 
     assert(count <= entries.U)
     assert(PopCount(newestOH) === 1.U)
-    when(outstanding) { assert(valid(head)) }
+    when(outstanding) { assert((headOH & valid.asUInt).orR) }
 }

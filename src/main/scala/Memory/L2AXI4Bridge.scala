@@ -74,9 +74,10 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
 
     val idle :: readAddress :: readData :: writeAddress :: writeData :: writeResponse :: respond :: Nil = Enum(7)
     val state = RegInit(idle)
-    val request = RegInit(0.U.asTypeOf(new L2BridgeRequest(p)))
+    // A fresh request fills every field before the bridge leaves idle.
+    val request = Reg(new L2BridgeRequest(p))
     val beat = RegInit(0.U(beatBits.W))
-    val readBeats = RegInit(VecInit.fill(lineBeats)(0.U(64.W)))
+    val readBeats = Reg(Vec(lineBeats, UInt(64.W)))
     val responseError = RegInit(false.B)
 
     val lastBeat = Mux(request.uncache, 0.U(beatBits.W), (lineBeats - 1).U(beatBits.W))
@@ -87,7 +88,11 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
 
     io.memory.req.ready := state === idle
     io.memory.rsp.valid := state === respond
-    io.memory.rsp.bits.data := Mux(request.write, 0.U, readBeats.asUInt)
+    val cachedReadData = VecInit((0 until lineBeats).map { index =>
+        Mux(index.U <= beat, readBeats(index), 0.U(64.W))
+    }).asUInt
+    io.memory.rsp.bits.data := Mux(request.write, 0.U,
+        Mux(request.uncache, readBeats(0).pad(p.lineBits), cachedReadData))
     io.memory.rsp.bits.error := responseError
 
     io.axi.ar.valid := state === readAddress
@@ -154,7 +159,6 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
         request.data := io.memory.req.bits.data
         request.mask := io.memory.req.bits.mask
         beat := 0.U
-        readBeats.foreach(_ := 0.U)
         responseError := false.B
         state := Mux(io.memory.req.bits.write, writeAddress, readAddress)
     }

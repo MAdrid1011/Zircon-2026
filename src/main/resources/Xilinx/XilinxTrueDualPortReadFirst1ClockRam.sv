@@ -31,6 +31,9 @@ module XilinxTrueDualPortReadFirst1ClockRam #(
                 BRAM[addra] <= dina;
             addrRA <= addra;
         end
+    end
+
+    always @(posedge clka) begin
         if (enb) begin
             if (web)
                 BRAM[addrb] <= dinb;

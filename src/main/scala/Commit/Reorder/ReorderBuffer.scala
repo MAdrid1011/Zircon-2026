@@ -5,10 +5,8 @@ import ZirconConfig._
 /** Static instruction state retained until architectural retirement. */
 class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val ftqIdx = UInt(fp.ftqBits.W)
-    val ftqIdxOH = UInt(fp.ftqDepth.W)
     val slot = UInt(fp.slotBits.W)
     val packetEnd = Bool()
-    val pc = UInt(32.W)
     val robIdx = UInt(bp.robWidth.W)
     val destination = new MiddleendCommitDestination(bp)
     val sqIdx = UInt(bp.sqWidth.W)
@@ -18,6 +16,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val systemOp = UInt(5.W)
     val instruction = UInt(32.W)
     val writesExecutionState = Bool()
+    val writesSatp = Bool()
     val fpDirty = Bool()
 
     val complete = Bool()
@@ -29,10 +28,8 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     def enqueue(data: Data): Unit = {
         val incoming = data.asInstanceOf[ROBEntry]
         ftqIdx := incoming.ftqIdx
-        ftqIdxOH := incoming.ftqIdxOH
         slot := incoming.slot
         packetEnd := incoming.packetEnd
-        pc := incoming.pc
         robIdx := incoming.robIdx
         destination := incoming.destination
         sqIdx := incoming.sqIdx
@@ -42,6 +39,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
         systemOp := incoming.systemOp
         instruction := incoming.instruction
         writesExecutionState := incoming.writesExecutionState
+        writesSatp := incoming.writesSatp
         fpDirty := incoming.fpDirty
         complete := incoming.complete
         mispredicted := false.B
@@ -85,7 +83,6 @@ class ReorderBufferIO(
 
     val completion = Input(Vec(cp.completionPorts, Valid(new ROBWrite(addressWidth))))
     val readIdx = Input(Vec(cp.robReadPorts, UInt(addressWidth.W)))
-    val readPc = Output(Vec(cp.robReadPorts, UInt(32.W)))
     val readEntry = Output(Vec(cp.robReadPorts, new ROBEntry(fp, bp)))
 
     val head = Output(Vec(cp.width, Valid(new ROBEntry(fp, bp))))
@@ -95,7 +92,7 @@ class ReorderBufferIO(
     val headData = if (simulationDebug) Some(Output(Vec(cp.width, UInt(32.W)))) else None
 }
 
-/** 48-entry banked ROB with parallel completion and a three-entry head window. */
+/** Banked ROB with parallel completion and a three-entry head window. */
 class ReorderBuffer(
     val fp: FrontendParams = FrontendParams(),
     val bp: BackendParams = BackendParams(),
@@ -116,9 +113,10 @@ class ReorderBuffer(
         cp.robReadPorts,
         cp.completionPorts,
         writePayloadOnFlush = true,
-        registeredDeq = true,
+        registeredDeq = false,
+        exposeDeqIndex = true,
         separateEnqWrite = true,
-        selectDeqAfterRegister = true,
+        selectDeqAfterRegister = false,
     ))
     queue.io.enqWrite.get := io.enqueue.writeValid.asBools
 
@@ -128,11 +126,10 @@ class ReorderBuffer(
         val incoming = io.enqueue.entries(lane)
         val entry = WireDefault(0.U.asTypeOf(new ROBEntry(fp, bp)))
         entry.ftqIdx := incoming.context.ftqIdx
-        entry.ftqIdxOH := UIntToOH(incoming.context.ftqIdx, fp.ftqDepth)
         entry.slot := incoming.context.slot
         entry.packetEnd := incoming.context.packetEnd
-        entry.pc := incoming.context.instruction.pc
-        entry.robIdx := incoming.allocation.robIdx
+        // The physical ROB identity is reconstructed from its bank head/read index.
+        entry.robIdx := 0.U
         entry.destination := incoming.destination
         entry.sqIdx := incoming.allocation.sqIdx
         entry.isStore := incoming.context.instruction.fu === DecodeUnit.Store.U
@@ -151,6 +148,7 @@ class ReorderBuffer(
             csrAddress === CSRAddress.satp.U || csrAddress === CSRAddress.mstatus.U
         entry.writesExecutionState := entry.isSystem && executionCsr &&
             (unconditionalCsrWrite || (conditionalCsrWrite && entry.instruction(19, 15).orR))
+        entry.writesSatp := entry.writesExecutionState && csrAddress === CSRAddress.satp.U
         val fpMultiplyFlags = incoming.context.instruction.fu === DecodeUnit.Multiply.U &&
             incoming.context.instruction.op >= MultiplyOp.FADD
         val fpDivideFlags = incoming.context.instruction.fu === DecodeUnit.Divide.U &&
@@ -202,13 +200,16 @@ class ReorderBuffer(
 
     for (port <- 0 until cp.robReadPorts) {
         queue.io.ridx(port) := CommitIndex.decodeAddress(io.readIdx(port), cp.robEntries, banks)
-        io.readPc(port) := queue.io.rdata(port).pc
         io.readEntry(port) := queue.io.rdata(port)
+        io.readEntry(port).robIdx := io.readIdx(port)
     }
 
     for (lane <- 0 until cp.width) {
         io.head(lane).valid := queue.io.deq(lane).valid
         io.head(lane).bits := queue.io.deq(lane).bits
+        io.head(lane).bits.robIdx := CommitIndex.encode(
+            queue.io.deqIdx.get(lane), cp.robEntries, banks, bp.robWidth, simulationDebug,
+        )
         queue.io.deq(lane).ready := io.pop(lane)
         when(io.pop(lane) && !io.clear) {
             assert(queue.io.deq(lane).valid && queue.io.deq(lane).bits.complete)
@@ -240,7 +241,7 @@ class ReorderBuffer(
             resultMemory.io.wdata(port) := io.completion(port).bits.data
         }
         for (lane <- 0 until cp.width) {
-            resultMemory.io.raddr(lane) := queue.io.deq(lane).bits.robIdx(bankWidth + rowWidth - 1, 0)
+            resultMemory.io.raddr(lane) := io.head(lane).bits.robIdx(bankWidth + rowWidth - 1, 0)
             io.headData.get(lane) := resultMemory.io.rdata(lane)
         }
     }

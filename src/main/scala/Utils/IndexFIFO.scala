@@ -46,6 +46,8 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     rstVal: Option[Seq[T]] = None,
     writePayloadOnFlush: Boolean = false,
     registeredDeq: Boolean = false,
+    externallyGuardedCapacity: Boolean = false,
+    resetPayload: Boolean = true,
 ) extends Module {
     require(n > 0, "IndexFIFO depth must be positive")
     require(rw >= 0 && ww >= 0, "IndexFIFO random port counts must be nonnegative")
@@ -60,8 +62,13 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     private val hasEnqueue = hasMethod("enqueue")
     private val hasWrite = hasMethod("write")
     private val payloadWriteAllowed = if (writePayloadOnFlush) true.B else !io.flush
-    private val q = RegInit(if (isFlst && rstVal.isDefined) VecInit(rstVal.get)
-    else VecInit.fill(n)(0.U.asTypeOf(gen)))
+    // A queue without random reads may omit payload reset when its consumers
+    // use the valid bit. Free-list contents and random-read semantics retain it.
+    private val q = if (isFlst || resetPayload) {
+        RegInit(rstVal.map(VecInit(_)).getOrElse(VecInit.fill(n)(0.U.asTypeOf(gen))))
+    } else {
+        Reg(Vec(n, gen))
+    }
     private val head = RegInit(1.U(n.W))
     private val tail = RegInit(1.U(n.W))
     private val headHigh = RegInit(false.B)
@@ -71,7 +78,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
 
     // Outputs describe the pre-edge state even during flush. This avoids a path
     // from flush back into a caller's commit-valid / redirect decision.
-    io.enq.ready := (if (isFlst) true.B else !full)
+    io.enq.ready := (if (isFlst || externallyGuardedCapacity) true.B else !full)
     io.deq.valid := !empty
     val push = io.enq.fire
     val pushWrite = io.enqWrite && io.enq.ready
@@ -101,9 +108,12 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
         tail := tailNext
         headHigh := headHighNext
         tailHigh := tailHighNext
-        when(push =/= pop) {
-            empty := pop && headNext === tailNext
-            if (!isFlst) full := push && headNext === tailNext
+        when(push && !pop) {
+            empty := false.B
+            if (!isFlst) full := (tailNext & head).orR
+        }.elsewhen(pop && !push) {
+            empty := (headNext & tail).orR
+            if (!isFlst) full := false.B
         }
     }
 
@@ -165,4 +175,10 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     }
 
     assert(!push || pushWrite, "IndexFIFO occupancy cannot advance without writing its payload")
+    if (externallyGuardedCapacity) {
+        when(!io.flush) {
+            assert(!pushWrite || !full || pop,
+                "Externally guarded FIFO wrote a full bank without removing its head")
+        }
+    }
 }

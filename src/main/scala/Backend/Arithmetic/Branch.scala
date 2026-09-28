@@ -45,21 +45,13 @@ object BranchLogic {
 class Branch extends Module {
     val io = IO(new BranchIO)
     val isJalr = io.op === JALR
-    val directTarget = BranchLogic.targetSum(io.pc, io.imm)
-    val indirectTarget = BranchLogic.targetSum(io.src1, io.imm)
-    val rawTarget = Mux(isJalr, indirectTarget, directTarget)
+    val rawTarget = BranchLogic.targetSum(Mux(isJalr, io.src1, io.pc), io.imm)
     val target = Cat(rawTarget(31, 1), rawTarget(0) && !isJalr)
-    // JALR discards target bit 0. Both possible unmasked sums are prepared
-    // from the early prediction and immediate before a forwarded src1 arrives.
-    val expectedEvenSource = io.predOffset - io.imm
-    val expectedOddSource = (io.predOffset | 1.U(32.W)) - io.imm
-    val indirectMatch = !io.predOffset(0) &&
-        (io.src1 === expectedEvenSource || io.src1 === expectedOddSource)
     BranchLogic.resolve(
         io,
         io.src1 === io.src2,
         io.src1 < io.src2,
         target,
-        indirectMatch
+        target === io.predOffset
     )
 }

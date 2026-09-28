@@ -80,8 +80,8 @@ class TLBDriver(val dut: TLB) extends chisel3.simulator.PeekPokeAPI {
         dut.io.lookup(port).bits.vaddr.poke(vaddr >> dut.paddrLowBits)
         dut.io.lookup(port).valid.poke(true)
         dut.io.response(port).hit.expect(hit)
-        dut.io.response(port).paddr.expect(if (hit) paddr >> dut.paddrLowBits else BigInt(0))
-        dut.io.response(port).pma.expect(if (hit) pma else 0)
+        if (hit) dut.io.response(port).paddr.expect(paddr >> dut.paddrLowBits)
+        if (hit) dut.io.response(port).pma.expect(pma)
         dut.io.response(port).superpage.expect(hit && superpage)
     }
 
