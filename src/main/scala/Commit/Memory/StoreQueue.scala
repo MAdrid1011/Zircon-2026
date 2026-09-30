@@ -8,6 +8,7 @@ class CommittedStore extends Bundle {
     val mask = UInt(4.W)
     val size = UInt(2.W)
     val uncache = Bool()
+    val writeCombine = Bool()
 }
 
 class StoreQueueEntry(bp: BackendParams) extends Bundle {
@@ -24,6 +25,7 @@ class StoreQueueEntry(bp: BackendParams) extends Bundle {
     val size = UInt(2.W)
     val exception = UInt(4.W)
     val uncache = Bool()
+    val writeCombine = Bool()
     val atomic = Bool()
     val atomicOp = UInt(5.W)
     val prd = UInt(bp.tagWidth.W)
@@ -37,6 +39,7 @@ class PendingAtomic(bp: BackendParams) extends Bundle {
     val data = UInt(32.W)
     val op = UInt(5.W)
     val uncache = Bool()
+    val writeCombine = Bool()
     val exception = UInt(4.W)
 }
 
@@ -195,6 +198,7 @@ class StoreQueue(
         addressEntry.size := io.address.bits.size
         addressEntry.exception := io.address.bits.exception
         addressEntry.uncache := io.address.bits.uncache
+        addressEntry.writeCombine := io.address.bits.writeCombine
         when(addressEntry.dataValid) {
             addressEntry.data := alignStoreData(addressEntry.data, io.address.bits.paddr(1, 0))
         }
@@ -291,6 +295,7 @@ class StoreQueue(
         pendingAtomic.data := headEntry.data
         pendingAtomic.op := headEntry.atomicOp
         pendingAtomic.uncache := headEntry.uncache
+        pendingAtomic.writeCombine := false.B
         pendingAtomic.exception := headEntry.exception
     }.elsewhen(pendingAtomicIdentity =/= io.atomic.sqIdx.bits) {
         pendingAtomicValid := false.B
@@ -306,6 +311,7 @@ class StoreQueue(
     io.drain.bits.mask := headEntry.mask
     io.drain.bits.size := headEntry.size
     io.drain.bits.uncache := headEntry.uncache
+    io.drain.bits.writeCombine := headEntry.writeCombine
 
     val atomicRetire = VecInit(io.commit.map { event =>
         val entry = storage(slot(narrow(event.bits)))

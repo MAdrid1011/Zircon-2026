@@ -8,8 +8,9 @@ python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target
 
 默认输出位于 `build/eda/nangate45/`，包含 BSG 配置 RTL、SRAM 绑定、标准单元网表、
 `results.json` 和时序报告。`--target-ns` 指定 Yosys/ABC 映射周期；`--sta-target-ns`
-指定纯逻辑 STA 周期，仅与 `--logic-only` 同用。不带 `--logic-only` 时还会运行
-OpenROAD 布局估算与修复。
+指定纯逻辑 STA 周期，仅与 `--logic-only` 同用。纯逻辑 STA 在零互连寄生条件下使用
+OpenROAD Resizer 执行标准单元 upsizing 和等价输入脚交换，不进行布局、缓冲插入或门复制。
+不带 `--logic-only` 时还会运行 OpenROAD 布局估算与修复。
 
 `--output DIR` 指定输出目录，`--yosys PATH` 指定 Yosys，`--skip-elaboration` 复用该目录
 已有 RTL。`--sweep` 评估平台配置中的周期集合。脚本检查库文件摘要、综合结构和 BSG

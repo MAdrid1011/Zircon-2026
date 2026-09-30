@@ -129,6 +129,7 @@ class AtomicUnit(
     io.store.request.bits.mask := 15.U
     io.store.request.bits.size := 2.U
     io.store.request.bits.uncache := request.uncache
+    io.store.request.bits.writeCombine := false.B
     io.store.response.ready := state === storeWait
 
     when(io.committedStore.valid && io.committedStore.bits(33, 2) === reservationAddress) {

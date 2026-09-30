@@ -324,6 +324,53 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "an unlocked delayed-failure candidate creates replay without waking consumers" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 1)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.enq.valid.poke(3)
+            packageEntry(dut.io.enq.candidates(0), 20, DecodeUnit.ALU)
+            packageEntry(
+                dut.io.enq.candidates(1),
+                21,
+                DecodeUnit.ALU,
+                sourceTag = Some(6),
+                sourceReady = true,
+                sourceSpecMask = 1,
+            )
+            dut.io.enq.candidates(0).rdValid.poke(true)
+            dut.io.enq.candidates(0).prd.poke(8)
+            dut.io.enq.candidates(1).rdValid.poke(true)
+            dut.io.enq.candidates(1).prd.poke(9)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+
+            dut.io.issue.ready.poke(true)
+            dut.io.speculation.failedMask.poke(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(20)
+            dut.clock.step()
+
+            dut.io.speculation.failedMask.poke(0)
+            dut.io.issue.bits.robIdx.expect(21)
+            // The execution boundary consumes and kills this attempt while the
+            // queue captures its replay checkpoint. It must not wake dependents.
+            dut.io.issue.valid.expect(true)
+            dut.io.issueWakeup.get.valid.expect(false)
+            dut.clock.step()
+            dut.io.occupancy.expect(0)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.wakeup(0).prd.poke(6)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(21)
+            dut.io.issueWakeup.get.valid.expect(true)
+            dut.io.issueWakeup.get.prd.expect(9)
+        }
+    }
+
     "commit flush clears every queued instruction even with a coincident enqueue" in {
         val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
         simulate(new IssueQueue(backend, q)) { dut =>
@@ -444,6 +491,68 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.wakeup(0).prd.poke(0)
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(43)
+        }
+    }
+
+    "MixArith does not issue a stale-ready source on a same-cycle speculative rewakeup" in {
+        val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>
+            initialize(dut)
+            enqueue(dut, Seq((44, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt, Some(7), true)))
+            dut.io.issue.valid.expect(true)
+
+            dut.io.issue.ready.poke(true)
+            dut.io.directWakeup.get(0).valid.poke(true)
+            dut.io.directWakeup.get(0).prd.poke(7)
+            dut.io.directWakeup.get(0).specMask.poke(1)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
+            dut.io.directWakeup.get(0).valid.poke(false)
+            dut.io.directWakeup.get(0).prd.poke(0)
+            dut.io.directWakeup.get(0).specMask.poke(0)
+            dut.io.occupancy.expect(1)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.speculation.failedMask.poke(1)
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.failedMask.poke(0)
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.wakeup(0).prd.poke(7)
+            dut.clock.step()
+            dut.io.wakeup(0).prd.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(44)
+        }
+    }
+
+    "a stalled MixArith selection unlocks when its ready source becomes speculative" in {
+        val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>
+            initialize(dut)
+            enqueue(dut, Seq((45, DecodeUnit.Multiply, MultiplyOp.MUL.litValue.toInt, Some(8), true)))
+            dut.io.issue.valid.expect(true)
+            dut.clock.step()
+
+            dut.io.issue.ready.poke(true)
+            dut.io.directWakeup.get(0).valid.poke(true)
+            dut.io.directWakeup.get(0).prd.poke(8)
+            dut.io.directWakeup.get(0).specMask.poke(2)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
+            dut.io.directWakeup.get(0).valid.poke(false)
+            dut.io.directWakeup.get(0).prd.poke(0)
+            dut.io.directWakeup.get(0).specMask.poke(0)
+            dut.io.occupancy.expect(1)
+            dut.io.issue.valid.expect(false)
+
+            dut.io.speculation.resolvedMask.poke(2)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(45)
         }
     }
 

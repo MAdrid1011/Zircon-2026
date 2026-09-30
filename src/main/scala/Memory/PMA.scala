@@ -5,11 +5,17 @@ object PMA {
     private val mainMemoryMask = "h3e0000000".U(34.W)
     private val deviceBase = "ha0000000".U(34.W)
     private val deviceMask = "h3f0000000".U(34.W)
+    // Dedicated posted-write window, outside the UART/CLINT subranges.
+    private val writeCombineBase = "ha2000000".U(34.W)
+    private val writeCombineLimit = "ha3000000".U(34.W)
 
     def attribute(paddr: UInt): UInt = {
         val mainMemory = (paddr & mainMemoryMask) === mainMemoryBase
         val device = (paddr & deviceMask) === deviceBase
-        Mux(mainMemory, PMAAttribute.cached, Mux(device, PMAAttribute.device, PMAAttribute.invalid))
+        val writeCombine = paddr >= writeCombineBase && paddr < writeCombineLimit
+        Mux(mainMemory, PMAAttribute.cached,
+            Mux(writeCombine, PMAAttribute.uncached,
+                Mux(device, PMAAttribute.device, PMAAttribute.invalid)))
     }
 
     def readable(paddr: UInt): Bool = attribute(paddr) =/= PMAAttribute.invalid

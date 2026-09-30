@@ -234,7 +234,16 @@ class ReorderBuffer(
         }
         for (lane <- 0 until cp.width) {
             resultMemory.io.raddr(lane) := io.head(lane).bits.robIdx(bankWidth + rowWidth - 1, 0)
-            io.headData.get(lane) := resultMemory.io.rdata(lane)
+            val completionHit = io.completion.map { completion =>
+                completion.valid && completion.bits.complete && !io.clear &&
+                    completion.bits.address === io.head(lane).bits.robIdx(bankWidth + rowWidth - 1, 0)
+            }
+            assert(PopCount(completionHit) <= 1.U, "ROB debug result cannot receive multiple completions")
+            io.headData.get(lane) := Mux(
+                VecInit(completionHit).asUInt.orR,
+                Mux1H(completionHit, io.completion.map(_.bits.data)),
+                resultMemory.io.rdata(lane),
+            )
         }
     }
 }

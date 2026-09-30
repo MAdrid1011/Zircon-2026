@@ -52,13 +52,20 @@ def _violating_endpoint_count(path):
     )
 
 
+def _last_log_count(text, pattern):
+    values = re.findall(pattern, text)
+    return int(values[-1]) if values else 0
+
+
 def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IMAGE,
         top="ZirconCore", platform_dir=PLATFORM):
     netlist = Path(netlist).resolve()
     output_dir = Path(output_dir).resolve()
     platform_dir = Path(platform_dir).resolve()
     liberty_files = [Path(path).resolve() for path in liberty_files]
-    required = [netlist, *liberty_files]
+    metadata = json.loads((platform_dir / "platform.json").read_text())
+    rc_script = platform_dir / metadata["physical"]["rc_script"]["file"]
+    required = [netlist, rc_script, *liberty_files]
     missing = [path for path in required if not path.is_file()]
     if missing:
         raise RuntimeError("Missing logic-only STA inputs: " + ", ".join(map(str, missing)))
@@ -80,7 +87,6 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
         path = _container_path
         identity = image
 
-    metadata = json.loads((platform_dir / "platform.json").read_text())
     constraints = metadata["constraints"]
     lef_files = [
         platform_dir / item["file"]
@@ -100,6 +106,7 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
         "OUTPUT_DELAY_NS": f"{constraints['output_delay_ns']:g}",
         "LEF_FILES": _tcl_list(path(item) for item in lef_files),
         "LIBERTY_FILES": _tcl_list(path(item) for item in liberty_files),
+        "RC_SCRIPT": path(rc_script),
         "OUTPUT_DIR": path(output_dir),
     }
     script_text = TEMPLATE.read_text()
@@ -130,9 +137,11 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
         tail = log.read_text(errors="replace").splitlines()[-80:]
         raise RuntimeError("Logic-only STA failed:\n" + "\n".join(tail))
     elapsed = time.monotonic() - started
+    log_text = log.read_text(errors="replace")
     wns_ns = _scalar(output_dir / "logic-only-wns.rpt")
     worst_paths = output_dir / "logic-only-worst-paths.rpt"
     violating_endpoints = output_dir / "logic-only-violating-endpoints.rpt"
+    sized_netlist = output_dir / "ZirconCore-logic-only-sized.v"
     summary = {
         "mode": "logic-only",
         "top": top,
@@ -146,8 +155,29 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
         "worst_data_arrival_ns": _worst_data_arrival(worst_paths),
         "violating_endpoint_count": _violating_endpoint_count(violating_endpoints),
         "target_met": wns_ns >= 0.0,
+        "sizing": {
+            "method": "OpenROAD setup repair with cell upsizing and equivalent pin swaps",
+            "pre_wns_ns": _scalar(output_dir / "logic-only-pre-size-wns.rpt"),
+            "pre_tns_ns": _scalar(output_dir / "logic-only-pre-size-tns.rpt"),
+            "pre_violating_endpoint_count": _violating_endpoint_count(
+                output_dir / "logic-only-pre-size-violating-endpoints.rpt"
+            ),
+            "resized_instance_count": _last_log_count(
+                log_text, r"Resized (\d+) instances"
+            ),
+            "pin_swap_count": _last_log_count(log_text, r"Swapped pins on (\d+) instances"),
+            "buffering": False,
+            "gate_cloning": False,
+            "placement": False,
+        },
         "reports": {
             "log": str(log),
+            "sized_netlist": str(sized_netlist),
+            "pre_size_wns": str(output_dir / "logic-only-pre-size-wns.rpt"),
+            "pre_size_tns": str(output_dir / "logic-only-pre-size-tns.rpt"),
+            "pre_size_violating_endpoints": str(
+                output_dir / "logic-only-pre-size-violating-endpoints.rpt"
+            ),
             "wns": str(output_dir / "logic-only-wns.rpt"),
             "tns": str(output_dir / "logic-only-tns.rpt"),
             "worst_paths": str(worst_paths),
@@ -166,7 +196,7 @@ def run(netlist, target_ns, output_dir, liberty_files, image=DEFAULT_OPENROAD_IM
     audit_path = output_dir / "logic-only-path-audit.json"
     audit_result = audit(
         output_dir / "logic-only-violating-paths-full.rpt",
-        netlist,
+        sized_netlist,
         json.loads(Path(summary["path_clusters"]["json"]).read_text()),
     )
     audit_path.write_text(json.dumps(audit_result, indent=2) + "\n")

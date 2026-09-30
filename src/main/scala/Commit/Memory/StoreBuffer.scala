@@ -71,6 +71,7 @@ class StoreBuffer(
     io.store.request.bits.mask := request.mask
     io.store.request.bits.size := request.size
     io.store.request.bits.uncache := request.uncache
+    io.store.request.bits.writeCombine := request.writeCombine
     io.store.response.ready := outstanding
     when(io.store.request.fire =/= responseFire) {
         outstanding := io.store.request.fire

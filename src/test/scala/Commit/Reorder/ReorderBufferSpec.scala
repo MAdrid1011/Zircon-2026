@@ -155,6 +155,26 @@ class ReorderBufferSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "simulation head data observes a completion before the result RAM write edge" in {
+        simulate(new ReorderBuffer(dispatchWidth = 3, simulationDebug = true)) { dut =>
+            initialize(dut)
+            val identity = dut.io.allocation(0).peek().litValue
+            dut.io.enqueue.valid.poke(1)
+            dut.io.enqueue.writeValid.poke(1)
+            enqueueLane(dut, 0, pc = 0x1800, identity)
+            dut.clock.step()
+            dut.io.enqueue.valid.poke(0)
+            dut.io.enqueue.writeValid.poke(0)
+
+            complete(dut, 0, identity)
+            dut.io.completion(0).bits.data.poke(0x12345678L)
+            dut.io.headData.get(0).expect(0x12345678L)
+            dut.clock.step()
+            dut.io.completion(0).valid.poke(false)
+            dut.io.headData.get(0).expect(0x12345678L)
+        }
+    }
+
     "clear resets allocation generation after discarding speculative entries" in {
         simulate(new ReorderBuffer(dispatchWidth = 2)) { dut =>
             initialize(dut)
