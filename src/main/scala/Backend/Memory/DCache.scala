@@ -189,6 +189,12 @@ class DCache(
     // ==================== Miss and store state ====================
     val missUnit = Module(new DCacheMissUnit(p))
     missUnit.io.flush := io.flush
+    val writeCombineQueue = Module(new WriteCombineQueue)
+    writeCombineQueue.io.enq.bits := io.store.req.bits
+    // Strongly ordered traffic closes the open burst. Ordinary gaps retain it
+    // briefly so StoreBuffer's one-cycle response turn-around does not split a
+    // sequential stream; WriteCombineQueue's age timeout handles Fence/idle.
+    writeCombineQueue.io.seal := io.store.req.valid && !io.store.req.bits.writeCombine
 
     val Seq(
         storeIdle,
@@ -204,16 +210,31 @@ class DCache(
     val storeLookupResult = Reg(new DCacheStoreLookupResult)
     val storeResponse = Reg(new DStoreResponse)
 
-    val storeResponseFire = io.store.rsp.fire
+    // Posted stores complete at this interface as soon as they enter the
+    // write-combine queue. The lower AXI response only releases that queue;
+    // each original Store still receives exactly one immediate completion.
+    val postedResponsePending = RegInit(false.B)
+    val postedStoreRequest = io.store.req.bits.writeCombine && io.store.req.bits.uncache
     val storeCanReplaceResponse = storeState === storeRespond && io.store.rsp.ready
-    io.store.req.ready := (storeState === storeIdle || storeCanReplaceResponse) &&
-        !recovering && !io.maintenance.request
-    io.store.rsp.valid := storeState === storeRespond
-    io.store.rsp.bits := storeResponse
+    val normalStoreReady = (storeState === storeIdle || storeCanReplaceResponse) &&
+        writeCombineQueue.io.empty && !postedResponsePending && !recovering && !io.maintenance.request
+    io.store.req.ready := Mux(
+        postedStoreRequest,
+        writeCombineQueue.io.enq.ready && !postedResponsePending && !recovering && !io.maintenance.request,
+        normalStoreReady,
+    )
+    writeCombineQueue.io.enq.valid := io.store.req.valid && postedStoreRequest
+    io.store.rsp.valid := storeState === storeRespond || postedResponsePending
+    io.store.rsp.bits := Mux(
+        postedResponsePending,
+        0.U.asTypeOf(new DStoreResponse),
+        storeResponse,
+    )
+    val storeResponseFire = io.store.rsp.fire
 
-    val storeDirectLookup = io.store.req.fire && !missUnit.io.busy
+    val storeDirectLookup = io.store.req.fire && !postedStoreRequest && !missUnit.io.busy
     val storeLookupIssue = storeDirectLookup || (storeState === storeBuffered && !missUnit.io.busy)
-    val storeDirectAddress = io.store.req.valid &&
+    val storeDirectAddress = io.store.req.valid && !postedStoreRequest &&
         (storeState === storeIdle || storeCanReplaceResponse) &&
         !io.maintenance.request && !missUnit.io.busy
     val storeLookupAddressOwner = storeDirectAddress ||
@@ -424,6 +445,7 @@ class DCache(
         missUnit.io.allocate.bits.store := true.B
         missUnit.io.allocate.bits.paddr := storeRequest.paddr
         missUnit.io.allocate.bits.uncache := storeRequest.uncache
+        missUnit.io.allocate.bits.writeCombine := storeRequest.writeCombine
         missUnit.io.allocate.bits.ioAuthorized := true.B
         missUnit.io.allocate.bits.way := Mux(storeRequest.uncache, 0.U, storeLookupResult.victimWay)
         missUnit.io.allocate.bits.storeData := storeRequest.data
@@ -674,6 +696,12 @@ class DCache(
                 PMAAttribute.cached,
             translation.io.response(2).pma =/= PMAAttribute.cached
         )
+        io.storeTranslation.get.response.writeCombine := Mux(
+            storeDirect,
+            PMA.attribute(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) ===
+                PMAAttribute.uncached,
+            translation.io.response(2).pma === PMAAttribute.uncached
+        ) && !io.storeTranslation.get.request.bits.atomic
         io.storeTranslation.get.response.exception := Mux(
             io.storeTranslation.get.request.bits.exception =/= 0.U,
             io.storeTranslation.get.request.bits.exception,
@@ -809,9 +837,15 @@ class DCache(
     }
 
     // ==================== Store pipeline ====================
-    when(io.store.req.fire) {
+    when(io.store.req.fire && !postedStoreRequest) {
         storeRequest := io.store.req.bits
         storeState := Mux(missUnit.io.busy, storeBuffered, storeLookup)
+    }
+    when(io.store.req.fire && postedStoreRequest) {
+        postedResponsePending := true.B
+    }
+    when(storeResponseFire && postedResponsePending) {
+        postedResponsePending := io.store.req.fire && postedStoreRequest
     }
     when(storeLookupIssue) {
         storeState := storeLookup
@@ -842,18 +876,50 @@ class DCache(
         storeResponse := missUnit.io.complete.bits.storeResponse
         storeState := storeRespond
     }
-    when(storeResponseFire) {
-        storeState := Mux(io.store.req.fire, Mux(missUnit.io.busy, storeBuffered, storeLookup), storeIdle)
+    when(storeResponseFire && !postedResponsePending) {
+        // A posted request may be accepted in the same cycle as a normal
+        // response, but it belongs exclusively to WriteCombineQueue and must
+        // never restart the ordinary store state machine with stale payload.
+        val nextNormalStore = io.store.req.fire && !postedStoreRequest
+        storeState := Mux(nextNormalStore, Mux(missUnit.io.busy, storeBuffered, storeLookup), storeIdle)
     }
 
     // ==================== Lower-memory transaction ====================
-    io.l2.req.valid := Mux(maintenanceActive, maintenanceRequest.valid, missUnit.io.memory.req.valid)
-    io.l2.req.bits := Mux(maintenanceActive, maintenanceRequest.bits, missUnit.io.memory.req.bits)
+    val writeCombineOut = writeCombineQueue.io.out.valid
+    val missRequestEligible = missUnit.io.memory.req.valid && !writeCombineQueue.io.busy
+    val lowerOwnerWriteCombine = RegInit(false.B)
+    io.l2.req.valid := Mux(
+        maintenanceActive,
+        maintenanceRequest.valid,
+        missRequestEligible || writeCombineOut,
+    )
+    io.l2.req.bits := Mux(
+        maintenanceActive,
+        maintenanceRequest.bits,
+        Mux(writeCombineOut, writeCombineQueue.io.out.bits, missUnit.io.memory.req.bits),
+    )
     maintenanceRequest.ready := maintenanceActive && io.l2.req.ready
-    missUnit.io.memory.req.ready := !maintenanceActive && io.l2.req.ready
-    missUnit.io.memory.rsp.valid := !maintenanceActive && io.l2.rsp.valid
+    // The L2 response channel has one owner. Once a posted burst has been
+    // accepted, keep MissUnit from starting a competing transaction until the
+    // burst response clears lowerOwnerWriteCombine.
+    missUnit.io.memory.req.ready := !maintenanceActive &&
+        !writeCombineQueue.io.busy && io.l2.req.ready
+    writeCombineQueue.io.out.ready := !maintenanceActive && io.l2.req.ready
+    when(io.l2.req.fire && !maintenanceActive) {
+        lowerOwnerWriteCombine := writeCombineOut
+    }
+    when(io.l2.rsp.fire && lowerOwnerWriteCombine) {
+        lowerOwnerWriteCombine := false.B
+    }
+    missUnit.io.memory.rsp.valid := !maintenanceActive && !lowerOwnerWriteCombine && io.l2.rsp.valid
     missUnit.io.memory.rsp.bits := io.l2.rsp.bits
-    io.l2.rsp.ready := Mux(maintenanceActive, maintenanceState(4), missUnit.io.memory.rsp.ready)
+    writeCombineQueue.io.rsp.valid := !maintenanceActive && lowerOwnerWriteCombine && io.l2.rsp.valid
+    writeCombineQueue.io.rsp.bits := io.l2.rsp.bits
+    io.l2.rsp.ready := Mux(
+        maintenanceActive,
+        maintenanceState(4),
+        Mux(lowerOwnerWriteCombine, writeCombineQueue.io.rsp.ready, missUnit.io.memory.rsp.ready),
+    )
 
     // ==================== Refill and array connections ====================
     missUnit.io.install.ready := !io.flush
@@ -991,7 +1057,7 @@ class DCache(
         }
     }
 
-    io.idle := pipelineIdle && maintenanceState(0)
+    io.idle := pipelineIdle && maintenanceState(0) && writeCombineQueue.io.empty && !postedResponsePending
 
     assert(!(installFire && storeArrayWrite), "DCache: refill and committed store write overlap")
     for (lane <- 0 until 2) {
@@ -1084,6 +1150,9 @@ class DCache(
         io.debug.get.executeRelease := executeRelease(1)
         io.debug.get.missBusy := missUnit.io.busy
         io.debug.get.storeState := storeState
+        io.debug.get.postedResponsePending := postedResponsePending
+        io.debug.get.writeCombineBusy := writeCombineQueue.io.busy
+        io.debug.get.lowerOwnerWriteCombine := lowerOwnerWriteCombine
         io.debug.get.flush := io.flush
     }
 }

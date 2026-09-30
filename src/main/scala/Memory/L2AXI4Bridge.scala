@@ -49,6 +49,9 @@ class L2BridgeRequest(p: L2CacheParams) extends Bundle {
     val paddr = UInt(34.W)
     val write = Bool()
     val uncache = Bool()
+    val writeCombine = Bool()
+    val burstBeats = UInt(4.W)
+    val burstMask = UInt(p.lineBytes.W)
     val size = UInt(2.W)
     val data = UInt(p.lineBits.W)
     val mask = UInt(8.W)
@@ -80,10 +83,18 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
     val readBeats = Reg(Vec(lineBeats, UInt(64.W)))
     val responseError = RegInit(false.B)
 
-    val lastBeat = Mux(request.uncache, 0.U(beatBits.W), (lineBeats - 1).U(beatBits.W))
+    val lastBeat = Mux(
+        request.writeCombine,
+        (request.burstBeats - 1.U)(beatBits - 1, 0),
+        Mux(request.uncache, 0.U(beatBits.W), (lineBeats - 1).U(beatBits.W)),
+    )
     val requestBeats = request.data.asTypeOf(Vec(lineBeats, UInt(64.W)))
-    val addressSize = Mux(request.uncache, request.size.pad(3), 3.U(3.W))
-    val addressLength = Mux(request.uncache, 0.U(8.W), (lineBeats - 1).U(8.W))
+    val addressSize = Mux(request.writeCombine, 3.U(3.W), Mux(request.uncache, request.size.pad(3), 3.U(3.W)))
+    val addressLength = Mux(
+        request.writeCombine,
+        request.burstBeats - 1.U,
+        Mux(request.uncache, 0.U(8.W), (lineBeats - 1).U(8.W)),
+    )
     val addressCache = Mux(request.uncache, 0.U(4.W), "b1111".U(4.W))
 
     io.memory.req.ready := state === idle
@@ -116,8 +127,9 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
     io.axi.w.valid := state === writeData
     val uncachedData = request.data(63, 0)
     val uncachedStrobe = request.mask
-    io.axi.w.bits.data := Mux(request.uncache, uncachedData, requestBeats(beat))
-    io.axi.w.bits.strb := Mux(request.uncache, uncachedStrobe, "b11111111".U)
+    val burstMasks = request.burstMask.asTypeOf(Vec(lineBeats, UInt(8.W)))
+    io.axi.w.bits.data := Mux(request.writeCombine, requestBeats(beat), Mux(request.uncache, uncachedData, requestBeats(beat)))
+    io.axi.w.bits.strb := Mux(request.writeCombine, burstMasks(beat), Mux(request.uncache, uncachedStrobe, "b11111111".U))
     io.axi.w.bits.last := beat === lastBeat
 
     io.axi.b.ready := state === writeResponse
@@ -151,10 +163,17 @@ class L2AXI4Bridge(val p: L2CacheParams = L2CacheParams()) extends Module {
                 )
             }
         }
+        when(io.memory.req.bits.writeCombine) {
+            assert(io.memory.req.bits.burstBeats > 0.U && io.memory.req.bits.burstBeats <= lineBeats.U)
+            assert(io.memory.req.bits.paddr(11, 0) + (io.memory.req.bits.burstBeats << 3) <= 4096.U)
+        }
 
         request.paddr := io.memory.req.bits.paddr
         request.write := io.memory.req.bits.write
         request.uncache := io.memory.req.bits.uncache
+        request.writeCombine := io.memory.req.bits.writeCombine
+        request.burstBeats := io.memory.req.bits.burstBeats
+        request.burstMask := io.memory.req.bits.burstMask
         request.size := io.memory.req.bits.size
         request.data := io.memory.req.bits.data
         request.mask := io.memory.req.bits.mask

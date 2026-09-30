@@ -34,6 +34,8 @@ class PMASpec extends AnyFreeSpec with ChiselSim {
             expect(BigInt("80000000", 16), attribute = 0, executable = true)
             expect(BigInt("9fffffff", 16), attribute = 0, executable = true)
             expect(BigInt("a0000000", 16), attribute = 2, executable = false)
+            expect(BigInt("a2000000", 16), attribute = 1, executable = false)
+            expect(BigInt("a2ffffff", 16), attribute = 1, executable = false)
             expect(BigInt("affff000", 16), attribute = 2, executable = false)
             expect(BigInt("afffffff", 16), attribute = 2, executable = false)
             expect(BigInt("00000000", 16), attribute = 3, executable = false)

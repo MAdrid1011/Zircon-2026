@@ -15,6 +15,9 @@ class L2DataStageRequest(p: L2CacheParams) extends Bundle {
     val paddr = UInt(34.W)
     val write = Bool()
     val uncache = Bool()
+    val writeCombine = Bool()
+    val burstBeats = UInt(4.W)
+    val burstMask = UInt(p.lineBytes.W)
     val size = UInt(2.W)
     val data = UInt(p.lineBits.W)
     val mask = UInt(4.W)
@@ -82,6 +85,9 @@ class L2Cache(
     val enginePaddr = Reg(UInt(34.W))
     val engineWrite = Reg(Bool())
     val engineUncache = Reg(Bool())
+    val engineWriteCombine = Reg(Bool())
+    val engineBurstBeats = Reg(UInt(4.W))
+    val engineBurstMask = Reg(UInt(p.lineBytes.W))
     val engineSize = Reg(UInt(2.W))
     val engineMask = Reg(UInt(8.W))
     val engineVictimValid = Reg(Bool())
@@ -253,6 +259,9 @@ class L2Cache(
         dInput.paddr := io.dcache.req.bits.paddr
         dInput.write := io.dcache.req.bits.write
         dInput.uncache := io.dcache.req.bits.uncache
+        dInput.writeCombine := io.dcache.req.bits.writeCombine
+        dInput.burstBeats := io.dcache.req.bits.burstBeats
+        dInput.burstMask := io.dcache.req.bits.burstMask
         dInput.size := io.dcache.req.bits.size
         dInput.data := io.dcache.req.bits.data
         dInput.mask := io.dcache.req.bits.mask
@@ -389,6 +398,9 @@ class L2Cache(
     )
     val selectedWrite = !selectInstructionVictim && !selectI && dS3.write
     val selectedUncache = !selectInstructionVictim && Mux(selectI, iS3.uncache, dS3.uncache)
+    val selectedWriteCombine = !selectInstructionVictim && !selectI && dS3.writeCombine
+    val selectedBurstBeats = Mux(selectInstructionVictim || selectI, 0.U(4.W), dS3.burstBeats)
+    val selectedBurstMask = Mux(selectInstructionVictim || selectI, 0.U(p.lineBytes.W), dS3.burstMask)
     val selectedSize = Mux(selectInstructionVictim || selectI, 2.U, dS3.size)
     val selectedMask = Mux(
         selectInstructionVictim || selectI,
@@ -431,6 +443,9 @@ class L2Cache(
         enginePaddr := selectedPaddr
         engineWrite := selectedWrite
         engineUncache := selectedUncache
+        engineWriteCombine := selectedWriteCombine
+        engineBurstBeats := selectedBurstBeats
+        engineBurstMask := selectedBurstMask
         engineSize := selectedSize
         engineMask := selectedMask
         engineVictimValid := selectedVictimValid
@@ -487,6 +502,9 @@ class L2Cache(
     )
     io.memory.req.bits.write := Mux(engineState === engineWritebackSend, true.B, engineWrite)
     io.memory.req.bits.uncache := engineState =/= engineWritebackSend && (engineUncache || enginePtw)
+    io.memory.req.bits.writeCombine := engineState =/= engineWritebackSend && engineWriteCombine
+    io.memory.req.bits.burstBeats := Mux(engineState === engineWritebackSend, 0.U, engineBurstBeats)
+    io.memory.req.bits.burstMask := Mux(engineState === engineWritebackSend, 0.U, engineBurstMask)
     io.memory.req.bits.size := Mux(engineState === engineWritebackSend, 2.U, engineSize)
     // The D-side S3 entry cannot advance until this engine completes its
     // response, so its request data remains stable across lower-memory stalls.

@@ -330,6 +330,7 @@ class LoadPipeline(
         val translationReady = WireDefault(true.B)
         val translatedPaddr = WireDefault(Cat(0.U(2.W), addressVaddr))
         val translatedUncache = WireDefault(addressItem.uncache)
+        val translatedWriteCombine = WireDefault(false.B)
         val translatedException = WireDefault(0.U(4.W))
         if (tlbEnabled) {
             val translation = io.cache.storeTranslation.get
@@ -344,6 +345,7 @@ class LoadPipeline(
             translationReady := !translation.response.miss
             translatedPaddr := translation.response.paddr
             translatedUncache := translation.response.uncache
+            translatedWriteCombine := translation.response.writeCombine
             translatedException := translation.response.exception
         }
         val resolvedAddressReady = !resolvedAddressValid || addr.ready
@@ -373,6 +375,7 @@ class LoadPipeline(
             Mux(misaligned, Mux(lrAddress, 4.U, 6.U), translatedException)
         )
         nextResolvedAddress.uncache := translatedUncache
+        nextResolvedAddress.writeCombine := translatedWriteCombine
 
         addr.valid := resolvedAddressValid && !io.cmt.flush
         addr.bits := resolvedAddress

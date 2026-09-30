@@ -36,6 +36,8 @@ class DStoreTranslationRequest extends Bundle {
 class DStoreTranslationResponse extends Bundle {
     val paddr = UInt(34.W)
     val uncache = Bool()
+    // Uncached memory windows may combine committed word stores; device stores may not.
+    val writeCombine = Bool()
     val exception = UInt(4.W)
     val miss = Bool()
 }
@@ -68,6 +70,7 @@ class DStoreRequest extends Bundle {
     val mask = UInt(4.W)
     val size = UInt(2.W)
     val uncache = Bool()
+    val writeCombine = Bool()
 }
 
 class DStoreResponse extends Bundle {
@@ -92,6 +95,9 @@ class DMemoryRequest extends Bundle {
     val paddr = UInt(34.W)
     val write = Bool()
     val uncache = Bool()
+    val writeCombine = Bool()
+    val burstBeats = UInt(4.W)
+    val burstMask = UInt(64.W)
     val size = UInt(2.W)
     val data = UInt(l1LineBits.W)
     val mask = UInt(4.W)
@@ -168,6 +174,9 @@ class DCacheDebugIO extends Bundle {
     val executeRelease = Bool()
     val missBusy = Bool()
     val storeState = UInt(3.W)
+    val postedResponsePending = Bool()
+    val writeCombineBusy = Bool()
+    val lowerOwnerWriteCombine = Bool()
     val flush = Bool()
 }
 

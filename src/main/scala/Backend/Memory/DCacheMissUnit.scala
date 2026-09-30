@@ -6,6 +6,7 @@ import ZirconUtil.InheritFields
 
 class DCacheMissEntry(p: DCacheParams) extends DLoadRequest(p) {
     val store = Bool()
+    val writeCombine = Bool()
     val lane = Bool()
     val way = UInt(l1Way.W)
     val forwardData = UInt(32.W)

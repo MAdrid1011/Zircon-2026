@@ -20,6 +20,7 @@ class StoreAddressResult(p: LoadPipelineParams) extends Bundle {
     val mask = UInt(4.W)
     val exception = UInt(4.W)
     val uncache = Bool()
+    val writeCombine = Bool()
 }
 
 class StoreDataResult(p: LoadPipelineParams) extends Bundle {

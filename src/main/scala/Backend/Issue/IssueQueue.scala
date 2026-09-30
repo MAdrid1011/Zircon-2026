@@ -290,6 +290,37 @@ class IssueQueue(
         if (usedByProfile) !item.sourceValid(source) || item.sourceReady(source) else true.B
     }.reduce(_ && _)
 
+    /** A ready source is re-tagged by an unresolved or failed wakeup this cycle. */
+    private def losesReadyOnWakeup(item: BackendPackage): Bool = {
+        val unresolvedOrFailed = ~maintenanceResolvedMask |
+            maintenanceFailedMask | io.speculation.failedMask
+        val losses = usedSources.map { source =>
+            val ordinaryLosses = io.wakeup.map { wakeup =>
+                wakeup.prd =/= 0.U && wakeup.prd === item.prs(source) &&
+                    (wakeup.specMask & unresolvedOrFailed).orR
+            }
+            val directLosses = io.directWakeup.toSeq.flatten.map { wakeup =>
+                wakeup.valid && wakeup.prd =/= 0.U && wakeup.prd === item.prs(source) &&
+                    (wakeup.specMask & unresolvedOrFailed).orR
+            }
+            item.sourceValid(source) && item.sourceReady(source) &&
+                balancedBoolOr(ordinaryLosses ++ directLosses)
+        }
+        balancedBoolOr(losses)
+    }
+
+    // A replayed producer may publish a new speculative wakeup for a source that
+    // was ready from an older attempt. Preserve the old selection depth, but do
+    // not let that stale ready bit issue while updateReady installs the new token.
+    val awakened = Wire(Vec(q.entries, new IQEntry(p)))
+    for (position <- 0 until q.entries) {
+        awakened(position).item := updateReady(entries(position).item)
+        awakened(position).isSystem := entries(position).isSystem
+        awakened(position).speculative := speculationMask(awakened(position).item).orR
+        awakened(position).issued := entries(position).issued
+        awakened(position).csrAuthorized := entries(position).csrAuthorized
+    }
+
     val updatedReplay = Wire(Vec(replayDepth, new IQEntry(p)))
     val replayFree = Wire(Vec(replayDepth, Bool()))
     val replayCandidates = Wire(Vec(replayDepth, Bool()))
@@ -354,8 +385,9 @@ class IssueQueue(
             case IssueQueueProfile.Load | IssueQueueProfile.LoadStoreAddress => !entries(position).issued
             case _ => true.B
         }
+        val losesReadiness = if (waitsForSpeculationResolution) losesReadyOnWakeup(item) else false.B
         val issueReady = ageAllowed && notIssued && operandsReady(item) &&
-            resourceReady(entries(position))
+            !losesReadiness && resourceReady(entries(position))
         val issueEligible = live && issueReady
         candidates(position) := issueReady
         nonSpeculativeCandidates(position) := issueReady && !entries(position).speculative
@@ -405,15 +437,19 @@ class IssueQueue(
     )
     val selectedFailed = selectedExists && (speculationMask(selectedItem) & maintenanceFailedMask).orR
     val lockedFailed = selectionLocked && selectedFailed
-    // Unlocked candidates already exclude failed speculation. A locked item can fail while stalled.
-    io.issue.valid := !io.flush && !lockedFailed && selectedExists
+    val lockedLosesReadiness = selectionLocked && waitsForSpeculationResolution.B &&
+        losesReadyOnWakeup(lockedItem)
+    // Unlocked arithmetic candidates may still be consumed and killed at the
+    // execution boundary so their replay checkpoint is created. A locked item
+    // cannot make progress while its failed source is being repaired.
+    io.issue.valid := !io.flush && !lockedFailed && !lockedLosesReadiness && selectedExists
     io.issue.bits := selectedItem
     val issueFire = io.issue.fire
     // The execution inputs expose their ordinary capacity independent of flush.
     // On a flush this payload update is unobservable, while outside flush it is
     // exactly the real issue handshake. Keeping this view local prevents queue
     // clear from entering every resident entry D-input.
-    val payloadIssueFire = io.issue.ready && !lockedFailed && selectedExists
+    val payloadIssueFire = io.issue.ready && !lockedFailed && !lockedLosesReadiness && selectedExists
 
     // Select only the wakeup fields, not the full issued payload, before
     // broadcasting one candidate per arithmetic producer queue.
@@ -421,10 +457,11 @@ class IssueQueue(
         def candidate(item: BackendPackage): BackendWakeupCandidate = {
             val wakeup = Wire(new BackendWakeupCandidate(p))
             val mask = speculationMask(item)
-            // Consumers test the mask against the current failure locally.
-            // Keeping this candidate independent of failure cuts the cross-IQ
-            // selection and wakeup feedback path.
-            wakeup.valid := item.rdValid && !item.exception.valid
+            // A delayed failed-token presentation is consumed only to create a
+            // replay checkpoint; it never produces data and must not wake a
+            // consumer after the raw failure pulse has passed.
+            wakeup.valid := item.rdValid && !item.exception.valid &&
+                !(mask & maintenanceFailedMask).orR
             wakeup.prd := item.prd
             wakeup.specMask := mask
             wakeup
@@ -437,22 +474,13 @@ class IssueQueue(
         val wakeups = entries.map(entry => candidate(entry.item)).toSeq ++
             replayEntries.map(entry => candidate(entry.item)).toSeq :+ candidate(lockedItem)
         assert(PopCount(VecInit(selections)) <= 1.U)
-        output.valid := Mux1H(selections, wakeups.map(_.valid))
+        // Keep this output independent of direct-wakeup-driven readiness: the
+        // two arithmetic queues feed each other in the same cycle.
+        output.valid := !io.flush && !lockedFailed && Mux1H(selections, wakeups.map(_.valid))
         output.prd := Mux1H(selections, wakeups.map(_.prd))
         output.specMask := Mux1H(selections, wakeups.map(_.specMask))
     }
 
-    // Update each possible source before payload movement. Dispatch and removal
-    // controls then select among completed results instead of feeding the PRS
-    // compare and wakeup network after a wide entry mux.
-    val awakened = Wire(Vec(q.entries, new IQEntry(p)))
-    for (position <- 0 until q.entries) {
-        awakened(position).item := updateReady(entries(position).item)
-        awakened(position).isSystem := entries(position).isSystem
-        awakened(position).speculative := speculationMask(awakened(position).item).orR
-        awakened(position).issued := entries(position).issued
-        awakened(position).csrAuthorized := entries(position).csrAuthorized
-    }
     // Wakeup work is distributed over the original dispatch candidates. The
     // late capacity/route decision then selects an already-updated payload.
     val incomingCandidates = Wire(Vec(q.enqueueWidth, new IQEntry(p)))
@@ -693,7 +721,7 @@ class IssueQueue(
         valid := nextValid
         replayValid := nextReplayValid
         checkpointPendingValid.foreach(_ := checkpointCapture)
-        when(lockedFailed) {
+        when(lockedFailed || lockedLosesReadiness) {
             selectionLocked := false.B
             lockedMainPosition := 0.U
             lockedReplayPosition := 0.U
