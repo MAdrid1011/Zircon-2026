@@ -56,7 +56,58 @@ Victim 安装优先选择可用的 invalid way，因此 I/D 两侧均可使用 s
 I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、uncached 访问和安装操作共享
 一个维护引擎及外部存储接口。L2 没有多项 MSHR；同一时刻只允许一个下级事务在途。
 
-## RAM 后端与 PMA
+## PMA 与非缓存写合并
+
+PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
+属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和普通 uncached 请求
+绕过 Cache line 分配，以单个 32 位访问放在 64 位 AXI 数据 beat 的对应 lane 中送入下级接口；
+Cache line refill/writeback 则按 64 位 beat 传输。
+
+`0xa2000000` 至 `0xa2ffffff` 是面向设备描述符和连续控制数据的可合并写窗口。已提交的
+32 位 Store 在 DCache 中进入 8 beat 写合并队列；同一 64 位 beat 的两个字按字节 mask 合并，
+相邻 beat 组成 AXI4 INCR burst。队列不会跨越 4 KiB 边界，满 8 beat、短暂空闲或后续强顺序
+访问都会结束当前 burst。普通 device、原子操作、Cache refill 与 writeback 不进入该队列。
+
+```mermaid
+flowchart LR
+    SQ[Store Queue] --> SB[Store Buffer]
+    SB --> PMA{PMA 属性}
+    PMA -->|cacheable| DC[DCache line]
+    PMA -->|device| ORD[强顺序单次事务]
+    PMA -->|write-combine| WC[8 beat WriteCombineQueue]
+    WC --> L2[L2 维护通路]
+    ORD --> L2
+    DC --> L2
+    L2 --> AXI[AXI4 主接口]
+```
+
+写合并队列在一个 burst 内维护基地址、最后 beat 地址、下一 beat 地址、beat 数量，以及每个
+beat 的 64 位数据和 8 位字节 strobe。当前与下一 beat 位置使用独热状态驱动数据写使能，避免
+在宽数据寄存器输入前加入二进制索引译码。
+
+| 队列状态 | 接收与输出行为 |
+| --- | --- |
+| 空 | 接收第一条可合并 Store，以 8 字节边界建立 burst 基地址 |
+| 开放 | 合并当前 beat，或把紧邻的下一 beat 追加到 burst |
+| 封口 | 停止接收新 Store，向 L2 发送已有 burst |
+| 在途 | 保持数据和事务所有权，等待唯一的下级写响应 |
+
+非连续地址、跨 4 KiB 边界和超过 8 beat 的请求不会加入当前 burst。非可合并 Store 到达时会
+先封口并排空已有 burst，随后沿强顺序通路执行。L2 与 AXI Bridge 传递实际 beat 数、逐 beat
+strobe 和连续数据；AXI `AWLEN` 等于 beat 数减一，所有合并写固定使用 8 字节传输宽度。
+
+每条可合并 Store 在进入队列后向提交侧返回完成，队列继续负责下级 AXI 响应。后续强顺序
+Store 只有在当前 burst 完成后才能进入 DCache，因此“写入描述符，再写门铃”的程序顺序无需
+额外软件协议；`FENCE` 可用于明确标记描述符提交边界。
+
+实现入口包括 [PMA.scala](../src/main/scala/Memory/PMA.scala)、
+[WriteCombineQueue.scala](../src/main/scala/Backend/Memory/WriteCombineQueue.scala)、
+[DCache.scala](../src/main/scala/Backend/Memory/DCache.scala) 和
+[L2AXI4Bridge.scala](../src/main/scala/Memory/L2AXI4Bridge.scala)。合并、封口和 4 KiB 边界由
+[WriteCombineQueueSpec.scala](../src/test/scala/Backend/Memory/WriteCombineQueueSpec.scala) 验证；
+控制负载入口见 [TACLeBench lift](../RV-Software/taclebench/README.md#可合并写控制负载)。
+
+## RAM 后端
 
 Cache RAM 通过统一封装选择寄存器、Vivado 双口 BRAM 或 ASIC `1RW+1R` 接口。Vivado 配置
 保留两个可读写物理端口；ASIC 分析配置将 I 侧绑定到只读端口，将 D 侧和安装写绑定到读写端口。
@@ -65,8 +116,3 @@ Chisel 与 Verilator 仿真使用同周期的行为模型。Nangate45 纯逻辑�
 SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
 拆分到固定版本 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
 都是上升沿 clock-to-Q。Vivado 后端使用独立的 Verilog BRAM 模板。
-
-PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
-属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和 uncached 请求绕过
-Cache line 分配，以单个 32 位访问放在 64 位 AXI 数据 beat 的对应 lane 中送入下级接口；
-Cache line refill/writeback 则按 64 位 beat 传输。

@@ -25,6 +25,10 @@ SQ 保存两者并为年轻 Load 提供逐字节前递。Store 退休后按程�
 Store Buffer 继续向 DCache 发送请求，因此提交不需要等待每笔 Cache 写完成。原子指令不会进入
 Store Buffer，而是在 ROB 头等待更早的已提交 Store 排空，再授权后端原子单元执行。
 
+PMA 可合并写窗口中的 Store 仍按程序顺序从 Store Buffer 进入 DCache。DCache 接收后即可释放
+对应 Store Buffer 表项，并在内部完成 burst 聚合与下级响应；后续强顺序 Store 会等待该 burst
+结束。`FENCE` 的存储系统排空条件同时覆盖写合并队列。
+
 ## CSR 与系统指令
 
 CSR 保存 M/S 特权状态、异常向量、`satp`、浮点状态和计数器。CSR 指令在 ROB 头部获得授权，

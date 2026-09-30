@@ -7,8 +7,8 @@
 
 1. 从仓库 [README](../README.md#架构概览) 了解整核目标、默认配置和主数据流。
 2. 阅读 [处理器顶层](Core.md)，再按数据流进入前端、中端、后端和提交模块。
-3. 阅读 [存储系统](Memory.md) 了解 Cache、地址翻译、PMA 和 RAM 后端。
-4. 使用 Linux 与 Nangate45 文档复现软件启动和静态时序评估。
+3. 阅读 [存储系统](Memory.md) 了解 Cache、地址翻译、PMA、非缓存写合并和 RAM 后端。
+4. 使用 Linux、TACLeBench 与 Nangate45 文档复现系统启动、控制负载和静态时序评估。
 
 ## 模块设计
 
@@ -17,12 +17,17 @@
 - [中端](Middleend.md)：Decode、Rename、ReadyBoard 与 Dispatch
 - [后端](Backend.md)：Issue Queue、执行流水线、PRF、旁路与唤醒
 - [提交与恢复](Commit.md)：ROB、FTQ、SQ、Store Buffer、CSR 与异常恢复
-- [存储系统](Memory.md)：L1、L2、TLB、PTW、PMA 与 RAM 后端
+- [存储系统](Memory.md)：L1、L2、TLB、PTW、PMA、非缓存写合并与 RAM 后端
 
 ## 复现与验证
 
 - [Linux 启动与复现](Linux-Bringup.md)：软件镜像、PGO 仿真、Spike 差分、检查点与交互终端
+- [TACLeBench](../RV-Software/taclebench/README.md)：54 个嵌入式基准与 lift 控制负载
 - [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、当前结果与评估说明
 
 文档中的类名、接口名和流水级名称与源码保持一致，便于从设计说明直接定位实现。仓库 README
 提供项目入口和常用任务，本目录说明模块职责与验证方法。
+
+## 贡献与维护
+
+- [Git 消息标签](git-msg-tags.md)：提交与拉取请求的改动分类

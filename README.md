@@ -28,7 +28,7 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 > [!NOTE]
 > 当前版本已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
 > 输入、文件系统挂载和定时器路径验证。Nangate45 BSG 纯逻辑时序分析测得最长数据到达时间
-> 为 1.430775 ns，固定网表最高逻辑频率约 686 MHz。
+> 为 1.474616 ns，在 1.5 ns 周期下完成时序闭合，对应逻辑频率约 667 MHz。
 
 ## 架构概览
 
@@ -105,6 +105,7 @@ flowchart LR
 | L1 ICache / DCache | 各 2 KiB，2 路组相连，64 B Cache Line |
 | L2 Cache | 8 KiB，4 路组相连，64 B Cache Line |
 | 外部 AXI4 数据通路 | 64 位，8 B/beat |
+| 非缓存写合并 | PMA 专用窗口，最多 8 个连续 AXI beat |
 | ITLB / DTLB | 4 组 x 4 路，另含 4 项 4 MiB 大页表 |
 | 地址宽度 | 32 位虚拟地址，34 位物理地址 |
 
@@ -117,6 +118,8 @@ flowchart LR
   SQ 和 Store Buffer 提供逐字节前递。
 - **RV32 原子操作**：支持 `LR.W`、`SC.W` 和九条 `AMO.W` 指令；原子操作在 ROB 头获得授权，
   复用 LS1 与 DCache Store 端口完成不可分割的读改写。
+- **控制负载写合并**：PMA 专用窗口把连续的已提交非缓存 Store 聚合为最长 8 beat 的 AXI4
+  burst；普通设备访问保持强顺序，后续门铃写自然等待当前 burst 完成。
 - **三级 L1 命中流水**：ICache 与 DCache 将 miss 状态寄存后交给末级状态机，避免 miss 控制
   直接回到前级关键路径。
 - **偏非包含式 L2**：L2 主要接收 L1 victim；L1/L2 同时 miss 时，外部填充直接返回 L1，
@@ -202,7 +205,7 @@ sbt "runMain Elaborate --simulation generated"
 
 Vivado 2025 核心工程面向 SCARF Stage-B 的 `xcvu13p-fhgb2104-2-i`。裸核使用
 Xilinx BRAM，在默认流程下完成 100 MHz 综合与布线：路由后 setup WNS 为
-`+0.892 ns`，使用 115,602 LUT（6.69%）、59,634 FF、135 BRAM tile 和 0 DSP。
+`+1.716 ns`，使用 115,422 LUT（6.68%）、62,198 FF、135 BRAM tile 和 0 DSP。
 生成并运行工程：
 
 ```sh
@@ -233,12 +236,13 @@ python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target
 | 验证层级 | 当前状态 |
 | --- | --- |
 | CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.324128，CoreMark/MHz 5.114 |
+| TACLeBench lift 控制负载 | 校验通过，设备提交加速 2.16x，端到端加速 1.27x |
 | RISC-V Architecture Test 149 项 + Spike 提交级差分 | 通过 |
 | 整数、乘除与 FP32 模块向量测试 | 已提供 |
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
 | Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
-| Nangate45 BSG 纯逻辑时序分析 | 最长数据到达 1.430775 ns，固定网表最高逻辑频率约 686 MHz |
+| Nangate45 BSG 纯逻辑时序分析 | 1.5 ns 周期时序闭合，WNS +0.000092 ns，TNS 0 ns |
 | 特权架构 | M/S 模式、Sv32、定时器中断、原子操作和 `FENCE.I`/`SFENCE.VMA` |
 
 ## 模块文档
