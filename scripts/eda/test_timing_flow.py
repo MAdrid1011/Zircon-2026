@@ -345,9 +345,21 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
     def test_logic_only_sta_explicitly_skips_placement_and_parasitic_estimation(self):
         tcl = (Path(__file__).parent / "logic_only_sta.tcl").read_text()
         self.assertIn("read_lef", tcl)
+        self.assertIn("source $rc_script", tcl)
         self.assertIn("no_floorplan no_placement no_parasitics", tcl)
         self.assertNotIn("initialize_floorplan", tcl)
         self.assertNotIn("estimate_parasitics", tcl)
+        self.assertIn("repair_timing -setup", tcl)
+        for disabled_move in (
+            "-skip_buffering",
+            "-skip_gate_cloning",
+            "-skip_buffer_removal",
+            "-skip_last_gasp",
+            "-skip_vt_swap",
+            "-skip_size_down",
+        ):
+            self.assertIn(disabled_move, tcl)
+        self.assertIn("ZirconCore-logic-only-sized.v", tcl)
         self.assertIn("logic-only-violating-paths-summary.rpt", tcl)
         self.assertIn("-format summary", tcl)
         self.assertIn("logic-only-violating-paths-full.rpt", tcl)

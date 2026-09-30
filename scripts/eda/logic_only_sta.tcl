@@ -7,6 +7,7 @@ set input_arrival_ns @INPUT_ARRIVAL_NS@
 set output_delay_ns @OUTPUT_DELAY_NS@
 set lef_files {@LEF_FILES@}
 set liberty_files {@LIBERTY_FILES@}
+set rc_script {@RC_SCRIPT@}
 set output_dir {@OUTPUT_DIR@}
 
 file mkdir $output_dir
@@ -18,6 +19,7 @@ foreach liberty $liberty_files {
 }
 read_verilog $netlist
 link_design $top
+source $rc_script
 
 create_clock -name core_clock -period $period_ns [get_ports clock]
 set_clock_transition 0.05 [get_clocks core_clock]
@@ -29,6 +31,20 @@ set_load $output_load_ff [all_outputs]
 # LEF is read only to link abstract masters. Deliberately do not initialize a
 # floorplan or estimate RC, so timing uses Liberty cell delay and zero-delay nets.
 puts "LOGIC_ONLY_STA no_floorplan no_placement no_parasitics"
+report_worst_slack -max -digits 6 > [file join $output_dir logic-only-pre-size-wns.rpt]
+report_tns -max -digits 6 > [file join $output_dir logic-only-pre-size-tns.rpt]
+report_checks -path_delay max -slack_max 0 -group_path_count 1000000 \
+  -endpoint_path_count 1 -unique_paths_to_endpoint -format end -digits 6 \
+  -no_line_splits > [file join $output_dir logic-only-pre-size-violating-endpoints.rpt]
+
+# Use the same pin-level STA model for final setup repair. With buffering,
+# cloning, and downsizing disabled, this pass only upsizes equivalent cells or
+# swaps logically equivalent input pins; it does not create a placement model.
+repair_timing -setup -repair_tns 100 -max_passes 20 -max_iterations 1000 \
+  -skip_buffering -skip_gate_cloning -skip_buffer_removal -skip_last_gasp \
+  -skip_vt_swap -skip_size_down -max_repairs_per_pass 100
+write_verilog [file join $output_dir ZirconCore-logic-only-sized.v]
+
 report_worst_slack -max -digits 6 > [file join $output_dir logic-only-wns.rpt]
 report_tns -max -digits 6 > [file join $output_dir logic-only-tns.rpt]
 report_checks -path_delay max -group_path_count 50 -endpoint_path_count 1 \
