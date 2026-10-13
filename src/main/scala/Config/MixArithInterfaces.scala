@@ -48,11 +48,8 @@ object MixArithIssue {
         issue.robIdx := source.robIdx(MixArithConstants.robAddressWidth - 1, 0)
         issue.exception := source.exception
         issue.fpFlagsValid := source.fpFlagsValid
-        when(source.imm(31, 17).orR && !source.exception.valid) {
-            issue.exception.valid := true.B
-            issue.exception.cause := ZirconConfig.DecodeException.IllegalInstruction.U
-            issue.exception.tval := source.inst
-        }
+        // Decode supplies zero or a 17-bit CSR operand to this execution domain.
+        // Precise exceptions are already carried by the decoded package.
         issue
     }
 }

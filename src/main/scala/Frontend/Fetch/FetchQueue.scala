@@ -81,11 +81,12 @@ class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
     val packetPcWords = Wire(Vec(dequeueWidth, UInt(30.W)))
     val packetNextPcs = Wire(Vec(dequeueWidth, UInt(32.W)))
     val packetStarts = VecInit(queue.io.deq.map(port => port.valid && port.bits.packetStart))
+    val packetRanks = (0 until dequeueWidth).map { lane =>
+        val priorStarts = PopCount(packetStarts.take(lane))
+        VecInit((0 until dequeueWidth).map(index => priorStarts === index.U))
+    }
     for (lane <- 0 until dequeueWidth) {
-        val priorPacketStarts = PopCount((0 until lane).map { prior =>
-            queue.io.deq(prior).valid && queue.io.deq(prior).bits.packetStart
-        })
-        val recordSelect = VecInit((0 until dequeueWidth).map(index => priorPacketStarts === index.U))
+        val recordSelect = packetRanks(lane)
         val record = Mux1H(recordSelect, records.io.deq.map(_.bits))
         val packetStart = packetStarts(lane)
         packetPcWord = Mux(packetStart, record.train.pcWord, packetPcWord)
@@ -130,14 +131,11 @@ class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
         previousPacketNextPc := Mux1H(consumedClasses.drop(1), packetNextPcs)
     }
     for (record <- 0 until dequeueWidth) {
-        // Packet ranks are prepared in parallel with Rename. The final grant
-        // need not pass through a population count before record dequeue.
-        val acceptedPrefixes = (record + 1 to dequeueWidth).map { length =>
-            val hasRecords = packetStarts.take(length).combinations(record + 1)
-                .map(_.reduce(_ && _)).toSeq.reduce(_ || _)
-            consumedClasses(length) && hasRecords
-        }
-        records.io.deq(record).ready := acceptedPrefixes.reduce(_ || _)
+        // A packet start already names its record rank. Grant that record
+        // directly when its instruction transfers; no accepted-length decode.
+        records.io.deq(record).ready := (0 until dequeueWidth).map { lane =>
+            queue.io.deq(lane).ready && packetStarts(lane) && packetRanks(lane)(record)
+        }.reduce(_ || _)
     }
     queue.io.flush := io.flush
     records.io.flush := io.flush

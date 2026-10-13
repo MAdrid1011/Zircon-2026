@@ -71,6 +71,10 @@ class DecoderSpec extends AnyFreeSpec with ChiselSim {
         intercept[IllegalArgumentException] { DecodeTable.validate(Seq(first, rows(1).copy(name = first.name))) }
         intercept[IllegalArgumentException] { DecodeTable.validate(Seq(first.copy(pattern = BitPat("b?")))) }
         intercept[IllegalArgumentException] { DecodeTable.validate(Seq(first.copy(op = 31))) }
+        val multiply = rows.find(_.fu == DecodeUnit.Multiply).get
+        intercept[IllegalArgumentException] {
+            DecodeTable.validate(Seq(multiply.copy(immType = DecodeImmediate.I)))
+        }
         intercept[IllegalArgumentException] { DecodeSupport(Set(15)) }
         intercept[IllegalArgumentException] { DecodeSupport(Set(DecodeUnit.ALU), systemOps = Set(SystemOp.CSRRW)) }
         intercept[IllegalArgumentException] { DecodeSupport(Set(DecodeUnit.System), systemOps = Set(31)) }
@@ -167,11 +171,50 @@ class DecoderSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "single-lane target decode covers integer, floating, atomic, system and illegal boundaries" in {
-        exercise(DecodeSupport.target, full = true)
+    "single-lane scalar target decode covers integer, floating, atomic, system and illegal boundaries" in {
+        // The pinned 96-row reference covers scalar ISA; RVV owns the other
+        // encodings in the shared floating-point load/store opcode space.
+        exercise(DecodeSupport.target.copy(units = DecodeSupport.target.units - DecodeUnit.Vector), full = true)
     }
     "default decode accepts all connected backend operations and rejects absent consumers" in {
         exercise(DecodeSupport.current, full = false)
+    }
+
+    for ((profile, support, vectorEnabled) <- Seq(
+        ("system", DecodeSupport.current, false),
+        ("performance", DecodeSupport.performance, true),
+    )) {
+        s"$profile decode selects vector operations and scalar operands at the shared opcode boundary" in {
+            simulate(new DecoderTestTop(support)) { d =>
+                d.io.fault.poke(false)
+                d.io.exception.valid.poke(false)
+                d.io.exception.cause.poke(0)
+                d.io.exception.tval.poke(0)
+                d.reset.poke(true); d.clock.step(); d.reset.poke(false)
+                // vadd.vv/vx, vfadd.vf, vle32.v and vse32.v, all using vm=1.
+                val operands = Seq(
+                    (0x022180d7L, false, false),
+                    (0x0221c0d7L, true, false),
+                    (0x0221d0d7L, true, true),
+                    (0x0201e087L, true, false),
+                    (0x0201e0a7L, true, false),
+                )
+                for ((word, scalarSource, floatingSource) <- operands) {
+                    d.io.inst.poke(word)
+                    d.io.out.fu.expect(if (vectorEnabled) DecodeUnit.Vector else DecodeUnit.None)
+                    d.io.out.exception.valid.expect(!vectorEnabled)
+                    if (vectorEnabled) {
+                        d.io.out.rinfo.src(0).valid.expect(scalarSource)
+                        d.io.out.rinfo.src(0).isFp.expect(floatingSource)
+                        if (scalarSource) d.io.out.rinfo.src(0).index.expect(3)
+                        d.io.out.rinfo.dest.valid.expect(false)
+                    } else {
+                        d.io.out.exception.cause.expect(DecodeException.IllegalInstruction)
+                        d.io.out.exception.tval.expect(word)
+                    }
+                }
+            }
+        }
     }
 
     "incoming faults dominate decode and all non-decode instruction fields pass through" in {

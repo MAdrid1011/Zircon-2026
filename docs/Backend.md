@@ -26,6 +26,7 @@ Store Data 队列 5 项。队列以固定物理槽保存 payload，用年龄关�
 
 `MixArithPipeline` 执行整数乘除、FP32 加减乘、融合乘加、除法、平方根、比较、分类、符号操作、
 搬运与整数/浮点转换。CSR 指令也由该队列发射，并在获得 `Commit` 的按序授权后访问 CSR 状态。
+中端译码为该通路提供零立即数或 17 bit CSR 操作数字段；取指与译码异常随指令包直接传递。
 
 LS0 只执行 Load。LS1 执行 Load 和 Store Address，并从独立 Store Data 队列读取写数据。两条
 Load 通路在发射后先写入流水寄存器，下一拍读取 PRF 并由 AGU 生成虚拟地址。AGU 结果只写入

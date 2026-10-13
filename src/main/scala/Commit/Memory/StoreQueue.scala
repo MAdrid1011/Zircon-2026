@@ -453,9 +453,16 @@ class StoreQueue(
                 active(index) && wordMatch(index) && queryMask(index)(byte) && query.bits.mask(byte)
             }).asUInt
             val lowerHits = hits & beforeBoundary
-            val lowerWinner = Reverse(PriorityEncoderOH(Reverse(lowerHits)))
-            val wrapWinner = Reverse(PriorityEncoderOH(Reverse(hits)))
-            winnerStage(byte) := Mux(lowerHits.orR, lowerWinner, wrapWinner)
+            // Before-tail slots are younger than wrapped slots. Determine each
+            // winner directly so word matches do not cross two priority trees
+            // followed by a global lower-partition selection mux.
+            val lowerExists = lowerHits.orR
+            winnerStage(byte) := VecInit((0 until entries).map { index =>
+                val higher = if (index == entries - 1) false.B else hits(entries - 1, index + 1).orR
+                val higherLower = if (index == entries - 1) false.B else lowerHits(entries - 1, index + 1).orR
+                val blocked = higherLower || !beforeBoundary(index) && (lowerExists || higher)
+                hits(index) && !blocked
+            }).asUInt
         }
         unknownStage := VecInit((0 until entries).map { index =>
             active(index) && (!queryAddressValid(index) || storage(index).vector)

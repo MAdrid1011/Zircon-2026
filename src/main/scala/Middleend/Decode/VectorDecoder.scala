@@ -516,10 +516,24 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
             (0 until 8).map(fields => fields.U -> values(fields + 1)))
         val moveValue = MuxLookup(inst(19, 15), values(0))(
             (0 until 32).map(registers => registers.U -> values((registers + 1) & 15)))
-        val arithmeticValue = Mux(shape.widening || shape.wideConversion, at(1), at(0))
-        val groupedValue = Mux(wholeMove, moveValue, Mux(whole, wholeValue, Mux(maskMemory, values(1),
-            Mux(memory, Mux(indexed, segments(0), memoryValue), arithmeticValue))))
-        Mux(shape.writesVector, Mux(singleDestination, values(1), groupedValue), values(0))
+        // Form disjoint instruction classes beside the size lookups. A late
+        // size result terminates at one masked OR, rather than a priority mux chain.
+        val grouped = shape.writesVector && !singleDestination
+        val ordinary = grouped && !wholeMove && !whole && !maskMemory
+        val wide = shape.widening || shape.wideConversion
+        val selections = Seq(
+            !shape.writesVector,
+            shape.writesVector && singleDestination || grouped && maskMemory,
+            grouped && wholeMove,
+            grouped && whole,
+            ordinary && memory && indexed,
+            ordinary && memory && !indexed,
+            ordinary && !memory && wide,
+            ordinary && !memory && !wide,
+        )
+        assert(PopCount(selections) === 1.U)
+        Mux1H(selections, Seq(values(0), values(1), moveValue, wholeValue,
+            segments(0), memoryValue, at(1), at(0)))
     }
 
     def allocationBanks: UInt = {

@@ -304,6 +304,10 @@ class Backend(
     arith1.io.iq <> arith1IQ.io.issue
     mixArith.io.iq.valid := mixArithIQ.io.issue.valid
     mixArith.io.iq.bits := MixArithIssue.fromBackend(mixArithIQ.io.issue.bits)
+    when(mixArithIQ.io.issue.valid) {
+        assert(!mixArithIQ.io.issue.bits.imm(31, 17).orR,
+            "Decode must provide a 17-bit MixArith immediate")
+    }
     mixArithIQ.io.issue.ready := mixArith.io.iq.ready
     ls0.io.iq.instPkg <> loadIQ.io.issue
     ls1.io.iq.instPkg <> loadStoreAddressIQ.io.issue
