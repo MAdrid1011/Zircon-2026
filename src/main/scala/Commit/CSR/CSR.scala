@@ -62,7 +62,28 @@ class CSRFloatStatus extends Bundle {
     val dirty = Bool()
 }
 
-class CSRIO extends Bundle {
+class VectorCSRState extends Bundle {
+    val vstart = UInt(32.W)
+    val vxsat = Bool()
+    val vxrm = UInt(2.W)
+    val vl = UInt(32.W)
+    val vtype = UInt(32.W)
+}
+
+class VectorCSRRetirement extends Bundle {
+    val configuration = Bool()
+    val vl = UInt(32.W)
+    val vtype = UInt(32.W)
+    val fflags = UInt(5.W)
+    val saturated = Bool()
+}
+
+class VectorCSRIO extends Bundle {
+    val retire = Flipped(Valid(new VectorCSRRetirement))
+    val state = Output(new VectorCSRState)
+}
+
+class CSRIO(vectorEnabled: Boolean = false) extends Bundle {
     val req = Flipped(Valid(new CSRRequest))
     val rsp = Valid(new CSRResponse)
     // One ordered access completes at this edge; the caller samples the pre-edge response.
@@ -76,11 +97,15 @@ class CSRIO extends Bundle {
     // False is an accepted MRET, true is an accepted SRET. No instruction decoding occurs here.
     val xret = Flipped(Valid(Bool()))
     val state = Output(new CSRState)
+    val vector = if (vectorEnabled) Some(new VectorCSRIO) else None
+}
+
+abstract class CSRBase(vectorEnabled: Boolean = false) extends Module {
+    val io = IO(new CSRIO(vectorEnabled))
 }
 
 /** RV32 CSR state and one ordered access port; no instruction pipeline, interrupt arbiter or flush. */
-class CSR extends Module {
-    val io = IO(new CSRIO)
+class CSR extends CSRBase {
     val status = RegInit(0.U(32.W))
     val nextStatus = WireDefault(status)
     val mie = RegInit(0.U(32.W))

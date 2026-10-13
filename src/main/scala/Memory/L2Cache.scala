@@ -45,7 +45,7 @@ class L2Cache(
     val io = IO(new L2CacheIO(c, p, observe))
     require(c.lineBytes == p.lineBytes)
     if (ramBackend == DualPortRamBackend.BSG) {
-        require(p.sets == 16 && p.tagBits <= 25)
+        require(p.tagBits <= 25)
     }
 
     private def index(address: UInt): UInt = address(p.offsetBits + p.indexBits - 1, p.offsetBits)

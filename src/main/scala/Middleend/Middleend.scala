@@ -78,11 +78,13 @@ class MiddleendIO(
     bp: BackendParams,
     issue: IssueParams,
     commitParams: CommitParams,
+    vectorEnabled: Boolean = false,
 ) extends Bundle {
     val frontend = Flipped(new FrontendMiddleIO(fp, issue.dispatchWidth))
     val backend = Flipped(new BackendMiddleendIO(bp, issue))
     val commit = new CommitMiddleendIO(fp, bp, issue.dispatchWidth, commitParams.width)
     val fpState = Input(UInt(2.W))
+    val vector = if (vectorEnabled) Some(new VectorMiddleendIO(bp)) else None
     val performance = if (fp.observe) Some(Output(new MiddleendPerformanceCounters)) else None
 }
 
@@ -97,6 +99,8 @@ class Middleend(
     val backendParams: BackendParams = BackendParams(),
     val issueParams: IssueParams = IssueParams(),
     val commitParams: CommitParams = CommitParams(),
+    val privileged: Boolean = true,
+    val vectorEnabled: Boolean = false,
 ) extends Module {
     require(frontendParams.fetchWidth >= issueParams.dispatchWidth)
 
@@ -115,7 +119,8 @@ class Middleend(
         numSources = 3,
         hasZeroReg = false,
     )
-    val io = IO(new MiddleendIO(frontendParams, backendParams, issueParams, commitParams))
+    require(!vectorEnabled || !privileged)
+    val io = IO(new MiddleendIO(frontendParams, backendParams, issueParams, commitParams, vectorEnabled))
 
     private def unifiedTag(isFp: Boolean, index: UInt): UInt =
         Cat(isFp.B, index.pad(backendParams.physWidth))
@@ -125,15 +130,64 @@ class Middleend(
     val accepted = Wire(UInt(width.W))
 
     val instructions = io.frontend.out.map(_.bits.instruction)
-    val decoders = Seq.fill(width)(Module(new Decoder(frontendParams)))
+    val decoders = Seq.fill(width)(Module(new Decoder(frontendParams,
+        if (privileged) DecodeSupport.current else if (vectorEnabled) DecodeSupport.performance
+        else DecodeSupport.performance.copy(units = DecodeSupport.performance.units - DecodeUnit.Vector))))
     decoders.zip(instructions).foreach { case (decoder, instruction) => decoder.io.in := instruction }
+    // PD supplies the scalar register requests. RVV supplies its scalar operands
+    // here without extending the scalar RAT with a new architectural domain.
+    val renameInstructions = decoders.zip(instructions).map { case (decoder, instruction) =>
+        val renamed = WireDefault(instruction)
+        if (vectorEnabled) when(VectorDecoder.recognized(instruction.inst)) {
+            renamed.rinfo := VectorDecoder.scalarOperands(instruction.inst)
+        }
+        renamed
+    }
+    val vectorStage = if (vectorEnabled) Some(Reg(new VectorInstructionMetadata)) else None
+    val vectorRename = if (vectorEnabled) Some(Module(new VectorRename)) else None
+    val vectorState = if (vectorEnabled) Some(RegInit({
+        val initial = WireDefault(0.U.asTypeOf(new VectorCSRState))
+        initial.vtype := "h80000000".U
+        initial
+    })) else None
+    val configurationPending = if (vectorEnabled) Some(RegInit(false.B)) else None
+    val vectorCandidates = VecInit(decoders.zipWithIndex.map { case (decoder, lane) =>
+        io.frontend.out(lane).valid && vectorEnabled.B && VectorDecoder.recognized(instructions(lane).inst)
+    })
+    val vectorSelection = PriorityEncoderOH(vectorCandidates.asUInt)
+    val vectorCandidateGroups = if (vectorEnabled) instructions.map { instruction =>
+        new VectorGroupCounts(instruction.inst, vectorState.get.vtype)
+    } else Seq.empty
+    val vectorCapacityReady = vectorRename.map { rename =>
+        // Decode narrow allocation counts per FQ lane in parallel with the
+        // selected instruction's full decode and RAT reads. Capacity depends
+        // only on the existing bank FreeLists and the held Dispatch preview.
+        val candidateReady = instructions.zip(vectorCandidateGroups).map { case (instruction, groups) =>
+            (0 until 8).map { bank =>
+                val distance = (bank.U(3.W) - instruction.inst(9, 7))(2, 0)
+                distance >= groups.allocationCount || rename.io.bankAvailable(bank)
+            }.reduce(_ && _)
+        }
+        !vectorCandidates.asUInt.orR || Mux1H(vectorSelection, candidateReady)
+    }.getOrElse(true.B)
+    val vectorInstruction = Mux1H(vectorSelection, instructions.map(_.inst))
+    val vectorControl = if (vectorEnabled) Some(Module(new VectorDecoder)) else None
+    vectorControl.foreach(_.io.instruction := vectorInstruction)
+    val vectorGroups = if (vectorEnabled) Some(Module(new VectorRegisterGroups)) else None
+    vectorGroups.foreach { groups =>
+        groups.io.instruction := vectorInstruction
+        groups.io.control := vectorControl.get.io.control
+        groups.io.vtype := vectorState.get.vtype
+        groups.io.vl := vectorState.get.vl
+        groups.io.vstart := vectorState.get.vstart
+    }
 
     /* Decode and Rename run in parallel before the shared buffer boundary. */
     val integerRename = Module(new Rename(intParams))
     val floatingRename = Module(new Rename(fpParams))
     val renames = Seq(integerRename -> false, floatingRename -> true)
     for ((rename, isFp) <- renames; lane <- 0 until width) {
-        val instruction = instructions(lane)
+        val instruction = renameInstructions(lane)
         val rinfo = rename.io.rinfo(lane)
         val candidate = io.frontend.out(lane).valid
         rinfo.request := candidate && instruction.rinfo.dest.valid &&
@@ -148,44 +202,58 @@ class Middleend(
 
     /* Commit reserves ROB, SQ and FTQ resources for the same ordered prefix Dispatch may accept. */
     io.commit.request.valid := renameStageValid
-    io.commit.request.store := VecInit(renameStageEntries.map(_.dispatchClass.storeOrAtomic)).asUInt
+    io.commit.request.store := VecInit(renameStageEntries.map(entry => entry.dispatchClass.storeOrAtomic ||
+        vectorEnabled.B && entry.context.instruction.fu === DecodeUnit.Vector.U &&
+            entry.context.instruction.inst(6, 0) === "h27".U)).asUInt
     io.commit.request.packetStart := VecInit(renameStageEntries.map(_.context.packetStart)).asUInt
     FIFOUtil.assertPrefix(io.commit.resourcePrefix.asBools, "Commit resource permission must be a prefix")
 
     /* Admission moves one complete FQ group into the fixed pipeline register. */
-    val decodeCandidate = VecInit(io.frontend.out.map(_.valid))
+    val decodeCandidate = VecInit((0 until width).map { lane =>
+        // Stop before a second vector operation or after a configuration change.
+        // This preserves a continuous FQ prefix and one group RAT request.
+        val earlierVector = if (lane == 0) false.B else vectorCandidates.take(lane).reduce(_ || _)
+        val earlierConfiguration = if (lane == 0) false.B else (0 until lane).map { previous =>
+            vectorCandidates(previous) && instructions(previous).inst(14, 12) === 7.U
+        }.reduce(_ || _)
+        io.frontend.out(lane).valid && !(earlierVector && vectorCandidates(lane)) && !earlierConfiguration
+    })
+    // Once a lane is removed, younger lanes are also removed.
+    val decodePrefix = VecInit((0 until width).map(lane => decodeCandidate.take(lane + 1).reduce(_ && _)))
     val decodeNeedsInt = VecInit((0 until width).map { lane =>
-        decodeCandidate(lane) && instructions(lane).rinfo.dest.valid &&
-            !instructions(lane).rinfo.dest.isFp
+        decodePrefix(lane) && renameInstructions(lane).rinfo.dest.valid &&
+            !renameInstructions(lane).rinfo.dest.isFp
     })
     val decodeNeedsFp = VecInit((0 until width).map { lane =>
-        decodeCandidate(lane) && instructions(lane).rinfo.dest.valid &&
-            instructions(lane).rinfo.dest.isFp
+        decodePrefix(lane) && renameInstructions(lane).rinfo.dest.valid &&
+            renameInstructions(lane).rinfo.dest.isFp
     })
     val stageCanLoad = !renameStageValid.orR || accepted.orR
     val laneRenameReady = VecInit((0 until width).map { lane =>
         (!decodeNeedsInt(lane) || integerRename.io.freePrefix(lane)) &&
             (!decodeNeedsFp(lane) || floatingRename.io.freePrefix(lane))
     })
-    val groupRenameReady = decodeCandidate.toSeq.zip(laneRenameReady.toSeq).map {
+    val scalarRenameReady = decodePrefix.toSeq.zip(laneRenameReady.toSeq).map {
         case (candidate, ready) => !candidate || ready
     }.reduce(_ && _)
+    val groupRenameReady = scalarRenameReady && vectorCapacityReady &&
+        configurationPending.map(pending => !pending).getOrElse(true.B)
     val decodeGrant = Mux(
         stageCanLoad && groupRenameReady && !io.commit.flush && !io.commit.restore,
-        decodeCandidate.asUInt,
+        decodePrefix.asUInt,
         0.U(width.W),
     )
     // Prepare tags and same-group bypasses from the FQ candidates in parallel
     // with Dispatch admission. Only the fixed stage register uses decodeGrant.
-    integerRename.io.prepare := decodeCandidate.asUInt
-    floatingRename.io.prepare := decodeCandidate.asUInt
+    integerRename.io.prepare := decodePrefix.asUInt
+    floatingRename.io.prepare := decodePrefix.asUInt
     integerRename.io.restore := io.commit.restore
     floatingRename.io.restore := io.commit.restore
 
     /* Assemble the registered payload once Decode and the two rename domains have completed. */
     val renameIncoming = Wire(Vec(width, new MiddleendRenameEntry(frontendParams, backendParams)))
     for (lane <- 0 until width) {
-        val instruction = instructions(lane)
+        val instruction = renameInstructions(lane)
         val intInfo = integerRename.io.pinfo(lane)
         val fpInfo = floatingRename.io.pinfo(lane)
         renameIncoming(lane).context.ftqIdx := 0.U
@@ -221,7 +289,8 @@ class Middleend(
         renameIncoming(lane).dispatchClass.load := decoded.fu === DecodeUnit.Load.U
         renameIncoming(lane).dispatchClass.storeOrAtomic :=
             decoded.fu === DecodeUnit.Store.U || decoded.fu === DecodeUnit.Atomic.U
-        renameIncoming(lane).dispatchClass.noIssue := decoded.exception.valid || commitSystem
+        renameIncoming(lane).dispatchClass.noIssue := decoded.exception.valid || commitSystem ||
+            decoded.fu === DecodeUnit.Vector.U
         for (source <- 0 until 3) {
             val operand = instruction.rinfo.src(source)
             renameIncoming(lane).physical.prs(source) := Mux(
@@ -330,7 +399,15 @@ class Middleend(
         packageForDispatch.ftqSlot := renameStageEntries(lane).context.slot
         dispatcher.io.in.entries(lane) := packageForDispatch
     }
-    dispatcher.io.resourcePrefix := io.commit.resourcePrefix
+    val vectorStageSelection = VecInit(renameStageEntries.zipWithIndex.map { case (entry, lane) =>
+        renameStageValid(lane) && entry.context.instruction.fu === DecodeUnit.Vector.U
+    }).asUInt
+    val vectorStageMemory = vectorStage.map(stage =>
+        stage.control.execution === VectorExecution.Load.U ||
+            stage.control.execution === VectorExecution.Store.U).getOrElse(false.B)
+    val vectorDispatchReady = io.vector.map(port => !vectorStageSelection.orR ||
+        Mux(vectorStageMemory, port.availableMemory, port.availableCompute)).getOrElse(true.B)
+    dispatcher.io.resourcePrefix := Mux(vectorDispatchReady, io.commit.resourcePrefix, 0.U)
     dispatcher.io.freePrefix := io.backend.freePrefix
     dispatcher.io.clearPreference := io.commit.flush
     io.backend.enqueue := dispatcher.io.enqueue
@@ -354,7 +431,7 @@ class Middleend(
     // controls visibility only, so it need not fan out to every payload bit.
     for (lane <- 0 until width) {
         val destination = renameStageEntries(lane).context.instruction.rinfo.dest
-        val incomingDestination = instructions(lane).rinfo.dest
+        val incomingDestination = renameInstructions(lane).rinfo.dest
         readyBoard.io.allocate(lane).valid := decodeGrant(lane) && incomingDestination.valid
         readyBoard.io.allocate(lane).bits := renameIncoming(lane).physical.prd
         io.commit.enqueue.entries(lane).context := renameStageEntries(lane).context
@@ -373,6 +450,61 @@ class Middleend(
     }
     io.commit.enqueue.valid := accepted
     io.commit.enqueue.writeValid := Fill(width, true.B)
+
+    vectorRename.foreach { rename =>
+        val groups = vectorGroups.get.io.groups
+        val port = io.vector.get
+        // Compute only the narrow architectural bases before the late FQ
+        // selector; group-count decode stays parallel with the shared RAT read.
+        rename.io.sourceBase := Mux1H(vectorSelection, vectorCandidateGroups.map(_.sourceBases))
+        rename.io.sourceCount := groups.sourceCount
+        rename.io.destinationBase := groups.destinationBase
+        rename.io.destinationCount := groups.destinationCount
+        rename.io.restore := io.commit.restore
+        rename.io.retire := port.retire
+        rename.io.preview.valid := vectorStageSelection.orR && vectorStage.get.destination.count.orR
+        rename.io.preview.bits := vectorStage.get.destination
+        rename.io.accept := (accepted & vectorStageSelection).orR && vectorStage.get.destination.count.orR
+        val metadata = Wire(new VectorInstructionMetadata)
+        metadata.control := vectorControl.get.io.control
+        metadata.groups := groups
+        metadata.source := rename.io.source
+        metadata.mask := rename.io.mask
+        metadata.destination := rename.io.destination
+        metadata.state := port.committed
+        metadata.state.vl := vectorState.get.vl
+        metadata.state.vtype := vectorState.get.vtype
+        metadata.state.vstart := vectorState.get.vstart
+        val vectorDecodeFire = (decodeGrant & vectorCandidates.asUInt).orR
+        port.allocate.valid := vectorDecodeFire && groups.destinationCount.orR
+        port.allocate.bits := rename.io.destination
+        when(stageCanLoad) { vectorStage.get := metadata }
+        port.enqueue.valid := (accepted & vectorStageSelection).orR
+        port.enqueue.bits.vector := vectorStage.get
+        port.enqueue.bits.scalar := Mux1H(vectorStageSelection, dispatcher.io.in.entries)
+        val configurationDecode = vectorDecodeFire &&
+            metadata.control.execution === VectorExecution.Configuration.U
+        when(io.commit.flush || io.commit.restore) {
+            configurationPending.get := false.B
+        }.elsewhen(configurationDecode) {
+            configurationPending.get := true.B
+        }.elsewhen(port.configuration.valid) {
+            configurationPending.get := false.B
+        }
+        when(io.commit.restore) {
+            vectorState.get := port.committed
+        }.elsewhen(port.configuration.valid && !io.commit.flush) {
+            vectorState.get := port.configuration.bits
+        }
+        when(vectorDecodeFire && !io.commit.restore) { vectorState.get.vstart := 0.U }
+        when(vectorDecodeFire) {
+            assert(rename.io.sourceBase.asUInt === groups.sourceBase.asUInt)
+            assert(rename.io.available, "Parallel vector capacity must grant every requested bank")
+            assert(metadata.control.legal, "Vector instruction is not implemented in the current execution path")
+            assert(groups.legal, "Vector register group or configuration is outside the computation contract")
+        }
+        assert(PopCount(vectorStageSelection) <= 1.U)
+    }
 
     val acceptedAny = accepted(0)
     val lastAccepted = VecInit.tabulate(width) { lane =>
@@ -401,7 +533,7 @@ class Middleend(
         io.frontend.out(lane).ready := decodeGrant(lane) && !io.commit.flush
     }
     assert((accepted & ~renameStageValid) === 0.U, "Dispatch cannot consume an invalid renamed instruction")
-    FIFOUtil.assertPrefix(decodeCandidate.toSeq, "Middleend frontend candidates must be an ordered prefix")
+    FIFOUtil.assertPrefix(decodePrefix.toSeq, "Middleend frontend candidates must be an ordered prefix")
     FIFOUtil.assertPrefix(accepted.asBools, "Middleend acceptance must remain an ordered prefix")
     FIFOUtil.assertPrefix(decodeGrant.asBools, "Middleend decode must consume an ordered prefix")
     when(accepted.orR) {

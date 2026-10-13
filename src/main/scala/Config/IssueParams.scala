@@ -19,6 +19,12 @@ sealed trait IssueQueueProfile {
 }
 
 object IssueQueueProfile {
+    case object Vector extends IssueQueueProfile {
+        val label = "Vector"
+        val sourceMask = 0x7
+        val allowedUnits = Set(DecodeUnit.Vector)
+    }
+
     case object ArithBranch extends IssueQueueProfile {
         val label = "ArithBranch"
         val sourceMask = 0x3

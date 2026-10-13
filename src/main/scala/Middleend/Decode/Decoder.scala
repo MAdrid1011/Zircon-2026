@@ -40,7 +40,13 @@ class Decoder(
     }
     val usesRounding = any(_.rounding)
     val validRounding = !usesRounding || inst(14, 12) <= 4.U || inst(14, 12) === 7.U
-    val legal = hits.reduceTree(_ || _) && validRounding
+    val vector = if (support.units.contains(DecodeUnit.Vector)) {
+        val decoder = Module(new VectorDecoder)
+        decoder.io.instruction := inst
+        Some(decoder.io.control)
+    } else None
+    val vectorLegal = vector.map(_.legal).getOrElse(false.B)
+    val legal = hits.reduceTree(_ || _) && validRounding || vectorLegal
     val priorException = io.in.fault || io.in.exception.valid
     val execute = legal && !priorException
 
@@ -69,6 +75,14 @@ class Decoder(
     instPkgOut.rm := Mux(execute && usesRounding, inst(14, 12), 0.U)
     instPkgOut.aq := execute && any(_.aqrl) && inst(26)
     instPkgOut.rl := execute && any(_.aqrl) && inst(25)
+    vector.foreach { decoded =>
+        when(decoded.recognized && execute) {
+            instPkgOut.fu := DecodeUnit.Vector.U
+            instPkgOut.op := decoded.operation
+            instPkgOut.rinfo := decoded.scalarInfo
+            instPkgOut.rm := 7.U
+        }
+    }
 
     // Translation faults become precise exceptions here, after the fetch packet
     // has preserved the virtual PC needed for stval.

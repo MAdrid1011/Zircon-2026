@@ -170,6 +170,34 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
                 self.assertIn("BUF_X1 addr0_buffer", text)
                 self.assertIn(".addr0(addr0_buffered)", text)
 
+    def test_performance_cache_depth_and_predictor_pin_contracts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            rtl = root / "rtl"
+            rtl.mkdir()
+            (rtl / "SinglePortMaskedRam_256_1_24.sv").write_text(
+                "module SinglePortMaskedRam_256_1_24(input clock, enable, write, "
+                "input [7:0] address, input [23:0] dataIn, output [23:0] dataOut); endmodule\n"
+            )
+            (rtl / "DCache.sv").write_text(
+                "module DCache; BsgFakeram1RW1R_128_32 data(); "
+                "BsgFakeram1RW1R_128_25 tag(); "
+                "PredictorBsgFakeram_128_32 predictor(); endmodule\n"
+            )
+            result = generate_nangate_memories(rtl, root / "memory")
+            wrapper = (root / "memory/wrappers.sv").read_text()
+            self.assertIn("module BsgFakeram1RW1R_128_32", wrapper)
+            self.assertIn("input [6:0] addr0", wrapper)
+            self.assertIn(".wmask0(wmask0)", wrapper)
+            for name in ("fakeram45_1rw1r_128x25", "fakeram45_1rw1r_128x32",
+                         "fakeram45_1rw1r_128x32_masked"):
+                self.assertIn(name, result["libraries"])
+            predictor_lib = Path(result["libraries"]["fakeram45_1rw1r_128x32"]["path"]).read_text()
+            cache_lib = Path(result["libraries"]["fakeram45_1rw1r_128x32_masked"]["path"]).read_text()
+            self.assertNotIn("bus(wmask0)", predictor_lib)
+            self.assertIn("bus(wmask0)", cache_lib)
+            self.assertEqual(cache_lib.count("timing_type : rising_edge"), 2)
+
     def test_active_nangate_platform_contains_only_bsg_sram_views(self):
         platform = Path(__file__).parents[2] / "eda/platforms/nangate45"
         metadata = json.loads((platform / "platform.json").read_text())

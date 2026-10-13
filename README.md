@@ -25,8 +25,12 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 [Zircon-2024](https://github.com/MAdrid1011/Zircon-2024) 处理器工作，在取指预测、乱序执行和
 存储层次上形成当前实现。两个早期仓库保留各自的设计和实验资料，可用于了解这一研究方向的背景。
 
+同一仓库提供两种静态配置：`system` 面向控制程序与 Linux，`performance` 面向裸机整数与
+FP32 数组计算。性能配置支持 Zve32f、VLEN=256 和八个 32 bit lane，沿用标量乱序流水线、
+重命名、队列和算术模块，并增加独立向量后端与 256 bit AXI。
+
 > [!NOTE]
-> 当前版本已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
+> 系统配置已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
 > 输入、文件系统挂载和定时器路径验证。Nangate45 BSG 纯逻辑时序分析测得最长数据到达时间
 > 为 1.474616 ns，在 1.5 ns 周期下完成时序闭合，对应逻辑频率约 667 MHz。
 
@@ -91,7 +95,7 @@ flowchart LR
     FTQ -. 预测器训练 .-> PF
 ```
 
-### 默认配置
+### 默认系统配置
 
 | 项目 | 当前配置 |
 | --- | --- |
@@ -111,7 +115,7 @@ flowchart LR
 
 ### 关键设计
 
-- **乱序后端**：六个压缩式发射队列连接五条执行流水线；Load replay 保留原队列年龄并原位重发。
+- **乱序后端**：六个固定槽发射队列按年龄选择指令，连接五条执行流水线；Load replay 保留原队列年龄并原位重发。
 - **统一混合计算通路**：整数乘除、FP32 运算与 CSR 顺序访问共享 `MixArithPipeline`，CSR 仅在
   获得 ROB 头授权后执行。
 - **双 Load 能力**：LS0 与 LS1 可以同时执行 Load；Store Address 与 Store Data 分离调度，
@@ -126,6 +130,28 @@ flowchart LR
   减少 L1 与 L2 的重复数据。
 - **Sv32 地址翻译**：独立 ITLB、三查询端口 DTLB 和共享硬件 PTW 已接入整核，PTW 的 I/D
   请求分别复用 L2 的指令侧与数据侧通道。
+
+### SIMD8 性能配置
+
+| 项目 | 配置 |
+| --- | --- |
+| ISA | `RV32IMF_Zicsr_Zicntr_Zve32f_Zvl256b` |
+| 向量宽度 / 元素宽度 | VLEN=256 / ELEN=32，八 lane |
+| 向量架构 / 物理寄存器 | 32 / 64 个 |
+| 向量计算 / 访存队列 | 12 / 8 项 |
+| ICache / DCache / L2 | 2 / 16 / 64 KiB，64 B Line |
+| 外部 AXI4 | 256 bit，Cache Line 两个 beat |
+| 地址与运行环境 | 32 位直接物理寻址，裸机 C 程序 |
+
+性能配置复用原 `Rename/SRat/FreeList`、`Regfile`、`IssueQueue` 和算术单元，标量与向量
+任务可重叠执行。常用 INT32 和 FP32 运算使用八路流水，除法、归约、排列和复杂访存使用
+多拍通路。三槽 Rename–Dispatch 寄存器整组进出，每组最多包含一条向量指令。
+设计、指令组织与使用方法见 [SIMD8 性能核心](docs/PerformanceCore.md)。
+
+裸机程序包含三种版本的整数/浮点矩阵乘、FIR 和 FP32 FFT，以及 SGEMM、SAXPY 与寄存器
+吞吐测量。官方 FP32 负载使用 EEMBC CoreMark-PRO 的线性代数与 Livermore kernels，
+保留上游算法、数据集和校验。入口分别为 [SIMD 程序](RV-Software/simd/README.md) 和
+[CoreMark-PRO](RV-Software/coremark-pro/README.md)。
 
 ## 快速开始
 

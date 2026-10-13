@@ -14,7 +14,12 @@ include(CTest)
 
 find_program(SBT_EXECUTABLE sbt REQUIRED)
 
-set(ZIRCON_RTL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated")
+set(ZIRCON_CORE_PROFILE "system" CACHE STRING "Static core profile: system or performance")
+set_property(CACHE ZIRCON_CORE_PROFILE PROPERTY STRINGS system performance)
+if(NOT ZIRCON_CORE_PROFILE MATCHES "^(system|performance)$")
+    message(FATAL_ERROR "ZIRCON_CORE_PROFILE must be system or performance")
+endif()
+set(ZIRCON_RTL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated/${ZIRCON_CORE_PROFILE}")
 set(ZIRCON_RTL_TOP "${ZIRCON_RTL_DIR}/ZirconCore.sv")
 set(ZIRCON_XILINX_RAM_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/main/resources/Xilinx/XilinxSinglePortRamReadFirst.sv"
@@ -35,7 +40,7 @@ if(NOT EXISTS "${ZIRCON_RTL_TOP}")
         COMMAND "${CMAKE_COMMAND}" -E env
             "ZIRCON_INCLUDE_VIVADO_RAM_SOURCE=false"
             "ZIRCON_USE_EXTERNAL_VIVADO_RAM=true"
-            "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation ${ZIRCON_RTL_DIR}"
+            "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation --profile=${ZIRCON_CORE_PROFILE} ${ZIRCON_RTL_DIR}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMAND_ERROR_IS_FATAL ANY
     )
@@ -53,7 +58,7 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E env
         "ZIRCON_INCLUDE_VIVADO_RAM_SOURCE=false"
         "ZIRCON_USE_EXTERNAL_VIVADO_RAM=true"
-        "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation ${ZIRCON_RTL_DIR}"
+        "${SBT_EXECUTABLE}" --batch "runMain Elaborate --simulation --profile=${ZIRCON_CORE_PROFILE} ${ZIRCON_RTL_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         ${ZIRCON_XILINX_RAM_SOURCES}
         "${ZIRCON_RTL_DIR}"

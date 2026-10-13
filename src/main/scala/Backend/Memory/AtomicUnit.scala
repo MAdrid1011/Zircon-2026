@@ -125,6 +125,9 @@ class AtomicUnit(
 
     io.store.request.valid := state === storeRequest
     io.store.request.bits.paddr := request.paddr
+    io.store.request.bits.wide := false.B
+    io.store.request.bits.line := 0.U
+    io.store.request.bits.lineMask := 0.U
     io.store.request.bits.data := storeData
     io.store.request.bits.mask := 15.U
     io.store.request.bits.size := 2.U

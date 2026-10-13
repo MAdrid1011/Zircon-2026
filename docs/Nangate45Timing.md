@@ -74,6 +74,16 @@ Logic-only STA 使用理想时钟和零互连寄生，适合观察综合后的�
 python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target-ns 1.5
 ```
 
+SIMD8 性能核心采用其 16 KiB DCache、64 KiB L2 和 256 bit AXI 配置：
+
+```sh
+python3 scripts/eda/synthesize_core.py --profile performance \
+  --logic-only --target-ns 1.0 --sta-target-ns 1.5
+```
+
+性能配置默认输出到 `build/eda/nangate45-performance/`，全部 SRAM 使用 BSG 绑定。
+本页“当前结果”表对应系统配置。
+
 默认输出位于：
 
 ```text

@@ -24,9 +24,49 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
             port.request.bits.sqTailOH.poke(1)
         }
         dut.io.flush.poke(false)
+        dut.io.vector.foreach { port =>
+            VectorTestUtils.clear(port.store.bits)
+            port.store.valid.poke(false); port.ordering.tail.poke(0)
+        }
         dut.reset.poke(true)
         dut.clock.step()
         dut.reset.poke(false)
+    }
+
+    "vector Stores share allocation and retirement order, block scalar forwarding, and release their age boundary" in {
+        simulate(new StoreQueue(cp = ZirconConfig.CommitParams(vectorEnabled = true))) { dut =>
+            initialize(dut)
+            val vector = dut.io.vector.get
+            dut.io.request.valid.poke(3); dut.io.request.store.poke(3)
+            dut.io.enqueue.valid.poke(3); dut.io.enqueue.writeValid.poke(3)
+            for (lane <- 0 until 2) {
+                val entry = dut.io.enqueue.entries(lane)
+                entry.context.instruction.fu.poke(if (lane == 0) ZirconConfig.DecodeUnit.Vector else ZirconConfig.DecodeUnit.Store)
+                entry.context.instruction.inst.poke(if (lane == 0) 0x02006027 else 0x00002023)
+                entry.allocation.robIdx.poke(4 + lane); entry.allocation.sqIdx.poke(lane)
+            }
+            dut.clock.step()
+            dut.io.request.valid.poke(0); dut.io.enqueue.valid.poke(0); dut.io.enqueue.writeValid.poke(0)
+            vector.ordering.tail.poke(0); vector.ordering.clear.expect(true)
+            vector.ordering.tail.poke(1); vector.ordering.clear.expect(false)
+            vector.store.valid.poke(true); vector.store.bits.sqIdx.poke(0)
+            vector.store.bits.robIdx.poke(4); vector.store.bits.last.poke(true)
+            dut.clock.step(); vector.store.valid.poke(false)
+            dut.io.completion.foreach(_.valid.expect(false))
+            val query = dut.io.query(0).request
+            query.valid.poke(true); query.bits.wordAddress.poke(0x80000000L >> 2)
+            query.bits.mask.poke(15); query.bits.sqTailOH.poke(2)
+            dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(true)
+            dut.io.query(0).response.bits.mask.expect(0)
+            query.bits.sqTailOH.poke(1); dut.clock.step()
+            dut.io.query(0).response.bits.blocked.expect(false)
+            dut.io.commit(0).valid.poke(true); dut.io.commit(0).bits.poke(0)
+            dut.clock.step(); dut.io.commit(0).valid.poke(false)
+            dut.io.flush.poke(true); dut.clock.step(); dut.io.flush.poke(false)
+            dut.io.drain.valid.expect(true); dut.io.drain.bits.vector.expect(true)
+            dut.io.drain.ready.poke(true); dut.clock.step(); dut.io.drain.ready.poke(false)
+            vector.ordering.clear.expect(true); dut.io.empty.expect(true)
+        }
     }
 
     private def address(dut: StoreQueue, sqIdx: BigInt, robIdx: Int, paddr: Int, mask: Int): Unit = {

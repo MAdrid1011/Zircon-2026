@@ -31,6 +31,15 @@ class DivideNormalizeProbe extends Module {
     io.out := (io.data << io.shift)(31, 0)
 }
 
+class DivideJamProbe extends Module {
+    val io = IO(new Bundle {
+        val data = Input(UInt(27.W))
+        val shift = Input(UInt(5.W))
+        val out = Output(UInt(27.W))
+    })
+    io.out := SRT4Logic.rightJam(io.data, io.shift)
+}
+
 class DivideDigitProbe extends Module {
     val io = IO(new Bundle {
         val high = Input(UInt(7.W))
@@ -80,6 +89,20 @@ class SharedDivSqrtSpec extends AnyFreeSpec with ChiselSim {
             val overflow = x.op % 2 == 0 && x.a == 0x80000000L && x.b == 0xffffffffL
             if (b == 0 || a == 0 || a < b || overflow) 0
             else (a.bitLength - b.bitLength + 1) / 2 + 1
+        }
+    }
+
+    "retained window and sticky reduction cover every shift including shifts beyond the window" in {
+        simulate(new DivideJamProbe) { dut =>
+            val random = new scala.util.Random(20261013)
+            val patterns = Seq(BigInt(0), BigInt(1), (BigInt(1) << 27) - 1) ++
+                (0 until 27).map(bit => BigInt(1) << bit) ++
+                (0 until 128).map(_ => BigInt(27, random))
+            for (shift <- 0 until 32; data <- patterns) {
+                val sticky = (data & ((BigInt(1) << shift) - 1)) != 0
+                dut.io.data.poke(data); dut.io.shift.poke(shift)
+                dut.io.out.expect((data >> shift) | (if (sticky) BigInt(1) else BigInt(0)))
+            }
         }
     }
 

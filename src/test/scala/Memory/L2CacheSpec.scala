@@ -222,6 +222,26 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
 }
 
 class L2CacheSpec extends AnyFreeSpec with ChiselSim {
+    "256-set BSG performance L2 preserves high index bits and dirty victim ownership" in {
+        simulate(new L2Cache(DualPortRamBackend.BSG, p = ZirconConfig.L2CacheParams(sets = 256))) { dut =>
+            val d = new L2CacheDriver(dut)
+            import d._
+            tick()
+            val victims = Seq(0, 16, 31, 127, 128, 255).map(i => 0x80000000L + i * 64)
+            val expected = victims.zipWithIndex.map { case (address, i) =>
+                replaceWord(line(address), 12, BigInt(0x12340000L + i))
+            }
+            for ((address, i) <- victims.zipWithIndex)
+                dcache(0x80010000L + i * 64, Some((address, expected(i), true)))
+            val beforeHits = reads
+            for ((address, i) <- victims.zipWithIndex) {
+                val (data, error) = dcache(address)
+                assert(!error && data == expected(i) && lastDcacheDirty)
+            }
+            assert(reads == beforeHits, "Distinct high-index victims must remain resident")
+            drain()
+        }
+    }
     implicit val timedMemories: svsim.BackendSettingsModifications = {
         case settings: svsim.verilator.Backend.CompilationSettings =>
             settings.withTiming(Some(svsim.verilator.Backend.CompilationSettings.Timing.TimingEnabled))

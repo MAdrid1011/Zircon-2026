@@ -23,6 +23,7 @@ class BackendIO(
     dcache: DCacheParams,
     tlbEnabled: Boolean,
     observe: Boolean,
+    vectorEnabled: Boolean = false,
 ) extends Bundle {
     val middleend = new BackendMiddleendIO(p, issue)
     val commit = new BackendCommitIO(p, load)
@@ -33,10 +34,12 @@ class BackendIO(
     val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new BackendPerformanceCounters)) else None
     val debug = if (observe) Some(Output(new BackendDebugIO)) else None
+    val vector = if (vectorEnabled) Some(new VectorBackendIO(p)) else None
+    val vectorObservation = if (vectorEnabled && observe) Some(Output(UInt((64 * 256).W))) else None
 }
 
 /**
-  * Six compact issue queues, five execution pipes, shared PRFs, bypass and DCache.
+  * Six fixed-slot issue queues, five execution pipes, shared PRFs, bypass and DCache.
   *
   * The ROB, SQ, SB and ReadyBoard remain outside this module. Load retry is closed
   * locally: the corresponding IQ entry stays at its original age and is re-armed
@@ -49,13 +52,23 @@ class Backend(
     val ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
     val tlbEnabled: Boolean = true,
     val observe: Boolean = false,
+    val atomicEnabled: Boolean = true,
+    val dcacheSets: Int = 16,
+    val directPhysical: Boolean = false,
+    val vectorEnabled: Boolean = false,
 ) extends Module {
     require(p == BackendParams(), "The current execution pipeline interfaces use the default BackendParams")
     require(p == loadParams.backend, "Backend and LoadPipeline parameters must describe the same physical machine")
     require(issueParams.wakeupPorts == 8, "Backend wakeup routing has eight fixed producer positions")
 
-    private val dcacheParams = DCacheParams(loadParams.entries)
-    val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe))
+    // Vector LMUL groups reuse the cache request slot; scalar LS queues retain their size.
+    private val dcacheParams = DCacheParams(
+        if (vectorEnabled) math.max(loadParams.entries, 8) else loadParams.entries,
+        sets = dcacheSets,
+        directPhysical = directPhysical,
+    )
+    require(!vectorEnabled || (!atomicEnabled && directPhysical))
+    val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe, vectorEnabled))
 
     /* IssueQueueIndex is the shared ordering contract for dispatch, counters and execution pipes. */
     val queues = issueParams.queueParams.zipWithIndex.map { case (params, index) =>
@@ -75,21 +88,36 @@ class Backend(
     val arithPipes = Seq(arith0, arith1)
     val mixArith = Module(new MixArithPipeline)
     val ls0 = Module(new LoadPipeline(loadParams))
-    val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled))
+    val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled, directPhysical))
     val dcache = Module(new DCache(ramBackend, dcacheParams, tlbEnabled, observe))
-    val atomic = Module(new AtomicUnit(p, dcacheParams, observe))
+    val atomic = if (atomicEnabled) Module(new AtomicUnit(p, dcacheParams, observe)).io else {
+        val disabled = Wire(new AtomicUnitIO(p, dcacheParams, observe))
+        disabled.request.ready := false.B
+        disabled.response.valid := false.B
+        disabled.response.bits := 0.U.asTypeOf(new AtomicResponse(p))
+        disabled.writeResult := false.B
+        disabled.busy := false.B
+        disabled.load.request.valid := false.B
+        disabled.load.request.bits := 0.U.asTypeOf(new DLoadRequest(dcacheParams))
+        disabled.load.forwardResult := 0.U.asTypeOf(Valid(new DForwardResult(dcacheParams)))
+        disabled.store.request.valid := false.B
+        disabled.store.request.bits := 0.U.asTypeOf(new DStoreRequest)
+        disabled.store.response.ready := false.B
+        disabled.debug.foreach(_ := 0.U.asTypeOf(new AtomicUnitDebugIO))
+        disabled
+    }
     val sharedStore = Module(new SharedStorePort)
 
     /* Central PRFs provide stable held reads while a downstream execution stage is stalled. */
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
-        numReadPorts = 9,
+        numReadPorts = if (vectorEnabled) 10 else 9,
         numWritePorts = 5,
         holdReads = true,
     )
     val fpRfParams = RegfileParams(
         numEntries = p.numFpPhys,
-        numReadPorts = 4,
+        numReadPorts = if (vectorEnabled) 5 else 4,
         numWritePorts = 3,
         hasZeroReg = false,
         holdReads = true,
@@ -106,6 +134,159 @@ class Backend(
     val bypass = Module(new Bypass(BypassParams.twoArithBackend(p)))
     val wakeupRouter = Module(new WakeupRouter(p))
     val loadSpeculation = Module(new LoadSpeculationTracker(p))
+    val vectorScalarWrite = WireDefault(0.U.asTypeOf(Valid(new VectorScalarWrite(p))))
+    // Vector-to-scalar writes share LS1's existing RF port. Publish their tag
+    // from Q after the write, using an idle LS1 WB wakeup slot. One pending tag
+    // is sufficient because completion is backpressured while the slot is held.
+    val vectorScalarWake = if (vectorEnabled) Some(RegInit(0.U(p.tagWidth.W))) else None
+    vectorScalarWake.foreach { pending =>
+        when(io.commit.flush) { pending := 0.U }
+        .elsewhen(vectorScalarWrite.valid) { pending := vectorScalarWrite.bits.destination }
+        .elsewhen(ls1.io.wk.wakeWB.prd === 0.U) { pending := 0.U }
+        when(vectorScalarWrite.valid) {
+            assert(pending === 0.U || ls1.io.wk.wakeWB.prd === 0.U,
+                "A vector scalar wakeup must not overwrite a retained tag")
+        }
+    }
+    val vectorCompute = if (vectorEnabled) Some(Module(new VectorCompute(p))) else None
+    val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams))) else None
+    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p))) else None
+    vectorCompute.foreach { compute =>
+        val port = io.vector.get
+        val iq = Module(new IssueQueue(p, IssueQueueParams(12, IssueQueueProfile.Vector,
+            enqueueWidth = 1, wakeupPorts = issueParams.wakeupPorts)))
+        val memory = vectorMemory.get
+        val serial = vectorSerial.get
+        val memoryIQ = Module(new IssueQueue(p, IssueQueueParams(8, IssueQueueProfile.Vector,
+            enqueueWidth = 1, wakeupPorts = issueParams.wakeupPorts), orderedIssue = true))
+        val ready = Module(new VectorReadyBoard)
+        val file = Module(new VectorRegisterFile(observe = observe))
+        io.vectorObservation.foreach(_ := file.io.observation.get)
+        ready.io.allocate := port.allocate
+        ready.io.flush := io.commit.flush
+        val arithmeticWrite = Mux(serial.io.writeback.valid, serial.io.writeback, compute.io.writeback)
+        ready.io.wakeup(0).valid := arithmeticWrite.valid && arithmeticWrite.bits.ready
+        ready.io.wakeup(0).bits := arithmeticWrite.bits.address
+        ready.io.wakeup(1).valid := memory.io.writeback.valid
+        ready.io.wakeup(1).bits := memory.io.writeback.bits.address
+        iq.io.vector.get.ready := ready.io.ready
+        iq.io.vector.get.wakeup := ready.io.wakeup
+        iq.io.vector.get.enqueue := port.enqueue.bits.vector
+        iq.io.enq.valid := port.enqueue.valid &&
+            port.enqueue.bits.vector.control.execution =/= VectorExecution.Load.U &&
+            port.enqueue.bits.vector.control.execution =/= VectorExecution.Store.U
+        iq.io.enq.candidates(0) := port.enqueue.bits.scalar
+        iq.io.enq.selection(0) := 1.U
+        val memoryInstruction = port.enqueue.bits.vector.control.execution === VectorExecution.Load.U ||
+            port.enqueue.bits.vector.control.execution === VectorExecution.Store.U
+        memoryIQ.io.vector.get.ready := ready.io.ready
+        memoryIQ.io.vector.get.wakeup := ready.io.wakeup
+        memoryIQ.io.vector.get.enqueue := port.enqueue.bits.vector
+        memoryIQ.io.enq.valid := port.enqueue.valid && memoryInstruction
+        memoryIQ.io.enq.candidates(0) := port.enqueue.bits.scalar
+        memoryIQ.io.enq.selection(0) := 1.U
+        memoryIQ.io.flush := io.commit.flush
+        memoryIQ.io.speculation := loadSpeculation.io.resolution
+        iq.io.flush := io.commit.flush
+        iq.io.speculation := loadSpeculation.io.resolution
+        // Certain PRF writes reach this queue through a local Q boundary.
+        // Vector collection has no scalar bypass or early-wakeup contract.
+        val scalarWrites = Seq(
+            arith0.io.rf.write.valid -> Cat(0.U(1.W), arith0.io.rf.write.bits.prd),
+            arith1.io.rf.write.valid -> Cat(0.U(1.W), arith1.io.rf.write.bits.prd),
+            mixArith.io.rf.intWrite.valid -> Cat(0.U(1.W), mixArith.io.rf.intWrite.bits.addr),
+            mixArith.io.rf.fpWrite.valid -> Cat(1.U(1.W), mixArith.io.rf.fpWrite.bits.addr),
+            ls0.io.rf.wr.valid -> ls0.io.rf.wr.bits.prd,
+            ls1.io.rf.wr.valid -> ls1.io.rf.wr.bits.prd,
+            vectorScalarWrite.valid -> vectorScalarWrite.bits.destination,
+            false.B -> 0.U(p.tagWidth.W),
+        )
+        iq.io.wakeup := RegNext(VecInit(scalarWrites.map { case (valid, tag) =>
+            val wake = Wire(new BackendWakeup(p))
+            wake.prd := Mux(valid, tag, 0.U)
+            wake.specMask := 0.U
+            wake
+        }), 0.U.asTypeOf(Vec(issueParams.wakeupPorts, new BackendWakeup(p))))
+        memoryIQ.io.wakeup := iq.io.wakeup
+        val serialIssue = iq.io.vector.get.issue.control.execution === VectorExecution.Serial.U
+        compute.io.in.valid := iq.io.issue.valid && !serialIssue && serial.io.idle
+        compute.io.in.bits.scalar := iq.io.issue.bits
+        compute.io.in.bits.vector := iq.io.vector.get.issue
+        serial.io.in.valid := iq.io.issue.valid && serialIssue && compute.io.idle
+        serial.io.in.bits.scalar := iq.io.issue.bits
+        serial.io.in.bits.vector := iq.io.vector.get.issue
+        serial.io.flush := io.commit.flush
+        serial.io.roundingMode := port.roundingMode
+        iq.io.issue.ready := Mux(serialIssue, serial.io.in.ready && compute.io.idle,
+            compute.io.in.ready && serial.io.idle)
+        compute.io.flush := io.commit.flush
+        compute.io.roundingMode := port.roundingMode
+        memory.io.in.valid := memoryIQ.io.issue.valid && !io.commit.atomic.blockMemoryIssue
+        memory.io.in.bits.scalar := memoryIQ.io.issue.bits
+        memory.io.in.bits.vector := memoryIQ.io.vector.get.issue
+        memoryIQ.io.issue.ready := memory.io.in.ready && !io.commit.atomic.blockMemoryIssue
+        memory.io.flush := io.commit.flush
+        memory.io.store <> port.store
+        memory.io.ordering <> port.ordering
+        // Both collectors reuse all three existing lane read ports. A memory
+        // collection lasts one cycle; arithmetic holds its task while denied.
+        val memoryReads = memory.io.readRequest
+        val serialReads = serial.io.readRequest
+        compute.io.readAvailable := !memoryReads && !serialReads
+        serial.io.readAvailable := !memoryReads
+        memory.io.readAvailable := true.B
+        val readOwners = VecInit(Seq(memoryReads, !memoryReads && serialReads,
+            !memoryReads && !serialReads))
+        for (read <- 0 until 3) {
+            file.io.read(read).address := Mux1H(readOwners, Seq(memory.io.read(read).address,
+                serial.io.read(read).address, compute.io.read(read).address))
+            // Arbitrate six-bit tags before the shared RF decoder. Selecting
+            // three 64-bit masks makes the read-owner control drive every row.
+            file.io.read(read).oneHot := UIntToOH(file.io.read(read).address, 64)
+            compute.io.read(read).data := file.io.read(read).data
+            memory.io.read(read).data := file.io.read(read).data
+            serial.io.read(read).data := file.io.read(read).data
+        }
+        assert(PopCount(readOwners) === 1.U)
+        file.io.write(0).valid := arithmeticWrite.valid
+        file.io.write(0).address := arithmeticWrite.bits.address
+        file.io.write(0).data := arithmeticWrite.bits.data
+        file.io.write(0).bytes := arithmeticWrite.bits.bytes
+        assert(!(compute.io.writeback.valid && serial.io.writeback.valid))
+        file.io.write(1).valid := memory.io.writeback.valid
+        file.io.write(1).address := memory.io.writeback.bits.address
+        file.io.write(1).data := memory.io.writeback.bits.data
+        file.io.write(1).bytes := memory.io.writeback.bits.bytes
+        port.availableCompute := iq.io.freePrefix(0)
+        port.availableMemory := memoryIQ.io.freePrefix(0)
+        val scalarWakeAvailable = vectorScalarWake.get === 0.U || ls1.io.wk.wakeWB.prd === 0.U
+        val scalarPortAvailable = !compute.io.completion.bits.scalar.valid ||
+            (!ls1.io.rf.wr.valid && scalarWakeAvailable)
+        val completion = Module(new Arbiter(new VectorCompletion(p), 3))
+        completion.io.in(0).valid := compute.io.completion.valid && scalarPortAvailable
+        completion.io.in(0).bits := compute.io.completion.bits
+        compute.io.completion.ready := completion.io.in(0).ready && scalarPortAvailable
+        completion.io.in(1) <> memory.io.completion
+        val serialScalarAvailable = !serial.io.completion.bits.scalar.valid ||
+            (!ls1.io.rf.wr.valid && scalarWakeAvailable)
+        completion.io.in(2).valid := serial.io.completion.valid && serialScalarAvailable
+        completion.io.in(2).bits := serial.io.completion.bits
+        serial.io.completion.ready := completion.io.in(2).ready && serialScalarAvailable
+        port.completion <> completion.io.out
+        vectorScalarWrite.valid := port.completion.fire && port.completion.bits.scalar.valid
+        vectorScalarWrite.bits := port.completion.bits.scalar.bits
+        port.configuration := compute.io.configuration
+        val scalarAddress = Mux(memoryReads, memory.io.scalarAddress,
+            Mux(serialReads, serial.io.scalarAddress, compute.io.scalarAddress))
+        intRf.io.read(9).addr := scalarAddress(p.physWidth - 1, 0)
+        fpRf.io.read(4).addr := Mux(scalarAddress(p.tagWidth - 1),
+            scalarAddress(p.physWidth - 1, 0), 0.U)
+        compute.io.scalarData := Mux(compute.io.scalarAddress(p.tagWidth - 1),
+            fpRf.io.read(4).data, intRf.io.read(9).data)
+        memory.io.scalarData := intRf.io.read(9).data
+        serial.io.scalarData := Mux(serial.io.scalarAddress(p.tagWidth - 1),
+            fpRf.io.read(4).data, intRf.io.read(9).data)
+    }
 
     /* The indexed Middleend boundary connects homogeneously to the six issue queues. */
     queues.zip(io.middleend.enqueue).foreach { case (queue, enqueue) => queue.io.enq := enqueue }
@@ -147,7 +328,9 @@ class Backend(
     wakeupRouter.io.mixWB := certainWake(mixArith.io.wakeup.valid, mixArith.io.wakeup.bits)
     Seq(ls0, ls1).zipWithIndex.foreach { case (pipe, lane) =>
         wakeupRouter.io.loadD1(lane) := pipe.io.wk.wakeD1
-        wakeupRouter.io.loadWB(lane) := pipe.io.wk.wakeWB
+        wakeupRouter.io.loadWB(lane) := (if (lane == 1 && vectorEnabled) Mux(pipe.io.wk.wakeWB.prd.orR,
+            pipe.io.wk.wakeWB, certainWake(true.B, vectorScalarWake.get))
+            else pipe.io.wk.wakeWB)
     }
 
     val arithIssueCandidates = VecInit(Seq(
@@ -213,7 +396,7 @@ class Backend(
         ls0.io.rf.rd.hold,
         ls1.io.rf.rd.hold,
         ls1.io.rf.std.get.hold,
-    ))
+    ) ++ (if (vectorEnabled) Seq(false.B) else Seq.empty))
 
     for (source <- 0 until 3) {
         fpRf.io.read(source).addr := mixArith.io.rf.fpRead(source).addr
@@ -221,7 +404,8 @@ class Backend(
     }
     fpRf.io.read(3).addr := ls1.io.rf.std.get.fpAddr
     ls1.io.rf.std.get.fpData := fpRf.io.read(3).data
-    fpRf.io.readHold.get := VecInit(Seq(false.B, false.B, false.B, ls1.io.rf.std.get.hold))
+    fpRf.io.readHold.get := VecInit(Seq(false.B, false.B, false.B, ls1.io.rf.std.get.hold) ++
+        (if (vectorEnabled) Seq(false.B) else Seq.empty))
 
     /* Atomic shares LS1's integer write port; the other producers remain fixed. */
     def intWrite(port: Int, valid: Bool, address: UInt, data: UInt): Unit = {
@@ -250,18 +434,19 @@ class Backend(
         ls0.io.rf.wr.bits.data,
     )
     // AtomicUnit captures the result-write decision alongside its response.
-    val atomicIntWrite = atomic.io.writeResult
+    val atomicIntWrite = atomic.writeResult
     val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)
     intRf.io.selectiveReadBypass.get.we := ls1IntWrite
     intRf.io.selectiveReadBypass.get.addr := ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0)
     intRf.io.selectiveReadBypass.get.data := ls1.io.rf.wr.bits.data
     intWrite(
         4,
-        ls1IntWrite || atomicIntWrite,
-        Mux(atomicIntWrite,
-            atomic.io.response.bits.prd(p.physWidth - 1, 0),
-            ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0)),
-        Mux(atomicIntWrite, atomic.io.response.bits.data, ls1.io.rf.wr.bits.data),
+        ls1IntWrite || atomicIntWrite || vectorScalarWrite.valid && !vectorScalarWrite.bits.destination(p.tagWidth - 1),
+        Mux(vectorScalarWrite.valid, vectorScalarWrite.bits.destination(p.physWidth - 1, 0), Mux(atomicIntWrite,
+            atomic.response.bits.prd(p.physWidth - 1, 0),
+            ls1.io.rf.wr.bits.prd(p.physWidth - 1, 0))),
+        Mux(vectorScalarWrite.valid, vectorScalarWrite.bits.data,
+            Mux(atomicIntWrite, atomic.response.bits.data, ls1.io.rf.wr.bits.data)),
     )
     assert(!(atomicIntWrite && ls1IntWrite), "Atomic completion and LS1 must not share a write cycle")
     when(atomicIntWrite) {
@@ -274,9 +459,12 @@ class Backend(
     fpRf.io.directWrite.get.oneHot := mixArith.io.rf.fpWriteOneHot
     fpRf.io.directWrite.get.data := mixArith.io.rf.fpWriteData
     for ((pipe, port) <- Seq(ls0 -> 1, ls1 -> 2)) {
-        fpRf.io.write(port).we := pipe.io.rf.wr.valid && pipe.io.rf.wr.bits.prd(p.tagWidth - 1)
-        fpRf.io.write(port).addr := pipe.io.rf.wr.bits.prd(p.physWidth - 1, 0)
-        fpRf.io.write(port).data := pipe.io.rf.wr.bits.data
+        val vectorWrite = (port == 2).B && vectorScalarWrite.valid &&
+            vectorScalarWrite.bits.destination(p.tagWidth - 1)
+        fpRf.io.write(port).we := vectorWrite || pipe.io.rf.wr.valid && pipe.io.rf.wr.bits.prd(p.tagWidth - 1)
+        fpRf.io.write(port).addr := Mux(vectorWrite, vectorScalarWrite.bits.destination(p.physWidth - 1, 0),
+            pipe.io.rf.wr.bits.prd(p.physWidth - 1, 0))
+        fpRf.io.write(port).data := Mux(vectorWrite, vectorScalarWrite.bits.data, pipe.io.rf.wr.bits.data)
     }
 
     /* Arithmetic and load results feed the common bypass network before PRF visibility. */
@@ -316,34 +504,65 @@ class Backend(
 
     /* LS0 owns DCache load port 0; LS1 shares port 1 with the serialized atomic unit. */
     ls0.connectCache(dcache.io)
-    dcache.io.load(1).req.valid := Mux(atomic.io.busy, atomic.io.load.request.valid, ls1.io.cache.req.valid)
-    dcache.io.load(1).req.bits := Mux(atomic.io.busy, atomic.io.load.request.bits, ls1.io.cache.req.bits)
-    atomic.io.load.request.ready := atomic.io.busy && dcache.io.load(1).req.ready
-    ls1.io.cache.req.ready := !atomic.io.busy && dcache.io.load(1).req.ready
-    ls1.io.cache.wbSelect.valid := !dcache.io.load(1).wbSelect.bits.atomic && dcache.io.load(1).wbSelect.valid
+    val scalarLoadRequest = Wire(new DLoadRequest(dcacheParams))
+    scalarLoadRequest := ls1.io.cache.req.bits
+    val vectorRequest = vectorMemory.map(_.io.request.valid).getOrElse(false.B)
+    val preferVector = if (vectorEnabled) Some(RegInit(false.B)) else None
+    val loadSelectionLocked = if (vectorEnabled) Some(RegInit(false.B)) else None
+    val lockedVectorSelection = if (vectorEnabled) Some(Reg(Bool())) else None
+    val vectorGrant = Mux(loadSelectionLocked.getOrElse(false.B),
+        lockedVectorSelection.getOrElse(false.B),
+        vectorRequest && (!ls1.io.cache.req.valid || preferVector.getOrElse(false.B)))
+    preferVector.foreach { preference =>
+        when(dcache.io.load(1).req.fire) { preference := !vectorGrant }
+        when(io.commit.flush) { loadSelectionLocked.get := false.B }
+            .elsewhen(dcache.io.load(1).req.fire) { loadSelectionLocked.get := false.B }
+            .elsewhen(dcache.io.load(1).req.valid) {
+                loadSelectionLocked.get := true.B
+                lockedVectorSelection.get := vectorGrant
+            }
+    }
+    dcache.io.load(1).req.valid := Mux(atomic.busy, atomic.load.request.valid,
+        ls1.io.cache.req.valid || vectorRequest)
+    dcache.io.load(1).req.bits := Mux(atomic.busy, atomic.load.request.bits,
+        vectorMemory.map(memory => Mux(vectorGrant, memory.io.request.bits, scalarLoadRequest))
+            .getOrElse(scalarLoadRequest))
+    vectorMemory.foreach { memory =>
+        memory.io.request.ready := vectorGrant && dcache.io.load(1).req.ready
+        memory.io.response.valid := dcache.io.load(1).rsp.valid && dcache.io.load(1).rsp.bits.wide
+        memory.io.response.bits := dcache.io.load(1).rsp.bits
+        memory.io.cachePending := dcache.io.load(1).widePending
+    }
+    atomic.load.request.ready := atomic.busy && dcache.io.load(1).req.ready
+    ls1.io.cache.req.ready := !atomic.busy && !vectorGrant && dcache.io.load(1).req.ready
+    ls1.io.cache.wbSelect.valid := !dcache.io.load(1).wbSelect.bits.atomic &&
+        !dcache.io.load(1).wbSelect.bits.wide && dcache.io.load(1).wbSelect.valid
     ls1.io.cache.wbSelect.bits := dcache.io.load(1).wbSelect.bits
-    atomic.io.load.response.valid := dcache.io.load(1).rsp.bits.atomic && dcache.io.load(1).rsp.valid
-    atomic.io.load.response.bits.data := dcache.io.load(1).rsp.bits.data
-    atomic.io.load.response.bits.exception := dcache.io.load(1).rsp.bits.exception
-    atomic.io.load.response.bits.retry := dcache.io.load(1).rsp.bits.retry
-    ls1.io.cache.rsp.valid := !dcache.io.load(1).rsp.bits.atomic && dcache.io.load(1).rsp.valid
+    atomic.load.response.valid := dcache.io.load(1).rsp.bits.atomic && dcache.io.load(1).rsp.valid
+    atomic.load.response.bits.data := dcache.io.load(1).rsp.bits.data
+    atomic.load.response.bits.exception := dcache.io.load(1).rsp.bits.exception
+    atomic.load.response.bits.retry := dcache.io.load(1).rsp.bits.retry
+    ls1.io.cache.rsp.valid := !dcache.io.load(1).rsp.bits.atomic &&
+        !dcache.io.load(1).rsp.bits.wide && dcache.io.load(1).rsp.valid
     ls1.io.cache.rsp.bits := dcache.io.load(1).rsp.bits
     // Request ready already excludes Atomic ownership, so fixed-latency
     // qualification need not feed Atomic state into speculative wakeup.
     ls1.io.cache.fixedLatency := dcache.io.load(1).fixedLatency
-    atomic.io.load.forwardQuery.valid := atomic.io.busy && dcache.io.forward(1).query.valid
-    atomic.io.load.forwardQuery.bits := dcache.io.forward(1).query.bits
-    ls1.io.cache.forward.query.valid := !atomic.io.busy && dcache.io.forward(1).query.valid
+    atomic.load.forwardQuery.valid := atomic.busy && dcache.io.forward(1).query.valid
+    atomic.load.forwardQuery.bits := dcache.io.forward(1).query.bits
+    ls1.io.cache.forward.query.valid := !atomic.busy && dcache.io.forward(1).query.valid
     ls1.io.cache.forward.query.bits := dcache.io.forward(1).query.bits
     dcache.io.forward(1).result.valid := Mux(
-        atomic.io.busy,
-        atomic.io.load.forwardResult.valid,
+        atomic.busy,
+        atomic.load.forwardResult.valid,
         ls1.io.cache.forward.result.valid,
     )
+    val scalarForwardResult = Wire(new DForwardResult(dcacheParams))
+    scalarForwardResult := ls1.io.cache.forward.result.bits
     dcache.io.forward(1).result.bits := Mux(
-        atomic.io.busy,
-        atomic.io.load.forwardResult.bits,
-        ls1.io.cache.forward.result.bits,
+        atomic.busy,
+        atomic.load.forwardResult.bits,
+        scalarForwardResult,
     )
     if (tlbEnabled) {
         dcache.io.storeTranslation.get.request := ls1.io.cache.storeTranslation.get.request
@@ -359,31 +578,32 @@ class Backend(
     }
     // Atomic launch requires an empty StoreBuffer, so no committed store can
     // request this port until the atomic unit becomes busy on the next edge.
-    when(io.commit.atomic.request.valid && !atomic.io.busy) {
+    when(io.commit.atomic.request.valid && !atomic.busy) {
         assert(!io.commit.store.request.valid)
     }
-    sharedStore.io.reserveAtomic := atomic.io.busy
-    sharedStore.io.atomicRequest <> atomic.io.store.request
-    atomic.io.store.response <> sharedStore.io.atomicResponse
+    sharedStore.io.reserveAtomic := atomic.busy
+    sharedStore.io.atomicRequest <> atomic.store.request
+    atomic.store.response <> sharedStore.io.atomicResponse
     sharedStore.io.committedRequest <> io.commit.store.request
     io.commit.store.response <> sharedStore.io.committedResponse
     dcache.io.store.req <> sharedStore.io.cacheRequest
     sharedStore.io.cacheResponse <> dcache.io.store.rsp
-    atomic.io.committedStore.valid := sharedStore.io.committedRequest.fire
-    atomic.io.committedStore.bits := sharedStore.io.committedRequest.bits.paddr
+    atomic.committedStore.valid := sharedStore.io.committedRequest.fire
+    atomic.committedStore.bits := sharedStore.io.committedRequest.bits.paddr
     when(dcache.io.load(1).rsp.valid) {
         assert(
-            atomic.io.load.response.valid ^ ls1.io.cache.rsp.valid,
+            PopCount(VecInit(Seq(atomic.load.response.valid, ls1.io.cache.rsp.valid,
+                vectorMemory.map(_.io.response.valid).getOrElse(false.B)))) === 1.U,
             "DCache lane 1 response must have exactly one owner",
         )
     }
-    atomic.io.request <> io.commit.atomic.request
-    io.commit.atomic.response <> atomic.io.response
+    atomic.request <> io.commit.atomic.request
+    io.commit.atomic.response <> atomic.response
     when(io.commit.flush) {
-        assert(!atomic.io.busy, "Commit must not flush an active atomic operation")
+        assert(!atomic.busy, "Commit must not flush an active atomic operation")
     }
     io.l2 <> dcache.io.l2
-    io.dcacheIdle := ls0.io.idle && ls1.io.idle && dcache.io.idle && !atomic.io.busy
+    io.dcacheIdle := ls0.io.idle && ls1.io.idle && dcache.io.idle && !atomic.busy
     dcache.io.maintenance.request := io.maintenance.request
     dcache.io.maintenance.invalidate := io.maintenance.invalidate
     io.maintenance.done := dcache.io.maintenance.done
@@ -432,13 +652,13 @@ class Backend(
         io.performance.get.pipelineExecutionBlockedCycles := pipelineExecutionBlockedCycles
         io.performance.get.divideBusyCycles := divideBusyCycles
         io.performance.get.dcache := dcache.io.performance.get
-        io.debug.get.atomicState := atomic.io.debug.get.state
+        io.debug.get.atomicState := atomic.debug.get.state
         io.debug.get.atomicRequestValid := io.commit.atomic.request.valid
-        io.debug.get.atomicRequestReady := atomic.io.request.ready
-        io.debug.get.atomicLoadRequestValid := atomic.io.load.request.valid
-        io.debug.get.atomicLoadResponseValid := atomic.io.load.response.valid
-        io.debug.get.atomicStoreRequestValid := atomic.io.store.request.valid
-        io.debug.get.atomicStoreResponseValid := atomic.io.store.response.valid
+        io.debug.get.atomicRequestReady := atomic.request.ready
+        io.debug.get.atomicLoadRequestValid := atomic.load.request.valid
+        io.debug.get.atomicLoadResponseValid := atomic.load.response.valid
+        io.debug.get.atomicStoreRequestValid := atomic.store.request.valid
+        io.debug.get.atomicStoreResponseValid := atomic.store.response.valid
         io.debug.get.dcacheIdle := dcache.io.idle
         io.debug.get.dcache := dcache.io.debug.get
     }

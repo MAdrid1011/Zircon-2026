@@ -12,6 +12,9 @@ class L2AXI4BridgeDriver(dut: L2AXI4Bridge) extends chisel3.simulator.PeekPokeAP
         dut.io.memory.req.bits.paddr.poke(0)
         dut.io.memory.req.bits.write.poke(false)
         dut.io.memory.req.bits.uncache.poke(false)
+        dut.io.memory.req.bits.writeCombine.poke(false)
+        dut.io.memory.req.bits.burstBeats.poke(0)
+        dut.io.memory.req.bits.burstMask.poke(0)
         dut.io.memory.req.bits.size.poke(0)
         dut.io.memory.req.bits.data.poke(0)
         dut.io.memory.req.bits.mask.poke(0)
@@ -117,7 +120,7 @@ class L2AXI4BridgeDriver(dut: L2AXI4Bridge) extends chisel3.simulator.PeekPokeAP
         dut.io.axi.r.valid.poke(false)
     }
 
-    def acceptWriteBeat(data: BigInt, strobe: Int, last: Boolean, stalls: Int): Unit = {
+    def acceptWriteBeat(data: BigInt, strobe: BigInt, last: Boolean, stalls: Int): Unit = {
         dut.io.axi.w.ready.poke(false)
         for (_ <- 0 until stalls) {
             dut.io.axi.w.valid.expect(true)
@@ -168,6 +171,65 @@ class L2AXI4BridgeDriver(dut: L2AXI4Bridge) extends chisel3.simulator.PeekPokeAP
 class L2AXI4BridgeSpec extends AnyFreeSpec with ChiselSim {
     private def line(words: Seq[BigInt]): BigInt = words.zipWithIndex.foldLeft(BigInt(0)) { case (result, (word, i)) =>
         result | ((word & BigInt("ffffffffffffffff", 16)) << (64 * i))
+    }
+
+    "256-bit cached lines use two stable beats and preserve narrow device byte lanes" in {
+        simulate(new L2AXI4Bridge(dataBits = 256)) { dut =>
+            val d = new L2AXI4BridgeDriver(dut)
+            d.initialize()
+            val words = (0 until 8).map(i => BigInt("aabbccdd11220000", 16) + i)
+            val data = line(words)
+            val beatMask = (BigInt(1) << 256) - 1
+            d.request(0x80000000L, write = false, uncached = false)
+            d.acceptReadAddress(0x80000000L, 1, 5, cached = true, stalls = 3)
+            d.sendReadBeat(data & beatMask, last = false, delay = 2)
+            d.sendReadBeat(data >> 256, last = true, delay = 4)
+            d.acceptResponse(data, error = false, stalls = 3)
+            d.request(0x80000000L, write = true, uncached = false, data = data)
+            d.acceptWriteAddress(0x80000000L, 1, 5, cached = true, stalls = 4)
+            d.acceptWriteBeat(data & beatMask, BigInt("ffffffff", 16), last = false, stalls = 3)
+            d.acceptWriteBeat(data >> 256, BigInt("ffffffff", 16), last = true, stalls = 2)
+            d.sendWriteResponse(delay = 2)
+            d.acceptResponse(0, error = false, stalls = 1)
+            for (size <- 0 to 2; offset <- 0 until 32 by (1 << size)) {
+                val address = BigInt(0xa0000000L) + offset
+                val value = BigInt("a1b2c3d4", 16) & ((BigInt(1) << (8 << size)) - 1)
+                d.request(address, write = false, uncached = true, size = size)
+                d.acceptReadAddress(address, 0, size, cached = false, stalls = 1)
+                d.sendReadBeat(value << (offset * 8), last = true)
+                d.acceptResponse(value, error = false, stalls = 1)
+                d.request(address, write = true, uncached = true, size = size,
+                    data = value << ((offset & 7) * 8), mask = ((1 << (1 << size)) - 1) << (offset & 7))
+                d.acceptWriteAddress(address, 0, size, cached = false, stalls = 1)
+                d.acceptWriteBeat(value << (offset * 8), BigInt((1 << (1 << size)) - 1) << offset,
+                    last = true, stalls = 2)
+                d.sendWriteResponse()
+                d.acceptResponse(0, error = false, stalls = 0)
+            }
+        }
+    }
+
+    "256-bit AXI preserves all eight narrow write-combine beats across bus lane wrap" in {
+        simulate(new L2AXI4Bridge(dataBits = 256)) { dut =>
+            val d = new L2AXI4BridgeDriver(dut)
+            d.initialize()
+            val words = (0 until 8).map(i => BigInt("123456789abcdef0", 16) + i)
+            val masks = Seq(15, 255, 3, 240, 128, 85, 170, 255)
+            dut.io.memory.req.bits.writeCombine.poke(true)
+            dut.io.memory.req.bits.burstBeats.poke(8)
+            dut.io.memory.req.bits.burstMask.poke(masks.zipWithIndex.foldLeft(BigInt(0)) {
+                case (acc, (mask, i)) => acc | (BigInt(mask) << (8 * i))
+            })
+            d.request(0xb0000018L, write = true, uncached = true, data = line(words))
+            d.acceptWriteAddress(0xb0000018L, 7, 3, cached = false, stalls = 3)
+            for (i <- 0 until 8) {
+                val offset = (24 + 8 * i) & 31
+                d.acceptWriteBeat(words(i) << (offset * 8), BigInt(masks(i)) << offset,
+                    last = i == 7, stalls = i % 3)
+            }
+            d.sendWriteResponse(delay = 3)
+            d.acceptResponse(0, error = false, stalls = 2)
+        }
     }
 
     "cached reads preserve 34-bit addresses and assemble a complete cache line" in {

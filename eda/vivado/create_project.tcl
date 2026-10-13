@@ -1,15 +1,21 @@
 set script_dir [file normalize [file dirname [info script]]]
 set root_dir [file normalize [file join $script_dir ../..]]
-set build_dir [file join $root_dir build eda vivado-vu13p]
+set profile system
+set create_only false
+foreach arg $argv {
+    if {$arg eq "--create-only"} { set create_only true } elseif {$arg eq "--profile=performance"} {
+        set profile performance
+    } elseif {$arg ne "--profile=system"} {
+        error "Usage: create_project.tcl ?--create-only? ?--profile=system|performance?"
+    }
+}
+set suffix [expr {$profile eq "performance" ? "-performance" : ""}]
+set build_dir [file join $root_dir build eda vivado-vu13p$suffix]
 set rtl_dir [file join $build_dir rtl]
 set report_dir [file join $build_dir reports]
 set project_file [file join $build_dir project ZirconCore.xpr]
 set target_part xcvu13p-fhgb2104-2-i
 set_param general.maxThreads 8
-
-if {[llength $argv] > 1 || ([llength $argv] == 1 && [lindex $argv 0] ne "--create-only")} {
-    error "Usage: vivado -mode batch -source eda/vivado/create_project.tcl ?-tclargs --create-only?"
-}
 
 set filelist [file join $rtl_dir filelist.f]
 if {![file exists $filelist]} {
@@ -66,9 +72,10 @@ add_files -fileset constrs_1 [file join $script_dir core_clock_100mhz.xdc]
 update_compile_order -fileset sources_1
 set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs synth_1]
 set_property INCREMENTAL_CHECKPOINT "" [get_runs synth_1]
+set_property STEPS.SYNTH_DESIGN.ARGS.MAX_DSP 0 [get_runs synth_1]
 puts "Created $project_file for $target_part with [llength $sv_files] SystemVerilog files"
 
-if {[llength $argv] == 1} {
+if {$create_only} {
     close_project
     return
 }
@@ -89,6 +96,9 @@ set bram_count [llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ RAM
 puts "Inferred $bram_count RAMB cells"
 if {$bram_count == 0} {
     error "Synthesis did not infer block RAM"
+}
+if {[llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ DSP*}]] != 0} {
+    error "Synthesis inferred DSP cells despite the zero-DSP resource limit"
 }
 close_design
 

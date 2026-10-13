@@ -19,6 +19,40 @@ class CommitDestinationPolicyHarness extends Module {
 }
 
 class RenameSpec extends AnyFreeSpec with ChiselSim {
+    "free-list capacity is independent of late requests at every occupancy and held prefix" in {
+        simulate(new PRegFreeList(40, 3, 3)) { dut =>
+            dut.io.request.foreach(_.poke(false))
+            dut.io.previewAllocate.foreach(_.poke(false))
+            dut.io.allocate.foreach(_.poke(false))
+            dut.io.release.foreach { release => release.valid.poke(false); release.bits.poke(0) }
+            dut.io.restore.poke(false)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            for (remaining <- 8 to 0 by -1) {
+                for (held <- 0 to math.min(remaining, 3); requests <- 0 until 8) {
+                    for (lane <- 0 until 3) {
+                        dut.io.previewAllocate(lane).poke(lane < held)
+                        dut.io.request(lane).poke((requests & (1 << lane)) != 0)
+                    }
+                    val capacity = (0 until 3).filter(lane => remaining >= held + lane + 1)
+                        .map(1 << _).sum
+                    val prefix = (0 until 3).filter { lane =>
+                        remaining >= held + Integer.bitCount(requests & ((1 << (lane + 1)) - 1))
+                    }.map(1 << _).sum
+                    dut.io.capacityPrefix.expect(capacity)
+                    dut.io.availablePrefix.expect(prefix)
+                    dut.io.available.expect(remaining >= held + Integer.bitCount(requests))
+                }
+                dut.io.previewAllocate.foreach(_.poke(false))
+                dut.io.request.foreach(_.poke(false))
+                if (remaining > 0) {
+                    dut.io.allocate(0).poke(true); dut.clock.step(); dut.io.allocate(0).poke(false)
+                }
+            }
+            dut.io.restore.poke(true); dut.clock.step(); dut.io.restore.poke(false)
+            dut.io.capacityPrefix.expect(7)
+        }
+    }
+
     private def initialize(dut: Rename): Unit = {
         dut.io.rinfo.foreach { info =>
             info.src.foreach(_.poke(0))

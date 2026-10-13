@@ -9,10 +9,10 @@ class ZirconInterrupts extends Bundle {
     val seip = Bool()
 }
 
-class ZirconCoreIO(simulationDebug: Boolean) extends Bundle {
-    val axi = new AXI4MasterIO
-    val interrupts = Input(new ZirconInterrupts)
-    val debug = if (simulationDebug) Some(new ZirconDebugIO) else None
+class ZirconCoreIO(simulationDebug: Boolean, profile: CoreProfile = CoreProfile.System) extends Bundle {
+    val axi = new AXI4MasterIO(profile.axiDataBits)
+    val interrupts = if (profile.privileged) Some(Input(new ZirconInterrupts)) else None
+    val debug = if (simulationDebug) Some(new ZirconDebugIO(profile.vlen != 0)) else None
 }
 
 /** Integration top level. Architectural behavior belongs to the instantiated blocks. */
@@ -20,27 +20,50 @@ class ZirconCore(
     val simulationDebug: Boolean = false,
     val ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
     val l2Params: L2CacheParams = L2CacheParams(),
+    val profile: CoreProfile = CoreProfile.System,
 ) extends Module {
     override val desiredName = "ZirconCore"
-    val io = IO(new ZirconCoreIO(simulationDebug))
+    val io = IO(new ZirconCoreIO(simulationDebug, profile))
 
     private val frontendParams = FrontendParams(observe = simulationDebug)
     private val issueParams = IssueParams()
-    val frontend = Module(new Frontend(p = frontendParams, issue = issueParams, ramBackend = ramBackend))
-    val middleend = Module(new Middleend(frontendParams = frontendParams, issueParams = issueParams))
-    val backend = Module(new Backend(issueParams = issueParams, ramBackend = ramBackend, observe = simulationDebug))
-    val commit = Module(new Commit(fp = frontendParams, issue = issueParams, simulationDebug = simulationDebug))
-    val ptw = Module(new PageTableWalker)
-    val l2 = Module(new L2Cache(ramBackend = ramBackend, p = l2Params, observe = simulationDebug))
-    val bridge = Module(new L2AXI4Bridge)
+    private val vectorEnabled = profile.vlen != 0
+    private val commitParams = CommitParams(vectorEnabled = vectorEnabled)
+    private val actualL2Params = if (profile == CoreProfile.Performance) profile.l2 else l2Params
+    val frontend = Module(new Frontend(p = frontendParams, c = profile.icache,
+        tlbEnabled = profile.privileged, issue = issueParams, ramBackend = ramBackend))
+    val middleend = Module(new Middleend(frontendParams = frontendParams, issueParams = issueParams,
+        privileged = profile.privileged, vectorEnabled = vectorEnabled, commitParams = commitParams))
+    val backend = Module(new Backend(issueParams = issueParams, ramBackend = ramBackend,
+        observe = simulationDebug, tlbEnabled = profile.privileged,
+        atomicEnabled = profile.privileged, dcacheSets = profile.dcacheSets,
+        directPhysical = !profile.privileged, vectorEnabled = vectorEnabled))
+    val commit = Module(new Commit(fp = frontendParams, issue = issueParams,
+        simulationDebug = simulationDebug, privileged = profile.privileged, cp = commitParams))
+    val l2 = Module(new L2Cache(ramBackend = ramBackend, p = actualL2Params, observe = simulationDebug))
+    val bridge = Module(new L2AXI4Bridge(actualL2Params, dataBits = profile.axiDataBits))
 
     /* Major pipeline blocks exchange one owned interface per module boundary. */
     frontend.io.middle <> middleend.io.frontend
-    middleend.io.fpState := commit.io.csr.state.mstatus(14, 13)
+    middleend.io.fpState := (if (profile.privileged) commit.io.csr.state.mstatus(14, 13) else 3.U)
     middleend.io.backend <> backend.io.middleend
     frontend.io.commit <> commit.io.frontend
     middleend.io.commit <> commit.io.middleend
     backend.io.commit <> commit.io.backend
+    if (vectorEnabled) {
+        backend.io.vector.get.enqueue := middleend.io.vector.get.enqueue
+        backend.io.vector.get.allocate := middleend.io.vector.get.allocate
+        middleend.io.vector.get.availableCompute := backend.io.vector.get.availableCompute
+        middleend.io.vector.get.availableMemory := backend.io.vector.get.availableMemory
+        middleend.io.vector.get.configuration := backend.io.vector.get.configuration
+        middleend.io.vector.get.committed := commit.io.vector.get.state
+        middleend.io.vector.get.retire := commit.io.vector.get.retire
+        commit.io.vector.get.enqueue := middleend.io.vector.get.enqueue
+        commit.io.vector.get.completion <> backend.io.vector.get.completion
+        commit.io.vector.get.store <> backend.io.vector.get.store
+        backend.io.vector.get.ordering <> commit.io.vector.get.ordering
+        backend.io.vector.get.roundingMode := commit.io.csr.state.frm
+    }
     /* Instruction, data and page-table traffic share the unified L2 and AXI bridge. */
     frontend.io.mem.l2 <> l2.io.icache
     backend.io.l2 <> l2.io.dcache
@@ -64,10 +87,14 @@ class ZirconCore(
         when(timeTick && timeCarry(word)) { timeWords(word) := timeWords(word) + 1.U }
     }
     commit.io.csr.time := Cat(timeWords.reverse)
-    commit.io.csr.interrupt.software := io.interrupts.msip
-    commit.io.csr.interrupt.timer := io.interrupts.mtip
-    commit.io.csr.interrupt.external := io.interrupts.meip
-    commit.io.csr.interrupt.supervisorExternal := io.interrupts.seip
+    commit.io.csr.interrupt := io.interrupts.map { irq =>
+        val csrIrq = Wire(new CSRInterrupts)
+        csrIrq.software := irq.msip
+        csrIrq.timer := irq.mtip
+        csrIrq.external := irq.meip
+        csrIrq.supervisorExternal := irq.seip
+        csrIrq
+    }.getOrElse(0.U.asTypeOf(new CSRInterrupts))
     commit.io.memoryIdle := backend.io.dcacheIdle && l2.io.idle
     /* FENCE.I invalidates both L1s; SFENCE.VMA cleans DCache for the L2-backed PTW. */
     frontend.io.maintenance.request := commit.io.maintenance.request && commit.io.maintenance.invalidate
@@ -77,6 +104,8 @@ class ZirconCore(
     commit.io.maintenance.done := backend.io.maintenance.done &&
         (!commit.io.maintenance.invalidate || frontend.io.maintenance.done)
 
+    if (profile.privileged) {
+    val ptw = Module(new PageTableWalker)
     /* ITLB and DTLB use the same current address-space and privilege controls. */
     val translation = Wire(new AddressTranslationControl)
     translation.enabled := commit.io.csr.state.satp(31) && commit.io.csr.currentPrivilege =/= 3.U
@@ -111,9 +140,24 @@ class ZirconCore(
     frontend.io.mmu.response.bits := 0.U.asTypeOf(new ICacheTranslation)
     ptw.io.iptw <> l2.io.iptw
     ptw.io.dptw <> l2.io.dptw
+    } else {
+        frontend.io.mmu.response.valid := false.B
+        frontend.io.mmu.response.bits := 0.U.asTypeOf(new ICacheTranslation)
+        Seq(l2.io.iptw, l2.io.dptw).foreach { port =>
+            port.req.valid := false.B
+            port.req.bits := 0.U.asTypeOf(port.req.bits)
+            port.rsp.ready := true.B
+        }
+    }
 
     /* Simulation-only observability stays after all architectural connections. */
     if (simulationDebug) {
+        if (vectorEnabled) {
+            io.debug.get.vector.get.registers := backend.io.vectorObservation.get
+            io.debug.get.vector.get.retire := commit.io.debug.vector.get
+            io.debug.get.vector.get.state := commit.io.vector.get.state
+            io.debug.get.vector.get.store := commit.io.debug.vectorStore.get
+        }
         for (lane <- 0 until CommitParams().width) {
             io.debug.get.retire(lane) := commit.io.debug.retire(lane)
         }
@@ -197,7 +241,7 @@ class ZirconRetireTrace extends Bundle {
     val value = UInt(32.W)
 }
 
-class ZirconDebugIO extends Bundle {
+class ZirconDebugIO(vectorEnabled: Boolean = false) extends Bundle {
     val retire = Output(Vec(CommitParams().width, new ZirconRetireTrace))
     val robHeadValid = Output(Bool())
     val robHeadComplete = Output(Bool())
@@ -209,6 +253,7 @@ class ZirconDebugIO extends Bundle {
     val backend = Output(new BackendDebugIO)
     val memoryIdle = Output(Bool())
     val l2Idle = Output(Bool())
+    val vector = if (vectorEnabled) Some(Output(new VectorCoreDebug)) else None
 }
 
 class ZirconPerformanceCounters extends Bundle {

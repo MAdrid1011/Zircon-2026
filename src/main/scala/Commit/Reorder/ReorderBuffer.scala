@@ -13,6 +13,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
     val isStore = Bool()
     val isAtomic = Bool()
     val isSystem = Bool()
+    val isVector = Bool()
     val systemOp = UInt(5.W)
     val instruction = UInt(32.W)
     val writesExecutionState = Bool()
@@ -36,6 +37,7 @@ class ROBEntry(fp: FrontendParams, bp: BackendParams) extends Bundle {
         isStore := incoming.isStore
         isAtomic := incoming.isAtomic
         isSystem := incoming.isSystem
+        isVector := incoming.isVector
         systemOp := incoming.systemOp
         instruction := incoming.instruction
         writesExecutionState := incoming.writesExecutionState
@@ -130,9 +132,12 @@ class ReorderBuffer(
         entry.robIdx := 0.U
         entry.destination := incoming.destination
         entry.sqIdx := incoming.allocation.sqIdx
-        entry.isStore := incoming.context.instruction.fu === DecodeUnit.Store.U
+        entry.isStore := incoming.context.instruction.fu === DecodeUnit.Store.U || cp.vectorEnabled.B &&
+            incoming.context.instruction.fu === DecodeUnit.Vector.U &&
+            incoming.context.instruction.inst(6, 0) === "h27".U
         entry.isAtomic := incoming.context.instruction.fu === DecodeUnit.Atomic.U
         entry.isSystem := incoming.context.instruction.fu === DecodeUnit.System.U
+        entry.isVector := incoming.context.instruction.fu === DecodeUnit.Vector.U
         entry.systemOp := incoming.context.instruction.op
         entry.instruction := incoming.context.instruction.inst
         val unconditionalCsrWrite = entry.systemOp === SystemOp.CSRRW.U ||
@@ -143,7 +148,9 @@ class ReorderBuffer(
         val csrAddress = entry.instruction(31, 20)
         val executionCsr = csrAddress === CSRAddress.fflags.U || csrAddress === CSRAddress.frm.U ||
             csrAddress === CSRAddress.fcsr.U || csrAddress === CSRAddress.sstatus.U ||
-            csrAddress === CSRAddress.satp.U || csrAddress === CSRAddress.mstatus.U
+            csrAddress === CSRAddress.satp.U || csrAddress === CSRAddress.mstatus.U ||
+            (if (cp.vectorEnabled) csrAddress === "h008".U || csrAddress === "h00a".U ||
+                csrAddress === "h00f".U else false.B)
         entry.writesExecutionState := entry.isSystem && executionCsr &&
             (unconditionalCsrWrite || (conditionalCsrWrite && entry.instruction(19, 15).orR))
         entry.writesSatp := entry.writesExecutionState && csrAddress === CSRAddress.satp.U

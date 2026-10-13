@@ -170,9 +170,14 @@ class MorslDirection(
             (bank + 1) * phtValidBankWidth)).asUInt
     })
     val phtPredictionBanks = RegEnable(phtValidBanks, io.query.prefetch)
-    val phtPredictionBank = if (phtValidBanks.length == 1) phtPredictionBanks(0) else
-        phtPredictionBanks(phtPredictionIndex(p.phtIndexBits - 1, phtValidLowBits))
-    val phtPredictionValid = phtPredictionBank(phtPredictionIndex(phtValidLowBits - 1, 0))
+    val phtPredictionLowOH = RegEnable(UIntToOH(phtPrefetchIndex(phtValidLowBits - 1, 0),
+        phtValidBankWidth), io.query.prefetch)
+    val phtPredictionHighOH = if (phtValidBanks.length == 1) 1.U(1.W) else
+        RegEnable(UIntToOH(phtPrefetchIndex(p.phtIndexBits - 1, phtValidLowBits),
+            phtValidBanks.length), io.query.prefetch)
+    val phtPredictionValid = VecInit(phtPredictionBanks.zipWithIndex.map { case (bank, index) =>
+        phtPredictionHighOH(index) && (bank & phtPredictionLowOH).orR
+    }).asUInt.orR
     pht.io.predictEnable := io.query.prefetch
     pht.io.predictAddress := phtPrefetchIndex
     val phtRaw = pht.io.predictData.asTypeOf(Vec(p.fetchWidth, UInt(2.W)))

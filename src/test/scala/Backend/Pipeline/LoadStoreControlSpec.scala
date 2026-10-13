@@ -139,18 +139,24 @@ class LoadStoreControlSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.cmt.storeAddress.get.bits.sqIdx.expect(i - 2)
                     dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * (i - 2))
                 }
-                dut.io.cmt.storeData.get.valid.expect(true)
-                dut.io.cmt.storeData.get.bits.sqIdx.expect(i)
-                dut.io.cmt.storeData.get.bits.data.expect(BigInt(if (i % 2 == 0) "89abcdef" else "7f800001", 16))
+                dut.io.cmt.storeData.get.valid.expect(i > 0)
+                if (i > 0) {
+                    dut.io.cmt.storeData.get.bits.sqIdx.expect(i - 1)
+                    dut.io.cmt.storeData.get.bits.data.expect(BigInt(if ((i - 1) % 2 == 0) "89abcdef" else "7f800001", 16))
+                }
                 dut.io.rf.std.get.intAddr.expect(if (i % 2 == 0) 9 else 0)
                 dut.io.rf.std.get.fpAddr.expect(if (i % 2 == 0) 0 else 32)
                 dut.io.rf.wr.valid.expect(false); dut.io.cmt.rob.valid.expect(false)
             }
             a.valid.poke(false); s.valid.poke(false); dut.clock.step()
+            dut.io.cmt.storeData.get.valid.expect(true)
+            dut.io.cmt.storeData.get.bits.sqIdx.expect(11)
+            dut.io.cmt.storeData.get.bits.data.expect(BigInt("7f800001", 16))
             dut.io.cmt.storeAddress.get.valid.expect(true)
             dut.io.cmt.storeAddress.get.bits.sqIdx.expect(10)
             dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * 10)
             dut.clock.step()
+            dut.io.cmt.storeData.get.valid.expect(false)
             dut.io.cmt.storeAddress.get.valid.expect(true)
             dut.io.cmt.storeAddress.get.bits.sqIdx.expect(11)
             dut.io.cmt.storeAddress.get.bits.paddr.expect(0x1000 + 4 * 11)

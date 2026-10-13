@@ -50,14 +50,12 @@ object SRT4Logic {
 
     def rightJam(x: UInt, shift: UInt): UInt = {
         val width = x.getWidth
-        val stages = log2Ceil(width)
-        var value = x
-        for (i <- 0 until stages) {
-            val distance = 1 << i
-            val shifted = (value >> distance).pad(width)
-            value = Mux(shift(i), shifted | value(distance - 1, 0).orR, value)
-        }
-        Mux(shift >= width.U, Cat(0.U((width - 1).W), x.orR), value)
+        // Select retained bits and reduce discarded bits in parallel. A jam
+        // update after each barrel stage serializes the sticky ORs with all five
+        // shift muxes before rounding can start.
+        val retained = (x >> shift).pad(width)
+        val discarded = VecInit((0 until width).map(bit => x(bit) && shift > bit.U)).asUInt.orR
+        retained | discarded.asUInt
     }
 
     def integerWindow(data: UInt, shift: UInt): UInt = {

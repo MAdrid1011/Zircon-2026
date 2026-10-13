@@ -23,3 +23,16 @@ vivado -mode batch -source eda/vivado/create_project.tcl -nolog -nojournal -tcla
 
 此 XDC 只约束核心时钟。PCIe、DDR4 和管脚约束由板级 SoC wrapper 工程提供，其接口与
 独立 `ZirconCore` 顶层不同。
+
+## 性能配置
+
+SIMD8 性能核心使用相同器件、100 MHz 时钟与默认综合实现策略，DSP 使用上限为零：
+
+```sh
+python3 scripts/eda/prepare_vivado_rtl.py --profile performance
+vivado -mode batch -source eda/vivado/create_project.tcl -nolog -nojournal \
+  -tclargs --profile=performance
+```
+
+RTL 与工程输出位于 `build/eda/vivado-vu13p-performance/`，与默认系统核心分开。
+存储阵列使用 Xilinx BRAM 模板，ASIC 路径的 BSG 绑定由独立生成入口选择。

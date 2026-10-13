@@ -26,11 +26,16 @@ class FrontendSelectorSpec extends AnyFreeSpec with ChiselSim {
                 val rng = new scala.util.Random(20260910 + width)
                 for (caseIndex <- 0 until 400) {
                     val start = rng.nextInt(width)
-                    val pc = 0x80000000L + start * 4
+                    val addressMask = 0xffffffffL
+                    val blockMask = (1L << p.blockBits) - 1
+                    val block = if (caseIndex % 5 == 0) addressMask & ~blockMask
+                        else if (caseIndex % 5 == 1) ((1L << (p.blockBits + caseIndex % 20)) - 1) & ~blockMask
+                        else (rng.nextLong() & addressMask) & ~blockMask
+                    val pc = block + start * 4
                     val kinds = if (caseIndex % 2 == 0) Vector.fill(width)(1) else Vector.fill(width)(rng.nextInt(8))
                     val directions = rng.nextInt(1 << width)
-                    val targets = Vector.fill(width)(0x80000000L + (rng.nextInt(128) - 64) * 2)
-                    val backwards = targets.zipWithIndex.map { case (target, i) => target <= 0x80000000L + i * 4 }
+                    val targets = Vector.fill(width)((block + (rng.nextInt(128) - 64) * 2) & addressMask)
+                    val backwards = targets.zipWithIndex.map { case (target, i) => target <= block + i * 4 }
                     val backwardMask = backwards.zipWithIndex.filter(_._1).map(x => 1 << x._2).sum
                     val range = ((1 << width) - 1) ^ ((1 << start) - 1)
                     val slotDirections = if (!directionsAreSlots) directions else {
@@ -53,7 +58,7 @@ class FrontendSelectorSpec extends AnyFreeSpec with ChiselSim {
                     var rank = 0
                     var mask = 0
                     var taken = 0
-                    var next = 0x80000000L + width * 4
+                    var next = (block + width * 4) & addressMask
                     for (slot <- start until width if taken == 0) {
                         mask |= 1 << slot
                         val kind = kinds(slot)

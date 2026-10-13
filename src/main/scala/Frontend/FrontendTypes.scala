@@ -188,7 +188,8 @@ object FrontendMath {
         parts.reduce(_ ^ _)
     }
     def blockBase(pc: UInt, p: FrontendParams): UInt = Cat(pc(31, p.blockBits), 0.U(p.blockBits.W))
-    def sequential(pc: UInt, p: FrontendParams): UInt = blockBase(pc, p) + (p.fetchWidth * 4).U
+    def sequential(pc: UInt, p: FrontendParams): UInt =
+        BLevelPAdder32.sum(blockBase(pc, p), (p.fetchWidth * 4).U(32.W), 0.U(1.W))
     def slotPc(pc: UInt, slot: Int, p: FrontendParams): UInt = blockBase(pc, p) | (slot * 4).U
     def range(pc: UInt, p: FrontendParams): UInt = {
         if (p.fetchWidth == 1) 1.U(1.W)

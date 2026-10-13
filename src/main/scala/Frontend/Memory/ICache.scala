@@ -48,7 +48,6 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
 
     /* Control and Return Buffers */
     val fsm = Module(new ICacheFSM)
-    val itlb = Module(new InstructionTLB(paddrLowBits = p.blockBits))
     val missC1 = RegInit(false.B)
     val rbuf = Reg(UInt(c.lineBits.W))
     val responseWords = Reg(Vec(p.fetchWidth, UInt(32.W)))
@@ -116,14 +115,9 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
     val translatedUncache = WireDefault(io.mmu.response.bits.uncache)
     val translatedFault = WireDefault(io.mmu.response.bits.fault)
 
-    itlb.io.lookup(0).valid := false.B
-    itlb.io.lookup(0).bits.vaddr := c1s2TlbVaddr(31, p.blockBits)
-    itlb.io.scopeUpdate.valid := false.B
-    itlb.io.scopeUpdate.bits.asid := 0.U
-    itlb.io.refill.valid := false.B
-    itlb.io.refill.bits := 0.U.asTypeOf(new TLBRefill(itlb.p))
-    itlb.io.flush := false.B
     if (c.tlbEnabled) {
+        val itlb = Module(new InstructionTLB(paddrLowBits = p.blockBits))
+        itlb.io.lookup(0).bits.vaddr := c1s2TlbVaddr(31, p.blockBits)
         val manage = io.tlb.get
         val activeAsid = RegInit(0.U(9.W))
         val asidChanged = activeAsid =/= manage.control.asid
@@ -155,21 +149,27 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
             !MMUPermission.instruction(itlb.io.response(0), manage.control) ||
                 itlb.io.response(0).pma === PMAAttribute.invalid,
         )
+    } else if (c.directPhysical) {
+        localTranslation := true.B
+        translationValid := c1s2.rreq
+        translatedBlock := directPaddr(33, p.blockBits)
+        translatedUncache := PMA.attribute(directPaddr) =/= PMAAttribute.cached
+        translatedFault := false.B
     }
     val c1s2MayRelease = c1s2.rreq && translationValid && !missC1 && fsm.io.cc.ready &&
         (!c1s3.rreq || (!missC1 && io.pp.response.ready))
     val c1s2Go = c1s2MayRelease && !io.flush
-    val translationDrain = if (c.tlbEnabled) None else Some(RegInit(false.B))
+    val translationDrain = if (c.tlbEnabled || c.directPhysical) None else Some(RegInit(false.B))
     val translationSlotAvailable = translationDrain.map(drain => !drain).getOrElse(true.B)
-    val flushCanReplaceTranslation = if (c.tlbEnabled) io.flush else
+    val flushCanReplaceTranslation = if (c.tlbEnabled || c.directPhysical) io.flush else
         io.flush && (!c1s2.rreq || io.mmu.response.valid)
     io.pp.request.ready := !reset.asBool && !io.maintenance.request && !invalidateActive && !missC1 && fsm.io.cc.ready &&
         translationSlotAvailable && (!c1s2.rreq || c1s2Go || flushCanReplaceTranslation)
     io.mmu.request.valid := c1s2.rreq && !localTranslation && !io.flush
     io.mmu.request.bits.pc := c1s2.vaddr
-    io.mmu.response.ready := (if (c.tlbEnabled) true.B else
+    io.mmu.response.ready := (if (c.tlbEnabled || c.directPhysical) true.B else
         translationDrain.get || c1s2Go || (io.flush && c1s2.rreq))
-    if (!c.tlbEnabled) {
+    if (!c.tlbEnabled && !c.directPhysical) {
         when(io.flush && c1s2.rreq && !io.mmu.response.valid) {
             translationDrain.get := true.B
         }

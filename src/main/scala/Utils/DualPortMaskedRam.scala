@@ -53,7 +53,7 @@ class DualPortMaskedRam(
 
     effectiveBackend match {
         case DualPortRamBackend.BSG =>
-            require(depth == 16 && (lanes == 1 && laneBits <= 25 || lanes % 4 == 0 && laneBits == 8))
+            require(lanes == 1 && laneBits <= 25 || lanes % 4 == 0 && laneBits == 8)
             require(readWritePort == 0 || readWritePort == 1)
             val address = Seq(io.addra, io.addrb)
             val enable = Seq(io.ena, io.enb)
@@ -65,7 +65,7 @@ class DualPortMaskedRam(
             val paddedData = data.map(_.pad(macroWidth))
             val useMacro = sys.env.get("ZIRCON_USE_EXTERNAL_BSG_RAM").contains("true")
             val ram = Seq.fill(macroWidth / width) {
-                if (useMacro) Module(new BsgFakeram1RW1RMacro(width)).io else Module(new BsgFakeram1RW1R(width)).io
+                if (useMacro) Module(new BsgFakeram1RW1RMacro(width, depth)).io else Module(new BsgFakeram1RW1R(width, depth)).io
             }
             for ((r, i) <- ram.zipWithIndex) {
                 r.clock := io.clka

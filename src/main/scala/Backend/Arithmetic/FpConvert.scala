@@ -22,10 +22,11 @@ class FpConvertResponse(val tagWidth: Int) extends Bundle {
     val tag = UInt(tagWidth.W)
 }
 
-class FpConvertIO(tagWidth: Int) extends Bundle {
+class FpConvertIO(tagWidth: Int, narrowIntegerEnabled: Boolean = false) extends Bundle {
     val in = Flipped(Decoupled(new FpConvertRequest(tagWidth)))
     val out = Decoupled(new FpConvertResponse(tagWidth))
     val flush = Input(Bool())
+    val integerWidth16 = if (narrowIntegerEnabled) Some(Input(Bool())) else None
 }
 
 /** R1 holds only the shared shifter input and final-rounding controls. */
@@ -34,6 +35,7 @@ class FpConvertStage1(tagWidth: Int) extends Bundle {
     val shift = UInt(5.W)
     val toFloat = Bool()
     val signedInt = Bool()
+    val integerWidth16 = Bool()
     val sign = Bool()
     val zero = Bool()
     val nan = Bool()
@@ -53,6 +55,7 @@ class FpConvertStage2(tagWidth: Int) extends Bundle {
     val sticky = Bool()
     val toFloat = Bool()
     val signedInt = Bool()
+    val integerWidth16 = Bool()
     val sign = Bool()
     val zero = Bool()
     val nan = Bool()
@@ -64,9 +67,9 @@ class FpConvertStage2(tagWidth: Int) extends Bundle {
 }
 
 /** Three elastic stages, with conversion completing at the existing EX4 boundary. */
-class FpConvert(val tagWidth: Int = 32) extends Module {
+class FpConvert(val tagWidth: Int = 32, narrowIntegerEnabled: Boolean = false) extends Module {
     require(tagWidth > 0)
-    val io = IO(new FpConvertIO(tagWidth))
+    val io = IO(new FpConvertIO(tagWidth, narrowIntegerEnabled))
 
     val r1 = Reg(new FpConvertStage1(tagWidth))
     val r2 = Reg(new FpConvertStage2(tagWidth))
@@ -108,6 +111,7 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     s1.shift := Mux(toFloat, magnitudeLeading(4, 0), floatShift(4, 0))
     s1.toFloat := toFloat
     s1.signedInt := signedInt
+    s1.integerWidth16 := io.integerWidth16.getOrElse(false.B)
     s1.sign := Mux(toFloat, negativeInt, req.src1(31))
     s1.zero := !req.src1.orR
     s1.nan := exponent.andR && fraction.orR
@@ -139,6 +143,7 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     s2.sticky := sticky
     s2.toFloat := r1.toFloat
     s2.signedInt := r1.signedInt
+    s2.integerWidth16 := r1.integerWidth16
     s2.sign := r1.sign
     s2.zero := r1.zero
     s2.nan := r1.nan
@@ -166,19 +171,26 @@ class FpConvert(val tagWidth: Int = 32) extends Module {
     val floatResult = Mux(r2.zero, 0.U(32.W), Cat(r2.sign, floatExponent, rounded(22, 0)))
 
     /* Range checks run beside the incrementer and use the rounded magnitude's limit. */
-    val signedOverflow = Mux(
+    val signedOverflow32 = Mux(
         r2.sign,
         r2.retained(31) && (r2.retained(30, 0).orR || roundUp),
         r2.retained(31) || (r2.retained(30, 0).andR && roundUp)
     )
-    val unsignedOverflow = r2.retained.andR && roundUp
+    val signedOverflow16 = r2.retained(31, 16).orR || Mux(r2.sign,
+        r2.retained(15) && (r2.retained(14, 0).orR || roundUp),
+        r2.retained(15) || r2.retained(14, 0).andR && roundUp)
+    val signedOverflow = Mux(r2.integerWidth16, signedOverflow16, signedOverflow32)
+    val unsignedOverflow = Mux(r2.integerWidth16,
+        r2.retained(31, 16).orR || r2.retained(15, 0).andR && roundUp,
+        r2.retained.andR && roundUp)
     val negativeUnsigned = !r2.signedInt && r2.sign && (r2.retained.orR || roundUp)
     val invalid = r2.tooLarge || Mux(r2.signedInt, signedOverflow, unsignedOverflow) || negativeUnsigned
     val saturatePositive = r2.nan || !r2.sign
     val saturation = Mux(
         saturatePositive,
-        Mux(r2.signedInt, "h7fffffff".U(32.W), "hffffffff".U(32.W)),
-        Mux(r2.signedInt, "h80000000".U(32.W), 0.U(32.W))
+        Mux(r2.integerWidth16, Mux(r2.signedInt, "h00007fff".U, "h0000ffff".U),
+            Mux(r2.signedInt, "h7fffffff".U(32.W), "hffffffff".U(32.W))),
+        Mux(r2.signedInt, Mux(r2.integerWidth16, "hffff8000".U, "h80000000".U), 0.U(32.W))
     )
     val s3 = Wire(new FpConvertResponse(tagWidth))
     s3.res := Mux(r2.toFloat, floatResult, Mux(invalid, saturation, rounded))

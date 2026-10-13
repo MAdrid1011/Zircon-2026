@@ -13,8 +13,9 @@ class SharedMultiplySpec extends AnyFreeSpec with ChiselSim {
             }.toVector
         finally input.close()
     }
-    "all eleven operations match pinned SoftFloat/BigInt vectors with four-stage mixed traffic, hold and flush" in {
-        simulate(new MulBooth2Wallce) { dut =>
+    for (blockWidth <- Seq(4, 8)) {
+      s"$blockWidth-bit blocks match all eleven operations with four-stage mixed traffic, hold and flush" in {
+        simulate(new MulBooth2Wallce(blockWidth = blockWidth)) { dut =>
             var pipe = Vector.fill[Option[Sample]](4)(None)
             var cycle = 0
             var retired = 0
@@ -109,5 +110,6 @@ class SharedMultiplySpec extends AnyFreeSpec with ChiselSim {
                 s"$cycle cycles; ${vectors.size} pinned oracle vectors; 4096 additional integer cases; $stalls held cycles"
             )
         }
+    }
     }
 }

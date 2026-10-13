@@ -6,8 +6,11 @@ import ZirconConfig.DCacheParams
 import ZirconUtil.InheritFields
 
 class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
+    private val l1Index = p.indexBits
+    private val l1IndexNum = p.sets
     val hit = UInt(l1Way.W)
     val words = Vec(l1Way, UInt(32.W))
+    val lines = Vec(l1Way, UInt(l1LineBits.W))
     val byteEnable = UInt(4.W)
     val setOH = UInt(l1IndexNum.W)
     val victimWay = UInt(l1Way.W)
@@ -23,7 +26,7 @@ class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
 }
 
 class DCacheLookupStage(p: DCacheParams) extends DLoadRequest(p) {
-    val cacheIndex = UInt(l1Index.W)
+    val cacheIndex = UInt(p.indexBits.W)
     val permission = new DCachePermissionContext
 }
 
@@ -42,6 +45,8 @@ class DCache(
     val tlbEnabled: Boolean = false,
     val observe: Boolean = false,
 ) extends Module {
+    private val l1Index = p.indexBits
+    private val l1IndexNum = p.sets
     val io = IO(new DCacheIO(p, tlbEnabled, observe))
     require(l1Way == 2)
 
@@ -158,6 +163,15 @@ class DCache(
         resolvedLookup(lane) := 0.U.asTypeOf(new DLoadRequest(p))
         InheritFields(resolvedLookup(lane), lookup(lane))
     }
+    if (p.directPhysical) {
+        require(!tlbEnabled)
+        // Classify registered addresses alongside the synchronous RAM result;
+        // AGU outputs only drive the preceding request boundary.
+        for (lane <- 0 until 2) {
+            resolvedLookup(lane).uncache := lookup(lane).uncache ||
+                PMA.attribute(lookup(lane).paddr) =/= PMAAttribute.cached
+        }
+    }
 
     // S3 owns forwarding, hit completion, retry generation and MSHR allocation.
     val execute = Reg(Vec(2, new DCacheExecuteStage(p)))
@@ -189,6 +203,13 @@ class DCache(
     // ==================== Miss and store state ====================
     val missUnit = Module(new DCacheMissUnit(p))
     missUnit.io.flush := io.flush
+    for (lane <- 0 until 2) {
+        io.load(lane).widePending :=
+            requestBufferValid(lane) && requestBuffer(lane).wide ||
+            lookupValid(lane) && lookup(lane).wide ||
+            executeValid(lane) && execute(lane).wide ||
+            responseValid(lane) && responseWB(lane).wide || missUnit.io.wideLoadPending(lane)
+    }
     val writeCombineQueue = Module(new WriteCombineQueue)
     writeCombineQueue.io.enq.bits := io.store.req.bits
     // Strongly ordered traffic closes the open burst. Ordinary gaps retain it
@@ -254,16 +275,19 @@ class DCache(
     val storeVictimPaddr = Cat(Mux1H(storeVictimWay, tagTab.map(_.doutb)), index(storeRequest.paddr), 0.U(l1Offset.W))
     val storeVictimData = Mux1H(storeVictimWay, dataTab.map(_.doutb))
     val storeException = Mux(
-        misaligned(storeRequest.paddr, storeRequest.size) || !storeRequest.mask.orR ||
+        Mux(storeRequest.wide, storeRequest.paddr(l1Offset - 1, 0).orR || !storeRequest.lineMask.orR,
+            misaligned(storeRequest.paddr, storeRequest.size) || !storeRequest.mask.orR) ||
             (storeRequest.uncache &&
                 storeRequest.mask =/= (byteMask(storeRequest.size) << storeRequest.paddr(1, 0))),
         6.U,
         0.U
     )
     val storeWord = storeRequest.paddr(l1Offset - 1, 2)
-    val storeLineMask = VecInit.tabulate(l1Line) { byte =>
+    val scalarStoreLineMask = VecInit.tabulate(l1Line) { byte =>
         storeWord === (byte / 4).U && storeRequest.mask(byte % 4)
     }.asUInt
+    val storeLineMask = Mux(storeRequest.wide, storeRequest.lineMask, scalarStoreLineMask)
+    val storeLineData = Mux(storeRequest.wide, storeRequest.line, Fill(l1Line / 4, storeRequest.data))
     // Bit 6 records the active interval; bits 0-5 identify its state.
     val maintenanceIdle = (1 << 0).U(7.W)
     val maintenanceReadState = ((1 << 6) | (1 << 1)).U(7.W)
@@ -376,7 +400,7 @@ class DCache(
     }
     val forwardComplete = VecInit((0 until 2).map(lane => executeValid(lane) && effectiveForwardValid(lane)))
     val fullForward = VecInit((0 until 2).map { lane =>
-        (effectiveForwardMask(lane) & execute(lane).byteEnable) === execute(lane).byteEnable
+        !execute(lane).wide && (effectiveForwardMask(lane) & execute(lane).byteEnable) === execute(lane).byteEnable
     })
     val requiresMemory = VecInit((0 until 2).map { lane =>
         forwardComplete(lane) && !execute(lane).translationMiss &&
@@ -451,6 +475,9 @@ class DCache(
         missUnit.io.allocate.bits.storeData := storeRequest.data
         missUnit.io.allocate.bits.storeMask := storeRequest.mask
         missUnit.io.allocate.bits.storeSize := storeRequest.size
+        missUnit.io.allocate.bits.wide := storeRequest.wide
+        missUnit.io.allocate.bits.storeLine := storeRequest.line
+        missUnit.io.allocate.bits.storeLineMask := storeRequest.lineMask
         missUnit.io.allocate.bits.victimValid := storeLookupResult.victimValid && !storeRequest.uncache
         missUnit.io.allocate.bits.victimLine := storeLookupResult.victimLine
         missUnit.io.allocate.bits.victimDirty := storeLookupResult.victimDirty
@@ -492,6 +519,8 @@ class DCache(
         localResponseValid(lane) := forwardComplete(lane) && !selectedForAllocation && !io.flush
         localResponse(lane) := 0.U.asTypeOf(new DLoadResponse(p))
         localResponse(lane).slot := execute(lane).slot
+        localResponse(lane).wide := execute(lane).wide
+        localResponse(lane).line := Mux1H(execute(lane).hit, execute(lane).lines)
         localResponse(lane).data := extend(mergedWord, execute(lane).mtype)
         localResponse(lane).exception := execute(lane).exception
         localResponse(lane).retry := execute(lane).exception === 0.U &&
@@ -524,6 +553,7 @@ class DCache(
         // Select LoadPipeline metadata in parallel with capturing the DCache WB data.
         io.load(lane).wbSelect.valid := responseInputValid(lane) && !io.flush
         io.load(lane).wbSelect.bits.slot := responseInput(lane).slot
+        io.load(lane).wbSelect.bits.wide := responseInput(lane).wide
         io.load(lane).wbSelect.bits.exception := responseInput(lane).exception
         io.load(lane).wbSelect.bits.retry := responseInput(lane).retry
         io.load(lane).wbSelect.bits.uncache := responseInput(lane).uncache
@@ -718,8 +748,9 @@ class DCache(
         // SQ/SB reads are side-effect free. Their eligibility is determined by
         // the registered lookup; translated faults and uncached accesses ignore
         // the returned data after the existing lookup-to-execute boundary.
+        // Wide loads resolve Store ordering before issue and do not use scalar forwarding.
         io.forward(lane).query.valid := lookupValid(lane) && lookupFresh(lane) &&
-            lookup(lane).exception === 0.U
+            !lookup(lane).wide && lookup(lane).exception === 0.U
         io.forward(lane).query.bits.wordAddress := resolvedLookup(lane).paddr(33, 2)
         io.forward(lane).query.bits.slot := resolvedLookup(lane).slot
         io.forward(lane).query.bits.mask := accessMask(resolvedLookup(lane))
@@ -767,6 +798,7 @@ class DCache(
                 execute(lane) := 0.U.asTypeOf(new DCacheExecuteStage(p))
                 InheritFields(execute(lane), resolvedLookup(lane))
                 execute(lane).hit := hitNow(lane)
+                execute(lane).lines := linesNow(lane)
                 execute(lane).victimWay := victimWayNow(lane)
                 execute(lane).victimValid := (victimWayNow(lane) & validWaysNow(lane)).orR
                 execute(lane).victimDirty := Mux1H(victimWayNow(lane), dirtyWaysNow(lane).asBools)
@@ -777,6 +809,12 @@ class DCache(
                     resolvedLookup(lane).exception =/= 0.U ||
                     misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))
                 execute(lane).forwardValid := noForward
+                when(resolvedLookup(lane).wide) {
+                    execute(lane).forwardValid := true.B
+                    execute(lane).forwardMask := 0.U
+                    execute(lane).forwardBlocked := false.B
+                    assert(!resolvedLookup(lane).uncache && !resolvedLookup(lane).paddr(l1Offset - 1, 0).orR)
+                }
                 when(resolvedLookup(lane).exception === 0.U &&
                     misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))) {
                     execute(lane).exception := 4.U
@@ -991,7 +1029,7 @@ class DCache(
         dataTab(way).dinb := Mux(
             installFire,
             missUnit.io.install.bits.data,
-            Fill(l1Line / 4, storeRequest.data)
+            storeLineData
         )
 
         validTab(way).wen(0) := maintenanceInvalidate && maintenanceWay === way.U ||

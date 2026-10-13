@@ -2,6 +2,7 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.Cache.{l1IndexNum, l1Line, l1Offset}
+import ZirconConfig.DCacheParams
 
 import scala.collection.mutable
 import scala.util.Random
@@ -147,6 +148,9 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
         }
         val s = write.getOrElse(Store(0, 0))
         dut.io.store.req.valid.poke(write.nonEmpty)
+        dut.io.store.req.bits.wide.poke(false)
+        dut.io.store.req.bits.line.poke(0)
+        dut.io.store.req.bits.lineMask.poke(0)
         dut.io.store.req.bits.paddr.poke(s.address)
         dut.io.store.req.bits.data.poke(s.data)
         dut.io.store.req.bits.mask.poke(s.mask)
@@ -305,7 +309,9 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
         )
         if (acceptedDriven.forall(identity)) pairs += 1
         for (i <- 0 until 2 if acceptedDriven(i)) {
-            val x = drivenInputs(i).get
+            val incoming = drivenInputs(i).get
+            val cached = incoming.address >= 0x80000000L && incoming.address < 0xa0000000L
+            val x = incoming.copy(uncache = incoming.uncache || (dut.p.directPhysical && !cached))
             val f = forward.getOrElse(x.id, Forward())
             val fault = if (x.exception != 0) x.exception
             else if (!aligned(x.address, x.mtype & 3)) 4
@@ -361,6 +367,27 @@ class DCacheDriver(dut: DCache, seed: Long = 20260911L) extends chisel3.simulato
 }
 
 class DCacheSpec extends AnyFreeSpec with ChiselSim {
+    "physical DCache classifies device loads after the request register and retains 128 sets" in {
+        simulate(new DCache(DualPortRamBackend.Vivado, DCacheParams(sets = 128, directPhysical = true))) { dut =>
+            val d = new DCacheDriver(dut)
+            import d._
+            tick()
+            // These lines alias in a 16-set cache, but fit in the 128-set geometry.
+            for (i <- 0 until 8) { issue(Some(load(0x80000000L + i * 1024))); drain() }
+            val warmReads = reads
+            for (i <- 0 until 8) { issue(Some(load(0x80000000L + i * 1024))); drain() }
+            assert(reads == warmReads)
+            val beforeIO = reads
+            issue(Some(load(0xa0000000L)))
+            drain()
+            assert(reads == beforeIO, "unauthorized device access must not reach the bus")
+            for (_ <- 0 until 2) {
+                issue(Some(load(0xa0000000L, authorized = true)))
+                drain()
+            }
+            assert(reads == beforeIO + 2, "device reads must not fill or hit the cache")
+        }
+    }
     implicit val timedMemories: svsim.BackendSettingsModifications = {
         case s: svsim.verilator.Backend.CompilationSettings =>
             s.withTiming(Some(svsim.verilator.Backend.CompilationSettings.Timing.TimingEnabled))
