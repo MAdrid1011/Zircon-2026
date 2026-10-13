@@ -66,13 +66,30 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
     io.empty := !valid && !inflight
     io.busy := valid || inflight
 
+    val incomingData = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.data, 0.U(32.W)),
+        Cat(0.U(32.W), io.enq.bits.data))
+    val incomingMask = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.mask, 0.U(4.W)),
+        Cat(0.U(4.W), io.enq.bits.mask))
+    val payloadOpen = io.enq.valid && !sealedBurst && !inflight && !io.out.valid
+    for (index <- 0 until depth) {
+        // Same-beat stores already share the burst page. Keep their byte
+        // enables independent of the next-beat admission comparison.
+        val fresh = (!valid && (index == 0).B) || nextBeat && samePage && nextBeatOH(index)
+        val merge = sameBeat && lastBeatOH(index)
+        val bytes = WireDefault(data(index).asTypeOf(Vec(8, UInt(8.W))))
+        for (byte <- 0 until 8) {
+            when(payloadOpen && (fresh || merge && incomingMask(byte))) {
+                bytes(byte) := incomingData(8 * byte + 7, 8 * byte)
+            }
+        }
+        data(index) := bytes.asUInt
+        when(payloadOpen && fresh) { mask(index) := incomingMask }
+        .elsewhen(payloadOpen && merge) { mask(index) := mask(index) | incomingMask }
+    }
+
     when(io.out.fire) {
         inflight := true.B
     }.elsewhen(io.enq.fire) {
-        val incomingData = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.data, 0.U(32.W)),
-            Cat(0.U(32.W), io.enq.bits.data))
-        val incomingMask = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.mask, 0.U(4.W)),
-            Cat(0.U(4.W), io.enq.bits.mask))
         when(!valid) {
             valid := true.B
             sealedBurst := false.B
@@ -83,29 +100,9 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
             age := 0.U
             lastBeatOH := 1.U
             nextBeatOH := 2.U
-            data(0) := incomingData
-            mask(0) := incomingMask
         }.elsewhen(sameBeat) {
-            for (index <- 0 until depth) {
-                when(lastBeatOH(index)) {
-                    data(index) := VecInit.tabulate(8) { byte =>
-                        Mux(
-                            incomingMask(byte),
-                            incomingData(8 * byte + 7, 8 * byte),
-                            data(index)(8 * byte + 7, 8 * byte),
-                        )
-                    }.asUInt
-                    mask(index) := mask(index) | incomingMask
-                }
-            }
             age := 0.U
         }.otherwise {
-            for (index <- 0 until depth) {
-                when(nextBeatOH(index)) {
-                    data(index) := incomingData
-                    mask(index) := incomingMask
-                }
-            }
             lastBeatAddress := nextBeatAddress
             nextBeatAddress := nextBeatAddress + 8.U
             lastBeatOH := nextBeatOH

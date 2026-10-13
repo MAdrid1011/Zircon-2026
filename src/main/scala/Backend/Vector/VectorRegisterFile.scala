@@ -31,11 +31,11 @@ class VectorRegisterFile(val p: VectorParams = VectorParams(), val observe: Bool
             numEntries = p.physicalRegisters, numReadPorts = 3, numWritePorts = 2,
             hasZeroReg = false, byteWrite = true, readBypass = false, initialize = false,
             observe = observe,
-            oneHotRead = true,
+            readBankEntries = 8,
         )))
         for (port <- 0 until 3) {
             bank.io.read(port).addr := io.read(port).address
-            bank.io.read(port).oneHot.get := io.read(port).oneHot
+            bank.io.read(port).oneHot.foreach(_ := io.read(port).oneHot)
             io.read(port).data(lane) := bank.io.read(port).data
         }
         for (port <- 0 until 2) {

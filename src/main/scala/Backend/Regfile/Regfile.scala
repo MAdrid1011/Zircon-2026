@@ -119,7 +119,16 @@ class Regfile(
     }
 
     io.read.zipWithIndex.foreach { case (r, index) =>
-        val stored = if (p.oneHotRead) {
+        val stored = if (p.readBankEntries > 0) {
+            // Decode row and bank independently. The bank select drives only
+            // the final word mux, rather than every bit of every storage row.
+            val rowBits = log2Ceil(p.readBankEntries)
+            val rowOH = UIntToOH(r.addr(rowBits - 1, 0), p.readBankEntries)
+            val words = values.toSeq.grouped(p.readBankEntries).map(rows =>
+                Mux1H(rowOH.asBools, rows)).toSeq
+            if (words.size == 1) words.head else
+                Mux1H(UIntToOH(r.addr(p.addrWidth - 1, rowBits), words.size).asBools, words)
+        } else if (p.oneHotRead) {
             Mux1H(r.oneHot.get, values)
         } else if (overrideReadPorts.contains(index)) {
             Mux1H(UIntToOH(r.addr, p.numEntries).asBools, values.toSeq)

@@ -163,7 +163,9 @@ class MorslDirection(
     val phtPredictionIndex = RegEnable(phtPrefetchIndex, io.query.prefetch)
     // Capture valid banks at the PF/IF1 edge with the SRAM read. The next-PC
     // path then ends at the index register, not at a bank-wide register D mux.
-    val phtValidLowBits = math.min(6, p.phtIndexBits)
+    // Balance the low/high index decoders at the same PF/IF1 boundary. The
+    // low selector no longer needs to drive a 64-way decode after next-PC hash.
+    val phtValidLowBits = math.min(4, (p.phtIndexBits + 1) / 2)
     val phtValidBankWidth = 1 << phtValidLowBits
     val phtValidBanks = VecInit((0 until p.phtSets / phtValidBankWidth).map { bank =>
         VecInit(phtValid.slice(bank * phtValidBankWidth,

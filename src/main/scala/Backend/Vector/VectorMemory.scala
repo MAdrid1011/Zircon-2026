@@ -83,7 +83,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val startElement = metadata.state.vstart(7, 0)
     val strided = instruction.scalar.inst(27, 26) === 2.U
     val fields = Reg(UInt(4.W))
-    val elementAccess = strided || indexed || !whole && fields =/= 1.U
+    val elementAccess = Reg(Bool())
     val fullGroupLoad = !store && !elementAccess && !metadata.groups.mask &&
         metadata.state.vstart === 0.U && base(4, 0) === 0.U &&
         transferVl === ((count.pad(32) << 5) >> eew)
@@ -205,6 +205,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 when(io.readAvailable) {
                     indexWidth := decodedIndexWidth
                     indexed := instruction.scalar.inst(26)
+                    elementAccess := strided || instruction.scalar.inst(26) ||
+                        !whole && instruction.scalar.inst(31, 29).orR
                     eew := decodedEew
                     transferVl := Mux(whole, ((count.pad(9) << 5) >> decodedEew)(8, 0),
                         Mux(maskMemory, (metadata.state.vl(8, 0) +& 7.U) >> 3, metadata.state.vl(8, 0)))

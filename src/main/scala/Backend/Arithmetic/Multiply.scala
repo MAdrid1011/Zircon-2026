@@ -204,6 +204,7 @@ object SharedMultiplyLogic {
     def resolveBlocks(blocks: Seq[MulSpeculativeBlock]): (UInt, UInt, Bool) = {
         val width = blocks.head.blockWidth
         require(blocks.size * width == Width && blocks.forall(_.blockWidth == width))
+        if (width == 4) return resolveSmallBlocks(blocks)
         var gp = blocks.map(b => (b.generate, b.propagate))
         for (level <- 0 until log2Ceil(blocks.size)) {
             val distance = 1 << level
@@ -223,6 +224,43 @@ object SharedMultiplyLogic {
         // corresponding local sum completes the adder without a second 64-bit CPA.
         val words = blocks.indices.map(i => Mux(carry(i), blocks(i).sum1, blocks(i).sum0))
         (VecInit(words).asUInt, Mux1H(highest.zip(tops)), !nonzero.reduce(_ || _))
+    }
+
+    /** Resolve sixteen-bit candidates before selecting the five group carries.
+      * A late carry selects one local leading-bit candidate; it does not enter
+      * the twenty-block priority network. Reuse the core's four-way lookahead.
+      */
+    private def resolveSmallBlocks(blocks: Seq[MulSpeculativeBlock]): (UInt, UInt, Bool) = {
+        val groups = blocks.grouped(4).toSeq
+        val local = groups.map { group =>
+            val propagate = VecInit(group.map(_.propagate)).asUInt
+            val generate = VecInit(group.map(_.generate)).asUInt
+            val (p, g, carry0) = BLevelCarry4(propagate, generate, 0.U(1.W))
+            val (_, _, carry1) = BLevelCarry4(propagate, generate, 1.U(1.W))
+            def candidate(cin: Bool, carries: UInt): (UInt, UInt, Bool) = {
+                val carry = Seq(cin) ++ (0 until 3).map(carries(_))
+                val words = group.indices.map(i => Mux(carry(i), group(i).sum1, group(i).sum0))
+                val nonzero = group.indices.map(i => Mux(carry(i), group(i).nonzero1, group(i).nonzero0))
+                val highest = group.indices.map(i => nonzero(i) &&
+                    !nonzero.drop(i + 1).foldLeft(false.B)(_ || _))
+                val tops = group.indices.map(i => Cat(i.U(2.W),
+                    Mux(carry(i), group(i).top1, group(i).top0)))
+                (VecInit(words).asUInt, Mux1H(highest.zip(tops)), nonzero.reduce(_ || _))
+            }
+            (p, g, candidate(false.B, carry0), candidate(true.B, carry1))
+        }
+        val (_, _, carry) = BLevelCarry4(VecInit(local.take(4).map(_._1)).asUInt,
+            VecInit(local.take(4).map(_._2)).asUInt, 0.U(1.W))
+        val selected = local.indices.map { i =>
+            val cin = if (i == 0) false.B else carry(i - 1)
+            val (_, _, c0, c1) = local(i)
+            (Mux(cin, c1._1, c0._1), Mux(cin, c1._2, c0._2), Mux(cin, c1._3, c0._3))
+        }
+        val nonzero = selected.map(_._3)
+        val highest = selected.indices.map(i => nonzero(i) &&
+            !nonzero.drop(i + 1).foldLeft(false.B)(_ || _))
+        val tops = selected.indices.map(i => Cat(i.U(3.W), selected(i)._2))
+        (VecInit(selected.map(_._1)).asUInt, Mux1H(highest.zip(tops)), !nonzero.reduce(_ || _))
     }
 
     // A 3:2 compressor produces sum/carry rows without word-wide carry propagation.

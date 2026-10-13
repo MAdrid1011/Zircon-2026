@@ -101,6 +101,7 @@ stride、indexed、segment、mask 与 whole-register 访问展开为内部任务
 cmake -S . -B build/performance -DCMAKE_CXX_COMPILER=clang++ \
   -DZIRCON_CORE_PROFILE=performance
 cmake --build build/performance --target zircon-sim -j4
+cmake --build build/performance --target coremark
 make -C RV-Software/simd -j4
 make -C RV-Software/simd run
 ```

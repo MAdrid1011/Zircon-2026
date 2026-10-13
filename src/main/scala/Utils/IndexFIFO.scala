@@ -14,6 +14,19 @@ object FIFOUtil {
     def advance(value: UInt, count: UInt, maxCount: Int): UInt =
         Mux1H((0 to maxCount).map(i => (count === i.U) -> rotate(value, i)))
 
+    /** An ordered transfer prefix already encodes its length at the boundary. */
+    def prefixClasses(fires: Seq[Bool]): Seq[Bool] = {
+        require(fires.nonEmpty)
+        Seq(!fires.head) ++ fires.indices.map { lane =>
+            fires(lane) && (if (lane + 1 == fires.size) true.B else !fires(lane + 1))
+        }
+    }
+
+    def advancePrefix(value: UInt, fires: Seq[Bool]): UInt =
+        Mux1H(prefixClasses(fires).zipWithIndex.map { case (selected, count) =>
+            selected -> rotate(value, count)
+        })
+
     def assertPrefix(fires: Seq[Bool], message: String): Unit =
         fires.indices.drop(1).foreach(i => assert(!fires(i) || fires(i - 1), message))
 }

@@ -128,7 +128,7 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
         enqBaseNext := Mux(allEnqReady, next, enqBase)
     } else {
         enqSelect.zipWithIndex.foreach { case (select, lane) => select := FIFOUtil.rotate(enqBase, lane) }
-        enqBaseNext := FIFOUtil.advance(enqBase, PopCount(io.enq.map(_.fire)), ew)
+        enqBaseNext := FIFOUtil.advancePrefix(enqBase, io.enq.map(_.fire).toSeq)
         when(!io.flush) {
             FIFOUtil.assertPrefix(
                 io.enq.map(_.fire).toSeq,
@@ -194,10 +194,9 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     when(!io.flush) {
         FIFOUtil.assertPrefix(io.deq.map(_.fire).toSeq, "ClusterIndexFIFO dequeue transfers must be a prefix")
     }
-    private val deqBaseNext = FIFOUtil.advance(deqBase, PopCount(io.deq.map(_.fire)), dw)
+    private val deqBaseNext = FIFOUtil.advancePrefix(deqBase, io.deq.map(_.fire).toSeq)
     if (registeredDeq) {
-        val popCount = PopCount(io.deq.map(_.fire))
-        val popCountOH = VecInit.tabulate(dw + 1)(count => popCount === count.U)
+        val popCountOH = VecInit(FIFOUtil.prefixClasses(io.deq.map(_.fire).toSeq))
         for (lane <- 0 until dw) {
             val candidates = (0 to dw).map { candidateCount =>
                 val candidateBase = FIFOUtil.rotate(deqBase, candidateCount)
