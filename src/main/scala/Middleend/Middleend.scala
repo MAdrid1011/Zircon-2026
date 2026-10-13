@@ -151,13 +151,13 @@ class Middleend(
     val vectorCandidateGroups = if (vectorEnabled) instructions.map { instruction =>
         new VectorGroupCounts(instruction.inst, vectorState.get.vtype)
     } else Seq.empty
+    vectorCandidateGroups.foreach(groups => assert(PopCount(groups.allocationClasses) === 1.U))
     val vectorAllocationBanks = if (vectorEnabled)
         Some(Mux1H(vectorSelection, vectorCandidateGroups.map(_.allocationBanks))) else None
     val vectorCapacityReady = vectorRename.map { rename =>
-        // Decode narrow allocation counts per FQ lane in parallel with the
-        // selected instruction's full decode and RAT reads. Capacity depends
-        // only on the existing bank FreeLists and the held Dispatch preview.
-        (vectorAllocationBanks.get & ~rename.io.bankAvailable) === 0.U
+        // Test each candidate's banks before the late first-vector selection.
+        // Only a one-bit blocked result crosses that selection boundary.
+        !Mux1H(vectorSelection, vectorCandidateGroups.map(_.allocationBlocked(rename.io.bankAvailable)))
     }.getOrElse(true.B)
     val vectorInstruction = Mux1H(vectorSelection, instructions.map(_.inst))
     val vectorControl = if (vectorEnabled) Some(Module(new VectorDecoder)) else None
@@ -466,7 +466,8 @@ class Middleend(
         metadata.state.vtype := vectorState.get.vtype
         metadata.state.vstart := vectorState.get.vstart
         val vectorDecodeFire = (decodeGrant & vectorCandidates.asUInt).orR
-        port.allocate.valid := vectorDecodeFire && vectorAllocationBanks.get.orR
+        val writesVector = Mux1H(vectorSelection, vectorCandidateGroups.map(_.shape.writesVector))
+        port.allocate.valid := vectorDecodeFire && writesVector
         port.allocate.bits := rename.io.destination
         when(stageCanLoad) { vectorStage.get := metadata }
         port.enqueue.valid := (accepted & vectorStageSelection).orR
@@ -488,6 +489,8 @@ class Middleend(
         }
         when(vectorDecodeFire && !io.commit.restore) { vectorState.get.vstart := 0.U }
         when(vectorDecodeFire) {
+            assert(writesVector === vectorAllocationBanks.get.orR,
+                "Legal vector destination classes must match allocated banks")
             assert(rename.io.sourceBase.asUInt === groups.sourceBase.asUInt)
             assert(rename.io.available, "Parallel vector capacity must grant every requested bank")
             assert(metadata.control.legal, "Vector instruction is not implemented in the current execution path")

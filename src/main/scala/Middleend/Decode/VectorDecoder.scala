@@ -495,7 +495,27 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
     val reduction = shape.reduction
     val singleDestination = shape.singleDestination
     val destinationCount = Mux(singleDestination, 1.U, totalCount)
-    val allocationCount = Mux(shape.writesVector, destinationCount, 0.U)(3, 0)
+    val encodedAllocationCount = Mux(shape.writesVector, destinationCount, 0.U)(3, 0)
+    // These disjoint classes are shared by count and capacity lookup. Clocked
+    // consumers assert the partition; this helper also serves RawModules.
+    val allocationClasses = {
+        val grouped = shape.writesVector && !singleDestination
+        val ordinary = grouped && !wholeMove && !whole && !maskMemory
+        val wide = shape.widening || shape.wideConversion
+        Seq(
+            !shape.writesVector,
+            shape.writesVector && singleDestination || grouped && maskMemory,
+            grouped && wholeMove,
+            grouped && whole,
+            ordinary && memory && indexed,
+            ordinary && memory && !indexed,
+            ordinary && !memory && wide,
+            ordinary && !memory && !wide,
+        )
+    }
+    // Use the same disjoint class lookup for the stored count and capacity.
+    // Allocation consumers do not re-encode the complete group-size mux chain.
+    val allocationCount = selectAllocation((0 until 16).map(_.U(4.W)))
 
     /** Select a bank mask directly from constant group sizes. Admission
       * need not encode a count, then decode it in eight bank comparisons.
@@ -516,23 +536,7 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
             (0 until 8).map(fields => fields.U -> values(fields + 1)))
         val moveValue = MuxLookup(inst(19, 15), values(0))(
             (0 until 32).map(registers => registers.U -> values((registers + 1) & 15)))
-        // Form disjoint instruction classes beside the size lookups. A late
-        // size result terminates at one masked OR, rather than a priority mux chain.
-        val grouped = shape.writesVector && !singleDestination
-        val ordinary = grouped && !wholeMove && !whole && !maskMemory
-        val wide = shape.widening || shape.wideConversion
-        val selections = Seq(
-            !shape.writesVector,
-            shape.writesVector && singleDestination || grouped && maskMemory,
-            grouped && wholeMove,
-            grouped && whole,
-            ordinary && memory && indexed,
-            ordinary && memory && !indexed,
-            ordinary && !memory && wide,
-            ordinary && !memory && !wide,
-        )
-        assert(PopCount(selections) === 1.U)
-        Mux1H(selections, Seq(values(0), values(1), moveValue, wholeValue,
+        Mux1H(allocationClasses, Seq(values(0), values(1), moveValue, wholeValue,
             segments(0), memoryValue, at(1), at(0)))
     }
 

@@ -931,6 +931,53 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "registered replay capacity includes consecutive pending reservations and resolution" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, enqueueWidth = 3,
+            wakeupPorts = 1, replayEntries = 2)
+        simulate(new IssueQueue(backend, q)) { dut =>
+            initialize(dut)
+            dut.io.issue.ready.poke(true)
+            dut.io.enq.valid.poke(7)
+            for (lane <- 0 until 3) {
+                packageEntry(dut.io.enq.candidates(lane), 57 + lane, DecodeUnit.ALU,
+                    sourceTag = Some(10 + lane), sourceSpecMask = 1 << lane)
+            }
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(57)
+            dut.clock.step()
+            // One pending snapshot still leaves capacity for the next issue.
+            dut.io.replayOccupancy.expect(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(58)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(2)
+            dut.io.issue.valid.expect(false)
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.replayOccupancy.expect(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(59)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(2)
+            dut.io.flush.poke(true)
+            dut.clock.step()
+            dut.io.flush.poke(false)
+            dut.io.replayOccupancy.expect(0)
+            dut.io.occupancy.expect(0)
+            // A stale sampled reservation cannot consume post-flush capacity.
+            dut.io.enq.valid.poke(1)
+            packageEntry(dut.io.enq.candidates(0), 61, DecodeUnit.ALU,
+                sourceTag = Some(13), sourceSpecMask = 1)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(61)
+        }
+    }
+
     "a full replay queue skips an older speculative entry for a younger certain entry" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1, replayEntries = 1)
         simulate(new IssueQueue(backend, q)) { dut =>

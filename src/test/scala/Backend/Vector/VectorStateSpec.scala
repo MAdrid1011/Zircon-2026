@@ -59,14 +59,19 @@ class VectorCapacityHarness extends Module {
         val available = Input(UInt(8.W))
         val blocked = Output(Bool())
         val reference = Output(Bool())
+        val count = Output(UInt(4.W))
+        val referenceCount = Output(UInt(4.W))
     })
     val counts = new VectorGroupCounts(io.instruction, io.vtype)
+    assert(chisel3.util.PopCount(counts.allocationClasses) === 1.U)
     val banks = (0 until 8).map { bank =>
         (bank.U(3.W) - io.instruction(9, 7))(2, 0) -> !io.available(bank)
     }
     io.blocked := counts.allocationBlocked(io.available)
+    io.count := counts.allocationCount
+    io.referenceCount := counts.encodedAllocationCount
     io.reference := banks.map { case (distance, blocked) =>
-        distance < counts.allocationCount && blocked
+        distance < counts.encodedAllocationCount && blocked
     }.reduce(_ || _)
 }
 
@@ -82,6 +87,7 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.available.poke(cycle & 255)
                 dut.clock.step()
                 dut.io.blocked.expect(dut.io.reference.peek().litToBoolean)
+                dut.io.count.expect(dut.io.referenceCount.peek().litValue)
             }
         }
     }

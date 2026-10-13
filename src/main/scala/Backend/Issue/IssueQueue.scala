@@ -150,8 +150,7 @@ class IssueQueue(
     // The payload remains there until the following edge, when replay takes its
     // snapshot without extending issue selection into every replay D-input.
     private val delayedCheckpoint = q.profile == IssueQueueProfile.ArithBranch
-    private val replayFreeOne = if (delayedCheckpoint) Some(RegInit((q.replayEntries >= 1).B)) else None
-    private val replayFreeTwo = if (delayedCheckpoint) Some(RegInit((q.replayEntries >= 2).B)) else None
+    private val replayCanReserve = if (delayedCheckpoint) Some(RegInit((q.replayEntries >= 1).B)) else None
     val checkpointPendingValid = if (delayedCheckpoint) Some(RegInit(false.B)) else None
     val checkpointPendingPosition = if (delayedCheckpoint) {
         Some(RegInit(0.U(q.entries.W)))
@@ -400,9 +399,9 @@ class IssueQueue(
         0.U
     })
     val replayCapacityAvailable = if (delayedCheckpoint) {
-        // Two free slots imply one free slot, so pending capacity only gates
-        // the one-slot case rather than selecting both registered thresholds.
-        replayFreeTwo.get || (replayFreeOne.get && !pendingNeedsReplay)
+        // The registered next-state capacity already includes the pending
+        // snapshot reservation; issue selection reads one Q-side predicate.
+        replayCanReserve.get
     } else {
         replayAvailable
     }
@@ -777,11 +776,14 @@ class IssueQueue(
     checkpointPendingMask.foreach(_ := speculationMask(checkpointMainItem) & ~maintenanceResolvedMask)
     if (delayedCheckpoint) {
         val nextFree = PopCount(nextReplayValid.take(q.replayEntries).map(!_))
-        replayFreeOne.get := (if (q.replayEntries >= 1) io.flush || nextFree >= 1.U else false.B)
-        replayFreeTwo.get := (if (q.replayEntries >= 2) io.flush || nextFree >= 2.U else false.B)
+        val nextPendingReserved = checkpointCapture && (checkpointMainSpeculative || checkpointMainFailed)
+        replayCanReserve.get := (if (q.replayEntries >= 1) {
+            io.flush || nextFree >= 2.U || nextFree >= 1.U && !nextPendingReserved
+        } else false.B)
         when(!io.flush) {
-            assert(replayFreeOne.get === replayAvailable)
-            assert(replayFreeTwo.get === (PopCount(replayFree.take(q.replayEntries)) >= 2.U))
+            val free = PopCount(replayFree.take(q.replayEntries))
+            assert(replayCanReserve.get === (free >= 2.U || free >= 1.U && !pendingNeedsReplay),
+                "Replay admission must include the current pending snapshot reservation")
         }
     }
     when(io.flush) {
