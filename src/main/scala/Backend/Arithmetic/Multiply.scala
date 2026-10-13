@@ -509,7 +509,7 @@ class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false
         (x ^ y ^ z, (((x & y) | (x & z) | (y & z)) << 1)(10, 0))
     val (fmaSum0, fmaCarry0) = compressShift(cExp.pad(11), ~aExp.pad(11), ~bExp.pad(11))
     val (fmaSum1, fmaCarry1) = compressShift(fmaSum0, fmaCarry0, 155.U(11.W))
-    val fmaShift = (fmaSum1 + fmaCarry1).asSInt
+    val fmaShift = prefixAdd(fmaSum1, fmaCarry1, 11).asSInt
     val shiftCWithOther = Mux(
         add,
         27.S(11.W) - addDistance.zext,
@@ -596,8 +596,16 @@ class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false
     val (d, positiveTop, zero) = resolveBlocks(r2.positiveBlocks.toSeq)
     val (negative, negativeTop, _) = resolveBlocks(r2.negativeBlocks.toSeq)
     val topBit = Mux(d(79), negativeTop, positiveTop)
-    val positiveExponent = prefixAdd(r2.exp.asUInt, Cat(0.U(4.W), positiveTop), 11).asSInt
-    val negativeExponent = prefixAdd(r2.exp.asUInt, Cat(0.U(4.W), negativeTop), 11).asSInt
+    // The leading index occupies seven bits. Prepare the upper exponent's
+    // increment before that index arrives, then select only on the low carry.
+    val exponentHigh = r2.exp.asUInt(10, 7)
+    val exponentHighIncremented = (exponentHigh + 1.U)(3, 0)
+    def exponentWithLeading(leading: UInt): SInt = {
+        val low = prefixAdd(r2.exp.asUInt(6, 0).pad(8), leading.pad(8), 8)
+        Cat(Mux(low(7), exponentHighIncremented, exponentHigh), low(6, 0)).asSInt
+    }
+    val positiveExponent = exponentWithLeading(positiveTop)
+    val negativeExponent = exponentWithLeading(negativeTop)
     val top = Mux(d(79), negativeExponent, positiveExponent)
     val s3 = Wire(new MulStage3(tagWidth))
     s3.mag := Mux(d(79), negative, d)

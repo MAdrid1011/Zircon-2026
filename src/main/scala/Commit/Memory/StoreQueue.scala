@@ -423,18 +423,18 @@ class StoreQueue(
     for (port <- 0 until 2) {
         val query = io.query(port).request
         val boundaryOH = query.bits.sqTailOH
-        val boundary = OHToUInt(boundaryOH)
         val boundarySlotOH = VecInit((0 until entries).map { index =>
             boundaryOH(index) || boundaryOH(index + entries)
         }).asUInt
-        // The preceding 1..entries ring positions are older; the smaller distance wins.
-        val age = VecInit(storage.map { entry =>
-            val identity = entry.identity(pointerWidth - 1, 0)
-            Mux(boundary >= identity, boundary - identity,
-                boundary + ringEntries.U - identity)(pointerWidth - 1, 0)
-        })
+        // A physical slot has only two legal ring identities. Decode the older
+        // half-ring directly from the captured one-hot tail; no binary tail
+        // encoder, subtractor or age comparison lies on the forwarding select.
         val active = VecInit((0 until entries).map { index =>
-            valid(index) && age(index) =/= 0.U && age(index) <= entries.U
+            def older(identity: Int): Bool = VecInit((1 to entries).map(distance =>
+                boundaryOH((identity + distance) % ringEntries))).asUInt.orR
+            val identity = narrow(storage(index).identity)
+            valid(index) && (identity === index.U && older(index) ||
+                identity === (index + entries).U && older(index + entries))
         })
         val wordMatch = VecInit((0 until entries).map { index =>
             !storage(index).vector && queryAddressValid(index) &&

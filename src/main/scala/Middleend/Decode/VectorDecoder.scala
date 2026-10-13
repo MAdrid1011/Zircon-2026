@@ -497,18 +497,18 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
     val destinationCount = Mux(singleDestination, 1.U, totalCount)
     val allocationCount = Mux(shape.writesVector, destinationCount, 0.U)(3, 0)
 
-    /** Select a capacity fact directly from constant group sizes. Admission
+    /** Select a bank mask directly from constant group sizes. Admission
       * need not encode a count, then decode it in eight bank comparisons.
       */
-    def selectAllocation(values: Seq[Bool]): Bool = {
+    def selectAllocation(values: Seq[UInt]): UInt = {
         require(values.size == 16)
-        def at(delta: Int, multiplier: Int = 1): Bool = MuxLookup(lmul, values(0))(
+        def at(delta: Int, multiplier: Int = 1): UInt = MuxLookup(lmul, values(0))(
             Seq(0, 1, 2, 3, 5, 6, 7).map { encoding =>
                 val adjusted = (if (encoding < 4) encoding else encoding - 8) + delta
                 val size = if (adjusted <= 0) 1 else if (adjusted <= 3) 1 << adjusted else 0
                 encoding.U -> values((size * multiplier) & 15)
             })
-        def segments(delta: Int): Bool = MuxLookup(inst(31, 29), values(0))(
+        def segments(delta: Int): UInt = MuxLookup(inst(31, 29), values(0))(
             (0 until 8).map(fields => fields.U -> at(delta, fields + 1)))
         val memoryValue = Mux1H((for (dataWidth <- 0 to 2; elementWidth <- 0 to 2) yield
             (sew === dataWidth.U && eew === elementWidth.U) -> segments(elementWidth - dataWidth)))
@@ -526,12 +526,16 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
         require(available.getWidth == 8)
         val base = (0 until 8).map(index => inst(9, 7) === index.U)
         val candidates = (0 until 16).map { count =>
-            if (count == 0) false.B
+            if (count == 0) 0.U(8.W)
             else Mux1H(base, (0 until 8).map { first =>
-                (0 until math.min(count, 8)).map(offset => !available((first + offset) & 7)).reduce(_ || _)
+                (0 until math.min(count, 8)).foldLeft(BigInt(0)) { (mask, offset) =>
+                    mask.setBit((first + offset) & 7)
+                }.U(8.W)
             })
         }
-        selectAllocation(candidates)
+        // Decode needed banks alongside the FreeList's held-group preview.
+        // Late availability reaches only this final mask intersection.
+        (selectAllocation(candidates) & ~available).orR
     }
 }
 

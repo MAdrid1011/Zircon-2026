@@ -348,12 +348,14 @@ class SpeculativeState(p: FrontendParams) extends Module {
             speculativeSelect(2) && io.early.bits.prediction.taken(slot) &&
                 FrontendCfi.push(kind) && rowEligible
         }
-        // Merge early slot selection, hold and recovery into one row mux. Late
-        // PHT direction no longer crosses an early-row mux and a snapshot mux.
-        val hold = !speculativeSelect(0) && !speculativeSelect(1) && !VecInit(writes).asUInt.orR
-        val selects = Seq(speculativeSelect(0), speculativeSelect(1), hold) ++ writes
-        speculativeNext.ras(row) := Mux1H(selects,
-            Seq(committedNext.ras(row), repaired.ras(row), speculative.ras(row)) ++ earlyReturnPcs)
+        // Select recovery independently of the late prediction. A one-hot early
+        // write applies its precomputed bit difference to that base row, avoiding
+        // taken -> write reduction -> hold decode -> row-data selection.
+        val base = Mux1H(Seq(speculativeSelect(0), speculativeSelect(1),
+            !speculativeSelect(0) && !speculativeSelect(1)),
+            Seq(committedNext.ras(row), repaired.ras(row), speculative.ras(row)))
+        val changes = earlyReturnPcs.map(_ ^ speculative.ras(row))
+        speculativeNext.ras(row) := base ^ Mux1H(writes, changes)
     }
     assert(PopCount(VecInit(speculativeSelect)) === 1.U)
     when(retireValid.asUInt.orR || io.recovery.valid) {

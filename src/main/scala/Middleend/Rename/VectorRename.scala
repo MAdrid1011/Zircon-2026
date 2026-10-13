@@ -36,8 +36,12 @@ class VectorRename extends Module {
     def distance(base: UInt, bank: Int): UInt = (bank.U(3.W) - base(2, 0))(2, 0)
     def localAddress(base: UInt, bank: Int): UInt =
         (base(4, 3) + (bank.U < base(2, 0)).asUInt)(1, 0)
+    // A legal group visits each bank at most once. Its local tag position
+    // depends on the base alone; count only qualifies the bank's write.
     def groupSelection(group: VectorDestination, bank: Int): Seq[Bool] =
-        (0 until 8).map(i => i.U < group.count && (group.base + i.U)(2, 0) === bank.U)
+        (0 until 8).map(i => distance(group.base, bank) === i.U)
+    def groupContains(group: VectorDestination, bank: Int): Bool =
+        distance(group.base, bank) < group.count
 
     for ((bank, index) <- banks.zipWithIndex) {
         val rinfo = bank.io.rinfo(0)
@@ -55,7 +59,7 @@ class VectorRename extends Module {
 
         val preview = bank.io.preview(0)
         val selection = groupSelection(io.preview.bits, index)
-        preview.valid := io.preview.valid && selection.reduce(_ || _)
+        preview.valid := io.preview.valid && groupContains(io.preview.bits, index)
         preview.bits.rd := localAddress(io.preview.bits.base, index)
         preview.bits.prd := Mux1H(selection, io.preview.bits.physical.map(_(5, 3)))
         bank.io.writeback(0).valid := io.accept && preview.valid
@@ -65,7 +69,7 @@ class VectorRename extends Module {
             val retirement = io.retire(port)
             val hits = groupSelection(retirement.bits, index)
             val commit = bank.io.commit(port)
-            commit.valid := retirement.valid && hits.reduce(_ || _)
+            commit.valid := retirement.valid && groupContains(retirement.bits, index)
             commit.bits.rd := localAddress(retirement.bits.base, index)
             commit.bits.prd := Mux1H(hits, retirement.bits.physical.map(_(5, 3)))
             commit.bits.pprd := Mux1H(hits, retirement.bits.previous.map(_(5, 3)))

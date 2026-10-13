@@ -191,9 +191,10 @@ class Middleend(
 
     /* Commit reserves ROB, SQ and FTQ resources for the same ordered prefix Dispatch may accept. */
     io.commit.request.valid := renameStageValid
+    val vectorStageStore = vectorStage.map(_.control.execution === VectorExecution.Store.U).getOrElse(false.B)
     io.commit.request.store := VecInit(renameStageEntries.map(entry => entry.dispatchClass.storeOrAtomic ||
         vectorEnabled.B && entry.context.instruction.fu === DecodeUnit.Vector.U &&
-            entry.context.instruction.inst(6, 0) === "h27".U)).asUInt
+            vectorStageStore)).asUInt
     io.commit.request.packetStart := VecInit(renameStageEntries.map(_.context.packetStart)).asUInt
     FIFOUtil.assertPrefix(io.commit.resourcePrefix.asBools, "Commit resource permission must be a prefix")
 
@@ -449,9 +450,9 @@ class Middleend(
         rename.io.destinationCount := groups.destinationCount
         rename.io.restore := io.commit.restore
         rename.io.retire := port.retire
-        rename.io.preview.valid := vectorStageSelection.orR && vectorStage.get.destination.count.orR
+        rename.io.preview.valid := vectorStageSelection.orR
         rename.io.preview.bits := vectorStage.get.destination
-        rename.io.accept := (accepted & vectorStageSelection).orR && vectorStage.get.destination.count.orR
+        rename.io.accept := (accepted & vectorStageSelection).orR
         val metadata = Wire(new VectorInstructionMetadata)
         metadata.control := vectorControl.get.io.control
         metadata.groups := groups

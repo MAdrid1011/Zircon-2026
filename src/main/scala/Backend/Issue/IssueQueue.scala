@@ -472,8 +472,9 @@ class IssueQueue(
             Mux1H(selectedMainRaw.asBools, entries.map(_.item)),
         ),
     )
-    val selectedFailed = selectedExists && (speculationMask(selectedItem) & maintenanceFailedMask).orR
-    val lockedFailed = selectionLocked && selectedFailed
+    // Failure checks consume the owned snapshot directly. Unlocked selection
+    // must not pass through a wide payload mux before the lock qualifier.
+    val lockedFailed = selectionLocked && (speculationMask(lockedItem) & maintenanceFailedMask).orR
     val lockedLosesReadiness = selectionLocked && waitsForSpeculationResolution.B &&
         losesReadyOnWakeup(lockedItem)
     // Unlocked arithmetic candidates may still be consumed and killed at the

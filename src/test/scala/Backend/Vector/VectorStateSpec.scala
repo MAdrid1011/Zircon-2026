@@ -287,6 +287,40 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
                 val physical = dut.io.destination.physical(i).peek().litValue.toInt
                 assert((physical & 7) == ((7 + i) & 7))
             }
+            val wrappedTags = (0 until 8).map(i => dut.io.destination.physical(i).peek().litValue.toInt)
+            val wrappedPrevious = (0 until 8).map(i => dut.io.destination.previous(i).peek().litValue.toInt)
+            dut.io.preview.valid.poke(true); dut.io.accept.poke(true)
+            destination(dut.io.preview.bits, 7, wrappedTags, wrappedPrevious)
+            dut.clock.step(); dut.io.preview.valid.poke(false); dut.io.accept.poke(false)
+            dut.io.sourceBase(0).poke(7)
+            for (i <- 0 until 8) dut.io.source(0)(i).expect(wrappedTags(i))
+            dut.io.retire(0).valid.poke(true)
+            destination(dut.io.retire(0).bits, 7, wrappedTags, wrappedPrevious)
+            dut.clock.step(); dut.io.retire(0).valid.poke(false)
+            dut.io.restore.poke(true); dut.clock.step(); dut.io.restore.poke(false)
+            for (i <- 0 until 8) dut.io.source(0)(i).expect(wrappedTags(i))
+
+            // Scalar-result/configuration instructions still pass the vector
+            // stage, but a zero-sized destination cannot consume or recycle a
+            // tag, even when all unused tag fields carry nonzero values.
+            val unchanged = (0 until 8).map(i => dut.io.destination.physical(i).peek().litValue.toInt)
+            val available = dut.io.bankAvailable.peek().litValue
+            for (base <- 0 until 32) {
+                destination(dut.io.preview.bits, base, Seq.empty, Seq.empty)
+                destination(dut.io.retire(0).bits, base, Seq.empty, Seq.empty)
+                for (i <- 0 until 8) {
+                    dut.io.preview.bits.physical(i).poke(48 + i)
+                    dut.io.retire(0).bits.previous(i).poke(48 + i)
+                }
+                dut.io.preview.valid.poke(true); dut.io.accept.poke(true)
+                dut.io.retire(0).valid.poke(true)
+                dut.clock.step()
+                dut.io.bankAvailable.expect(available)
+                for (i <- 0 until 8) {
+                    dut.io.source(0)(i).expect(wrappedTags(i))
+                    dut.io.destination.physical(i).expect(unchanged(i))
+                }
+            }
         }
     }
 }
