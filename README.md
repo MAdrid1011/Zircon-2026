@@ -32,7 +32,8 @@ FP32 数组计算。性能配置支持 Zve32f、VLEN=256 和八个 32 bit lane�
 > [!NOTE]
 > 系统配置已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
 > 输入、文件系统挂载和定时器路径验证。Nangate45 BSG 纯逻辑时序分析测得最长数据到达时间
-> 为 1.474616 ns，在 1.5 ns 周期下完成时序闭合，对应逻辑频率约 667 MHz。
+> 为 1.473745 ns；SIMD8 性能配置为 1.467417 ns。两种配置均在 1.5 ns 周期下完成时序闭合，
+> 对应逻辑频率约 667 MHz。
 
 ## 架构概览
 
@@ -143,7 +144,7 @@ flowchart LR
 | 外部 AXI4 | 256 bit，Cache Line 两个 beat |
 | 地址与运行环境 | 32 位直接物理寻址，裸机 C 程序 |
 
-性能配置复用原 `Rename/SRat/FreeList`、`Regfile`、`IssueQueue` 和算术单元，标量与向量
+性能配置复用原 `Rename/SRat/PRegFreeList`、`Regfile`、`IssueQueue` 和算术单元，标量与向量
 任务可重叠执行。常用 INT32 和 FP32 运算使用八路流水，除法、归约、排列和复杂访存使用
 多拍通路。三槽 Rename–Dispatch 寄存器整组进出，每组最多包含一条向量指令。
 设计、指令组织与使用方法见 [SIMD8 性能核心](docs/PerformanceCore.md)。
@@ -152,6 +153,10 @@ flowchart LR
 吞吐测量。官方 FP32 负载使用 EEMBC CoreMark-PRO 的线性代数与 Livermore kernels，
 保留上游算法、数据集和校验。入口分别为 [SIMD 程序](RV-Software/simd/README.md) 和
 [CoreMark-PRO](RV-Software/coremark-pro/README.md)。
+
+相同硬件配置下，五项 RVV 程序相对标量的计算阶段加速比几何平均为 **3.159 倍**，
+SGEMM 加速为 **5.309 倍**；性能核心的标量 CoreMark 为 **5.177 CoreMark/MHz**。
+各项周期、自动向量化结果与测量方法见 [性能测量](docs/PerformanceCore.md#性能测量)。
 
 ## 快速开始
 

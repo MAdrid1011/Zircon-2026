@@ -133,6 +133,47 @@ make -C RV-Software/simd run
 `loops-all-mid-10k-sp`，保留上游算法、数据集与校验，仅适配裸机接口。
 两个负载分别报告，不生成完整套件总分。矩阵吞吐另外使用 Netlib BLAS SGEMM 接口。
 
+## 性能测量
+
+以下结果使用 Clang 23.1.2、上述性能核心配置及 Spike 退休差分。计算阶段周期取五次
+计时的中位数，包含 Load、Store 和循环控制；三种版本共用输入、算法与浮点运算顺序。
+
+| 程序 | 标量周期 | 自动向量化周期 | RVV 周期 | 自动加速比 | RVV 加速比 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| INT32 矩阵乘，64×64 | 1174930 | 838967 | 416689 | 1.400 | 2.820 |
+| INT32 FIR，4096 输出、32 taps | 801211 | 688077 | 210183 | 1.164 | 3.812 |
+| FP32 矩阵乘，64×64 | 2399105 | 861879 | 430953 | 2.784 | 5.567 |
+| FP32 FIR，4096 输出、32 taps | 1304221 | 680237 | 199937 | 1.917 | 6.523 |
+| FP32 FFT，1024 点 | 180753 | 252190 | 224282 | 0.717 | 0.806 |
+
+五项 RVV 加速比的几何平均为 **3.159**。FFT 包含排列、短向量与标量控制，
+适合与矩阵乘、FIR 一起观察不同计算结构的向量化效果。全部结果通过逐元素校验。
+整个五项程序的端到端周期包含输入准备、参考计算和校验：标量为 42623371，
+自动向量化为 27223415，RVV 为 16180572。
+
+性能核心的标量 CoreMark 为 **5.177 CoreMark/MHz**，IPC 为 1.308324，
+30 次迭代计时 5794057 周期，CRC 为 `0xf8b3`。Netlib BLAS SGEMM 接口测试中，
+同算法标量与 RVV 分别使用 2348544 和 442378 周期，加速比为 **5.309**。
+
+十六组独立寄存器的吞吐程序执行 32768 个 INT32 加法或 FP32 运算：
+INT32 加法为 4118 周期，FP32 加法与乘法为 4133 周期，FMA 为 4121 周期。
+计时包含循环控制，独立 FMA 流水每拍接受八个元素。
+
+CoreMark-PRO 的 `linear_alg-mid-100x100-sp` 使用上游 100×100 单精度数据集，
+通过原始校验，计时为 71337989 周期，端到端为 75740668 周期。
+
+带宽程序分别测量 Cache 内数组与超过 Cache 容量的数组，计算周期如下：
+
+| 程序 | 标量周期 | RVV 周期 | 加速比 |
+| --- | ---: | ---: | ---: |
+| Cache 内 INT32 数组加法 | 4152 | 4603 | 0.902 |
+| Cache 内 FP32 SAXPY | 6204 | 4674 | 1.327 |
+| 大数组 INT32 加法 | 560336 | 671247 | 0.835 |
+| 大数组 FP32 SAXPY | 878927 | 679452 | 1.294 |
+
+向量化的收益同时取决于每个元素的运算量、任务长度和访存带宽。矩阵乘与 FIR
+具有较高数据复用，数组加法更适合用于观察 Cache 和外部总线的吞吐限制。
+
 ## 仿真与验证
 
 ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量退休比较目的寄存器组、
@@ -152,3 +193,14 @@ ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量
 晚响应；浮点覆盖 NaN、无穷、subnormal、舍入和标志。RTL 单元测试位于
 `src/test/scala/Backend/Vector`，裸机编码、访存与配置测试位于 `RV-Software/simd`。
 系统配置使用架构测试和 Linux shell 验证运行环境。
+
+Nangate45 BSG logic-only 分析中，性能核心在 1.5 ns 周期下的 WNS 为
++0.000925 ns，TNS 为 0，违例端点为 0，最长数据到达时间为 1.467417 ns。
+配置、工具和复现入口见 [Nangate45 逻辑时序评估](Nangate45Timing.md)。
+
+向量重命名实现见 [VectorRename](../src/main/scala/Middleend/Rename/VectorRename.scala)，
+寄存器堆与八路算术实现见 [VectorRegisterFile](../src/main/scala/Backend/Vector/VectorRegisterFile.scala)
+和 [VectorArithmetic](../src/main/scala/Backend/Vector/VectorArithmetic.scala)。
+[VectorStateSpec](../src/test/scala/Backend/Vector/VectorStateSpec.scala) 检查分组、配置与映射恢复，
+[VectorArithmeticSpec](../src/test/scala/Backend/Vector/VectorArithmeticSpec.scala) 检查八路运算、
+浮点标志、连续 FMA 吞吐及反压取消。
