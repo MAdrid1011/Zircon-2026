@@ -196,7 +196,9 @@ ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量
 算术和访存生成器同步输出逐用例 CSV 覆盖表，分别包含 5709 与 450 个实际执行编码；
 配置与状态程序包含 960 个用例。覆盖表与程序共用生成入口，说明见
 [指令与状态验证](../RV-Software/simd/README.md#指令与状态验证)。
-系统配置使用架构测试和 Linux shell 验证运行环境。
+系统配置通过全部 149 项架构测试与 Spike 差分，CoreMark 为 5.114 CoreMark/MHz。
+Linux 6.1.44 在 Spike 差分下完成用户空间检查并进入 BusyBox `~ #`，
+从复位到 shell 使用 139685990 周期。
 
 Nangate45 BSG logic-only 分析中，性能核心在 1.5 ns 周期下的 WNS 为
 +0.000925 ns，TNS 为 0，违例端点为 0，最长数据到达时间为 1.467417 ns。

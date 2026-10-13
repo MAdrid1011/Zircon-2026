@@ -273,7 +273,7 @@ python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target
 | ICache、DCache 与 L2 随机压力测试 | 已提供 |
 | ITLB、DTLB 与 L1 集成测试 | 已提供 |
 | Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
-| Nangate45 BSG 纯逻辑时序分析 | 1.5 ns 周期时序闭合，WNS +0.000092 ns，TNS 0 ns |
+| Nangate45 BSG 纯逻辑时序分析 | 两种配置均在 1.5 ns 周期闭合，TNS 0 ns、零违例端点 |
 | 特权架构 | M/S 模式、Sv32、定时器中断、原子操作和 `FENCE.I`/`SFENCE.VMA` |
 
 ## 模块文档
