@@ -193,6 +193,9 @@ ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量
 定向验证覆盖 VL、全部 LMUL 分组、重叠、mask/tail、跨行访问、存储顺序、反压、恢复与
 晚响应；浮点覆盖 NaN、无穷、subnormal、舍入和标志。RTL 单元测试位于
 `src/test/scala/Backend/Vector`，裸机编码、访存与配置测试位于 `RV-Software/simd`。
+算术和访存生成器同步输出逐用例 CSV 覆盖表，分别包含 5709 与 450 个实际执行编码；
+配置与状态程序包含 960 个用例。覆盖表与程序共用生成入口，说明见
+[指令与状态验证](../RV-Software/simd/README.md#指令与状态验证)。
 系统配置使用架构测试和 Linux shell 验证运行环境。
 
 Nangate45 BSG logic-only 分析中，性能核心在 1.5 ns 周期下的 WNS 为
