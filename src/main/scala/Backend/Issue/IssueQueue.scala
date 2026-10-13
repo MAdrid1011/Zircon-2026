@@ -492,6 +492,14 @@ class IssueQueue(
     // clear from entering every resident entry D-input.
     val payloadIssueFire = io.issue.ready && !lockedFailed && !lockedLosesReadiness && selectedExists
 
+    // Before locking, the snapshot is unobservable. Sample the selected payload
+    // independently of the late valid/stall decision; only selectionLocked
+    // establishes its ownership. Once locked, retain it until that owner exits.
+    when(!selectionLocked) {
+        lockedItem := io.issue.bits
+        lockedVector.foreach(_ := io.vector.get.issue)
+    }
+
     // Select only the wakeup fields, not the full issued payload, before
     // broadcasting one candidate per arithmetic producer queue.
     io.issueWakeup.foreach { output =>
@@ -793,8 +801,6 @@ class IssueQueue(
             lockedReplayPosition := 0.U
         }.elsewhen(io.issue.valid && !io.issue.ready && !selectionLocked) {
             selectionLocked := true.B
-            lockedItem := io.issue.bits
-            lockedVector.foreach(_ := io.vector.get.issue)
             lockedMainPosition := selectedMain
             lockedReplayPosition := selectedReplay
         }

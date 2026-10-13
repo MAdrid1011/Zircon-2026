@@ -35,7 +35,7 @@ class BackendIO(
     val performance = if (observe) Some(Output(new BackendPerformanceCounters)) else None
     val debug = if (observe) Some(Output(new BackendDebugIO)) else None
     val vector = if (vectorEnabled) Some(new VectorBackendIO(p)) else None
-    val vectorObservation = if (vectorEnabled && observe) Some(Output(UInt((64 * 256).W))) else None
+    val vectorObservation = if (vectorEnabled && observe) Some(Output(Vec(64, UInt(256.W)))) else None
 }
 
 /**

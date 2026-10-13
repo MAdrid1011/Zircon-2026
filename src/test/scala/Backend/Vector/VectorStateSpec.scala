@@ -52,7 +52,40 @@ class VectorGroupingHarness extends Module {
     }
 }
 
+class VectorCapacityHarness extends Module {
+    val io = IO(new Bundle {
+        val instruction = Input(UInt(32.W))
+        val vtype = Input(UInt(32.W))
+        val available = Input(UInt(8.W))
+        val blocked = Output(Bool())
+        val reference = Output(Bool())
+    })
+    val counts = new VectorGroupCounts(io.instruction, io.vtype)
+    val banks = (0 until 8).map { bank =>
+        (bank.U(3.W) - io.instruction(9, 7))(2, 0) -> !io.available(bank)
+    }
+    io.blocked := counts.allocationBlocked(io.available)
+    io.reference := banks.map { case (distance, blocked) =>
+        distance < counts.allocationCount && blocked
+    }.reduce(_ || _)
+}
+
 class VectorStateSpec extends AnyFreeSpec with ChiselSim {
+    "direct allocation capacity agrees with encoded group counts across banks and instruction forms" in {
+        simulate(new VectorCapacityHarness) { dut =>
+            val random = new Random(20261014)
+            for (cycle <- 0 until 24000) {
+                val opcode = Seq(0x57, 0x07, 0x27)(cycle % 3)
+                val inst = (BigInt(random.nextInt()) & 0xffffffffL & ~BigInt(0x7f)) | opcode
+                dut.io.instruction.poke(inst)
+                dut.io.vtype.poke((random.nextInt(3) << 3) | random.nextInt(8))
+                dut.io.available.poke(cycle & 255)
+                dut.clock.step()
+                dut.io.blocked.expect(dut.io.reference.peek().litToBoolean)
+            }
+        }
+    }
+
     "parallel grouping agrees with execution decode for every arithmetic encoding and memory form" in {
         simulate(new VectorGroupingHarness) { dut =>
             var legal = 0

@@ -57,7 +57,10 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         trace.eew := eew
         trace.fieldRegisterShift := fieldRegisterShift
         trace.lastField := lastField
-        trace.elementAddresses := VecInit((0 until 256).map(index => elementAddresses(index))).asUInt
+        for (group <- 0 until 8) {
+            trace.elementAddresses(group) := VecInit((0 until 32).map(index =>
+                elementAddresses(group * 32 + index))).asUInt
+        }
     }
     io.cache.request.valid := state === send
     io.cache.request.bits := request

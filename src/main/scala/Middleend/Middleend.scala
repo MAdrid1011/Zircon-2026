@@ -155,12 +155,7 @@ class Middleend(
         // Decode narrow allocation counts per FQ lane in parallel with the
         // selected instruction's full decode and RAT reads. Capacity depends
         // only on the existing bank FreeLists and the held Dispatch preview.
-        val candidateBlocked = instructions.zip(vectorCandidateGroups).map { case (instruction, groups) =>
-            (0 until 8).map { bank =>
-                val distance = (bank.U(3.W) - instruction.inst(9, 7))(2, 0)
-                distance < groups.allocationCount && !rename.io.bankAvailable(bank)
-            }.reduce(_ || _)
-        }
+        val candidateBlocked = vectorCandidateGroups.map(_.allocationBlocked(rename.io.bankAvailable))
         // A zero-hot vector selection selects no blocked candidate.
         !Mux1H(vectorSelection, candidateBlocked)
     }.getOrElse(true.B)

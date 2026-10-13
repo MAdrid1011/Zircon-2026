@@ -23,7 +23,7 @@ class VectorRegisterFile(val p: VectorParams = VectorParams(), val observe: Bool
     val io = IO(new Bundle {
         val read = Vec(3, new VectorRegisterRead(p))
         val write = Vec(2, new VectorRegisterWrite(p))
-        val observation = if (observe) Some(Output(UInt((64 * 256).W))) else None
+        val observation = if (observe) Some(Output(Vec(64, UInt(256.W)))) else None
     })
     val observed = if (observe) Some(Wire(Vec(64, Vec(8, UInt(32.W))))) else None
     for (lane <- 0 until p.lanes) {
@@ -48,7 +48,9 @@ class VectorRegisterFile(val p: VectorParams = VectorParams(), val observe: Bool
             observed.get(register)(lane) := bank.io.observation.get(register)
         }
     }
-    io.observation.foreach(_ := observed.get.asUInt)
+    // Keep each physical register separate at the simulation boundary. Flattening
+    // all 16 Kib into one UInt creates quadratic wide concatenations in Verilator.
+    io.observation.foreach(_.zip(observed.get).foreach { case (output, words) => output := words.asUInt })
     assert(!(io.write(0).valid && io.write(1).valid &&
         io.write(0).address === io.write(1).address), "Vector writers own distinct physical registers")
 }

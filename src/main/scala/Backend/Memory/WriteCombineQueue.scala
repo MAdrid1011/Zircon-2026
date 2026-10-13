@@ -37,6 +37,10 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
     val nextBeatOH = RegInit(1.U(depth.W))
 
     val incomingBeat = Cat(io.enq.bits.paddr(33, 3), 0.U(3.W))
+    // Separate the two candidate increments before the late enqueue grant.
+    // The shared carry-lookahead adder keeps grant out of the address carry chain.
+    val incomingNext = Cat(BLevelPAdder32.sum(io.enq.bits.paddr(33, 3).pad(32), 1.U, 0.U)(30, 0), 0.U(3.W))
+    val followingNext = Cat(BLevelPAdder32.sum(nextBeatAddress(33, 3).pad(32), 1.U, 0.U)(30, 0), 0.U(3.W))
     val sameBeat = valid && incomingBeat === lastBeatAddress
     val nextBeat = valid && incomingBeat === nextBeatAddress
     val samePage = !valid || incomingBeat(33, 12) === base(33, 12)
@@ -95,7 +99,7 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
             sealedBurst := false.B
             base := incomingBeat
             lastBeatAddress := incomingBeat
-            nextBeatAddress := incomingBeat + 8.U
+            nextBeatAddress := incomingNext
             count := 1.U
             age := 0.U
             lastBeatOH := 1.U
@@ -104,7 +108,7 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
             age := 0.U
         }.otherwise {
             lastBeatAddress := nextBeatAddress
-            nextBeatAddress := nextBeatAddress + 8.U
+            nextBeatAddress := followingNext
             lastBeatOH := nextBeatOH
             nextBeatOH := (nextBeatOH << 1)(depth - 1, 0)
             count := count + 1.U

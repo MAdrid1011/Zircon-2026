@@ -50,7 +50,7 @@ class VectorSerialHarness extends Module {
     file.io.write(1).address := io.initialize.address
     file.io.write(1).data := io.initialize.data
     file.io.write(1).bytes := io.initialize.bytes
-    io.data := file.io.observation.get.asTypeOf(Vec(64, Vec(8, UInt(32.W))))(io.address)
+    io.data := file.io.observation.get(io.address).asTypeOf(Vec(8, UInt(32.W)))
     io.writes := serial.io.writeback.valid
 }
 

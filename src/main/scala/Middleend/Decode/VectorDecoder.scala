@@ -496,6 +496,43 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
     val singleDestination = shape.singleDestination
     val destinationCount = Mux(singleDestination, 1.U, totalCount)
     val allocationCount = Mux(shape.writesVector, destinationCount, 0.U)(3, 0)
+
+    /** Select a capacity fact directly from constant group sizes. Admission
+      * need not encode a count, then decode it in eight bank comparisons.
+      */
+    def selectAllocation(values: Seq[Bool]): Bool = {
+        require(values.size == 16)
+        def at(delta: Int, multiplier: Int = 1): Bool = MuxLookup(lmul, values(0))(
+            Seq(0, 1, 2, 3, 5, 6, 7).map { encoding =>
+                val adjusted = (if (encoding < 4) encoding else encoding - 8) + delta
+                val size = if (adjusted <= 0) 1 else if (adjusted <= 3) 1 << adjusted else 0
+                encoding.U -> values((size * multiplier) & 15)
+            })
+        def segments(delta: Int): Bool = MuxLookup(inst(31, 29), values(0))(
+            (0 until 8).map(fields => fields.U -> at(delta, fields + 1)))
+        val memoryValue = Mux1H((for (dataWidth <- 0 to 2; elementWidth <- 0 to 2) yield
+            (sew === dataWidth.U && eew === elementWidth.U) -> segments(elementWidth - dataWidth)))
+        val wholeValue = MuxLookup(inst(31, 29), values(0))(
+            (0 until 8).map(fields => fields.U -> values(fields + 1)))
+        val moveValue = MuxLookup(inst(19, 15), values(0))(
+            (0 until 32).map(registers => registers.U -> values((registers + 1) & 15)))
+        val arithmeticValue = Mux(shape.widening || shape.wideConversion, at(1), at(0))
+        val groupedValue = Mux(wholeMove, moveValue, Mux(whole, wholeValue, Mux(maskMemory, values(1),
+            Mux(memory, Mux(indexed, segments(0), memoryValue), arithmeticValue))))
+        Mux(shape.writesVector, Mux(singleDestination, values(1), groupedValue), values(0))
+    }
+
+    def allocationBlocked(available: UInt): Bool = {
+        require(available.getWidth == 8)
+        val base = (0 until 8).map(index => inst(9, 7) === index.U)
+        val candidates = (0 until 16).map { count =>
+            if (count == 0) false.B
+            else Mux1H(base, (0 until 8).map { first =>
+                (0 until math.min(count, 8)).map(offset => !available((first + offset) & 7)).reduce(_ || _)
+            })
+        }
+        selectAllocation(candidates)
+    }
 }
 
 class VectorRegisterGroups extends RawModule {

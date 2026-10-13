@@ -596,16 +596,25 @@ class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false
     val (d, positiveTop, zero) = resolveBlocks(r2.positiveBlocks.toSeq)
     val (negative, negativeTop, _) = resolveBlocks(r2.negativeBlocks.toSeq)
     val topBit = Mux(d(79), negativeTop, positiveTop)
-    val top = prefixAdd(r2.exp.asUInt, Cat(0.U(4.W), topBit), 11).asSInt
+    val positiveExponent = prefixAdd(r2.exp.asUInt, Cat(0.U(4.W), positiveTop), 11).asSInt
+    val negativeExponent = prefixAdd(r2.exp.asUInt, Cat(0.U(4.W), negativeTop), 11).asSInt
+    val top = Mux(d(79), negativeExponent, positiveExponent)
     val s3 = Wire(new MulStage3(tagWidth))
     s3.mag := Mux(d(79), negative, d)
     // 2. FP: prepare normal/subnormal shift controls in parallel; EX4 performs the shift.
     //    Normal results place the leading bit at bit 26. Subnormals use a fixed E=-152 window,
     //    so bit 3 has the minimum-subnormal weight 2^-149 and bits [2:0] retain rounding data.
     val (tinyShift, tinyRight) = shiftControl(prefixAdd(r2.exp.asUInt, 152.U(11.W), 11).asSInt)
-    val normalRight = topBit >= 26.U
-    val normalShift = Mux(normalRight,
-        prefixAdd(topBit, 102.U(7.W), 7), prefixAdd(26.U(7.W), ~topBit, 7, true.B))
+    def normalControl(leading: UInt): (UInt, Bool) = {
+        val right = leading >= 26.U
+        val shift = Mux(right, prefixAdd(leading, 102.U(7.W), 7),
+            prefixAdd(26.U(7.W), ~leading, 7, true.B))
+        (shift, right)
+    }
+    val positiveControl = normalControl(positiveTop)
+    val negativeControl = normalControl(negativeTop)
+    val normalRight = Mux(d(79), negativeControl._2, positiveControl._2)
+    val normalShift = Mux(d(79), negativeControl._1, positiveControl._1)
     val subnormalThreshold = prefixAdd((-125).S(11.W).asUInt, ~r2.exp.asUInt, 11).asSInt
     val subnormal = topBit.zext.pad(11) < subnormalThreshold
     s3.shift := Mux(subnormal, tinyShift, normalShift)

@@ -101,7 +101,7 @@ class VectorRetireTrace extends Bundle {
 }
 
 class VectorCoreDebug extends Bundle {
-    val registers = UInt((64 * 256).W)
+    val registers = Vec(64, UInt(256.W))
     val retire = Vec(3, new VectorRetireTrace)
     val state = new VectorCSRState
     val store = new VectorStoreTrace
@@ -116,5 +116,5 @@ class VectorStoreTrace extends Bundle {
     val eew = UInt(2.W)
     val fieldRegisterShift = UInt(2.W)
     val lastField = UInt(3.W)
-    val elementAddresses = UInt(8192.W)
+    val elementAddresses = Vec(8, UInt(1024.W))
 }
