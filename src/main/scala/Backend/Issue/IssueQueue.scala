@@ -393,7 +393,9 @@ class IssueQueue(
         0.U
     })
     val replayCapacityAvailable = if (delayedCheckpoint) {
-        Mux(pendingNeedsReplay, replayFreeTwo.get, replayFreeOne.get)
+        // Two free slots imply one free slot, so pending capacity only gates
+        // the one-slot case rather than selecting both registered thresholds.
+        replayFreeTwo.get || (replayFreeOne.get && !pendingNeedsReplay)
     } else {
         replayAvailable
     }

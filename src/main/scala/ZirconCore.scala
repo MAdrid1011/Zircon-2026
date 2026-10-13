@@ -31,7 +31,8 @@ class ZirconCore(
     private val commitParams = CommitParams(vectorEnabled = vectorEnabled)
     private val actualL2Params = if (profile == CoreProfile.Performance) profile.l2 else l2Params
     val frontend = Module(new Frontend(p = frontendParams, c = profile.icache,
-        tlbEnabled = profile.privileged, issue = issueParams, ramBackend = ramBackend))
+        tlbEnabled = profile.privileged, issue = issueParams, ramBackend = ramBackend,
+        vectorEnabled = vectorEnabled))
     val middleend = Module(new Middleend(frontendParams = frontendParams, issueParams = issueParams,
         privileged = profile.privileged, vectorEnabled = vectorEnabled, commitParams = commitParams))
     val backend = Module(new Backend(issueParams = issueParams, ramBackend = ramBackend,

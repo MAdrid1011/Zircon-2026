@@ -3,7 +3,7 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.FrontendParams
 
-class FrontendPredecoderTestTop extends Module {
+class FrontendPredecoderTestTop(vectorEnabled: Boolean = false) extends Module {
     val p = FrontendParams(rasDepth = 2)
     val io = IO(new Bundle {
         val pc = Input(UInt(32.W))
@@ -21,7 +21,7 @@ class FrontendPredecoderTestTop extends Module {
         val changed = Output(Bool())
         val commitBackward = Output(UInt(4.W))
     })
-    val pd = Module(new PreDecoders(p))
+    val pd = Module(new PreDecoders(p, vectorEnabled))
     val packet = WireDefault(0.U.asTypeOf(new FrontendPackage(p)))
     packet.startPc := io.pc
     packet.predict.range := 15.U
@@ -54,6 +54,61 @@ class FrontendPredecoderTestTop extends Module {
 }
 
 class FrontendPredecoderSpec extends AnyFreeSpec with ChiselSim {
+    "performance PD supplies scalar operand domains for vector arithmetic, configuration and memory" in {
+        simulate(new FrontendPredecoderTestTop(vectorEnabled = true)) { d =>
+            d.io.pc.poke(0x80001000L); d.io.directions.poke(0)
+            d.io.rasTop.poke(0); d.io.rasValid.poke(false)
+            d.io.earlyNext.poke(0x80001010L); d.io.earlyTaken.poke(0)
+            d.io.earlyMask.poke(15); d.io.earlyKinds.foreach(_.poke(0))
+            def arithmetic(funct: Int, form: Int, rs1: Int = 3, rd: Int = 8): BigInt =
+                (BigInt(funct) << 26) | (1 << 25) | (8 << 20) |
+                    (rs1 << 15) | (form << 12) | (rd << 7) | 0x57
+            // Each domain is unused, integer or FP. The expectations describe
+            // ISA operands independently of the hardware classification helper.
+            val cases = Seq(
+                ("vadd.vv", arithmetic(0, 0), Seq(0, 0, 0), 0),
+                ("vadd.vi", arithmetic(0, 3), Seq(0, 0, 0), 0),
+                ("vadd.vx", arithmetic(0, 4), Seq(1, 0, 0), 0),
+                ("vadd.vx x0", arithmetic(0, 4, rs1 = 0), Seq(0, 0, 0), 0),
+                ("vfmul.vf", arithmetic(0x24, 5), Seq(2, 0, 0), 0),
+                ("vfmul.vf f0", arithmetic(0x24, 5, rs1 = 0), Seq(2, 0, 0), 0),
+                ("vmul.vx", arithmetic(0x25, 6), Seq(1, 0, 0), 0),
+                ("vmv.x.s", arithmetic(0x10, 2, rs1 = 0), Seq(0, 0, 0), 1),
+                ("vmv.x.s x0", arithmetic(0x10, 2, rs1 = 0, rd = 0), Seq(0, 0, 0), 0),
+                ("vfmv.f.s f0", arithmetic(0x10, 1, rs1 = 0, rd = 0), Seq(0, 0, 0), 2),
+                ("vcpop.m", arithmetic(0x10, 2, rs1 = 16), Seq(0, 0, 0), 1),
+                ("vfirst.m", arithmetic(0x10, 2, rs1 = 17), Seq(0, 0, 0), 1),
+                ("vsetvli", arithmetic(0, 7), Seq(1, 0, 0), 1),
+                ("vsetivli", arithmetic(0x30, 7), Seq(0, 0, 0), 1),
+                ("vsetvl", arithmetic(0x20, 7) & ~(BigInt(1) << 25), Seq(1, 1, 0), 1),
+                ("vle32.v", BigInt(0x0201e407L), Seq(1, 0, 0), 0),
+                ("vlse32.v", BigInt(0x0a81e407L), Seq(1, 1, 0), 0),
+                ("vluxei32.v", BigInt(0x0681e407L), Seq(1, 0, 0), 0),
+                ("vse32.v", BigInt(0x0201e427L), Seq(1, 0, 0), 0),
+                ("vsse32.v", BigInt(0x0a81e427L), Seq(1, 1, 0), 0),
+                ("flw", BigInt(0x0001a407L), Seq(1, 0, 0), 2),
+                ("fsw", BigInt(0x0081a027L), Seq(1, 2, 0), 0),
+            )
+            for ((name, word, sources, destination) <- cases) {
+                d.io.instructions.foreach(_.poke(word)); d.io.faults.poke(0)
+                for (slot <- 0 until 4) {
+                    val rinfo = d.io.out.instructions(slot).rinfo
+                    for ((domain, index) <- sources.zipWithIndex) {
+                        rinfo.src(index).valid.expect((domain != 0).B, name)
+                        if (domain != 0) rinfo.src(index).isFp.expect((domain == 2).B, name)
+                    }
+                    rinfo.dest.valid.expect((destination != 0).B, name)
+                    if (destination != 0) rinfo.dest.isFp.expect((destination == 2).B, name)
+                }
+                d.io.faults.poke(15)
+                d.io.out.instructions.foreach { instruction =>
+                    instruction.rinfo.src.foreach(_.valid.expect(false))
+                    instruction.rinfo.dest.valid.expect(false)
+                }
+            }
+        }
+    }
+
     "PD retains only the indirect slot needed for commit training" in {
         simulate(new FrontendPredecoderTestTop) { d =>
             d.io.pc.poke(0x80001000L)

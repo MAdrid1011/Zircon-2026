@@ -134,15 +134,8 @@ class Middleend(
         if (privileged) DecodeSupport.current else if (vectorEnabled) DecodeSupport.performance
         else DecodeSupport.performance.copy(units = DecodeSupport.performance.units - DecodeUnit.Vector))))
     decoders.zip(instructions).foreach { case (decoder, instruction) => decoder.io.in := instruction }
-    // PD supplies the scalar register requests. RVV supplies its scalar operands
-    // here without extending the scalar RAT with a new architectural domain.
-    val renameInstructions = decoders.zip(instructions).map { case (decoder, instruction) =>
-        val renamed = WireDefault(instruction)
-        if (vectorEnabled) when(VectorDecoder.recognized(instruction.inst)) {
-            renamed.rinfo := VectorDecoder.scalarOperands(instruction.inst)
-        }
-        renamed
-    }
+    // PD classifies scalar and RVV operands before FQ stores their domain bits.
+    val renameInstructions = instructions
     val vectorStage = if (vectorEnabled) Some(Reg(new VectorInstructionMetadata)) else None
     val vectorRename = if (vectorEnabled) Some(Module(new VectorRename)) else None
     val vectorState = if (vectorEnabled) Some(RegInit({

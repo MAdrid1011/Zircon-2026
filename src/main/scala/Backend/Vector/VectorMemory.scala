@@ -34,6 +34,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val indexOffset = Reg(UInt(32.W))
     val step = Reg(UInt(32.W))
     val groupStep = Reg(UInt(32.W))
+    val groupOffset = Reg(UInt(32.W))
     val position = Reg(UInt(5.W))
     val cachedLine = Reg(UInt(512.W))
     val cachedAddress = Reg(UInt(26.W))
@@ -235,6 +236,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     address := base + Cat(group, 0.U(5.W))
                     second := false.B
                     position := 0.U
+                    // collect already precedes groupAddress for every element
+                    // task. Resolve its small multiply at this existing edge.
+                    groupOffset := (withinField * groupStep)(31, 0)
                     when(fullGroupLoad) {
                         streamRequestValid := true.B
                         streamRequestAddress := base
@@ -253,7 +257,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             is(groupAddress) {
                 // The first element is a multiple of 8, 16 or 32; this is a
                 // shift by SEW and a three-bit register index, not a 32x32 MUL.
-                val groupOffset = (withinField * groupStep)(31, 0)
                 val fieldOffset = (field << eew).pad(32)
                 val sum = base ^ groupOffset ^ fieldOffset
                 val carry = (((base & groupOffset) | ((base ^ groupOffset) & fieldOffset)) << 1)(31, 0)
