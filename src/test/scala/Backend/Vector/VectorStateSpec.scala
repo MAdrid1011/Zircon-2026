@@ -236,6 +236,75 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "candidate source addresses share RAT ports across selection, preview and restore" in {
+        simulate(new VectorRename(sourceCandidates = 3)) { dut =>
+            val mapping = Array.tabulate(32)(identity)
+            val random = new Random(20261014)
+            def destination(x: VectorDestination, base: Int, physical: Seq[Int], previous: Seq[Int]): Unit = {
+                x.base.poke(base); x.count.poke(physical.size)
+                for (i <- 0 until 8) {
+                    x.physical(i).poke(physical.lift(i).getOrElse(0))
+                    x.previous(i).poke(previous.lift(i).getOrElse(0))
+                }
+            }
+            dut.io.sourceBase.foreach(_.poke(0)); dut.io.sourceCount.foreach(_.poke(8))
+            dut.io.sourceCandidates.get.foreach(_.foreach(_.poke(0)))
+            dut.io.sourceSelection.get.poke(0)
+            dut.io.destinationBase.poke(7); dut.io.destinationCount.poke(8)
+            dut.io.preview.valid.poke(false); dut.io.accept.poke(false); dut.io.restore.poke(false)
+            destination(dut.io.preview.bits, 0, Seq.empty, Seq.empty)
+            for (r <- dut.io.retire) { r.valid.poke(false); destination(r.bits, 0, Seq.empty, Seq.empty) }
+            dut.clock.step()
+            def checkSources(): Unit = {
+                for (iteration <- 0 until 64) {
+                    val candidates = (0 until 3).map(lane => (0 until 3).map(source =>
+                        (iteration + 7 * lane + 11 * source) & 31))
+                    for (lane <- 0 until 3; source <- 0 until 3)
+                        dut.io.sourceCandidates.get(lane)(source).poke(candidates(lane)(source))
+                    for (lane <- 0 until 3) {
+                        dut.io.sourceSelection.get.poke(1 << lane)
+                        for (source <- 0 until 3) {
+                            dut.io.sourceBase(source).poke(candidates(lane)(source))
+                            dut.io.sourceCount(source).poke(random.nextInt(9))
+                            for (element <- 0 until 8)
+                                dut.io.source(source)(element).expect(mapping((candidates(lane)(source) + element) & 31))
+                        }
+                        dut.io.mask.expect(mapping(0))
+                    }
+                    // No selected vector leaves source metadata unobserved.
+                    dut.io.sourceSelection.get.poke(0)
+                    for (source <- dut.io.source; tag <- source) tag.expect(0)
+                    dut.io.mask.expect(mapping(0))
+                }
+            }
+            checkSources()
+            val committedTags = (0 until 8).map(i => dut.io.destination.physical(i).peek().litValue.toInt)
+            val committedPrevious = (0 until 8).map(i => mapping(7 + i))
+            destination(dut.io.preview.bits, 7, committedTags, committedPrevious)
+            dut.io.preview.valid.poke(true)
+            for (i <- 0 until 8) mapping(7 + i) = committedTags(i)
+            checkSources() // Held Q-side writes are visible before acceptance.
+            dut.io.accept.poke(true); dut.clock.step()
+            dut.io.preview.valid.poke(false); dut.io.accept.poke(false)
+            checkSources()
+            destination(dut.io.retire(0).bits, 7, committedTags, committedPrevious)
+            dut.io.retire(0).valid.poke(true); dut.clock.step(); dut.io.retire(0).valid.poke(false)
+            val committed = mapping.clone()
+            dut.io.destinationBase.poke(0)
+            val speculativeTags = (0 until 8).map(i => dut.io.destination.physical(i).peek().litValue.toInt)
+            destination(dut.io.preview.bits, 0, speculativeTags, mapping.take(8).toSeq)
+            dut.io.preview.valid.poke(true)
+            for (i <- 0 until 8) mapping(i) = speculativeTags(i)
+            checkSources() // Includes v0 preview through the fourth shared read.
+            dut.io.accept.poke(true); dut.clock.step()
+            dut.io.preview.valid.poke(false); dut.io.accept.poke(false)
+            checkSources()
+            dut.io.restore.poke(true); dut.clock.step(); dut.io.restore.poke(false)
+            Array.copy(committed, 0, mapping, 0, 32)
+            checkSources()
+        }
+    }
+
     "group rename excludes held tags, recycles on retirement and restores committed maps" in {
         simulate(new VectorRename) { dut =>
             def destination(x: VectorDestination, base: Int, physical: Seq[Int], previous: Seq[Int]): Unit = {

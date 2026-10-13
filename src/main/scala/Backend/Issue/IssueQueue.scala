@@ -249,8 +249,16 @@ class IssueQueue(
                     Mux(hit, mask, 0.U)
                 })
                 val wakeRemainingMask = selectedMask & ~maintenanceResolvedMask
-                val wakeFailed = (selectedMask &
-                    (maintenanceFailedMask | io.speculation.failedMask)).orR
+                // Qualify one-bit outcomes beside tag comparison. Late producer
+                // selection need not form a wide mask before its OR reduction.
+                val wakeFailed = balancedBoolOr(wakeMasks.zip(hits).map { case (mask, hit) =>
+                    hit && (mask & (maintenanceFailedMask | io.speculation.failedMask)).orR
+                })
+                val wakeUnresolved = if (waitsForSpeculationResolution) {
+                    balancedBoolOr(wakeMasks.zip(hits).map { case (mask, hit) =>
+                        hit && (mask & ~maintenanceResolvedMask).orR
+                    })
+                } else false.B
                 val failed = (item.sourceSpecMask(source) & maintenanceFailedMask).orR
                 val remainingMask = item.sourceSpecMask(source) & ~maintenanceResolvedMask
                 updated.sourceSpecMask(source) := remainingMask
@@ -258,8 +266,7 @@ class IssueQueue(
                     updated.sourceReady(source) := true.B
                     updated.sourceSpecMask(source) := 0.U
                 }.elsewhen(wake) {
-                    updated.sourceReady(source) := !wakeFailed &&
-                        (if (waitsForSpeculationResolution) !wakeRemainingMask.orR else true.B)
+                    updated.sourceReady(source) := !wakeFailed && !wakeUnresolved
                     updated.sourceSpecMask(source) := wakeRemainingMask
                 }.elsewhen(failed) {
                     updated.sourceReady(source) := false.B

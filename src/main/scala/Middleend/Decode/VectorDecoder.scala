@@ -522,8 +522,7 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
         Mux(shape.writesVector, Mux(singleDestination, values(1), groupedValue), values(0))
     }
 
-    def allocationBlocked(available: UInt): Bool = {
-        require(available.getWidth == 8)
+    def allocationBanks: UInt = {
         val base = (0 until 8).map(index => inst(9, 7) === index.U)
         val candidates = (0 until 16).map { count =>
             if (count == 0) 0.U(8.W)
@@ -533,9 +532,11 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
                 }.U(8.W)
             })
         }
-        // Decode needed banks alongside the FreeList's held-group preview.
-        // Late availability reaches only this final mask intersection.
-        (selectAllocation(candidates) & ~available).orR
+        selectAllocation(candidates)
+    }
+    def allocationBlocked(available: UInt): Bool = {
+        require(available.getWidth == 8)
+        (allocationBanks & ~available).orR
     }
 }
 

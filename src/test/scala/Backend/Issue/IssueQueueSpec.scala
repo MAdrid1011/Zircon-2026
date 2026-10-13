@@ -494,6 +494,37 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "matching wakeup ports combine every failure and unresolved token" in {
+        for (profile <- Seq(IssueQueueProfile.ArithBranch, IssueQueueProfile.MixArith)) {
+            val q = IssueQueueParams(6, profile, wakeupPorts = 2,
+                replayEntries = if (profile == IssueQueueProfile.ArithBranch) 1 else 0)
+            simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>
+                val fu = if (profile == IssueQueueProfile.ArithBranch) DecodeUnit.ALU else DecodeUnit.Multiply
+                for ((ordinaryMask, directMask, failure, ready) <- Seq(
+                    (0, 0, 0, true),
+                    (1, 2, 2, false),
+                    (2, 1, 2, false),
+                    (1, 2, 0, profile == IssueQueueProfile.ArithBranch))) {
+                    initialize(dut)
+                    dut.io.enq.valid.poke(1)
+                    packageEntry(dut.io.enq.candidates(0), 44, fu, sourceTag = Some(7), sourceReady = false)
+                    dut.io.wakeup(0).prd.poke(7); dut.io.wakeup(0).specMask.poke(ordinaryMask)
+                    dut.io.wakeup(1).prd.poke(9); dut.io.wakeup(1).specMask.poke(4)
+                    dut.io.directWakeup.get(0).valid.poke(true)
+                    dut.io.directWakeup.get(0).prd.poke(7); dut.io.directWakeup.get(0).specMask.poke(directMask)
+                    dut.io.speculation.failedMask.poke(failure)
+                    dut.clock.step()
+                    dut.io.enq.valid.poke(0)
+                    dut.io.wakeup.foreach(_.prd.poke(0))
+                    dut.io.directWakeup.get(0).valid.poke(false)
+                    dut.io.speculation.failedMask.poke(0)
+                    dut.io.issue.valid.expect(ready)
+                    if (ready) dut.io.issue.bits.sourceSpecMask(0).expect(ordinaryMask | directMask)
+                }
+            }
+        }
+    }
+
     "MixArith does not issue a stale-ready source on a same-cycle speculative rewakeup" in {
         val q = IssueQueueParams(8, IssueQueueProfile.MixArith, wakeupPorts = 1)
         simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>

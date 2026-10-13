@@ -137,7 +137,7 @@ class Middleend(
     // PD classifies scalar and RVV operands before FQ stores their domain bits.
     val renameInstructions = instructions
     val vectorStage = if (vectorEnabled) Some(Reg(new VectorInstructionMetadata)) else None
-    val vectorRename = if (vectorEnabled) Some(Module(new VectorRename)) else None
+    val vectorRename = if (vectorEnabled) Some(Module(new VectorRename(sourceCandidates = width))) else None
     val vectorState = if (vectorEnabled) Some(RegInit({
         val initial = WireDefault(0.U.asTypeOf(new VectorCSRState))
         initial.vtype := "h80000000".U
@@ -151,13 +151,13 @@ class Middleend(
     val vectorCandidateGroups = if (vectorEnabled) instructions.map { instruction =>
         new VectorGroupCounts(instruction.inst, vectorState.get.vtype)
     } else Seq.empty
+    val vectorAllocationBanks = if (vectorEnabled)
+        Some(Mux1H(vectorSelection, vectorCandidateGroups.map(_.allocationBanks))) else None
     val vectorCapacityReady = vectorRename.map { rename =>
         // Decode narrow allocation counts per FQ lane in parallel with the
         // selected instruction's full decode and RAT reads. Capacity depends
         // only on the existing bank FreeLists and the held Dispatch preview.
-        val candidateBlocked = vectorCandidateGroups.map(_.allocationBlocked(rename.io.bankAvailable))
-        // A zero-hot vector selection selects no blocked candidate.
-        !Mux1H(vectorSelection, candidateBlocked)
+        (vectorAllocationBanks.get & ~rename.io.bankAvailable) === 0.U
     }.getOrElse(true.B)
     val vectorInstruction = Mux1H(vectorSelection, instructions.map(_.inst))
     val vectorControl = if (vectorEnabled) Some(Module(new VectorDecoder)) else None
@@ -445,6 +445,8 @@ class Middleend(
         // Compute only the narrow architectural bases before the late FQ
         // selector; group-count decode stays parallel with the shared RAT read.
         rename.io.sourceBase := Mux1H(vectorSelection, vectorCandidateGroups.map(_.sourceBases))
+        rename.io.sourceCandidates.foreach(_ := VecInit(vectorCandidateGroups.map(_.sourceBases)))
+        rename.io.sourceSelection.foreach(_ := vectorSelection)
         rename.io.sourceCount := groups.sourceCount
         rename.io.destinationBase := groups.destinationBase
         rename.io.destinationCount := groups.destinationCount
@@ -464,7 +466,7 @@ class Middleend(
         metadata.state.vtype := vectorState.get.vtype
         metadata.state.vstart := vectorState.get.vstart
         val vectorDecodeFire = (decodeGrant & vectorCandidates.asUInt).orR
-        port.allocate.valid := vectorDecodeFire && groups.destinationCount.orR
+        port.allocate.valid := vectorDecodeFire && vectorAllocationBanks.get.orR
         port.allocate.bits := rename.io.destination
         when(stageCanLoad) { vectorStage.get := metadata }
         port.enqueue.valid := (accepted & vectorStageSelection).orR

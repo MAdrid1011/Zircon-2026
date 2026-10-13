@@ -13,9 +13,14 @@ class VectorDestination extends Bundle {
   * Architectural index mod 8 selects a bank with four architectural and eight
   * physical registers. A group needs at most one destination in each bank.
   */
-class VectorRename extends Module {
+class VectorRename(val sourceCandidates: Int = 1) extends Module {
+    require(sourceCandidates > 0)
     val io = IO(new Bundle {
         val sourceBase = Input(Vec(3, UInt(5.W)))
+        val sourceCandidates = if (VectorRename.this.sourceCandidates > 1)
+            Some(Input(Vec(VectorRename.this.sourceCandidates, Vec(3, UInt(5.W))))) else None
+        val sourceSelection = if (VectorRename.this.sourceCandidates > 1)
+            Some(Input(UInt(VectorRename.this.sourceCandidates.W))) else None
         val sourceCount = Input(Vec(3, UInt(4.W)))
         val destinationBase = Input(UInt(5.W))
         val destinationCount = Input(UInt(4.W))
@@ -42,13 +47,20 @@ class VectorRename extends Module {
         (0 until 8).map(i => distance(group.base, bank) === i.U)
     def groupContains(group: VectorDestination, bank: Int): Bool =
         distance(group.base, bank) < group.count
+    val bases = io.sourceCandidates.map(_.toSeq).getOrElse(Seq(io.sourceBase))
+    def selectSource(values: Seq[UInt]): UInt =
+        io.sourceSelection.map(Mux1H(_, values)).getOrElse(values.head)
+    // Decode each FQ candidate beside the first-vector selector. The shared
+    // RAT still has exactly three source reads and one v0 read per bank.
+    val sourceBankOH = (0 until 3).map(source => selectSource(bases.map(candidate =>
+        UIntToOH(candidate(source)(2, 0), 8))))
 
     for ((bank, index) <- banks.zipWithIndex) {
         val rinfo = bank.io.rinfo(0)
         rinfo.request := distance(io.destinationBase, index) < io.destinationCount
         rinfo.rd := localAddress(io.destinationBase, index)
         for (source <- 0 until 3) {
-            rinfo.src(source) := localAddress(io.sourceBase(source), index)
+            rinfo.src(source) := selectSource(bases.map(candidate => localAddress(candidate(source), index)))
             rinfo.srcValid(source) := distance(io.sourceBase(source), index) < io.sourceCount(source)
         }
         // The fourth shared RAT read captures v0 before a masked destination write.
@@ -76,11 +88,10 @@ class VectorRename extends Module {
         }
     }
     for (source <- 0 until 3; element <- 0 until 8) {
-        val index = (io.sourceBase(source) + element.U)(2, 0)
         val tags = VecInit(banks.zipWithIndex.map { case (bank, i) =>
             Cat(bank.io.pinfo(0).prs(source), i.U(3.W))
         })
-        io.source(source)(element) := tags(index)
+        io.source(source)(element) := Mux1H(FIFOUtil.rotate(sourceBankOH(source), element), tags)
     }
     io.mask := Cat(banks(0).io.pinfo(0).prs(3), 0.U(3.W))
     io.destination.base := io.destinationBase
@@ -104,4 +115,5 @@ class VectorRename extends Module {
     assert(io.destinationCount <= 8.U)
     assert(io.destinationBase +& io.destinationCount <= 32.U)
     for (count <- io.sourceCount) assert(count <= 8.U)
+    io.sourceSelection.foreach(selection => assert(PopCount(selection) <= 1.U))
 }
