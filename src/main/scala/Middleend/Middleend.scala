@@ -155,13 +155,14 @@ class Middleend(
         // Decode narrow allocation counts per FQ lane in parallel with the
         // selected instruction's full decode and RAT reads. Capacity depends
         // only on the existing bank FreeLists and the held Dispatch preview.
-        val candidateReady = instructions.zip(vectorCandidateGroups).map { case (instruction, groups) =>
+        val candidateBlocked = instructions.zip(vectorCandidateGroups).map { case (instruction, groups) =>
             (0 until 8).map { bank =>
                 val distance = (bank.U(3.W) - instruction.inst(9, 7))(2, 0)
-                distance >= groups.allocationCount || rename.io.bankAvailable(bank)
-            }.reduce(_ && _)
+                distance < groups.allocationCount && !rename.io.bankAvailable(bank)
+            }.reduce(_ || _)
         }
-        !vectorCandidates.asUInt.orR || Mux1H(vectorSelection, candidateReady)
+        // A zero-hot vector selection selects no blocked candidate.
+        !Mux1H(vectorSelection, candidateBlocked)
     }.getOrElse(true.B)
     val vectorInstruction = Mux1H(vectorSelection, instructions.map(_.inst))
     val vectorControl = if (vectorEnabled) Some(Module(new VectorDecoder)) else None
@@ -226,9 +227,7 @@ class Middleend(
         (!decodeNeedsInt(lane) || integerRename.io.freePrefix(lane)) &&
             (!decodeNeedsFp(lane) || floatingRename.io.freePrefix(lane))
     })
-    val scalarRenameReady = decodePrefix.toSeq.zip(laneRenameReady.toSeq).map {
-        case (candidate, ready) => !candidate || ready
-    }.reduce(_ && _)
+    val scalarRenameReady = laneRenameReady.reduce(_ && _)
     val groupRenameReady = scalarRenameReady && vectorCapacityReady &&
         configurationPending.map(pending => !pending).getOrElse(true.B)
     val decodeGrant = Mux(

@@ -123,9 +123,11 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
         tailHigh := tailHighNext
         when(push && !pop) {
             empty := false.B
-            if (!isFlst) full := (tailNext & head).orR
+            // The event fixes the rotated pointer. Compare the candidate before
+            // the late transfer condition instead of muxing then comparing.
+            if (!isFlst) full := (FIFOUtil.rotate(tail, 1) & head).orR
         }.elsewhen(pop && !push) {
-            empty := (headNext & tail).orR
+            empty := (FIFOUtil.rotate(head, 1) & tail).orR
             if (!isFlst) full := false.B
         }
     }
@@ -180,7 +182,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
             io.deqCandidates.get(candidatePop).bits := candidateData
             io.deqCandidates.get(candidatePop).valid := !Mux(
                 push =/= popCandidate,
-                popCandidate && selectedHead === tailNext,
+                popCandidate && selectedHead === tail,
                 empty,
             )
             io.deqCandidateIdx.get(candidatePop) := selectedHead
