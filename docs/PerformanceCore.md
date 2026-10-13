@@ -137,6 +137,7 @@ make -C RV-Software/simd run
 
 以下结果使用 Clang 23.1.2、上述性能核心配置及 Spike 退休差分。计算阶段周期取五次
 计时的中位数，包含 Load、Store 和循环控制；三种版本共用输入、算法与浮点运算顺序。
+五项程序和下文 EDA 结果对应 RTL 版本 `c5bfd68`。
 
 | 程序 | 标量周期 | 自动向量化周期 | RVV 周期 | 自动加速比 | RVV 加速比 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -197,6 +198,25 @@ ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量
 Nangate45 BSG logic-only 分析中，性能核心在 1.5 ns 周期下的 WNS 为
 +0.000925 ns，TNS 为 0，违例端点为 0，最长数据到达时间为 1.467417 ns。
 配置、工具和复现入口见 [Nangate45 逻辑时序评估](Nangate45Timing.md)。
+
+Vivado 2025.2 使用 VU13P `xcvu13p-fhgb2104-2-i`、100 MHz 与默认综合实现策略。
+布线后 setup WNS 为 +1.084 ns、TNS 为 0，hold WHS 为 +0.010 ns、THS 为 0，
+setup/hold 均为零违例端点。资源为 237700 LUT、111780 FF、135.5 BRAM、0 DSP。
+工程入口见 [Vivado VU13P 工程](../eda/vivado/README.md)。
+
+在 i9-14900K 上，Clang 23.1.2、五个固定性能核与 Spike 差分下，公共标量 CoreMark ELF
+的三次运行速度中位数如下。性能配置的 PGO 使用完整 CoreMark 与向量编码程序训练，
+系统配置使用相同标量 CoreMark；LLVM 工具与 Clang 使用相同主版本，
+运行期间其他任务固定在不同 CPU 上。
+
+| 配置 | 仿真编译 | cycle/s |
+| --- | --- | ---: |
+| `performance` | O3、宿主原生指令 | 75873 |
+| `performance` | O3、宿主原生指令、PGO、ThinLTO、O3 公共运行库 | 86961 |
+| `system` | O3、宿主原生指令、PGO、ThinLTO、O3 公共运行库 | 132121 |
+
+性能配置包含更大的 Cache 与八路向量计算资源。仿真速度衡量宿主执行每个硬件周期的开销，
+程序性能仍使用上文的硬件周期测量。
 
 向量重命名实现见 [VectorRename](../src/main/scala/Middleend/Rename/VectorRename.scala)，
 寄存器堆与八路算术实现见 [VectorRegisterFile](../src/main/scala/Backend/Vector/VectorRegisterFile.scala)
