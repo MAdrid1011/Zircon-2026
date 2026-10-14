@@ -201,26 +201,7 @@ class SpeculativeState(p: FrontendParams) extends Module {
             advanceRas(before, event, selected, pointerOH, previousTop)
         }
         val next = advanceHistory(before, event, taken)
-        val returnPcs = (0 until p.fetchWidth).map(slot =>
-            returnPcWord(event, (1 << slot).U(p.fetchWidth.W))
-        )
-        val pushOnly = event.prediction.kinds.map(kind =>
-            FrontendCfi.push(kind) && (!FrontendCfi.pop(kind) || before.count === 0.U)
-        )
-        val replaceAfterPop = event.prediction.kinds.map(kind =>
-            FrontendCfi.push(kind) && FrontendCfi.pop(kind) && before.count =/= 0.U
-        )
-        // Select the return PC locally so taken does not fan through a full snapshot mux.
-        for (row <- 0 until p.rasDepth) {
-            val writeSlots = (0 until p.fetchWidth).map(slot =>
-                taken(slot) && (
-                    pointerOH(row) && pushOnly(slot) ||
-                    pointerOH((row + 1) % p.rasDepth) && replaceAfterPop(slot)
-                )
-            )
-            val writeAny = VecInit(writeSlots).asUInt.orR
-            next.ras(row) := Mux(writeAny, Mux1H(writeSlots, returnPcs), before.ras(row))
-        }
+        // Stack rows are selected once at their final D input below.
         next.top := Mux1H(selectors, candidates.map(_.top))
         next.pointer := Mux1H(selectors, candidates.map(_.pointer))
         next.count := Mux1H(selectors, candidates.map(_.count))
@@ -357,9 +338,24 @@ class SpeculativeState(p: FrontendParams) extends Module {
     )
     speculativeNext.top := Mux1H(speculativeSelect,
         Seq(committedNext.top, repaired.top, earlyNext.top, speculative.top))
+    val earlyPointerOH = UIntToOH(speculative.pointer, p.rasDepth)
+    val earlyReturnPcs = (0 until p.fetchWidth).map(slot =>
+        returnPcWord(io.early.bits, (1 << slot).U(p.fetchWidth.W)))
     for (row <- 0 until p.rasDepth) {
-        speculativeNext.ras(row) := Mux1H(speculativeSelect,
-            Seq(committedNext.ras(row), repaired.ras(row), earlyNext.ras(row), speculative.ras(row)))
+        val writes = io.early.bits.prediction.kinds.zipWithIndex.map { case (kind, slot) =>
+            val pop = FrontendCfi.pop(kind) && speculative.count =/= 0.U
+            val rowEligible = Mux(pop, earlyPointerOH((row + 1) % p.rasDepth), earlyPointerOH(row))
+            speculativeSelect(2) && io.early.bits.prediction.taken(slot) &&
+                FrontendCfi.push(kind) && rowEligible
+        }
+        // Select recovery independently of the late prediction. A one-hot early
+        // write applies its precomputed bit difference to that base row, avoiding
+        // taken -> write reduction -> hold decode -> row-data selection.
+        val base = Mux1H(Seq(speculativeSelect(0), speculativeSelect(1),
+            !speculativeSelect(0) && !speculativeSelect(1)),
+            Seq(committedNext.ras(row), repaired.ras(row), speculative.ras(row)))
+        val changes = earlyReturnPcs.map(_ ^ speculative.ras(row))
+        speculativeNext.ras(row) := base ^ Mux1H(writes, changes)
     }
     assert(PopCount(VecInit(speculativeSelect)) === 1.U)
     when(retireValid.asUInt.orR || io.recovery.valid) {

@@ -14,6 +14,19 @@ object FIFOUtil {
     def advance(value: UInt, count: UInt, maxCount: Int): UInt =
         Mux1H((0 to maxCount).map(i => (count === i.U) -> rotate(value, i)))
 
+    /** An ordered transfer prefix already encodes its length at the boundary. */
+    def prefixClasses(fires: Seq[Bool]): Seq[Bool] = {
+        require(fires.nonEmpty)
+        Seq(!fires.head) ++ fires.indices.map { lane =>
+            fires(lane) && (if (lane + 1 == fires.size) true.B else !fires(lane + 1))
+        }
+    }
+
+    def advancePrefix(value: UInt, fires: Seq[Bool]): UInt =
+        Mux1H(prefixClasses(fires).zipWithIndex.map { case (selected, count) =>
+            selected -> rotate(value, count)
+        })
+
     def assertPrefix(fires: Seq[Bool], message: String): Unit =
         fires.indices.drop(1).foreach(i => assert(!fires(i) || fires(i - 1), message))
 }
@@ -110,9 +123,11 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
         tailHigh := tailHighNext
         when(push && !pop) {
             empty := false.B
-            if (!isFlst) full := (tailNext & head).orR
+            // The event fixes the rotated pointer. Compare the candidate before
+            // the late transfer condition instead of muxing then comparing.
+            if (!isFlst) full := (FIFOUtil.rotate(tail, 1) & head).orR
         }.elsewhen(pop && !push) {
-            empty := (headNext & tail).orR
+            empty := (FIFOUtil.rotate(head, 1) & tail).orR
             if (!isFlst) full := false.B
         }
     }
@@ -167,7 +182,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
             io.deqCandidates.get(candidatePop).bits := candidateData
             io.deqCandidates.get(candidatePop).valid := !Mux(
                 push =/= popCandidate,
-                popCandidate && selectedHead === tailNext,
+                popCandidate && selectedHead === tail,
                 empty,
             )
             io.deqCandidateIdx.get(candidatePop) := selectedHead

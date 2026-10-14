@@ -13,7 +13,8 @@ BSG Fakeram 组合逻辑。
 | 映射目标 / STA 周期 | 1.0 ns / 1.5 ns |
 | 输入驱动 / 输出负载 | `BUF_X1` / 4 fF |
 | SRAM | 固定版本 BSG Fakeram，全部使用上升沿同步接口 |
-| L2 配置 | 4 路、16 set、64 B line |
+| 系统配置 L2 | 4 路、16 set、64 B line，4 KiB |
+| 性能配置 DCache / L2 | 16 / 32 KiB，64 B line |
 | 综合 | Yosys 0.68 + ABC，Nangate45 标准单元映射 |
 | STA | OpenROAD/OpenSTA，理想时钟，零互连寄生 |
 
@@ -38,23 +39,23 @@ Nangate45 标准单元映射。
 
 ## 当前结果
 
-当前整核结果如下：
+两种配置使用相同工艺库、映射目标和 STA 约束。
+性能配置采用 64 个物理向量寄存器、6/4 项向量队列、
+五张历史表与 32 KiB L2。
 
-| 指标 | 结果 |
-| --- | ---: |
-| 最长数据到达时间 | 1.474616 ns |
-| 目标周期 / 逻辑频率 | 1.5 ns / 约 667 MHz |
-| WNS / TNS | +0.000092 ns / 0 ns |
-| 违例端点 | 0 |
-| 映射单元数 | 432721 |
-| 触发器单元数 | 66230 |
-| 估算面积 | 1088450.72 um2 |
-| SRAM 宏实例 | 172 |
-| Yosys 检查问题 | 0 / 0 / 0 |
-| 展开 / 综合 / STA | 9.67 s / 187.93 s / 16.69 s |
+| 指标 | `system` | `performance` |
+| --- | ---: | ---: |
+| 最长数据到达时间 | 1.473745 ns | 1.474711 ns |
+| 目标周期 / 逻辑频率 | 1.5 ns / 约 667 MHz | 1.5 ns / 约 667 MHz |
+| WNS / TNS | +0.001318 ns / 0 ns | +0.000201 ns / 0 ns |
+| 违例端点 | 0 | 0 |
+| 映射单元数 | 433617 | 904324 |
+| 触发器单元数 | 66167 | 129045 |
+| 估算面积 | 1091106.20 um² | 2352172.30 um² |
+| SRAM 宏实例 | 172 | 170 |
 
-当前纯逻辑最长数据到达时间为 1.474616 ns，在 1.5 ns 周期下完成 setup 时序闭合。
-面积包含 BSG Fakeram 模型面积，用于相同配置下的设计比较。
+两种配置均在 1.5 ns 周期下完成 setup 时序闭合。面积包含 BSG Fakeram 模型面积，
+用于相同配置下的设计比较；性能配置采用更大的 Cache，并包含八路向量后端。
 
 ## 评估说明
 
@@ -64,7 +65,7 @@ Logic-only STA 使用理想时钟和零互连寄生，适合观察综合后的�
 - SRAM 使用 BSG Fakeram 时序与面积模型；
 - 完整布局布线频率需要在目标 PDK 中加入宏视图、CTS、布线和寄生提取。
 
-1.474616 ns 是当前映射网表经过标准单元尺寸调整后的纯逻辑数据到达时间。
+表中数据到达时间来自映射网表经过标准单元尺寸调整后的纯逻辑分析。
 
 ## 复现
 
@@ -73,6 +74,16 @@ Logic-only STA 使用理想时钟和零互连寄生，适合观察综合后的�
 ```sh
 python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target-ns 1.5
 ```
+
+SIMD8 性能核心采用其 16 KiB DCache、32 KiB L2 和 256 bit AXI 配置：
+
+```sh
+python3 scripts/eda/synthesize_core.py --profile performance \
+  --logic-only --target-ns 1.0 --sta-target-ns 1.5
+```
+
+性能配置默认输出到 `build/eda/nangate45-performance/`，全部 SRAM 使用 BSG 绑定。
+本页“当前结果”表分别列出系统配置和性能配置。
 
 默认输出位于：
 

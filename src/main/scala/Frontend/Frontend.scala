@@ -22,12 +22,13 @@ class Frontend(
     tlbEnabled: Boolean = true,
     issue: IssueParams = IssueParams(),
     ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
+    vectorEnabled: Boolean = false,
 ) extends Module {
     val io = IO(new FrontendIO(p, c, tlbEnabled, issue.dispatchWidth))
     val npc = Module(new NPC(p))
     val pr = Module(new Predict(p, ramBackend))
     val ic = Module(new ICache(p, c.copy(tlbEnabled = tlbEnabled)))
-    val pd = Module(new PreDecoders(p))
+    val pd = Module(new PreDecoders(p, vectorEnabled))
     val fq = Module(new FetchQueue(p, issue.dispatchWidth))
 
     val if1Fire = Wire(Bool())
@@ -150,7 +151,7 @@ class Frontend(
     instPkgFQIn.ftqIdx := 0.U
     for (slot <- 0 until p.fetchWidth) {
         val instruction = instPkgPD.instructions(slot)
-        val registerInfo = Module(new RegisterInfoDecoder)
+        val registerInfo = Module(new RegisterInfoDecoder(vectorEnabled))
         registerInfo.io.inst := instruction.inst
         registerInfo.io.fields.cfiClass := pdCfiClass(slot)
         registerInfo.io.fields.immediate := 0.U

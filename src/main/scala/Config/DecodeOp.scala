@@ -12,7 +12,8 @@ object DecodeUnit {
     val Store = 7
     val Atomic = 8
     val System = 9
-    val all = Set(ALU, Branch, Multiply, Divide, FpMisc, Load, Store, Atomic, System)
+    val Vector = 10
+    val all = Set(ALU, Branch, Multiply, Divide, FpMisc, Load, Store, Atomic, System, Vector)
 }
 
 object DecodeSource {
@@ -90,6 +91,11 @@ case class DecodeSupport(
 
 object DecodeSupport {
     private val csr = (SystemOp.CSRRW to SystemOp.CSRRCI).toSet
+    val performance = DecodeSupport(
+        DecodeUnit.all - DecodeUnit.Atomic,
+        floatingState = true,
+        systemOps = csr + SystemOp.FENCE,
+    )
     // Floating execution also needs ordered frm/fflags/FS handling outside this decoder.
     val current = DecodeSupport(
         Set(

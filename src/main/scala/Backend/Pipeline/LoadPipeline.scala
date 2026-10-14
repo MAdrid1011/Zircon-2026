@@ -107,6 +107,7 @@ class LoadPipeline(
     val p: LoadPipelineParams = LoadPipelineParams(),
     withStore: Boolean = false,
     val tlbEnabled: Boolean = false,
+    val directPhysical: Boolean = false,
 ) extends Module {
     val io = IO(new LoadPipelineIO(p, withStore, tlbEnabled))
     val cacheLane: Int = if (withStore) 1 else 0
@@ -115,8 +116,9 @@ class LoadPipeline(
     def connectCache(cache: DCacheIO): Unit = {
         cache.load(cacheLane).req <> io.cache.req
         io.cache.fixedLatency := cache.load(cacheLane).fixedLatency
-        io.cache.wbSelect <> cache.load(cacheLane).wbSelect
-        io.cache.rsp.valid := cache.load(cacheLane).rsp.valid
+        io.cache.wbSelect := cache.load(cacheLane).wbSelect
+        io.cache.wbSelect.valid := cache.load(cacheLane).wbSelect.valid && !cache.load(cacheLane).wbSelect.bits.wide
+        io.cache.rsp.valid := cache.load(cacheLane).rsp.valid && !cache.load(cacheLane).rsp.bits.wide
         io.cache.rsp.bits.slot := cache.load(cacheLane).rsp.bits.slot
         io.cache.rsp.bits.data := cache.load(cacheLane).rsp.bits.data
         io.cache.forward.query := cache.forward(cacheLane).query
@@ -171,6 +173,7 @@ class LoadPipeline(
     agu.io.cin := 0.U
     io.cache.req.valid := validRF && !storeRF && !killed(instPkgRF)
     io.cache.req.bits.vaddr := agu.io.res
+    io.cache.req.bits.wide := false.B
     io.cache.req.bits.paddr := Cat(0.U(2.W), agu.io.res)
     io.cache.req.bits.slot := indexRF
     io.cache.req.bits.sqTailOH := sqTailOHRF
@@ -332,6 +335,13 @@ class LoadPipeline(
         val translatedUncache = WireDefault(addressItem.uncache)
         val translatedWriteCombine = WireDefault(false.B)
         val translatedException = WireDefault(0.U(4.W))
+        if (directPhysical) {
+            require(!tlbEnabled)
+            val physical = Cat(0.U(2.W), addressVaddr)
+            val pma = PMA.attribute(physical)
+            translatedUncache := addressItem.uncache || pma =/= PMAAttribute.cached
+            translatedWriteCombine := pma === PMAAttribute.uncached
+        }
         if (tlbEnabled) {
             val translation = io.cache.storeTranslation.get
             translation.request.valid := addressStageValid && !io.cmt.flush

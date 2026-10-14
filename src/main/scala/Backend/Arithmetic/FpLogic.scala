@@ -33,12 +33,10 @@ class FpLogicClass extends Bundle {
     val snan = Bool()
 }
 
-/** One registered stage for FP32 comparisons, min/max, classification and bit operations. */
-class FpLogic(val tagWidth: Int = 32) extends Module {
-    require(tagWidth > 0)
-    val io = IO(new FpLogicIO(tagWidth))
-
-    private def classify(bits: UInt): FpLogicClass = {
+/** Shared combinational IEEE operation; scalar and vector stages own timing. */
+object FpLogic {
+    def execute(req: FpLogicRequest): FpLogicResponse = {
+    def classify(bits: UInt): FpLogicClass = {
         val result = Wire(new FpLogicClass)
         val expZero = !bits(30, 23).orR
         val expOnes = bits(30, 23).andR
@@ -53,7 +51,6 @@ class FpLogic(val tagWidth: Int = 32) extends Module {
         result
     }
 
-    val req = io.in.bits
     val a = classify(req.src1)
     val b = classify(req.src2)
 
@@ -117,7 +114,7 @@ class FpLogic(val tagWidth: Int = 32) extends Module {
     val isMinMax = req.op === FMIN.U || req.op === FMAX.U
     val isCompare = req.op >= FEQ.U && req.op <= FLE.U
     val isMove = req.op === FMV_X_W.U || req.op === FMV_W_X.U
-    val response = Wire(new FpLogicResponse(tagWidth))
+    val response = Wire(new FpLogicResponse(req.tagWidth))
     response.res := Mux1H(Seq(
         isSign -> Cat(injectedSign, req.src1(30, 0)),
         isMinMax -> minMaxResult,
@@ -129,6 +126,15 @@ class FpLogic(val tagWidth: Int = 32) extends Module {
         (isCompare && Mux(req.op === FEQ.U, signalingNaN, anyNaN))
     response.fflags := Cat(invalid, 0.U(4.W))
     response.tag := req.tag
+    response
+    }
+}
+
+/** One registered stage for FP32 comparisons, min/max, classification and bit operations. */
+class FpLogic(val tagWidth: Int = 32) extends Module {
+    require(tagWidth > 0)
+    val io = IO(new FpLogicIO(tagWidth))
+    val response = FpLogic.execute(io.in.bits)
 
     /* A held result owns its register until accepted or killed. */
     val result = Reg(new FpLogicResponse(tagWidth))
@@ -147,6 +153,6 @@ class FpLogic(val tagWidth: Int = 32) extends Module {
         result := response
     }
     when(active && io.in.valid) {
-        assert(req.op <= FMV_W_X.U, "FpLogic received a non-logic operation")
+        assert(io.in.bits.op <= FMV_W_X.U, "FpLogic received a non-logic operation")
     }
 }

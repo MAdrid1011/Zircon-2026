@@ -37,6 +37,10 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
     val nextBeatOH = RegInit(1.U(depth.W))
 
     val incomingBeat = Cat(io.enq.bits.paddr(33, 3), 0.U(3.W))
+    // Separate the two candidate increments before the late enqueue grant.
+    // The shared carry-lookahead adder keeps grant out of the address carry chain.
+    val incomingNext = Cat(BLevelPAdder32.sum(io.enq.bits.paddr(33, 3).pad(32), 1.U, 0.U)(30, 0), 0.U(3.W))
+    val followingNext = Cat(BLevelPAdder32.sum(nextBeatAddress(33, 3).pad(32), 1.U, 0.U)(30, 0), 0.U(3.W))
     val sameBeat = valid && incomingBeat === lastBeatAddress
     val nextBeat = valid && incomingBeat === nextBeatAddress
     val samePage = !valid || incomingBeat(33, 12) === base(33, 12)
@@ -66,48 +70,45 @@ class WriteCombineQueue(depth: Int = 8) extends Module {
     io.empty := !valid && !inflight
     io.busy := valid || inflight
 
+    val incomingData = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.data, 0.U(32.W)),
+        Cat(0.U(32.W), io.enq.bits.data))
+    val incomingMask = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.mask, 0.U(4.W)),
+        Cat(0.U(4.W), io.enq.bits.mask))
+    val payloadOpen = io.enq.valid && !sealedBurst && !inflight && !io.out.valid
+    for (index <- 0 until depth) {
+        // Same-beat stores already share the burst page. Keep their byte
+        // enables independent of the next-beat admission comparison.
+        val fresh = (!valid && (index == 0).B) || nextBeat && samePage && nextBeatOH(index)
+        val merge = sameBeat && lastBeatOH(index)
+        val bytes = WireDefault(data(index).asTypeOf(Vec(8, UInt(8.W))))
+        for (byte <- 0 until 8) {
+            when(payloadOpen && (fresh || merge && incomingMask(byte))) {
+                bytes(byte) := incomingData(8 * byte + 7, 8 * byte)
+            }
+        }
+        data(index) := bytes.asUInt
+        when(payloadOpen && fresh) { mask(index) := incomingMask }
+        .elsewhen(payloadOpen && merge) { mask(index) := mask(index) | incomingMask }
+    }
+
     when(io.out.fire) {
         inflight := true.B
     }.elsewhen(io.enq.fire) {
-        val incomingData = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.data, 0.U(32.W)),
-            Cat(0.U(32.W), io.enq.bits.data))
-        val incomingMask = Mux(io.enq.bits.paddr(2), Cat(io.enq.bits.mask, 0.U(4.W)),
-            Cat(0.U(4.W), io.enq.bits.mask))
         when(!valid) {
             valid := true.B
             sealedBurst := false.B
             base := incomingBeat
             lastBeatAddress := incomingBeat
-            nextBeatAddress := incomingBeat + 8.U
+            nextBeatAddress := incomingNext
             count := 1.U
             age := 0.U
             lastBeatOH := 1.U
             nextBeatOH := 2.U
-            data(0) := incomingData
-            mask(0) := incomingMask
         }.elsewhen(sameBeat) {
-            for (index <- 0 until depth) {
-                when(lastBeatOH(index)) {
-                    data(index) := VecInit.tabulate(8) { byte =>
-                        Mux(
-                            incomingMask(byte),
-                            incomingData(8 * byte + 7, 8 * byte),
-                            data(index)(8 * byte + 7, 8 * byte),
-                        )
-                    }.asUInt
-                    mask(index) := mask(index) | incomingMask
-                }
-            }
             age := 0.U
         }.otherwise {
-            for (index <- 0 until depth) {
-                when(nextBeatOH(index)) {
-                    data(index) := incomingData
-                    mask(index) := incomingMask
-                }
-            }
             lastBeatAddress := nextBeatAddress
-            nextBeatAddress := nextBeatAddress + 8.U
+            nextBeatAddress := followingNext
             lastBeatOH := nextBeatOH
             nextBeatOH := (nextBeatOH << 1)(depth - 1, 0)
             count := count + 1.U

@@ -163,16 +163,23 @@ class MorslDirection(
     val phtPredictionIndex = RegEnable(phtPrefetchIndex, io.query.prefetch)
     // Capture valid banks at the PF/IF1 edge with the SRAM read. The next-PC
     // path then ends at the index register, not at a bank-wide register D mux.
-    val phtValidLowBits = math.min(6, p.phtIndexBits)
+    // Balance the low/high index decoders at the same PF/IF1 boundary. The
+    // low selector no longer needs to drive a 64-way decode after next-PC hash.
+    val phtValidLowBits = math.min(4, (p.phtIndexBits + 1) / 2)
     val phtValidBankWidth = 1 << phtValidLowBits
     val phtValidBanks = VecInit((0 until p.phtSets / phtValidBankWidth).map { bank =>
         VecInit(phtValid.slice(bank * phtValidBankWidth,
             (bank + 1) * phtValidBankWidth)).asUInt
     })
     val phtPredictionBanks = RegEnable(phtValidBanks, io.query.prefetch)
-    val phtPredictionBank = if (phtValidBanks.length == 1) phtPredictionBanks(0) else
-        phtPredictionBanks(phtPredictionIndex(p.phtIndexBits - 1, phtValidLowBits))
-    val phtPredictionValid = phtPredictionBank(phtPredictionIndex(phtValidLowBits - 1, 0))
+    val phtPredictionLowOH = RegEnable(UIntToOH(phtPrefetchIndex(phtValidLowBits - 1, 0),
+        phtValidBankWidth), io.query.prefetch)
+    val phtPredictionHighOH = if (phtValidBanks.length == 1) 1.U(1.W) else
+        RegEnable(UIntToOH(phtPrefetchIndex(p.phtIndexBits - 1, phtValidLowBits),
+            phtValidBanks.length), io.query.prefetch)
+    val phtPredictionValid = VecInit(phtPredictionBanks.zipWithIndex.map { case (bank, index) =>
+        phtPredictionHighOH(index) && (bank & phtPredictionLowOH).orR
+    }).asUInt.orR
     pht.io.predictEnable := io.query.prefetch
     pht.io.predictAddress := phtPrefetchIndex
     val phtRaw = pht.io.predictData.asTypeOf(Vec(p.fetchWidth, UInt(2.W)))

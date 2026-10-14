@@ -45,7 +45,8 @@ class CommitIO(
 
     /* Commit starts cache maintenance required by FENCE.I and SFENCE.VMA. */
     val maintenance = new CacheMaintenanceIO
-    val debug = new CommitDebugIO(bp, cp.width)
+    val debug = new CommitDebugIO(bp, cp.width, cp.vectorEnabled)
+    val vector = if (cp.vectorEnabled) Some(new VectorCommitIO(bp)) else None
 }
 
 /**
@@ -62,6 +63,7 @@ class Commit(
     val load: LoadPipelineParams = LoadPipelineParams(numIntPhys = 64, numFpPhys = 40),
     val cp: CommitParams = CommitParams(),
     val simulationDebug: Boolean = false,
+    val privileged: Boolean = true,
 ) extends Module {
     require(bp == load.backend)
     val io = IO(new CommitIO(fp, bp, issue, load, cp))
@@ -71,8 +73,10 @@ class Commit(
     val ftq = Module(new FetchTargetQueue(fp, issue.dispatchWidth, cp.width))
     val sq = Module(new StoreQueue(fp, bp, load, issue.dispatchWidth, cp))
     val sb = Module(new StoreBuffer(cp, DCacheParams(load.entries)))
-    val csr = Module(new CSR)
-    val privilege = RegInit(3.U(2.W))
+    val csr: CSRBase = if (privileged) Module(new CSR) else Module(new PerformanceCSR)
+    require(!cp.vectorEnabled || !privileged)
+    csr.io.vector.foreach(_.retire := 0.U.asTypeOf(Valid(new VectorCSRRetirement)))
+    val privilege = if (privileged) RegInit(3.U(2.W)) else 0.U(2.W)
     val delayedRecovery = RegInit(false.B)
     // The middleend clear uses the opposite register polarity so synthesis does
     // not merge its high-fanout source with the frontend/backend clear source.
@@ -197,6 +201,12 @@ class Commit(
     atomicResponse.ready := true.B
     rob.io.completion(5) := sq.io.completion(0)
     rob.io.completion(6) := sq.io.completion(1)
+    io.vector.foreach { vector =>
+        vector.completion.ready := !delayedBackendRecovery
+        val result = vector.completion.bits
+        rob.io.completion(7) := completion(vector.completion.fire, vector.completion.fire,
+            result.robIdx, result.scalar.bits.data, 0.U.asTypeOf(new BackendException))
+    }
 
     /* SQ collects speculative stores; SB drains committed stores and supplies byte-wise forwarding. */
     sq.io.address <> io.backend.ls1.storeAddress.get
@@ -208,7 +218,35 @@ class Commit(
         loadPort.sbResult := sb.io.query(port).response
     }
     sb.io.enqueue <> sq.io.drain
-    io.backend.store <> sb.io.store
+    if (cp.vectorEnabled) {
+        val wide = Module(new VectorStoreBuffer(bp, simulationDebug))
+        io.debug.vectorStore.get := wide.io.observation.getOrElse(0.U.asTypeOf(new VectorStoreTrace))
+        wide.io.collect <> io.vector.get.store
+        wide.io.commit := sq.io.commit
+        wide.io.flush := delayedRecovery
+        wide.io.drain <> sb.io.vector.get
+        sq.io.vector.get.store.valid := wide.io.collect.fire && !wide.io.collect.bits.addressOnly
+        sq.io.vector.get.store.bits := wide.io.collect.bits
+        sq.io.vector.get.ordering.tail := io.vector.get.ordering.tail
+        io.vector.get.ordering.clear := sq.io.vector.get.ordering.clear && sb.io.empty
+        val wideActive = wide.io.active
+        // SB owns selection and never launches a scalar request during a wide
+        // drain. Wide cache responses remain local until the whole token ends.
+        io.backend.store.request.valid := sb.io.store.request.valid || wide.io.cache.request.valid
+        io.backend.store.request.bits := Mux(wideActive,
+            wide.io.cache.request.bits, sb.io.store.request.bits)
+        sb.io.store.request.ready := io.backend.store.request.ready
+        wide.io.cache.request.ready := io.backend.store.request.ready
+        wide.io.cache.response.valid := io.backend.store.response.valid && wideActive
+        wide.io.cache.response.bits := io.backend.store.response.bits
+        sb.io.store.response.valid := io.backend.store.response.valid && !wideActive
+        sb.io.store.response.bits := io.backend.store.response.bits
+        io.backend.store.response.ready := wide.io.cache.response.ready || sb.io.store.response.ready
+        assert(!(sb.io.store.request.valid && wide.io.cache.request.valid))
+        when(sb.io.store.request.valid) { assert(!wideActive) }
+    } else {
+        io.backend.store <> sb.io.store
+    }
     /* Retirement stops at the first recovery event and delays its global redirect by one cycle. */
     val trainQueue = Module(new ClusterIndexFIFO(
         new FrontendTraining(fp),
@@ -245,11 +283,11 @@ class Commit(
     io.frontend.ftq.train.bits := trainQueue.io.deq(0).bits
     val trainingSpace = trainStageReady && !pendingRecoveryTrainValid
     val headSystem = rob.io.head(0).valid && rob.io.head(0).bits.isSystem
-    val headAtomic = rob.io.head(0).valid && rob.io.head(0).bits.isAtomic
+    val headAtomic = if (privileged) rob.io.head(0).valid && rob.io.head(0).bits.isAtomic else false.B
     val headSystemOp = rob.io.head(0).bits.systemOp
     val fence = headSystem && headSystemOp === SystemOp.FENCE.U
-    val fenceI = headSystem && headSystemOp === SystemOp.FENCE_I.U
-    val sfence = headSystem && headSystemOp === SystemOp.SFENCE_VMA.U
+    val fenceI = if (privileged) headSystem && headSystemOp === SystemOp.FENCE_I.U else false.B
+    val sfence = if (privileged) headSystem && headSystemOp === SystemOp.SFENCE_VMA.U else false.B
     val memoryDrained = sq.io.committedEmpty && sb.io.empty && io.memoryIdle
     io.backend.loadGrant.valid := rob.io.head(0).valid && !rob.io.head(0).bits.complete &&
         memoryDrained && !delayedRecovery
@@ -266,10 +304,15 @@ class Commit(
     io.backend.atomic.request.bits.op := sq.io.atomic.request.bits.op
     io.backend.atomic.request.bits.uncache := sq.io.atomic.request.bits.uncache
     io.backend.atomic.request.bits.exception := sq.io.atomic.request.bits.exception
-    io.backend.atomic.blockMemoryIssue := headAtomic && sq.io.atomic.request.valid && !delayedRecovery
     val maintenanceStarted = RegInit(false.B)
     val maintenanceInvalidate = RegInit(false.B)
     val cacheMaintenance = fenceI || sfence
+    // At the ROB head all older addresses/data have completed. Stop younger
+    // issue while draining so their blocked-load replays cannot keep a fence
+    // waiting for an idle cache forever. Already accepted requests still drain.
+    val fenceDrain = RegNext((fence || cacheMaintenance) && !delayedRecovery, false.B)
+    io.backend.atomic.blockMemoryIssue := fenceDrain ||
+        headAtomic && sq.io.atomic.request.valid && !delayedRecovery
     when(!cacheMaintenance || delayedRecovery) {
         maintenanceStarted := false.B
         maintenanceInvalidate := false.B
@@ -330,9 +373,12 @@ class Commit(
         val mretIllegal = entry.isSystem && entry.systemOp === SystemOp.MRET.U && privilege =/= 3.U
         val sretIllegal = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
-        val systemException = ecall || ebreak || mretIllegal || sretIllegal
-        recoveryCandidate(lane) := entry.exception.valid || entry.mispredicted || commitSystem ||
-            entry.writesExecutionState || entry.isAtomic || systemException
+        val systemException = if (privileged) ecall || ebreak || mretIllegal || sretIllegal else false.B
+        val exceptionValid = if (privileged) entry.exception.valid else false.B
+        val atomic = if (privileged) entry.isAtomic else false.B
+        val systemRecovery = if (privileged) commitSystem else entry.isSystem && entry.systemOp === SystemOp.FENCE.U
+        recoveryCandidate(lane) := exceptionValid || entry.mispredicted || systemRecovery ||
+            entry.writesExecutionState || atomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
         val completed = rob.io.head(lane).valid && entry.complete &&
             (if (lane == 0) systemReady else !headSystem && !entry.isSystem) &&
@@ -340,12 +386,56 @@ class Commit(
         val recover = completed && recoveryCandidate(lane)
         packetEnd(lane) := completed && entry.packetEnd
         recovery(lane) := continue && recover
-        retire(lane) := continue && completed && !entry.exception.valid && !systemException
-        continue = continue && completed && !recover && !entry.isSystem && !entry.isAtomic
+        retire(lane) := continue && completed && !exceptionValid && !systemException
+        continue = continue && completed && !recover && !entry.isSystem && !atomic
     }
     val takeInterrupt = Wire(Bool())
     val retireFire = VecInit(retire.map(_ && !delayedRecovery && !takeInterrupt))
     rob.io.pop := retireFire.asUInt
+    io.vector.foreach { vector =>
+        // ROB occupancy owns table lifetime. One vector per dispatch group
+        // gives each side table one write port without widening scalar payload.
+        val destinations = Mem(1 << bp.robWidth, new VectorDestination)
+        val results = Mem(1 << bp.robWidth, new VectorCSRRetirement)
+        when(vector.enqueue.valid) {
+            destinations(vector.enqueue.bits.scalar.robIdx) := vector.enqueue.bits.vector.destination
+        }
+        when(vector.completion.fire) {
+            results(vector.completion.bits.robIdx) := vector.completion.bits.retirement
+        }
+        val vectorRetire = VecInit((0 until cp.width).map(lane =>
+            retireFire(lane) && rob.io.head(lane).bits.isVector))
+        val headResults = VecInit(rob.io.head.map(head => results(head.bits.robIdx)))
+        val configurationRetire = VecInit((0 until cp.width).map(lane =>
+            vectorRetire(lane) && headResults(lane).configuration))
+        val lastConfiguration = Reverse(PriorityEncoderOH(Reverse(configurationRetire.asUInt)))
+        val csrRetire = csr.io.vector.get.retire
+        csrRetire.valid := vectorRetire.asUInt.orR
+        csrRetire.bits.configuration := configurationRetire.asUInt.orR
+        csrRetire.bits.vl := Mux1H(lastConfiguration, headResults.map(_.vl))
+        csrRetire.bits.vtype := Mux1H(lastConfiguration, headResults.map(_.vtype))
+        csrRetire.bits.fflags := vectorRetire.zip(headResults).map { case (fire, result) =>
+            Mux(fire, result.fflags, 0.U)
+        }.reduce(_ | _)
+        csrRetire.bits.saturated := vectorRetire.zip(headResults).map { case (fire, result) =>
+            fire && result.saturated
+        }.reduce(_ || _)
+        vector.state := csr.io.vector.get.state
+        val retired = RegInit(VecInit.fill(cp.width)(0.U.asTypeOf(Valid(new VectorDestination))))
+        for (lane <- 0 until cp.width) {
+            retired(lane).valid := vectorRetire(lane) && destinations(rob.io.head(lane).bits.robIdx).count.orR
+            when(vectorRetire(lane)) { retired(lane).bits := destinations(rob.io.head(lane).bits.robIdx) }
+        }
+        vector.retire := retired
+        for (lane <- 0 until cp.width) {
+            val headDestination = destinations(rob.io.head(lane).bits.robIdx)
+            val trace = io.debug.vector.get(lane)
+            trace.base := headDestination.base
+            trace.count := headDestination.count
+            trace.physical := headDestination.physical.asUInt
+            trace.result := headResults(lane)
+        }
+    }
 
     /* Interrupt selection shares the recovery path and obeys privilege delegation. */
     val interruptBits = csr.io.state.mip & csr.io.state.mie
@@ -374,8 +464,8 @@ class Commit(
         interruptRecovery(lane) := interruptContinue && recover
         interruptContinue = interruptContinue && completed && !recover && !entry.isAtomic
     }
-    takeInterrupt := interruptEligible.asUInt.orR && rob.io.head(0).valid &&
-        !interruptRecovery.asUInt.orR && !delayedRecovery && !headSystem && !headAtomic
+    takeInterrupt := (if (privileged) interruptEligible.asUInt.orR && rob.io.head(0).valid &&
+        !interruptRecovery.asUInt.orR && !delayedRecovery && !headSystem && !headAtomic else false.B)
     val interruptCause = Mux1H(interruptEligible, interruptCandidates.map(_.U(5.W)))
     val recoveryValid = (recovery.asUInt.orR || takeInterrupt) && !delayedRecovery
     // Payload selection is independent of readiness. recoveryValid qualifies its
@@ -427,10 +517,10 @@ class Commit(
             head.bits.isSystem && head.bits.systemOp === op
         }),
     )
-    val selectedEcall = selectedSystemKind(SystemOp.ECALL.U)
-    val selectedEbreak = selectedSystemKind(SystemOp.EBREAK.U)
-    val selectedMret = selectedSystemKind(SystemOp.MRET.U)
-    val selectedSret = selectedSystemKind(SystemOp.SRET.U)
+    val selectedEcall = if (privileged) selectedSystemKind(SystemOp.ECALL.U) else false.B
+    val selectedEbreak = if (privileged) selectedSystemKind(SystemOp.EBREAK.U) else false.B
+    val selectedMret = if (privileged) selectedSystemKind(SystemOp.MRET.U) else false.B
+    val selectedSret = if (privileged) selectedSystemKind(SystemOp.SRET.U) else false.B
     val selectedMretIllegal = selectedMret && privilege =/= 3.U
     val selectedSretIllegal = selectedSret &&
         !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
@@ -444,7 +534,7 @@ class Commit(
             Mux(selectedEbreak, 3.U, Mux(selectedMretIllegal || selectedSretIllegal, 2.U, selectedExceptionCause)),
         ),
     )
-    val trap = takeInterrupt || selectedExceptionValid || selectedSystemException
+    val trap = if (privileged) takeInterrupt || selectedExceptionValid || selectedSystemException else false.B
     val delegatedInterrupt = Mux1H(
         VecInit.tabulate(32)(cause => interruptCause === cause.U),
         csr.io.state.mideleg.asBools,
@@ -630,14 +720,14 @@ class Commit(
     csr.io.req := io.backend.mixCSR.req
     csr.io.commit := io.backend.mixCSR.commit
     val ordinaryRetired = PopCount(retireFire.zip(rob.io.head).map { case (fire, entry) =>
-        fire && !entry.bits.isSystem
+        fire && (if (privileged) !entry.bits.isSystem else true.B)
     })
     val delayedOrdinaryRetired = RegNext(ordinaryRetired, 0.U)
-    csr.io.retired := Mux(
+    csr.io.retired := (if (privileged) Mux(
         io.backend.mixCSR.commit,
         Mux(csr.io.rsp.bits.illegal, 0.U, 1.U),
         delayedOrdinaryRetired,
-    )
+    ) else delayedOrdinaryRetired)
     csr.io.time := io.csr.time
     csr.io.interrupt := io.csr.interrupt
     csr.io.fp.valid := retireFire.zip(rob.io.head).map { case (fire, entry) =>
@@ -674,7 +764,7 @@ class Commit(
     csr.io.trap := delayedTrap
     csr.io.xret := delayedXret
     csr.io.privilege := Mux(delayedTrap.valid, trapPrivilege, privilege)
-    when(acceptedTrap.valid) {
+    if (privileged) { when(acceptedTrap.valid) {
         privilege := Mux(acceptedTrap.bits.supervisor, 1.U, 3.U)
     }.elsewhen(acceptedXret.valid) {
         privilege := Mux(
@@ -682,7 +772,7 @@ class Commit(
             Mux(csr.io.state.mstatus(8), 1.U, 0.U),
             csr.io.state.mstatus(12, 11),
         )
-    }
+    } }
     // SATP changes become visible only after all younger work is discarded and the
     // frontend redirects to the next instruction under the new translation regime.
     io.csr.tlbFlush := delayedTlbFlush
@@ -825,11 +915,13 @@ class CommitPerformanceCounters extends Bundle {
     val storeBufferBusyCycles = UInt(64.W)
 }
 
-class CommitDebugIO(bp: BackendParams, width: Int) extends Bundle {
+class CommitDebugIO(bp: BackendParams, width: Int, vectorEnabled: Boolean = false) extends Bundle {
+    val vectorStore = if (vectorEnabled) Some(Output(new VectorStoreTrace)) else None
     val retire = Output(Vec(width, new CommitRetireTrace(bp)))
     val robHeadValid = Output(Bool())
     val robHeadComplete = Output(Bool())
     val robHeadPc = Output(UInt(32.W))
     val trap = Output(Valid(new CommitTrapTrace))
     val performance = Output(new CommitPerformanceCounters)
+    val vector = if (vectorEnabled) Some(Output(Vec(width, new VectorRetireTrace))) else None
 }

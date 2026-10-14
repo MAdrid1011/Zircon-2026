@@ -23,18 +23,22 @@ class ALU extends Module {
 
     // SUB, SLT and SLTU share the same subtraction controls.
     val subtract = (io.op === SUB) || isSlt || isSltu
-    val adderSrc2 = Mux(io.op === ADD, io.src2, Mux(subtract, ~io.src2, 4.U(32.W)))
+    val adderSrc2 = io.src2 ^ Fill(32, subtract)
     val adder = BLevelPAdder32(io.src1, adderSrc2, subtract.asUInt)
+    // Link-PC increments run beside operand arithmetic. Their default select
+    // must not add an opcode mux before the shared ADD/SUB carry network.
+    val pcStep = BLevelPAdder32(io.src1, 4.U(32.W), 0.U(1.W)).io.res
 
     val shifter = Shifter(Mux(isSll, Reverse(io.src1), io.src1), io.src2(4, 0), isSra)
 
     val lessSigned = io.src1(31) && !io.src2(31) ||
         !(io.src1(31) ^ io.src2(31)) && adder.io.res(31)
     val rightShift = io.op === SRL || isSra
-    // Exactly one selector is active, including all default src1 + 4 operations.
-    val useAdder = !(isSlt || isSltu || isAnd || isOr || isXor || isSll || rightShift)
+    val useAdder = io.op === ADD || io.op === SUB
+    val usePcStep = !(useAdder || isSlt || isSltu || isAnd || isOr || isXor || isSll || rightShift)
     io.res := Mux1H(Seq(
         useAdder -> adder.io.res,
+        usePcStep -> pcStep,
         isSltu -> Cat(0.U(31.W), !adder.io.cout.get),
         isSlt -> Cat(0.U(31.W), lessSigned),
         isAnd -> (io.src1 & io.src2),

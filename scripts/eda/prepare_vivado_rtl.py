@@ -39,8 +39,11 @@ def validate(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--profile", choices=("system", "performance"), default="system")
     args = parser.parse_args()
     output = args.output.resolve()
+    if args.profile == "performance" and args.output == DEFAULT_OUTPUT:
+        output = ROOT / "build/eda/vivado-vu13p-performance/rtl"
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["ZIRCON_USE_EXTERNAL_VIVADO_RAM"] = "true"
@@ -48,7 +51,7 @@ def main():
     env["ZIRCON_VIVADO_NATIVE_ADDERS"] = "1"
     env.pop("ZIRCON_USE_EXTERNAL_BSG_RAM", None)
     subprocess.run(
-        ["sbt", "--batch", f"runMain Elaborate {shlex.quote(str(output))}"],
+        ["sbt", "--batch", f"runMain Elaborate --profile={args.profile} {shlex.quote(str(output))}"],
         cwd=ROOT, env=env, check=True,
     )
     for name in RAM_MODULES:

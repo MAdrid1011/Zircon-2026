@@ -79,21 +79,22 @@ class MulStage1(tagWidth: Int) extends Bundle {
 }
 
 /** R2: block candidates for the fused sum D, rather than the original S/C rows. */
-class MulStage2(tagWidth: Int) extends Bundle {
+class MulStage2(tagWidth: Int, blockWidth: Int = 8) extends Bundle {
     val exp = SInt(11.W)
     val baseSign = Bool()
     val zeroSign = Bool()
     val meta = new MulMeta(tagWidth)
-    val positiveBlocks = Vec(10, new MulSpeculativeBlock) // Candidates for D; D may be negative.
-    val negativeBlocks = Vec(10, new MulSpeculativeBlock) // Candidates for -D, used to select |D|.
+    val positiveBlocks = Vec(80 / blockWidth, new MulSpeculativeBlock(blockWidth)) // D may be negative.
+    val negativeBlocks = Vec(80 / blockWidth, new MulSpeculativeBlock(blockWidth)) // Candidates for -D.
 }
 
-/** One 8-bit block: sum, nonzero flag and leading bit for carry-in=0/1, plus block G/P. */
-class MulSpeculativeBlock extends Bundle {
-    val sum0 = UInt(8.W); val sum1 = UInt(8.W)
+/** Local sum, nonzero and leading bit for carry-in=0/1, plus block G/P. */
+class MulSpeculativeBlock(val blockWidth: Int = 8) extends Bundle {
+    require(blockWidth == 4 || blockWidth == 8)
+    val sum0 = UInt(blockWidth.W); val sum1 = UInt(blockWidth.W)
     val generate = Bool(); val propagate = Bool()
     val nonzero0 = Bool(); val nonzero1 = Bool()
-    val top0 = UInt(3.W); val top1 = UInt(3.W)
+    val top0 = UInt(log2Ceil(blockWidth).W); val top1 = UInt(log2Ceil(blockWidth).W)
 }
 
 /** R3: FP magnitude/normalization controls and the selected integer word for EX4. */
@@ -104,6 +105,15 @@ class MulStage3(tagWidth: Int) extends Bundle {
     val sign = Bool()
     val zero = Bool()
     val top = SInt(11.W) // Binary exponent of the leading bit: exp + leading-bit index.
+    val integer = UInt(32.W)
+    val meta = new MulMeta(tagWidth)
+}
+
+class MulNormalized(tagWidth: Int) extends Bundle {
+    val window = UInt(27.W)
+    val sign = Bool()
+    val zero = Bool()
+    val top = SInt(11.W)
     val integer = UInt(32.W)
     val meta = new MulMeta(tagWidth)
 }
@@ -136,19 +146,12 @@ object SharedMultiplyLogic {
         d
     }
 
-    /** Fixed-width barrel shift with jamming at each level, including overshift. */
+    /** Retained bits and sticky reduction run in parallel, including overshift. */
     def rightJam(x: UInt, amount: UInt, width: Int): UInt = {
         require(x.getWidth == width)
-        var value = x
-        for (i <- 0 until log2Ceil(width)) {
-            val distance = 1 << i
-            val shifted = Cat(0.U(distance.W), value(width - 1, distance))
-            val jammed = shifted | value(distance - 1, 0).orR.asUInt
-            value = Mux(amount(i), jammed, value)
-        }
-        if (amount.getWidth > log2Ceil(width))
-            Mux(amount(amount.getWidth - 1, log2Ceil(width)).orR, x.orR.asUInt, value)
-        else value
+        val retained = (x >> amount).pad(width)
+        val discarded = VecInit((0 until width).map(bit => x(bit) && amount > bit.U)).asUInt.orR
+        retained | discarded.asUInt
     }
     def leftTruncate(x: UInt, amount: UInt, width: Int): UInt = {
         require(x.getWidth == width)
@@ -174,30 +177,37 @@ object SharedMultiplyLogic {
 
     /** EX2 carry-select block: both carry-in cases and their exact leading bits. */
     def prepareBlock(a: UInt, b: UInt): MulSpeculativeBlock = {
-        val o = Wire(new MulSpeculativeBlock)
-        val p = (0 until 8).map(i => a(i) ^ b(i))
-        val g = (0 until 8).map(i => a(i) && b(i))
-        val prefixP = (0 until 8).map(i => p.take(i + 1).reduce(_ && _))
-        val prefixG = (0 until 8).map(i =>
+        val width = a.getWidth
+        require(b.getWidth == width)
+        val o = Wire(new MulSpeculativeBlock(width))
+        val p = (0 until width).map(i => a(i) ^ b(i))
+        val g = (0 until width).map(i => a(i) && b(i))
+        val prefixP = (0 until width).map(i => p.take(i + 1).reduce(_ && _))
+        val prefixG = (0 until width).map(i =>
             (0 to i).map(j =>
                 g(j) && p.slice(j + 1, i + 1).foldLeft(true.B)(_ && _)
             ).reduce(_ || _)
         )
-        o.sum0 := VecInit((0 until 8).map(i => p(i) ^ (if (i == 0) false.B else prefixG(i - 1)))).asUInt
+        o.sum0 := VecInit((0 until width).map(i => p(i) ^ (if (i == 0) false.B else prefixG(i - 1)))).asUInt
         o.sum1 :=
-            VecInit((0 until 8).map(i => p(i) ^ (if (i == 0) true.B else prefixG(i - 1) || prefixP(i - 1)))).asUInt
+            VecInit((0 until width).map(i => p(i) ^ (if (i == 0) true.B else prefixG(i - 1) || prefixP(i - 1)))).asUInt
         o.generate := prefixG.last; o.propagate := prefixP.last
         o.nonzero0 := o.sum0.orR; o.nonzero1 := o.sum1.orR
-        o.top0 := topBit8(o.sum0)
-        o.top1 := topBit8(o.sum1)
+        def localTop(x: UInt): UInt = if (width == 8) topBit8(x)
+            else Cat(x(3, 2).orR, x(3) || (!x(2) && x(1)))
+        o.top0 := localTop(o.sum0)
+        o.top1 := localTop(o.sum1)
         o
     }
 
     /** EX3 exact block-carry resolution and highest-bit selection, with no LZA correction. */
     def resolveBlocks(blocks: Seq[MulSpeculativeBlock]): (UInt, UInt, Bool) = {
-        require(blocks.size == 10)
+        val width = blocks.head.blockWidth
+        require(blocks.size * width == Width && blocks.forall(_.blockWidth == width))
+        if (width == 4) return resolveSmallBlocks(blocks)
         var gp = blocks.map(b => (b.generate, b.propagate))
-        for (distance <- Seq(1, 2, 4, 8)) {
+        for (level <- 0 until log2Ceil(blocks.size)) {
+            val distance = 1 << level
             val prev = gp
             gp = prev.indices.map(i =>
                 if (i < distance) prev(i)
@@ -205,14 +215,52 @@ object SharedMultiplyLogic {
                     (prev(i)._1 || (prev(i)._2 && prev(i - distance)._1), prev(i)._2 && prev(i - distance)._2)
             )
         }
-        val carry = (0 until 10).map(i => if (i == 0) false.B else gp(i - 1)._1)
+        val carry = blocks.indices.map(i => if (i == 0) false.B else gp(i - 1)._1)
         val nonzero = blocks.indices.map(i => Mux(carry(i), blocks(i).nonzero1, blocks(i).nonzero0))
         val highest = blocks.indices.map(i => nonzero(i) && !nonzero.drop(i + 1).foldLeft(false.B)(_ || _))
-        val tops = blocks.indices.map(i => Cat(i.U(4.W), Mux(carry(i), blocks(i).top1, blocks(i).top0)))
-        // The prefix has already resolved every byte-boundary carry. Selecting the
+        val tops = blocks.indices.map(i => Cat(i.U(log2Ceil(blocks.size).W),
+            Mux(carry(i), blocks(i).top1, blocks(i).top0)))
+        // The prefix has already resolved every block-boundary carry. Selecting the
         // corresponding local sum completes the adder without a second 64-bit CPA.
         val words = blocks.indices.map(i => Mux(carry(i), blocks(i).sum1, blocks(i).sum0))
         (VecInit(words).asUInt, Mux1H(highest.zip(tops)), !nonzero.reduce(_ || _))
+    }
+
+    /** Resolve sixteen-bit candidates before selecting the five group carries.
+      * A late carry selects one local leading-bit candidate; it does not enter
+      * the twenty-block priority network. Reuse the core's four-way lookahead.
+      */
+    private def resolveSmallBlocks(blocks: Seq[MulSpeculativeBlock]): (UInt, UInt, Bool) = {
+        val groups = blocks.grouped(4).toSeq
+        val local = groups.map { group =>
+            val propagate = VecInit(group.map(_.propagate)).asUInt
+            val generate = VecInit(group.map(_.generate)).asUInt
+            val (p, g, carry0) = BLevelCarry4(propagate, generate, 0.U(1.W))
+            val (_, _, carry1) = BLevelCarry4(propagate, generate, 1.U(1.W))
+            def candidate(cin: Bool, carries: UInt): (UInt, UInt, Bool) = {
+                val carry = Seq(cin) ++ (0 until 3).map(carries(_))
+                val words = group.indices.map(i => Mux(carry(i), group(i).sum1, group(i).sum0))
+                val nonzero = group.indices.map(i => Mux(carry(i), group(i).nonzero1, group(i).nonzero0))
+                val highest = group.indices.map(i => nonzero(i) &&
+                    !nonzero.drop(i + 1).foldLeft(false.B)(_ || _))
+                val tops = group.indices.map(i => Cat(i.U(2.W),
+                    Mux(carry(i), group(i).top1, group(i).top0)))
+                (VecInit(words).asUInt, Mux1H(highest.zip(tops)), nonzero.reduce(_ || _))
+            }
+            (p, g, candidate(false.B, carry0), candidate(true.B, carry1))
+        }
+        val (_, _, carry) = BLevelCarry4(VecInit(local.take(4).map(_._1)).asUInt,
+            VecInit(local.take(4).map(_._2)).asUInt, 0.U(1.W))
+        val selected = local.indices.map { i =>
+            val cin = if (i == 0) false.B else carry(i - 1)
+            val (_, _, c0, c1) = local(i)
+            (Mux(cin, c1._1, c0._1), Mux(cin, c1._2, c0._2), Mux(cin, c1._3, c0._3))
+        }
+        val nonzero = selected.map(_._3)
+        val highest = selected.indices.map(i => nonzero(i) &&
+            !nonzero.drop(i + 1).foldLeft(false.B)(_ || _))
+        val tops = selected.indices.map(i => Cat(i.U(3.W), selected(i)._2))
+        (VecInit(selected.map(_._1)).asUInt, Mux1H(highest.zip(tops)), !nonzero.reduce(_ || _))
     }
 
     // A 3:2 compressor produces sum/carry rows without word-wide carry propagation.
@@ -274,13 +322,20 @@ object SharedMultiplyLogic {
     }
 
     /** Shared FP EX4: normalize, extract GRS, round once and pack. Integer results bypass this. */
-    def finish(x: MulStage3): (UInt, UInt) = {
-        val coarse = Cat(x.shift(6, 3), 0.U(3.W))
-        val coarseRight = rightJam(x.mag, coarse, 80)
-        val coarseLeft = leftTruncate(x.mag, coarse, 80)
-        val fine = Cat(0.U(4.W), x.shift(2, 0))
-        val mag = Mux(x.right, rightJam(coarseRight, fine, 80), leftTruncate(coarseLeft, fine, 80))
-        val window = mag(26, 0)
+    def normalize(x: MulStage3): MulNormalized = {
+        val mag = Mux(x.right, rightJam(x.mag, x.shift, 80), leftTruncate(x.mag, x.shift, 80))
+        val normalized = Wire(new MulNormalized(x.meta.tag.getWidth))
+        normalized.window := mag(26, 0)
+        normalized.sign := x.sign
+        normalized.zero := x.zero
+        normalized.top := x.top
+        normalized.integer := x.integer
+        normalized.meta := x.meta
+        normalized
+    }
+
+    def round(x: MulNormalized): (UInt, UInt) = {
+        val window = x.window
         val q = window(26, 3)
         val guard = window(2); val sticky = window(1, 0).orR
         val inexact = guard || sticky
@@ -322,6 +377,8 @@ object SharedMultiplyLogic {
         )
         (bits, flags)
     }
+
+    def finish(x: MulStage3): (UInt, UInt) = round(normalize(x))
 }
 
 /** Four-stage shared integer multiply / FP32 add, multiply and fused multiply-add, II=1.
@@ -342,30 +399,38 @@ object SharedMultiplyLogic {
   * in EX4. useMul selects the main input; it does not gate the Booth circuit. See EX1 for
   * the far-FMA window change, where primary carries the small product's sticky contribution.
   *
-  * The four stages include output register R4. Output backpressure holds the entire pipeline.
+  * The scalar path has four stages including R4. SIMD can register normalization
+  * separately from rounding, giving five stages with the same II=1.
+  * Output backpressure holds the entire pipeline.
   * Flush kills all entries and suppresses handshakes in that cycle. Payload needs no reset.
   * tag is opaque backend identity carried through the stages in meta.
   */
-class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
+class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false,
+                     val blockWidth: Int = 8, val holdInvalidData: Boolean = false) extends Module {
     require(tagWidth > 0)
+    require(blockWidth == 4 || blockWidth == 8)
     val io = IO(new MultiplyIO(tagWidth))
     import SharedMultiplyLogic._
 
     // Pipeline control: s1/s2/s3/s4 are combinational outputs; r1/r2/r3/r4 register them.
     val r1 = Reg(new MulStage1(tagWidth))
-    val r2 = Reg(new MulStage2(tagWidth))
+    val r2 = Reg(new MulStage2(tagWidth, blockWidth))
     val r3 = Reg(new MulStage3(tagWidth))
     val r4 = Reg(new MultiplyResponse(tagWidth))
-    val v1 = RegInit(false.B); val v2 = RegInit(false.B)
-    val v3 = RegInit(false.B); val v4 = RegInit(false.B)
-    val advance = !v4 || io.out.ready
+    val normalized = if (splitFpFinish) Some(Reg(new MulNormalized(tagWidth))) else None
+    val valid = RegInit(VecInit.fill(if (splitFpFinish) 5 else 4)(false.B))
+    val outputValid = valid.last
+    val advance = !outputValid || io.out.ready
     val active = !io.flush && !reset.asBool
     io.in.ready := advance && active
-    io.present := v4
-    io.out.valid := v4 && active
+    io.present := outputValid
+    io.out.valid := outputValid && active
     io.out.bits := r4
-    when(io.flush) { v1 := false.B; v2 := false.B; v3 := false.B; v4 := false.B }
-        .elsewhen(advance) { v1 := io.in.valid; v2 := v1; v3 := v2; v4 := v3 }
+    when(io.flush) { valid.foreach(_ := false.B) }
+        .elsewhen(advance) {
+            valid.head := io.in.valid
+            for (stage <- 1 until valid.size) valid(stage) := valid(stage - 1)
+        }
 
     // -- EX1: select the operation form and prepare product/addend inputs ------------
     // 1. Decode effective signs. FSUB negates B; FMA variants negate the product and/or C.
@@ -444,7 +509,7 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
         (x ^ y ^ z, (((x & y) | (x & z) | (y & z)) << 1)(10, 0))
     val (fmaSum0, fmaCarry0) = compressShift(cExp.pad(11), ~aExp.pad(11), ~bExp.pad(11))
     val (fmaSum1, fmaCarry1) = compressShift(fmaSum0, fmaCarry0, 155.U(11.W))
-    val fmaShift = (fmaSum1 + fmaCarry1).asSInt
+    val fmaShift = prefixAdd(fmaSum1, fmaCarry1, 11).asSInt
     val shiftCWithOther = Mux(
         add,
         27.S(11.W) - addDistance.zext,
@@ -513,15 +578,17 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
         aligned ^ Fill(80, r1.subtract),
         Cat(0.U(79.W), r1.subtract)
     ))
-    val s2 = Wire(new MulStage2(tagWidth))
+    val s2 = Wire(new MulStage2(tagWidth, blockWidth))
     s2.exp := r1.exp; s2.baseSign := r1.baseSign; s2.zeroSign := r1.zeroSign; s2.meta := r1.meta
 
-    // 3. Prepare ten 8-bit blocks for both D and -D; -D = ~S + ~C + 2 (modulo 2^80).
+    // 3. Prepare local blocks for both D and -D; -D = ~S + ~C + 2 (modulo 2^80).
     //    Each block stores sums/leading bits for both carry inputs; EX3 resolves block carries.
     val negRows = compress(Seq(~fused(0), ~fused(1), 2.U(80.W)))
-    for (i <- 0 until 10) {
-        s2.positiveBlocks(i) := prepareBlock(fused(0)(8 * i + 7, 8 * i), fused(1)(8 * i + 7, 8 * i))
-        s2.negativeBlocks(i) := prepareBlock(negRows(0)(8 * i + 7, 8 * i), negRows(1)(8 * i + 7, 8 * i))
+    for (i <- 0 until Width / blockWidth) {
+        val low = blockWidth * i
+        val high = low + blockWidth - 1
+        s2.positiveBlocks(i) := prepareBlock(fused(0)(high, low), fused(1)(high, low))
+        s2.negativeBlocks(i) := prepareBlock(negRows(0)(high, low), negRows(1)(high, low))
     }
 
     // -- EX3: finish shared addition; select the integer word and FP normalization controls --
@@ -529,16 +596,34 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     val (d, positiveTop, zero) = resolveBlocks(r2.positiveBlocks.toSeq)
     val (negative, negativeTop, _) = resolveBlocks(r2.negativeBlocks.toSeq)
     val topBit = Mux(d(79), negativeTop, positiveTop)
-    val top = prefixAdd(r2.exp.asUInt, Cat(0.U(4.W), topBit), 11).asSInt
+    // The leading index occupies seven bits. Prepare the upper exponent's
+    // increment before that index arrives, then select only on the low carry.
+    val exponentHigh = r2.exp.asUInt(10, 7)
+    val exponentHighIncremented = (exponentHigh + 1.U)(3, 0)
+    def exponentWithLeading(leading: UInt): SInt = {
+        val low = prefixAdd(r2.exp.asUInt(6, 0).pad(8), leading.pad(8), 8)
+        Cat(Mux(low(7), exponentHighIncremented, exponentHigh), low(6, 0)).asSInt
+    }
+    val positiveExponent = exponentWithLeading(positiveTop)
+    val negativeExponent = exponentWithLeading(negativeTop)
+    val top = Mux(d(79), negativeExponent, positiveExponent)
     val s3 = Wire(new MulStage3(tagWidth))
     s3.mag := Mux(d(79), negative, d)
     // 2. FP: prepare normal/subnormal shift controls in parallel; EX4 performs the shift.
     //    Normal results place the leading bit at bit 26. Subnormals use a fixed E=-152 window,
     //    so bit 3 has the minimum-subnormal weight 2^-149 and bits [2:0] retain rounding data.
-    val (tinyShift, tinyRight) = shiftControl(r2.exp + 152.S)
-    val normalRight = topBit >= 26.U
-    val normalShift = Mux(normalRight, topBit - 26.U, 26.U - topBit)
-    val subnormalThreshold = (-126).S(11.W) - r2.exp
+    val (tinyShift, tinyRight) = shiftControl(prefixAdd(r2.exp.asUInt, 152.U(11.W), 11).asSInt)
+    def normalControl(leading: UInt): (UInt, Bool) = {
+        val right = leading >= 26.U
+        val shift = Mux(right, prefixAdd(leading, 102.U(7.W), 7),
+            prefixAdd(26.U(7.W), ~leading, 7, true.B))
+        (shift, right)
+    }
+    val positiveControl = normalControl(positiveTop)
+    val negativeControl = normalControl(negativeTop)
+    val normalRight = Mux(d(79), negativeControl._2, positiveControl._2)
+    val normalShift = Mux(d(79), negativeControl._1, positiveControl._1)
+    val subnormalThreshold = prefixAdd((-125).S(11.W).asUInt, ~r2.exp.asUInt, 11).asSInt
     val subnormal = topBit.zext.pad(11) < subnormalThreshold
     s3.shift := Mux(subnormal, tinyShift, normalShift)
     s3.right := Mux(subnormal, tinyRight, normalRight)
@@ -551,12 +636,13 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
     s3.meta := r2.meta
 
     // -- EX4: shared FP normalization/rounding, integer bypass and registered writeback --
-    val (floatBits, floatFlags) = finish(r3)
+    val rounded = normalized.getOrElse(normalize(r3))
+    val (floatBits, floatFlags) = round(rounded)
     val s4 = Wire(new MultiplyResponse(tagWidth))
-    s4.res := Mux(r3.meta.fp, floatBits, r3.integer)
-    s4.fflags := Mux(r3.meta.fp, floatFlags, 0.U)
-    s4.tag := r3.meta.tag
-    io.wbInput.valid := advance && v3 && active
+    s4.res := Mux(rounded.meta.fp, floatBits, rounded.integer)
+    s4.fflags := Mux(rounded.meta.fp, floatFlags, 0.U)
+    s4.tag := rounded.meta.tag
+    io.wbInput.valid := advance && valid(valid.size - 2) && active
     io.wbInput.bits.res := s4.res
     io.wbInput.bits.tag := MixArithWakeTag.fromUInt(s4.tag)
     when(io.in.valid && active) {
@@ -565,5 +651,12 @@ class MulBooth2Wallce(val tagWidth: Int = 32) extends Module {
         assert(req.bSigned === (!req.fp && op =/= MULHU && op =/= MULHSU))
     }
     // Data contents are don't-care after flush; keep flush out of every wide register D path.
-    when(advance) { r1 := s1; r2 := s2; r3 := s3; r4 := s4 }
+    // Validity still advances through bubbles. Only the unowned payload holds;
+    // every occupied stage advances at the original edge, including under stalls.
+    def payloadAdvance(owned: Bool): Bool = advance && (if (holdInvalidData) owned else true.B)
+    when(payloadAdvance(io.in.valid)) { r1 := s1 }
+    when(payloadAdvance(valid(0))) { r2 := s2 }
+    when(payloadAdvance(valid(1))) { r3 := s3 }
+    when(payloadAdvance(valid(valid.size - 2))) { r4 := s4 }
+    normalized.foreach { register => when(payloadAdvance(valid(2))) { register := normalize(r3) } }
 }

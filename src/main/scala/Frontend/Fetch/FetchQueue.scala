@@ -78,19 +78,21 @@ class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
 
     var packetPcWord = previousPacketPcWord
     var packetNextPc = previousPacketNextPc
-    val dequeueRecords = Wire(Vec(dequeueWidth, new FrontendFtqRecord(p)))
-    val consumedStarts = Wire(Vec(dequeueWidth, Bool()))
+    val packetPcWords = Wire(Vec(dequeueWidth, UInt(30.W)))
+    val packetNextPcs = Wire(Vec(dequeueWidth, UInt(32.W)))
+    val packetStarts = VecInit(queue.io.deq.map(port => port.valid && port.bits.packetStart))
+    val packetRanks = (0 until dequeueWidth).map { lane =>
+        val priorStarts = PopCount(packetStarts.take(lane))
+        VecInit((0 until dequeueWidth).map(index => priorStarts === index.U))
+    }
     for (lane <- 0 until dequeueWidth) {
-        val priorPacketStarts = PopCount((0 until lane).map { prior =>
-            queue.io.deq(prior).valid && queue.io.deq(prior).bits.packetStart
-        })
-        val recordSelect = VecInit((0 until dequeueWidth).map(index => priorPacketStarts === index.U))
+        val recordSelect = packetRanks(lane)
         val record = Mux1H(recordSelect, records.io.deq.map(_.bits))
-        dequeueRecords(lane) := record
-        val packetStart = queue.io.deq(lane).valid && queue.io.deq(lane).bits.packetStart
-        consumedStarts(lane) := queue.io.deq(lane).fire && packetStart
+        val packetStart = packetStarts(lane)
         packetPcWord = Mux(packetStart, record.train.pcWord, packetPcWord)
         packetNextPc = Mux(packetStart, record.nextPc, packetNextPc)
+        packetPcWords(lane) := packetPcWord
+        packetNextPcs(lane) := packetNextPc
         io.out(lane).valid := queue.io.deq(lane).valid
         io.out(lane).bits.slot := queue.io.deq(lane).bits.slot
         io.out(lane).bits.packetStart := queue.io.deq(lane).bits.packetStart
@@ -121,21 +123,19 @@ class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
                 "FetchQueue packet start must have an FTQ record")
         }
     }
-    val newestConsumedStart = VecInit((0 until dequeueWidth).map { lane =>
-        consumedStarts(lane) && !consumedStarts.drop(lane + 1).reduceOption(_ || _).getOrElse(false.B)
-    })
-    when(consumedStarts.asUInt.orR) {
-        previousPacketPcWord := Mux1H(newestConsumedStart, dequeueRecords.map(_.train.pcWord))
-        previousPacketNextPc := Mux1H(newestConsumedStart, dequeueRecords.map(_.nextPc))
+    val consumedClasses = FIFOUtil.prefixClasses(queue.io.deq.map(_.fire).toSeq)
+    when(queue.io.deq(0).fire) {
+        // Each candidate already contains the newest packet context for that
+        // prefix. Late admission selects only the accepted prefix length.
+        previousPacketPcWord := Mux1H(consumedClasses.drop(1), packetPcWords)
+        previousPacketNextPc := Mux1H(consumedClasses.drop(1), packetNextPcs)
     }
     for (record <- 0 until dequeueWidth) {
-        records.io.deq(record).ready := VecInit((0 until dequeueWidth).map { lane =>
-            val priorPacketStarts = PopCount((0 until lane).map { prior =>
-                queue.io.deq(prior).valid && queue.io.deq(prior).bits.packetStart
-            })
-            queue.io.deq(lane).fire && queue.io.deq(lane).bits.packetStart &&
-                priorPacketStarts === record.U
-        }).asUInt.orR
+        // A packet start already names its record rank. Grant that record
+        // directly when its instruction transfers; no accepted-length decode.
+        records.io.deq(record).ready := (0 until dequeueWidth).map { lane =>
+            queue.io.deq(lane).ready && packetStarts(lane) && packetRanks(lane)(record)
+        }.reduce(_ || _)
     }
     queue.io.flush := io.flush
     records.io.flush := io.flush

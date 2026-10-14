@@ -11,11 +11,11 @@ class PreDecodersIO(p: FrontendParams) extends Bundle {
     val record = Output(new FrontendFtqRecord(p))
 }
 
-class PreDecoders(p: FrontendParams) extends RawModule {
+class PreDecoders(p: FrontendParams, vectorEnabled: Boolean = false) extends RawModule {
     val io = IO(new PreDecodersIO(p))
     /* Modules */
     val finalSelect = Module(new FrontendPredictionSelect(p))
-    val decoders = Seq.fill(p.fetchWidth)(Module(new RegisterInfoDecoder))
+    val decoders = Seq.fill(p.fetchWidth)(Module(new RegisterInfoDecoder(vectorEnabled)))
 
     private def addWithoutCarry(a: UInt, b: UInt): UInt = BLevelPAdder32.sum(a, b, 0.U)
 

@@ -3,6 +3,7 @@ import chisel3.util._
 import ZirconConfig._
 
 class CommittedStore extends Bundle {
+    val vector = Bool()
     val paddr = UInt(34.W)
     val data = UInt(32.W)
     val mask = UInt(4.W)
@@ -12,6 +13,7 @@ class CommittedStore extends Bundle {
 }
 
 class StoreQueueEntry(bp: BackendParams) extends Bundle {
+    val vector = Bool()
     val valid = Bool()
     val identity = UInt(bp.sqWidth.W)
     val robIdx = UInt(CommitIndex.addressWidth(CommitParams().robEntries).W)
@@ -79,6 +81,10 @@ class StoreQueueIO(
     val flush = Input(Bool())
     val empty = Output(Bool())
     val committedEmpty = Output(Bool())
+    val vector = if (cp.vectorEnabled) Some(new Bundle {
+        val store = Flipped(Valid(new VectorStoreTask(bp)))
+        val ordering = Flipped(new VectorLoadOrdering(bp))
+    }) else None
 }
 
 /** Speculative Store queue with a committed boundary that survives recovery. */
@@ -149,7 +155,9 @@ class StoreQueue(
     var writePointer = tail
     for (lane <- 0 until dispatchWidth) {
         val incoming = io.enqueue.entries(lane)
-        val isStore = incoming.context.instruction.fu === DecodeUnit.Store.U
+        val isVectorStore = cp.vectorEnabled.B && incoming.context.instruction.fu === DecodeUnit.Vector.U &&
+            incoming.context.instruction.inst(6, 0) === "h27".U
+        val isStore = incoming.context.instruction.fu === DecodeUnit.Store.U || isVectorStore
         val isAtomic = incoming.context.instruction.fu === DecodeUnit.Atomic.U
         acceptedStores(lane) := io.enqueue.valid(lane) && writeStoreClass(lane) && !io.flush
         // Payload prewrite may run before another Commit resource admits this
@@ -167,6 +175,7 @@ class StoreQueue(
             storage(writeIndex).dataValid := false.B
             storage(writeIndex).exception := 0.U
             storage(writeIndex).atomic := isAtomic
+            storage(writeIndex).vector := isVectorStore
             storage(writeIndex).atomicOp := incoming.context.instruction.op
             storage(writeIndex).prd := incoming.destination.prd
         }
@@ -178,6 +187,26 @@ class StoreQueue(
         }
     }
     val enqueueCount = PopCount(acceptedStores)
+
+    io.vector.foreach { port =>
+        val index = slot(narrow(port.store.bits.sqIdx))
+        when(port.store.valid) {
+            val entry = storage(index)
+            assert(valid(index) && entry.identity === port.store.bits.sqIdx && entry.vector)
+            assert(entry.robIdx === port.store.bits.robIdx)
+            when(port.store.bits.last) {
+                entry.addressValid := true.B
+                entry.dataValid := true.B
+            }
+        }
+        val boundary = narrow(port.ordering.tail)
+        port.ordering.clear := !VecInit(storage.zipWithIndex.map { case (entry, index) =>
+            val identity = narrow(entry.identity)
+            val distance = Mux(boundary >= identity, boundary - identity,
+                boundary + ringEntries.U - identity)
+            valid(index) && distance =/= 0.U && distance <= entries.U
+        }).asUInt.orR
+    }
 
     io.address.ready := !io.flush
     io.data.ready := !io.flush
@@ -312,6 +341,15 @@ class StoreQueue(
     io.drain.bits.size := headEntry.size
     io.drain.bits.uncache := headEntry.uncache
     io.drain.bits.writeCombine := headEntry.writeCombine
+    io.drain.bits.vector := headEntry.vector
+    when(headEntry.vector) {
+        io.drain.bits.paddr := 0.U
+        io.drain.bits.data := 0.U
+        io.drain.bits.mask := 0.U
+        io.drain.bits.size := 0.U
+        io.drain.bits.uncache := false.B
+        io.drain.bits.writeCombine := false.B
+    }
 
     val atomicRetire = VecInit(io.commit.map { event =>
         val entry = storage(slot(narrow(event.bits)))
@@ -385,21 +423,22 @@ class StoreQueue(
     for (port <- 0 until 2) {
         val query = io.query(port).request
         val boundaryOH = query.bits.sqTailOH
-        val boundary = OHToUInt(boundaryOH)
         val boundarySlotOH = VecInit((0 until entries).map { index =>
             boundaryOH(index) || boundaryOH(index + entries)
         }).asUInt
-        // The preceding 1..entries ring positions are older; the smaller distance wins.
-        val age = VecInit(storage.map { entry =>
-            val identity = entry.identity(pointerWidth - 1, 0)
-            Mux(boundary >= identity, boundary - identity,
-                boundary + ringEntries.U - identity)(pointerWidth - 1, 0)
-        })
+        // A physical slot has only two legal ring identities. Decode the older
+        // half-ring directly from the captured one-hot tail; no binary tail
+        // encoder, subtractor or age comparison lies on the forwarding select.
         val active = VecInit((0 until entries).map { index =>
-            valid(index) && age(index) =/= 0.U && age(index) <= entries.U
+            def older(identity: Int): Bool = VecInit((1 to entries).map(distance =>
+                boundaryOH((identity + distance) % ringEntries))).asUInt.orR
+            val identity = narrow(storage(index).identity)
+            valid(index) && (identity === index.U && older(index) ||
+                identity === (index + entries).U && older(index + entries))
         })
         val wordMatch = VecInit((0 until entries).map { index =>
-            queryAddressValid(index) && queryPaddr(index)(33, 2) === query.bits.wordAddress
+            !storage(index).vector && queryAddressValid(index) &&
+                queryPaddr(index)(33, 2) === query.bits.wordAddress
         })
         val winnerStage = Reg(Vec(4, UInt(entries.W)))
         val unknownStage = Reg(Bool())
@@ -414,12 +453,19 @@ class StoreQueue(
                 active(index) && wordMatch(index) && queryMask(index)(byte) && query.bits.mask(byte)
             }).asUInt
             val lowerHits = hits & beforeBoundary
-            val lowerWinner = Reverse(PriorityEncoderOH(Reverse(lowerHits)))
-            val wrapWinner = Reverse(PriorityEncoderOH(Reverse(hits)))
-            winnerStage(byte) := Mux(lowerHits.orR, lowerWinner, wrapWinner)
+            // Before-tail slots are younger than wrapped slots. Determine each
+            // winner directly so word matches do not cross two priority trees
+            // followed by a global lower-partition selection mux.
+            val lowerExists = lowerHits.orR
+            winnerStage(byte) := VecInit((0 until entries).map { index =>
+                val higher = if (index == entries - 1) false.B else hits(entries - 1, index + 1).orR
+                val higherLower = if (index == entries - 1) false.B else lowerHits(entries - 1, index + 1).orR
+                val blocked = higherLower || !beforeBoundary(index) && (lowerExists || higher)
+                hits(index) && !blocked
+            }).asUInt
         }
         unknownStage := VecInit((0 until entries).map { index =>
-            active(index) && !queryAddressValid(index)
+            active(index) && (!queryAddressValid(index) || storage(index).vector)
         }).asUInt.orR
         resultSlot := query.bits.slot
         when(io.flush) {

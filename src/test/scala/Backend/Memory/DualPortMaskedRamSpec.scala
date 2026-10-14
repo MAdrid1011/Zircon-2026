@@ -5,16 +5,17 @@ import org.scalatest.freespec.AnyFreeSpec
 
 import scala.util.Random
 
-class DualPortRamHarness(lanes: Int, laneBits: Int) extends Module {
+class DualPortRamHarness(lanes: Int, laneBits: Int, depth: Int = 16,
+    backends: Seq[DualPortRamBackend] = Seq(DualPortRamBackend.Vivado, DualPortRamBackend.Registers)) extends Module {
     val io = IO(new Bundle {
-        val address = Input(Vec(2, UInt(4.W)))
+        val address = Input(Vec(2, UInt(log2Ceil(depth).W)))
         val enable = Input(Vec(2, Bool()))
         val mask = Input(Vec(2, UInt(lanes.W)))
         val data = Input(Vec(2, UInt((lanes * laneBits).W)))
-        val result = Output(Vec(2, Vec(2, UInt((lanes * laneBits).W))))
+        val result = Output(Vec(backends.size, Vec(2, UInt((lanes * laneBits).W))))
     })
-    Seq(DualPortRamBackend.Vivado, DualPortRamBackend.Registers).zipWithIndex.foreach { case (backend, i) =>
-        val ram = Module(new DualPortMaskedRam(16, lanes, laneBits, backend))
+    backends.zipWithIndex.foreach { case (backend, i) =>
+        val ram = Module(new DualPortMaskedRam(depth, lanes, laneBits, backend))
         ram.io.clka := clock
         ram.io.addra := io.address(0)
         ram.io.addrb := io.address(1)
@@ -30,6 +31,39 @@ class DualPortRamHarness(lanes: Int, laneBits: Int) extends Module {
 }
 
 class DualPortMaskedRamSpec extends AnyFreeSpec with ChiselSim {
+    for ((lanes, bits) <- Seq((1, 25), (32, 8))) {
+        s"128-row BSG $lanes x $bits Cache RAM matches shared register timing and byte masks" in {
+            simulate(new DualPortRamHarness(lanes, bits, 128,
+                Seq(DualPortRamBackend.BSG, DualPortRamBackend.Registers))) { dut =>
+                val rng = new Random(20261013L + lanes)
+                val memory = Array.fill(128)(BigInt(0))
+                val held = Array(0, 0)
+                def step(a: Int, b: Int, ena: Boolean, enb: Boolean, mask: BigInt, data: BigInt): Unit = {
+                    dut.io.address(0).poke(a); dut.io.address(1).poke(b)
+                    dut.io.enable(0).poke(ena); dut.io.enable(1).poke(enb)
+                    dut.io.mask(0).poke(mask); dut.io.mask(1).poke(0)
+                    dut.io.data(0).poke(data); dut.io.data(1).poke(0)
+                    if (ena) {
+                        held(0) = a
+                        for (lane <- 0 until lanes if mask.testBit(lane)) {
+                            val m = ((BigInt(1) << bits) - 1) << (lane * bits)
+                            memory(a) = (memory(a) & ~m) | (data & m)
+                        }
+                    }
+                    if (enb) held(1) = b
+                    dut.clock.step()
+                    for (backend <- 0 until 2; port <- 0 until 2)
+                        dut.io.result(backend)(port).expect(memory(held(port)))
+                }
+                for (a <- 0 until 128) step(a, 0, true, true, (BigInt(1) << lanes) - 1, 0)
+                for (_ <- 0 until 512)
+                    step(rng.nextInt(128), rng.nextInt(128), rng.nextBoolean(), rng.nextBoolean(),
+                        BigInt(lanes, rng), BigInt(lanes * bits, rng))
+                step(127, 127, true, true, 0, 0)
+                step(127, 0, true, false, (BigInt(1) << lanes) - 1, 1)
+            }
+        }
+    }
     for ((lanes, laneBits) <- Seq((1, 23), (1, 25), (32, 8))) {
         s"$lanes lanes x $laneBits bits: Vivado and register models preserve the original address-register timing" in {
             simulate(new DualPortRamHarness(lanes, laneBits)) { dut =>

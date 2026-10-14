@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MEMORY = ROOT / 'eda/platforms/nangate45/memory'
 PATTERN = re.compile(r'SinglePortMaskedRam_(\d+)_(\d+)_(\d+)')
 PREDICTOR_PATTERN = re.compile(r'PredictorBsgFakeram_(\d+)_(\d+)')
+CACHE_PATTERN = re.compile(r'BsgFakeram1RW1R_(\d+)_(25|32)\b')
 DUAL_PORT_MACROS = (
     ("fakeram45_1rw1r_16x25", 16, 25, 0),
     ("fakeram45_1rw1r_16x32", 16, 32, 4),
@@ -255,10 +256,10 @@ def _dual_port_lef(name, depth, width, mask_width, area):
     return '\n'.join(lines)
 
 
-def _predictor_wrapper(depth, width):
-    name = f'PredictorBsgFakeram_{depth}_{width}'
-    macro = f'fakeram45_1rw1r_{depth}x{width}'
+def _dual_port_wrapper(name, macro, depth, width, mask_width=0):
     address_width = max(1, (depth - 1).bit_length())
+    mask_port = f'    input [{mask_width - 1}:0] wmask0,\n' if mask_width else ''
+    mask_connection = ', .wmask0(wmask0)' if mask_width else ''
     return f'''module {name} (
     input clock,
     input csb0,
@@ -267,7 +268,7 @@ def _predictor_wrapper(depth, width):
     input [{address_width - 1}:0] addr0,
     input [{address_width - 1}:0] addr1,
     input [{width - 1}:0] din0,
-    output [{width - 1}:0] dout0,
+{mask_port}    output [{width - 1}:0] dout0,
     output [{width - 1}:0] dout1
 );
     wire csb0_buffered;
@@ -287,9 +288,14 @@ def _predictor_wrapper(depth, width):
     {macro} ram (
         .clock(clock), .csb0(csb0_buffered), .csb1(csb1_buffered), .web0(web0_buffered),
         .addr0(addr0_buffered), .addr1(addr1_buffered),
-        .din0(din0), .dout0(dout0), .dout1(dout1)
+        .din0(din0){mask_connection}, .dout0(dout0), .dout1(dout1)
     );
 endmodule'''
+
+
+def _predictor_wrapper(depth, width, macro=None):
+    return _dual_port_wrapper(f'PredictorBsgFakeram_{depth}_{width}',
+                              macro or f'fakeram45_1rw1r_{depth}x{width}', depth, width)
 
 
 def generate(rtl, output):
@@ -300,6 +306,11 @@ def generate(rtl, output):
         tuple(map(int, match.groups()))
         for path in rtl.glob('*.sv')
         for match in PREDICTOR_PATTERN.finditer(path.read_text())
+    })
+    cache_shapes = sorted({
+        tuple(map(int, match.groups()))
+        for path in rtl.glob('*.sv')
+        for match in CACHE_PATTERN.finditer(path.read_text())
     })
     for path in sorted(rtl.glob('SinglePortMaskedRam_*.sv')):
         match = PATTERN.fullmatch(path.stem)
@@ -367,10 +378,25 @@ def generate(rtl, output):
     known_dual_port = {name for name, _, _, _ in dual_port_macros}
     for depth, width in predictor_shapes:
         name = f'fakeram45_1rw1r_{depth}x{width}'
+        # A masked Cache interface and an unmasked predictor interface can
+        # have the same shape; each must retain its own Liberty pin contract.
+        if any(n == name and mask for n, _, _, mask in dual_port_macros):
+            name += '_unmasked'
         if name not in known_dual_port:
             dual_port_macros.append((name, depth, width, 0))
             known_dual_port.add(name)
-        wrappers.append(_predictor_wrapper(depth, width))
+        wrappers.append(_predictor_wrapper(depth, width, name))
+
+    for depth, width in cache_shapes:
+        name = f'fakeram45_1rw1r_{depth}x{width}'
+        mask_width = 4 if width == 32 else 0
+        if any(n == name and mask != mask_width for n, _, _, mask in dual_port_macros):
+            name += '_masked'
+        if name not in known_dual_port:
+            dual_port_macros.append((name, depth, width, mask_width))
+            known_dual_port.add(name)
+        wrappers.append(_dual_port_wrapper(f'BsgFakeram1RW1R_{depth}_{width}',
+                                           name, depth, width, mask_width))
 
     for name, depth, width, mask_width in dual_port_macros:
         exact_depth = [macro for macro in macros if macro['depth'] == depth]

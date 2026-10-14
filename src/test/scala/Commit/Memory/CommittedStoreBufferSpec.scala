@@ -2,8 +2,37 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
 class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
+    "a vector token serializes wide drain with adjacent scalar Stores and blocks Load forwarding" in {
+        simulate(new StoreBuffer(cp = ZirconConfig.CommitParams(vectorEnabled = true))) { dut =>
+            initialize(dut)
+            val vector = dut.io.vector.get
+            vector.start.ready.poke(false); vector.done.poke(false)
+            enqueue(dut, 0x1000, 0x12345678, 15)
+            dut.io.enqueue.bits.vector.poke(true)
+            enqueue(dut, 0, 0, 0)
+            dut.io.enqueue.bits.vector.poke(false)
+            enqueue(dut, 0x1004, 0x76543210, 15)
+            val query = dut.io.query(0).request
+            query.valid.poke(true); query.bits.wordAddress.poke(0x1000 >> 2); query.bits.mask.poke(15)
+            dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(true)
+            dut.io.store.request.ready.poke(true); dut.clock.step()
+            dut.io.store.response.valid.poke(true); vector.start.ready.poke(true)
+            vector.start.valid.expect(true); dut.io.store.request.valid.expect(false)
+            dut.clock.step(); dut.io.store.response.valid.poke(false)
+            for (_ <- 0 until 4) {
+                dut.io.store.request.valid.expect(false); vector.start.valid.expect(false)
+                dut.clock.step()
+            }
+            vector.done.poke(true)
+            dut.io.store.request.valid.expect(true); dut.io.store.request.bits.paddr.expect(0x1004)
+            dut.clock.step(); vector.done.poke(false)
+            dut.io.store.response.valid.poke(true); dut.clock.step(); dut.io.store.response.valid.poke(false)
+            dut.io.empty.expect(true); dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(false)
+        }
+    }
     private def initialize(dut: StoreBuffer): Unit = {
         dut.io.enqueue.valid.poke(false)
+        dut.io.enqueue.bits.vector.poke(false)
         dut.io.store.request.ready.poke(false)
         dut.io.store.response.valid.poke(false)
         dut.io.store.response.bits.exception.poke(0)

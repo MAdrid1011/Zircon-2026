@@ -14,6 +14,8 @@ class DCacheMissEntry(p: DCacheParams) extends DLoadRequest(p) {
     val storeData = UInt(32.W)
     val storeMask = UInt(4.W)
     val storeSize = UInt(2.W)
+    val storeLine = UInt(l1LineBits.W)
+    val storeLineMask = UInt(l1Line.W)
     val victimValid = Bool()
     val victimLine = UInt((34 - l1Offset).W)
     val victimDirty = Bool()
@@ -50,6 +52,7 @@ class DCacheMissUnitIO(p: DCacheParams) extends Bundle {
     val install = Decoupled(new DCacheInstall)
     val complete = Decoupled(new DCacheMissCompletion(p))
     val busy = Output(Bool())
+    val wideLoadPending = Output(UInt(2.W))
 }
 
 /** One outstanding cached refill or ordered uncached access.
@@ -92,10 +95,11 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
         )
     }).asUInt
     val storeWord = entry.paddr(l1Offset - 1, 2)
-    val storeLineMask = VecInit.tabulate(l1Line) { byte =>
+    val scalarStoreLineMask = VecInit.tabulate(l1Line) { byte =>
         storeWord === (byte / 4).U && entry.storeMask(byte % 4)
     }.asUInt
-    val storeLineData = Fill(l1Line / 4, entry.storeData)
+    val storeLineMask = Mux(entry.wide, entry.storeLineMask, scalarStoreLineMask)
+    val storeLineData = Mux(entry.wide, entry.storeLine, Fill(l1Line / 4, entry.storeData))
     val installedLine = VecInit((0 until l1Line).map { byte =>
         Mux(storeLineMask(byte), storeLineData(8 * byte + 7, 8 * byte), line(8 * byte + 7, 8 * byte))
     }).asUInt
@@ -131,6 +135,8 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
     io.complete.bits.lane := entry.lane
     io.complete.bits.preserve := preserve
     io.complete.bits.response.slot := entry.slot
+    io.complete.bits.response.wide := entry.wide
+    io.complete.bits.response.line := line
     io.complete.bits.response.data := extend(mergedWord, entry.mtype)
     io.complete.bits.response.exception := Mux(error, 5.U, 0.U)
     io.complete.bits.response.retry := false.B
@@ -138,6 +144,8 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
     io.complete.bits.response.atomic := entry.atomic
     io.complete.bits.storeResponse.exception := Mux(error, 7.U, 0.U)
     io.busy := state =/= idle
+    io.wideLoadPending := Mux(io.busy && entry.wide && !entry.store,
+        UIntToOH(entry.lane, 2), 0.U)
 
     switch(state) {
         is(idle) {

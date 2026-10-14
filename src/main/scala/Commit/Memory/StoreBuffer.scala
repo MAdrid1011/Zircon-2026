@@ -18,6 +18,7 @@ class StoreBufferIO(cp: CommitParams, cache: DCacheParams) extends Bundle {
     val query = Vec(2, new StoreBufferQueryIO(cache))
     val responseError = Valid(UInt(4.W))
     val empty = Output(Bool())
+    val vector = if (cp.vectorEnabled) Some(new VectorStoreDrain) else None
 }
 
 /** Architectural stores wait here while DCache services them in program order. */
@@ -60,22 +61,36 @@ class StoreBuffer(
     val newestOH = RegInit(1.U(entries.W))
     val count = RegInit(0.U(log2Ceil(entries + 1).W))
     val outstanding = RegInit(false.B)
+    val vectorOutstanding = if (cp.vectorEnabled) Some(RegInit(false.B)) else None
 
-    val responseFire = io.store.response.fire
+    val responseFire = Mux(vectorOutstanding.getOrElse(false.B),
+        io.vector.map(_.done).getOrElse(false.B), io.store.response.fire)
     val replaceOutstanding = responseFire && count > 1.U
     io.enqueue.ready := count < entries.U || responseFire
-    io.store.request.valid := (headOH & valid.asUInt).orR && !outstanding || replaceOutstanding
+    val offer = (headOH & valid.asUInt).orR && !outstanding || replaceOutstanding
     val request = Mux(replaceOutstanding, queue.io.deq(1).bits, queue.io.deq(0).bits)
+    val vectorRequest = if (cp.vectorEnabled) request.vector else false.B
+    io.store.request.valid := offer && !vectorRequest
+    io.vector.foreach { port =>
+        port.start.valid := offer && vectorRequest
+        port.start.bits := true.B
+    }
     io.store.request.bits.paddr := request.paddr
+    io.store.request.bits.wide := false.B
+    io.store.request.bits.line := 0.U
+    io.store.request.bits.lineMask := 0.U
     io.store.request.bits.data := request.data
     io.store.request.bits.mask := request.mask
     io.store.request.bits.size := request.size
     io.store.request.bits.uncache := request.uncache
     io.store.request.bits.writeCombine := request.writeCombine
-    io.store.response.ready := outstanding
-    when(io.store.request.fire =/= responseFire) {
-        outstanding := io.store.request.fire
+    io.store.response.ready := outstanding && !vectorOutstanding.getOrElse(false.B)
+    val requestFire = io.store.request.fire || io.vector.map(_.start.fire).getOrElse(false.B)
+    when(requestFire =/= responseFire) {
+        outstanding := requestFire
     }
+    vectorOutstanding.foreach(flag => when(requestFire) { flag := vectorRequest }
+        .elsewhen(responseFire) { flag := false.B })
     queue.io.deq(0).ready := responseFire
     for (position <- 0 until entries) {
         when(responseFire && headOH(position)) { valid(position) := false.B }
@@ -90,7 +105,7 @@ class StoreBuffer(
         count := Mux(io.enqueue.fire, count + 1.U, count - 1.U)
     }
     io.empty := count === 0.U
-    io.responseError.valid := responseFire && io.store.response.bits.exception.orR
+    io.responseError.valid := io.store.response.fire && io.store.response.bits.exception.orR
     io.responseError.bits := io.store.response.bits.exception
 
     val newerThan = VecInit.tabulate(entries, entries) { (candidate, older) =>
@@ -110,7 +125,8 @@ class StoreBuffer(
         val query = io.query(port).request
         val matches = Wire(Vec(entries, Bool()))
         for (position <- 0 until entries) {
-            matches(position) := valid(position) && storage(position).paddr(33, 2) === query.bits.wordAddress
+            matches(position) := valid(position) && !storage(position).vector &&
+                storage(position).paddr(33, 2) === query.bits.wordAddress
         }
         val bytes = Wire(Vec(4, UInt(8.W)))
         val mask = Wire(Vec(4, Bool()))
@@ -139,7 +155,10 @@ class StoreBuffer(
         io.query(port).response.bits.slot := resultSlot
         io.query(port).response.bits.data := bytes.asUInt
         io.query(port).response.bits.mask := resultMask
-        io.query(port).response.bits.blocked := false.B
+        io.query(port).response.bits.blocked := (if (cp.vectorEnabled)
+            RegNext(VecInit(storage.zipWithIndex.map { case (entry, index) =>
+                valid(index) && entry.vector
+            }).asUInt.orR, false.B) else false.B)
     }
 
     assert(count <= entries.U)

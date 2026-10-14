@@ -2,7 +2,15 @@
 
 Zircon-2026 的存储系统包含独立 ICache 与 DCache、ITLB 与 DTLB、共享 Sv32 PTW、偏非包含式
 L2 Cache，以及连接外部 AXI4 主接口的 `L2AXI4Bridge`。L1 与 L2 使用 64 B Cache Line，
-物理地址宽度为 34 位。
+系统配置的物理地址宽度为 34 位。性能配置使用 32 位直接物理地址，不例化 TLB 与 PTW。
+
+| 配置 | ICache | DCache | L2 | AXI4 数据宽度 |
+| --- | ---: | ---: | ---: | ---: |
+| `system` | 2 KiB | 2 KiB | 8 KiB | 64 bit |
+| `performance` | 2 KiB | 16 KiB | 32 KiB | 256 bit |
+
+两种配置使用相同 Cache 模块与 64 B Line。性能配置扩展 DCache 的宽数据请求和响应，
+使向量 Load/Store 复用已有 RAM 端口与 miss 单元；标量访问仍保持原来的字节语义。
 
 ## L1 Cache
 
@@ -22,6 +30,17 @@ Store Address 同时发生 TLB miss，共享的缺页请求通道先服务 Load�
 DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；Store miss 先取得整行
 再合并字节 mask。DCache 使用单项 miss 单元，支持无冲突命中的 hit-under-miss；同一资源冲突
 的 Load 返回 retry，由原发射队列表项重发。
+
+性能配置在命中时每拍可处理一个 256 bit 向量访问。对齐、未屏蔽的完整寄存器组按 64 B
+Line 发起请求，返回行通过四项响应缓冲分两拍写入相邻的 256 bit 寄存器；每个在途请求
+预约一个响应槽，空缓冲可直接将返回数据送入写回寄存器。其他访问按元素、寄存器组和
+Cache Line 拆分。Load 在请求前等待更老 Store
+排空，避免宽读取遗漏尚未写入 Cache 的数据。被恢复取消的请求保留所有权直到返回，
+返回值不写入向量 RF。
+
+向量 Store 的数据与字节 mask 保存在独立宽缓冲中，程序顺序仍由原 SQ 和 Store Buffer
+管理。退休后，Store Buffer 授权宽缓冲访问 DCache；最后一个请求完成后交还写口。
+stride、indexed 和 segment Store 展开为有序元素任务，保持地址重叠时的程序顺序。
 
 原子操作只允许对可缓存、自然对齐的 32 位字执行。原子执行单元在提交授权后独占 LS1 Load
 端口和 DCache Store 端口，以先读后写方式完成 AMO；不满足 PMA 或对齐要求的请求产生访存异常。
@@ -61,7 +80,8 @@ I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、un
 PMA 根据物理地址产生 cacheable、uncached memory 或 device 属性。TLB refill 时把静态 PMA
 属性写入表项；地址翻译关闭时，PMA 与直接映射路径并行计算。Device 和普通 uncached 请求
 绕过 Cache line 分配，以单个 32 位访问放在 64 位 AXI 数据 beat 的对应 lane 中送入下级接口；
-Cache line refill/writeback 则按 64 位 beat 传输。
+Cache line refill/writeback 在系统配置中按 64 位 beat 传输，在性能配置中按 256 位 beat 传输。
+可合并写在两种总线宽度下均使用 8 字节 AXI transfer，设备请求保持原始访问尺寸。
 
 `0xa2000000` 至 `0xa2ffffff` 是面向设备描述符和连续控制数据的可合并写窗口。已提交的
 32 位 Store 在 DCache 中进入 8 beat 写合并队列；同一 64 位 beat 的两个字按字节 mask 合并，

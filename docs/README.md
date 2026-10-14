@@ -13,6 +13,7 @@
 ## 模块设计
 
 - [处理器顶层](Core.md)：整核连接、外部接口、恢复与维护控制
+- [SIMD8 性能核心](PerformanceCore.md)：双配置、非特权运行环境、向量执行与程序测量
 - [前端](Frontend.md)：取指流水、分支预测、ICache、ITLB 与 Fetch Queue
 - [中端](Middleend.md)：Decode、Rename、ReadyBoard 与 Dispatch
 - [后端](Backend.md)：Issue Queue、执行流水线、PRF、旁路与唤醒

@@ -53,7 +53,9 @@ class FrontendPredictionSelect(
     io.prediction.taken := taken
     io.prediction.mask := mask
     io.prediction.backward := io.backward & io.conditional.asUInt
-    val sequential = Cat(io.pcBlock + 1.U, 0.U(p.blockBits.W))
+    // The full next PC feeds folded predictor addresses. Reuse the parallel
+    // adder so a carry across the block address does not serialize those folds.
+    val sequential = FrontendMath.sequential(Cat(io.pcBlock, 0.U(p.blockBits.W)), p)
     // Execution handles an actually taken misaligned target; do not issue an unaligned speculative fetch.
     io.prediction.nextPc := (if (assumeAlignedTargets) {
         Mux1H(taken.asBools :+ !taken.orR, io.targets :+ sequential)

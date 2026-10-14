@@ -5,12 +5,14 @@ import ZirconConfig.RegfileParams
 class RegfileReadIO(p: RegfileParams) extends Bundle {
     val addr = Input(UInt(p.addrWidth.W))
     val data = Output(UInt(p.dataWidth.W))
+    val oneHot = if (p.oneHotRead) Some(Input(UInt(p.numEntries.W))) else None
 }
 
 class RegfileWriteIO(p: RegfileParams) extends Bundle {
     val addr = Input(UInt(p.addrWidth.W))
     val we = Input(Bool())
     val data = Input(UInt(p.dataWidth.W))
+    val bytes = if (p.byteWrite) Some(Input(UInt((p.dataWidth / 8).W))) else None
 }
 
 class RegfileDirectWriteIO(p: RegfileParams) extends Bundle {
@@ -31,6 +33,7 @@ class RegfileIO(
     val readBypassOverrideAddr = readBypassOverridePort.map(_ => Input(UInt(p.addrWidth.W)))
     val selectiveReadBypass = selectiveReadBypassPort.map(_ => Input(new RegfileWriteIO(p)))
     val readHold = if (p.holdReads) Some(Input(Vec(p.numReadPorts, Bool()))) else None
+    val observation = if (p.observe) Some(Output(Vec(p.numEntries, UInt(p.dataWidth.W)))) else None
 }
 
 /** Asynchronous reads, synchronous writes, and same-cycle WB bypass.
@@ -55,10 +58,17 @@ class Regfile(
     val io = IO(new RegfileIO(p, directWritePort, readBypassOverridePort, selectiveReadBypassPort))
     // Keep the architectural p0 read constant; its unobservable storage row is removed by synthesis.
     private val firstWritable = if (p.hasZeroReg) 1 else 0
-    private val data = RegInit(VecInit.fill(p.numEntries)(0.U(p.dataWidth.W)))
+    private val byteData = if (p.byteWrite) Some(Reg(Vec(p.numEntries, Vec(p.dataWidth / 8, UInt(8.W))))) else None
+    private val data = if (p.byteWrite) VecInit(byteData.get.map(_.asUInt))
+        else if (p.initialize) RegInit(VecInit.fill(p.numEntries)(0.U(p.dataWidth.W)))
+        else Reg(Vec(p.numEntries, UInt(p.dataWidth.W)))
     private val values = if (p.hasZeroReg) VecInit(Seq(0.U(p.dataWidth.W)) ++ data.toSeq.drop(1)) else data
+    io.observation.foreach(_ := values)
 
     io.read.foreach(r => assert(r.addr < p.numEntries.U, "PRF read address out of range"))
+    if (p.oneHotRead) io.read.foreach { read =>
+        assert(PopCount(read.oneHot.get) <= 1.U)
+    }
     io.write.foreach { w =>
         when(w.we) {
             assert(w.addr < p.numEntries.U, "PRF write address out of range")
@@ -85,7 +95,14 @@ class Regfile(
     }
 
     for ((write, port) <- io.write.zipWithIndex) {
-        if (directWritePort.contains(port)) {
+        if (p.byteWrite) {
+            require(directWritePort.isEmpty)
+            for (entry <- firstWritable until p.numEntries; byte <- 0 until p.dataWidth / 8) {
+                when(write.we && write.addr === entry.U && write.bytes.get(byte)) {
+                    byteData.get(entry)(byte) := write.data(8 * byte + 7, 8 * byte)
+                }
+            }
+        } else if (directWritePort.contains(port)) {
             val direct = io.directWrite.get
             when(write.we && direct.oneHot.orR) {
                 for (entry <- firstWritable until p.numEntries) {
@@ -97,9 +114,23 @@ class Regfile(
             when(write.we) { data(write.addr) := write.data }
         }
     }
+    if (p.byteWrite && p.initialize) {
+        when(reset.asBool) { byteData.get := 0.U.asTypeOf(byteData.get) }
+    }
 
     io.read.zipWithIndex.foreach { case (r, index) =>
-        val stored = if (overrideReadPorts.contains(index)) {
+        val stored = if (p.readBankEntries > 0) {
+            // Decode row and bank independently. The bank select drives only
+            // the final word mux, rather than every bit of every storage row.
+            val rowBits = log2Ceil(p.readBankEntries)
+            val rowOH = UIntToOH(r.addr(rowBits - 1, 0), p.readBankEntries)
+            val words = values.toSeq.grouped(p.readBankEntries).map(rows =>
+                Mux1H(rowOH.asBools, rows)).toSeq
+            if (words.size == 1) words.head else
+                Mux1H(UIntToOH(r.addr(p.addrWidth - 1, rowBits), words.size).asBools, words)
+        } else if (p.oneHotRead) {
+            Mux1H(r.oneHot.get, values)
+        } else if (overrideReadPorts.contains(index)) {
             Mux1H(UIntToOH(r.addr, p.numEntries).asBools, values.toSeq)
         } else values(r.addr)
         val hit = io.write.zipWithIndex.map { case (w, port) =>
@@ -108,8 +139,10 @@ class Regfile(
                 selected.we && selected.addr === r.addr
             } else if (readBypassOverridePort.contains(port) && overrideReadPorts.contains(index)) {
                 io.readBypassOverride.get && io.readBypassOverrideAddr.get === r.addr
-            } else {
+            } else if (p.readBypass) {
                 w.we && w.addr === r.addr
+            } else {
+                false.B
             }
         }
         val bypassData = io.write.zipWithIndex.map { case (w, port) =>

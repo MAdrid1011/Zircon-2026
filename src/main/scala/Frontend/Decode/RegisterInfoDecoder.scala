@@ -10,7 +10,7 @@ class RegisterInfoDecoderIO extends Bundle {
 }
 
 /** PD resolves operand domains and the architectural x1/x5 RAS hints. */
-class RegisterInfoDecoder extends RawModule {
+class RegisterInfoDecoder(vectorEnabled: Boolean = false) extends RawModule {
     val io = IO(new RegisterInfoDecoderIO)
     val inst = io.inst
     val opcode = inst(6, 0)
@@ -186,6 +186,11 @@ class RegisterInfoDecoder extends RawModule {
                 }
             }
         }
+    }
+
+    // FQ stores the operand domains for both ISAs before its output selection.
+    if (vectorEnabled) when(VectorDecoder.recognized(inst)) {
+        decoded := VectorDecoder.scalarOperands(inst)
     }
 
     /* Zero-Register Filtering */

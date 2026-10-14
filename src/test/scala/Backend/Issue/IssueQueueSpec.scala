@@ -183,7 +183,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
     "candidate-level arithmetic wakeup updates a waiting source in the issue cycle" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
-        simulate(new IssueQueue(backend, q, directWakeupCandidates = 2)) { dut =>
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 2, parallelSpeculationSummary = true)) { dut =>
             initialize(dut)
             enqueue(dut, Seq((1, DecodeUnit.ALU, 0, Some(9), false)))
             dut.io.issue.valid.expect(false)
@@ -491,6 +491,37 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.wakeup(0).prd.poke(0)
             dut.io.issue.valid.expect(true)
             dut.io.issue.bits.robIdx.expect(43)
+        }
+    }
+
+    "matching wakeup ports combine every failure and unresolved token" in {
+        for (profile <- Seq(IssueQueueProfile.ArithBranch, IssueQueueProfile.MixArith)) {
+            val q = IssueQueueParams(6, profile, wakeupPorts = 2,
+                replayEntries = if (profile == IssueQueueProfile.ArithBranch) 1 else 0)
+            simulate(new IssueQueue(backend, q, directWakeupCandidates = 1, parallelSpeculationSummary = true)) { dut =>
+                val fu = if (profile == IssueQueueProfile.ArithBranch) DecodeUnit.ALU else DecodeUnit.Multiply
+                for ((ordinaryMask, directMask, failure, ready) <- Seq(
+                    (0, 0, 0, true),
+                    (1, 2, 2, false),
+                    (2, 1, 2, false),
+                    (1, 2, 0, profile == IssueQueueProfile.ArithBranch))) {
+                    initialize(dut)
+                    dut.io.enq.valid.poke(1)
+                    packageEntry(dut.io.enq.candidates(0), 44, fu, sourceTag = Some(7), sourceReady = false)
+                    dut.io.wakeup(0).prd.poke(7); dut.io.wakeup(0).specMask.poke(ordinaryMask)
+                    dut.io.wakeup(1).prd.poke(9); dut.io.wakeup(1).specMask.poke(4)
+                    dut.io.directWakeup.get(0).valid.poke(true)
+                    dut.io.directWakeup.get(0).prd.poke(7); dut.io.directWakeup.get(0).specMask.poke(directMask)
+                    dut.io.speculation.failedMask.poke(failure)
+                    dut.clock.step()
+                    dut.io.enq.valid.poke(0)
+                    dut.io.wakeup.foreach(_.prd.poke(0))
+                    dut.io.directWakeup.get(0).valid.poke(false)
+                    dut.io.speculation.failedMask.poke(0)
+                    dut.io.issue.valid.expect(ready)
+                    if (ready) dut.io.issue.bits.sourceSpecMask(0).expect(ordinaryMask | directMask)
+                }
+            }
         }
     }
 
@@ -897,6 +928,53 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
             dut.io.occupancy.expect(0)
             dut.io.replayOccupancy.expect(1)
+        }
+    }
+
+    "registered replay capacity includes consecutive pending reservations and resolution" in {
+        val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, enqueueWidth = 3,
+            wakeupPorts = 1, replayEntries = 2)
+        simulate(new IssueQueue(backend, q, parallelSpeculationSummary = true)) { dut =>
+            initialize(dut)
+            dut.io.issue.ready.poke(true)
+            dut.io.enq.valid.poke(7)
+            for (lane <- 0 until 3) {
+                packageEntry(dut.io.enq.candidates(lane), 57 + lane, DecodeUnit.ALU,
+                    sourceTag = Some(10 + lane), sourceSpecMask = 1 << lane)
+            }
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(57)
+            dut.clock.step()
+            // One pending snapshot still leaves capacity for the next issue.
+            dut.io.replayOccupancy.expect(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(58)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(2)
+            dut.io.issue.valid.expect(false)
+            dut.io.speculation.resolvedMask.poke(1)
+            dut.clock.step()
+            dut.io.speculation.resolvedMask.poke(0)
+            dut.io.replayOccupancy.expect(1)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(59)
+            dut.clock.step()
+            dut.io.replayOccupancy.expect(2)
+            dut.io.flush.poke(true)
+            dut.clock.step()
+            dut.io.flush.poke(false)
+            dut.io.replayOccupancy.expect(0)
+            dut.io.occupancy.expect(0)
+            // A stale sampled reservation cannot consume post-flush capacity.
+            dut.io.enq.valid.poke(1)
+            packageEntry(dut.io.enq.candidates(0), 61, DecodeUnit.ALU,
+                sourceTag = Some(13), sourceSpecMask = 1)
+            dut.clock.step()
+            dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.io.issue.bits.robIdx.expect(61)
         }
     }
 

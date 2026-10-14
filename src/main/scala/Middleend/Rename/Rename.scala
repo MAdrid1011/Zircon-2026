@@ -50,19 +50,23 @@ class RenameIO(p: RenameParams) extends Bundle {
   * writes back. Read ports are write-first with respect to that Q-side group,
   * so the fixed pipeline boundary does not create a Rename bubble.
   */
-class Rename(val p: RenameParams = RenameParams()) extends Module {
+class Rename(val p: RenameParams = RenameParams(), maskUnusedOutputs: Boolean = true) extends Module {
     val io = IO(new RenameIO(p))
-    val fList = Module(new PRegFreeList(p.numPhys, p.renameWidth, p.commitWidth))
+    // Vector groups carry separate operand counts. Their unused tag outputs
+    // are unobservable, so count decode need not gate the shared RAT data.
+    val fList = Module(new PRegFreeList(p.numPhys, p.renameWidth, p.commitWidth,
+        p.numArch, maskUnusedTags = maskUnusedOutputs))
     val srat = Module(new SRat(
         p.indexWidth,
         p.renameWidth * (p.numSources + 1),
         p.renameWidth,
         p.commitWidth,
-        p.hasZeroReg
+        p.hasZeroReg,
+        p.numArch,
     ))
     val request = io.rinfo.map(r => r.request && (if (p.hasZeroReg) r.rd =/= 0.U else true.B))
     io.available := !request.reduce(_ || _) || fList.io.available
-    io.freeAvailable := fList.io.available
+    io.freeAvailable := fList.io.capacityPrefix(0)
     io.freePrefix := fList.io.availablePrefix
     val prepared = request.zipWithIndex.map { case (candidate, lane) =>
         candidate && io.prepare(lane) && !io.restore
@@ -83,7 +87,8 @@ class Rename(val p: RenameParams = RenameParams()) extends Module {
     }
 
     for (i <- 0 until p.renameWidth) {
-        io.pinfo(i).prd := Mux(prepared(i), fList.io.prd(i), 0.U)
+        io.pinfo(i).prd := (if (maskUnusedOutputs) Mux(prepared(i), fList.io.prd(i), 0.U)
+            else fList.io.prd(i))
         val r = io.rinfo(i)
         val logical = r.src.toSeq :+ r.rd
         for (s <- 0 to p.numSources) {
@@ -96,9 +101,10 @@ class Rename(val p: RenameParams = RenameParams()) extends Module {
             val bypass = hits.foldLeft(false.B)(_ || _)
             val value = if (i == 0) srat.io.readData(read)
             else Mux(bypass, Mux1H(winners, io.pinfo.take(i).map(_.prd)), srat.io.readData(read))
-            if (s == p.numSources) io.pinfo(i).pprd := Mux(valid, value, 0.U)
+            val selectedValue = if (maskUnusedOutputs) Mux(valid, value, 0.U) else value
+            if (s == p.numSources) io.pinfo(i).pprd := selectedValue
             else {
-                io.pinfo(i).prs(s) := Mux(valid, value, 0.U)
+                io.pinfo(i).prs(s) := selectedValue
             }
         }
         srat.io.preview(i).valid := io.preview(i).valid

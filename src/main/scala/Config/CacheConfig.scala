@@ -2,9 +2,11 @@ package ZirconConfig
 
 import chisel3.util._
 
-case class DCacheParams(loadEntries: Int = 8) {
+case class DCacheParams(loadEntries: Int = 8, sets: Int = 16, directPhysical: Boolean = false) {
     require(loadEntries >= 2 && isPow2(loadEntries))
+    require(sets >= 2 && isPow2(sets))
     val slotWidth: Int = log2Ceil(loadEntries)
+    val indexBits: Int = log2Ceil(sets)
 }
 
 case class L2CacheParams(

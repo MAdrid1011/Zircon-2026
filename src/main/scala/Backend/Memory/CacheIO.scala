@@ -5,6 +5,7 @@ import ZirconConfig.{CommitParams, DCacheParams}
 
 // The request carries the virtual address into S1; translated attributes are resolved before tag comparison.
 class DLoadRequest(val p: DCacheParams = DCacheParams()) extends Bundle {
+    val wide = Bool()
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
     val slot = UInt(p.slotWidth.W)
@@ -48,6 +49,8 @@ class DTLBMissRequest extends Bundle {
 }
 
 class DLoadResponse(val p: DCacheParams = DCacheParams()) extends Bundle {
+    val wide = Bool()
+    val line = UInt(l1LineBits.W)
     val slot = UInt(p.slotWidth.W)
     val data = UInt(32.W)
     val exception = UInt(4.W)
@@ -57,6 +60,7 @@ class DLoadResponse(val p: DCacheParams = DCacheParams()) extends Bundle {
 }
 
 class DLoadWBSelect(val p: DCacheParams = DCacheParams()) extends Bundle {
+    val wide = Bool()
     val slot = UInt(p.slotWidth.W)
     val exception = UInt(4.W)
     val retry = Bool()
@@ -65,6 +69,9 @@ class DLoadWBSelect(val p: DCacheParams = DCacheParams()) extends Bundle {
 }
 
 class DStoreRequest extends Bundle {
+    val wide = Bool()
+    val line = UInt(l1LineBits.W)
+    val lineMask = UInt(l1Line.W)
     val paddr = UInt(34.W)
     val data = UInt(32.W)
     val mask = UInt(4.W)
@@ -124,6 +131,8 @@ class DCacheLoadIO(p: DCacheParams) extends Bundle {
     val fixedLatency = Output(Bool())
     val wbSelect = chisel3.util.Valid(new DLoadWBSelect(p))
     val rsp = chisel3.util.Valid(new DLoadResponse(p))
+    // Wide requests have one local owner; canceled misses retain it until drain.
+    val widePending = Output(Bool())
 }
 
 class DCacheStoreIO extends Bundle {

@@ -64,9 +64,10 @@ def target_delay_ps(target_ns):
     return round(target_ns * 1000)
 
 
-def elaboration_command(output_dir):
+def elaboration_command(output_dir, profile="system"):
     """Build the synthesis elaboration command without simulation observability."""
-    return f"runMain Elaborate --bsg {shlex.quote(str(output_dir))}"
+    option = "" if profile == "system" else f" --profile={profile}"
+    return f"runMain Elaborate --bsg{option} {shlex.quote(str(output_dir))}"
 
 
 def validate_no_simulation_debug(rtl_sources):
@@ -174,7 +175,7 @@ def _synthesis_summary(target_dir, version, target_ns, elapsed, memory_bindings)
         raise RuntimeError("Yosys did not report a mapped ZirconCore area")
     return {
         "top": "ZirconCore",
-        "configuration": "BSG Fakeram-only logic timing, L2 sets=16",
+        "configuration": "BSG Fakeram-only logic timing",
         "target_period_ns": target_ns,
         "abc_delay_ps": target_delay_ps(target_ns),
         "yosys": version,
@@ -198,6 +199,7 @@ def _synthesis_summary(target_dir, version, target_ns, elapsed, memory_bindings)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "build/eda/nangate45")
+    parser.add_argument("--profile", choices=("system", "performance"), default="system")
     default_yosys = next(
         (
             str(candidate)
@@ -254,6 +256,8 @@ def main():
         metadata["constraints"]["clock_period_ns"],
     )
     output = args.output.resolve()
+    if args.profile == "performance" and args.output == ROOT / "build/eda/nangate45":
+        output = ROOT / "build/eda/nangate45-performance"
     rtl = output / "rtl"
     output.mkdir(parents=True, exist_ok=True)
     rtl.mkdir(parents=True, exist_ok=True)
@@ -265,7 +269,7 @@ def main():
         env.pop("ZIRCON_USE_EXTERNAL_VIVADO_RAM", None)
         env.pop("ZIRCON_INCLUDE_VIVADO_RAM_SOURCE", None)
         env.pop("ZIRCON_VIVADO_NATIVE_ADDERS", None)
-        command = elaboration_command(rtl)
+        command = elaboration_command(rtl, args.profile)
         elapsed["elaboration_seconds"] = run(
             ["sbt", "--batch", command], output / "elaboration.log", env=env
         )

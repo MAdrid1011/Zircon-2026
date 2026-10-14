@@ -373,6 +373,9 @@ object DecodeTable {
             )
             require(Set(DecodeRegister.None, Integer, Floating)(row.dest), s"${row.name}: invalid destination")
             require(row.immType >= 0 && row.immType <= DecodeImmediate.Fence, s"${row.name}: invalid immediate")
+            require(!Set(Multiply, Divide, FpMisc, System)(row.fu) ||
+                Set(DecodeImmediate.None, DecodeImmediate.CSR, DecodeImmediate.Fence)(row.immType),
+                s"${row.name}: MixArith immediate must fit its 17-bit interface")
             require(row.src1Sel >= 0 && row.src1Sel <= DecodeSource.Zero, s"${row.name}: invalid source selection")
             require(!row.rounding || row.usesFp, s"${row.name}: rounding requires floating operands")
             require(row.aqrl == (row.fu == Atomic), s"${row.name}: atomic ordering mismatch")
