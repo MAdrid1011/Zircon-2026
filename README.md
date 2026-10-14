@@ -32,7 +32,7 @@ FP32 数组计算。性能配置支持 Zve32f、VLEN=256 和八个 32 bit lane�
 > [!NOTE]
 > 系统配置已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
 > 输入、文件系统挂载和定时器路径验证。Nangate45 BSG 纯逻辑时序分析测得最长数据到达时间
-> 为 1.473745 ns；SIMD8 性能配置为 1.467417 ns。两种配置均在 1.5 ns 周期下完成时序闭合，
+> 为 1.473745 ns；SIMD8 性能配置为 1.471528 ns。两种配置均在 1.5 ns 周期下完成时序闭合，
 > 对应逻辑频率约 667 MHz。
 
 ## 架构概览
@@ -139,8 +139,8 @@ flowchart LR
 | ISA | `RV32IMF_Zicsr_Zicntr_Zve32f_Zvl256b` |
 | 向量宽度 / 元素宽度 | VLEN=256 / ELEN=32，八 lane |
 | 向量架构 / 物理寄存器 | 32 / 64 个 |
-| 向量计算 / 访存队列 | 12 / 8 项 |
-| ICache / DCache / L2 | 2 / 16 / 64 KiB，64 B Line |
+| 向量计算 / 访存队列 | 6 / 4 项 |
+| ICache / DCache / L2 | 2 / 16 / 32 KiB，64 B Line |
 | 外部 AXI4 | 256 bit，Cache Line 两个 beat |
 | 地址与运行环境 | 32 位直接物理寻址，裸机 C 程序 |
 
@@ -154,8 +154,8 @@ flowchart LR
 保留上游算法、数据集和校验。入口分别为 [SIMD 程序](RV-Software/simd/README.md) 和
 [CoreMark-PRO](RV-Software/coremark-pro/README.md)。
 
-相同硬件配置下，五项 RVV 程序相对标量的计算阶段加速比几何平均为 **3.159 倍**，
-SGEMM 加速为 **5.309 倍**；性能核心的标量 CoreMark 为 **5.177 CoreMark/MHz**。
+相同硬件配置下，五项 RVV 程序相对标量的计算阶段加速比几何平均为 **3.138 倍**，
+SGEMM 加速为 **5.306 倍**；性能核心的标量 CoreMark 为 **5.093 CoreMark/MHz**。
 各项周期、自动向量化结果与测量方法见 [性能测量](docs/PerformanceCore.md#性能测量)。
 
 ## 快速开始
