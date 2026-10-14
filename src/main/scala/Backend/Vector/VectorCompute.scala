@@ -30,6 +30,8 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
         val scalarAddress = Output(UInt(p.tagWidth.W))
         val scalarData = Input(UInt(32.W))
+        val scalarAvailable = Input(Bool())
+        val registerReady = Input(UInt(64.W))
         val roundingMode = Input(UInt(3.W))
         val writeback = Output(Valid(new VectorTaskWriteback))
         val completion = Decoupled(new VectorCompletion(p))
@@ -45,6 +47,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val busy = RegInit(false.B)
     val prepare = RegInit(0.U(2.W)) // 0=mask/rs1, 1=rs2, 2=collected task.
     val scalar = Reg(UInt(32.W))
+    val nextScalarAddress = RegInit(0.U(p.tagWidth.W))
     val registerVtype = Reg(UInt(32.W))
     val mask = Reg(UInt(256.W))
     val group = RegInit(0.U(3.W))
@@ -71,7 +74,11 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val lastGroup = isConfiguration || scalarMove || group +& 1.U === instruction.vector.destination.count
     val last = lastSubelement && lastGroup
 
-    io.scalarAddress := Mux(prepare === 1.U, instruction.scalar.prs(1), instruction.scalar.prs(0))
+    // While collecting vector groups, the existing scalar port can prepare the
+    // next IQ instruction. Capture its value at acceptance, ahead of RF collect.
+    nextScalarAddress := io.in.bits.scalar.prs(0)
+    io.scalarAddress := Mux(busy && prepare === 1.U, instruction.scalar.prs(1),
+        Mux(busy && prepare === 0.U, instruction.scalar.prs(0), nextScalarAddress))
     for (port <- 0 until 3) {
         // The next group is known at the preceding collection edge. Keep its
         // tag mux off the asynchronous RF-to-operand collection path.
@@ -91,6 +98,10 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
 
     val collectorValid = RegInit(false.B)
     val collector = Reg(new VectorComputeTask(p))
+    val configurationValid = RegInit(false.B)
+    val configurationHeld = RegInit(false.B)
+    val configurationResult = Reg(new VectorCompletion(p))
+    val configurationState = Reg(new VectorCSRState)
     val arithmetic = Module(new VectorArithmetic(p.robWidth, shareSerialMultiply))
     if (shareSerialMultiply) {
         arithmetic.io.serialMultiply.get <> io.serialMultiply.get
@@ -101,9 +112,17 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     arithmetic.io.in.valid := collectorValid && !io.flush
     arithmetic.io.in.bits := collector.arithmetic
     val collectorReady = !collectorValid || arithmetic.io.in.ready
+    val groupReady = (0 until 3).map(port =>
+        group >= instruction.vector.groups.sourceCount(port) || io.registerReady(readAddresses(port))).reduce(_ && _)
+    val configurationReady = !configurationValid || io.completion.ready && !arithmetic.io.out.valid
     io.readRequest := busy && (prepare =/= 2.U || collectorReady)
-    val collect = busy && prepare === 2.U && collectorReady && io.readAvailable && !io.flush
-    io.in.ready := !busy || collect && last
+    val collect = busy && prepare === 2.U &&
+        Mux(isConfiguration, configurationReady, collectorReady && groupReady && io.readAvailable) && !io.flush
+    val inputConfiguration = io.in.bits.vector.control.execution === VectorExecution.Configuration.U
+    val inputScalar = io.in.bits.vector.control.scalar ||
+        inputConfiguration && io.in.bits.scalar.inst(31, 30) =/= 3.U
+    val scalarTagReady = nextScalarAddress === io.in.bits.scalar.prs(0)
+    io.in.ready := (!busy || collect && last) && (!inputScalar || io.scalarAvailable && scalarTagReady)
     val incoming = WireDefault(0.U.asTypeOf(new VectorComputeTask(p)))
     incoming.address := Mux1H(groupOH, instruction.vector.destination.physical)
     incoming.firstSubelement := subelement === 0.U
@@ -201,8 +220,10 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val output = sideband.last
     val flags = RegInit(0.U(5.W))
     val combinedFlags = flags | arithmetic.io.out.bits.fflags
-    arithmetic.io.out.ready := !output.last || io.completion.ready
-    io.completion.valid := arithmetic.io.out.valid && output.last && !io.flush
+    val arithmeticCompletion = arithmetic.io.out.valid && output.last
+    val selectConfiguration = configurationValid && (configurationHeld || !arithmeticCompletion)
+    arithmetic.io.out.ready := !output.last || io.completion.ready && !selectConfiguration
+    io.completion.valid := (arithmeticCompletion || configurationValid) && !io.flush
     io.completion.bits.robIdx := arithmetic.io.out.bits.tag
     io.completion.bits.scalar := output.scalar
     io.completion.bits.retirement.configuration := output.configuration
@@ -210,8 +231,9 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     io.completion.bits.retirement.vtype := output.state.vtype
     io.completion.bits.retirement.fflags := combinedFlags
     io.completion.bits.retirement.saturated := false.B
-    io.configuration.valid := io.completion.fire && output.configuration
-    io.configuration.bits := output.state
+    when(selectConfiguration) { io.completion.bits := configurationResult }
+    io.configuration.valid := io.completion.fire && selectConfiguration
+    io.configuration.bits := configurationState
     io.writeback.valid := arithmetic.io.out.fire && output.writesVector && !io.flush
     io.writeback.bits.address := output.address
     io.writeback.bits.ready := output.lastSubelement
@@ -230,10 +252,25 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         busy := false.B
         collectorValid := false.B
         flags := 0.U
+        configurationValid := false.B
+        configurationHeld := false.B
     }.otherwise {
-        when(collectorReady) { collectorValid := collect }
+        when(io.completion.fire) { configurationHeld := false.B }
+            .elsewhen(selectConfiguration) { configurationHeld := true.B }
+        when(io.configuration.valid) { configurationValid := false.B }
+        when(collectorReady) { collectorValid := collect && !isConfiguration }
         when(collect) {
-            collector := incoming
+            when(isConfiguration) {
+                configurationValid := true.B
+                configurationState := incoming.state
+                configurationResult.robIdx := instruction.scalar.robIdx
+                configurationResult.scalar := incoming.scalar
+                configurationResult.retirement.configuration := true.B
+                configurationResult.retirement.vl := configuration.io.vl
+                configurationResult.retirement.vtype := configuration.io.vtype
+                configurationResult.retirement.fflags := 0.U
+                configurationResult.retirement.saturated := false.B
+            }.otherwise { collector := incoming }
             when(last) { busy := false.B }
             when(lastSubelement) {
                 group := group + 1.U
@@ -247,19 +284,19 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
                 .otherwise { subelement := subelement + 1.U }
         }
         when(busy && prepare === 0.U && io.readAvailable) {
-            scalar := io.scalarData
             mask := io.read(0).data.asUInt
-            prepare := Mux(isConfiguration, 1.U, 2.U)
+            prepare := 2.U
             readAddresses(0) := instruction.vector.source(0)(0)
-        }.elsewhen(busy && prepare === 1.U && io.readAvailable) {
+        }.elsewhen(busy && prepare === 1.U && io.scalarAvailable) {
             registerVtype := io.scalarData
             prepare := 2.U
         }
         when(io.in.fire) {
             instruction := io.in.bits
+            scalar := io.scalarData
             busy := true.B
-            prepare := Mux(io.in.bits.vector.control.scalar || io.in.bits.vector.groups.mask ||
-                io.in.bits.vector.control.execution === VectorExecution.Configuration.U, 0.U, 2.U)
+            prepare := Mux(inputConfiguration && io.in.bits.scalar.inst(31, 25) === "h40".U, 1.U,
+                Mux(io.in.bits.vector.groups.mask, 0.U, 2.U))
             group := 0.U
             groupOH := 1.U
             subelement := 0.U

@@ -194,8 +194,8 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 dut.io.completion.ready.poke(true); tick()
             }
             // Full continuous groups stream through the original DCache port.
-            // Cold groups exercise MSHR retries; a second pass must sustain one
-            // 256-bit request each cycle, including a 32-byte line-half offset.
+            // Cold groups exercise MSHR retries; a second pass requests each
+            // cache line once and drains its halves through the existing port.
             for (eew <- 0 to 2; count <- Seq(1, 2, 8); offset <- Seq(0, 32)) {
                 val base = 0x8000c000L + offset
                 val vl = count * (32 >> eew)
@@ -212,9 +212,9 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                             dut.io.data(lane).expect((expected >> (32 * lane)) & 0xffffffffL)
                     }
                     if (pass == 1) {
-                        assert(requestCycles.size == count)
-                        assert(requestCycles.sliding(2).forall(pair => pair.size < 2 || pair(1) == pair(0) + 1),
-                            s"Wide hit requests must be consecutive: $requestCycles")
+                        assert(requestCycles.size == (count + (offset / 32) + 1) / 2)
+                        assert(requestCycles.take(4).sliding(2).forall(pair => pair.size < 2 || pair(1) == pair(0) + 1),
+                            s"Available line-response credits must sustain consecutive requests: $requestCycles")
                         assert(writeCycles.size == count && writeCycles.sliding(2).forall(pair =>
                             pair.size < 2 || pair(1) == pair(0) + 1),
                             s"Wide hit writebacks must be consecutive: $writeCycles")

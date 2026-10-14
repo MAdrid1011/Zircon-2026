@@ -4,6 +4,28 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig._
 
 class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
+    "grouped arithmetic can issue its ready first group while later groups wait" in {
+        simulate(new IssueQueue(q = IssueQueueParams(4, IssueQueueProfile.Vector,
+            enqueueWidth = 1, wakeupPorts = 2))) { dut =>
+            VectorTestUtils.clear(dut.io.enq); VectorTestUtils.clear(dut.io.wakeup)
+            VectorTestUtils.clear(dut.io.speculation); VectorTestUtils.clear(dut.io.vector.get.enqueue)
+            VectorTestUtils.clear(dut.io.vector.get.wakeup)
+            dut.io.issue.ready.poke(false); dut.io.flush.poke(false)
+            dut.io.vector.get.ready.poke((BigInt(1) << 64) - 1 - (BigInt(1) << 41))
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            dut.io.enq.valid.poke(1); dut.io.enq.selection(0).poke(1)
+            dut.io.enq.candidates(0).fu.poke(DecodeUnit.Vector)
+            dut.io.vector.get.enqueue.control.execution.poke(VectorExecution.Multiply)
+            dut.io.vector.get.enqueue.groups.sourceCount(0).poke(2)
+            dut.io.vector.get.enqueue.source(0)(0).poke(40)
+            dut.io.vector.get.enqueue.source(0)(1).poke(41)
+            dut.clock.step(); dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(true)
+            dut.clock.step(); dut.io.issue.ready.poke(true); dut.clock.step()
+            dut.io.occupancy.expect(0)
+        }
+    }
+
     "ordered memory issue keeps a younger ready Load behind an operand-blocked Store" in {
         simulate(new IssueQueue(q = IssueQueueParams(4, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = 2), orderedIssue = true)) { dut =>

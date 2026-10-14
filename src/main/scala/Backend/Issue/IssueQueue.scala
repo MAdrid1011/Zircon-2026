@@ -13,6 +13,7 @@ class IQEntry(p: BackendParams, vectorEnabled: Boolean = false) extends Bundle {
     val item = new BackendPackage(p)
     val vector = if (vectorEnabled) Some(new VectorInstructionMetadata) else None
     val vectorReady = if (vectorEnabled) Some(UInt(25.W)) else None
+    val vectorGrouped = if (vectorEnabled) Some(Bool()) else None
     // Stable operation-class predicate captured at enqueue. MixArith uses it for
     // system-operation age serialization.
     val isSystem = Bool()
@@ -318,7 +319,10 @@ class IssueQueue(
         })
 
     private def resourceReady(entry: IQEntry): Bool = q.profile match {
-        case IssueQueueProfile.Vector => entry.vectorReady.get.andR
+        case IssueQueueProfile.Vector =>
+            Mux(entry.vectorGrouped.get,
+                entry.vectorReady.get(0) && entry.vectorReady.get(8) && entry.vectorReady.get(16) && entry.vectorReady.get(24),
+                entry.vectorReady.get.andR)
         case IssueQueueProfile.MixArith =>
             !entry.isSystem || entry.csrAuthorized
         case IssueQueueProfile.Load | IssueQueueProfile.LoadStoreAddress =>
@@ -579,6 +583,11 @@ class IssueQueue(
         incomingCandidates(lane).csrAuthorized := false.B
         if (vectorEnabled) {
             incomingCandidates(lane).vector.get := io.vector.get.enqueue
+            val metadata = io.vector.get.enqueue
+            incomingCandidates(lane).vectorGrouped.get :=
+                metadata.control.execution === VectorExecution.ALU.U ||
+                metadata.control.execution === VectorExecution.Multiply.U ||
+                metadata.control.execution === VectorExecution.FpLogic.U
             val ready = initialVectorReady(io.vector.get.enqueue)
             val tags = vectorTags(io.vector.get.enqueue)
             incomingCandidates(lane).vectorReady.get := VecInit(tags.zipWithIndex.map { case (tag, index) =>

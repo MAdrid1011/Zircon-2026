@@ -167,6 +167,7 @@ class Backend(
         io.vectorObservation.foreach(_ := file.io.observation.get)
         ready.io.allocate := port.allocate
         ready.io.flush := io.commit.flush
+        compute.io.registerReady := ready.io.ready
         val arithmeticWrite = Mux(serial.io.writeback.valid, serial.io.writeback, compute.io.writeback)
         ready.io.wakeup(0).valid := arithmeticWrite.valid && arithmeticWrite.bits.ready
         ready.io.wakeup(0).bits := arithmeticWrite.bits.address
@@ -236,7 +237,7 @@ class Backend(
         val memoryReads = memory.io.readRequest
         val serialReads = serial.io.readRequest
         compute.io.readAvailable := !memoryReads && !serialReads
-        serial.io.readAvailable := !memoryReads
+        serial.io.readAvailable := !memoryReads && !memory.io.scalarReadRequest
         memory.io.readAvailable := true.B
         val readOwners = VecInit(Seq(memoryReads, !memoryReads && serialReads,
             !memoryReads && !serialReads))
@@ -279,11 +280,14 @@ class Backend(
         vectorScalarWrite.valid := port.completion.fire && port.completion.bits.scalar.valid
         vectorScalarWrite.bits := port.completion.bits.scalar.bits
         port.configuration := compute.io.configuration
-        val scalarAddress = Mux(memoryReads, memory.io.scalarAddress,
+        val integerScalarAddress = Mux(memory.io.scalarReadRequest, memory.io.scalarAddress,
             Mux(serialReads, serial.io.scalarAddress, compute.io.scalarAddress))
-        intRf.io.read(9).addr := scalarAddress(p.physWidth - 1, 0)
-        fpRf.io.read(4).addr := Mux(scalarAddress(p.tagWidth - 1),
-            scalarAddress(p.physWidth - 1, 0), 0.U)
+        val floatingScalarAddress = Mux(serialReads, serial.io.scalarAddress, compute.io.scalarAddress)
+        intRf.io.read(9).addr := integerScalarAddress(p.physWidth - 1, 0)
+        fpRf.io.read(4).addr := Mux(floatingScalarAddress(p.tagWidth - 1),
+            floatingScalarAddress(p.physWidth - 1, 0), 0.U)
+        compute.io.scalarAvailable := !serialReads &&
+            (compute.io.scalarAddress(p.tagWidth - 1) || !memory.io.scalarReadRequest)
         compute.io.scalarData := Mux(compute.io.scalarAddress(p.tagWidth - 1),
             fpRf.io.read(4).data, intRf.io.read(9).data)
         memory.io.scalarData := intRf.io.read(9).data

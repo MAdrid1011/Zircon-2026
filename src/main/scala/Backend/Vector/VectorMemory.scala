@@ -12,6 +12,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
         val scalarAddress = Output(UInt(p.tagWidth.W))
         val scalarData = Input(UInt(32.W))
+        val scalarReadRequest = Output(Bool())
         val readRequest = Output(Bool())
         val readAvailable = Input(Bool())
         val request = Decoupled(new DLoadRequest(cache))
@@ -66,6 +67,19 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val streamDone = RegInit(0.U(8.W))
     val streamWriteValid = RegInit(false.B)
     val streamWrite = Reg(new VectorTaskWriteback)
+    // Reserve a response slot before issuing a line. Responses cannot stall;
+    // each slot retains both halves until the single Load write port drains it.
+    val streamLines = Module(new Queue(new Bundle {
+        val line = UInt(512.W)
+        val group = UInt(3.W)
+    }, 4, flow = true, hasFlush = true))
+    streamLines.io.flush.get := io.flush
+    val streamCredits = RegInit(0.U(3.W))
+    val streamHigh = RegInit(false.B)
+    streamLines.io.enq.valid := state === streamLoad && io.response.valid && !io.response.bits.retry && !io.flush
+    streamLines.io.enq.bits.line := io.response.bits.line
+    streamLines.io.enq.bits.group := io.response.bits.slot(2, 0)
+    streamLines.io.deq.ready := false.B
     val metadata = instruction.vector
     val store = metadata.control.execution === VectorExecution.Store.U
     val count = Mux(store, metadata.groups.sourceCount(0), metadata.destination.count)
@@ -109,8 +123,22 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val lastElement = nextPosition === 32.U
     io.in.ready := state === idle && !io.flush
     io.idle := state === idle
-    io.readRequest := RegNext(nextState === operands || nextState === strideOperand ||
-        nextState === collect || nextState === indexOperand, false.B)
+    io.scalarReadRequest := RegNext(nextState === operands || nextState === strideOperand, false.B)
+    // Scalar base/stride reads do not occupy the vector RF. Complete unmasked
+    // Loads also need neither mask nor old-destination data at collection.
+    val operandVl = Mux(whole, ((count.pad(9) << 5) >> decodedEew)(8, 0),
+        Mux(maskMemory, (metadata.state.vl(8, 0) +& 7.U) >> 3, metadata.state.vl(8, 0)))
+    val operandFullGroupLoad = !store && !strided && !instruction.scalar.inst(26) &&
+        (whole || !instruction.scalar.inst(31, 29).orR) && !metadata.groups.mask &&
+        metadata.state.vstart === 0.U && io.scalarData(4, 0) === 0.U &&
+        operandVl === ((count.pad(9) << 5) >> decodedEew)
+    // Resolve next-cycle RF ownership at the preceding edge. The full-group
+    // predicate may depend on scalar data, but never enters the RF read mux.
+    val nextReadRequest = nextState === operands &&
+        Mux(io.in.fire, io.in.bits.vector.groups.mask, metadata.groups.mask) ||
+        nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
+        nextState === indexOperand
+    io.readRequest := RegNext(nextReadRequest && !io.flush, false.B)
     io.scalarAddress := Mux(state === strideOperand, instruction.scalar.prs(1), instruction.scalar.prs(0))
     io.read(0).address := sourceReadAddress
     io.read(1).address := indexReadAddress
@@ -126,7 +154,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.request.bits.paddr := io.request.bits.vaddr
     io.request.bits.mtype := 2.U
     when(state === streamLoad) {
-        io.request.valid := streamRequestValid && io.ordering.clear && !io.flush
+        io.request.valid := streamRequestValid && streamCredits < 4.U && io.ordering.clear && !io.flush
         io.request.bits.vaddr := Cat(streamRequestAddress(31, 6), 0.U(6.W))
         io.request.bits.paddr := io.request.bits.vaddr
         io.request.bits.slot := streamRequestGroup
@@ -180,6 +208,16 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val loaded = (joined >> (address(5, 0) << 3))(255, 0).asTypeOf(Vec(32, UInt(8.W)))
     val heldBytes = data.asTypeOf(Vec(32, UInt(8.W)))
     streamWriteValid := false.B
+    val streamReturned = state === streamLoad && io.response.valid
+    val streamRetried = streamReturned && io.response.bits.retry
+    when(io.flush) {
+        streamCredits := 0.U
+        streamHigh := false.B
+    }.otherwise {
+        when(state === streamLoad) {
+            streamCredits := streamCredits + io.request.fire.asUInt - streamRetried.asUInt - streamLines.io.deq.fire.asUInt
+        }
+    }
     when(io.flush) {
         streamRequestValid := false.B
         when(state === response) { discard := true.B }
@@ -209,8 +247,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     elementAccess := strided || instruction.scalar.inst(26) ||
                         !whole && instruction.scalar.inst(31, 29).orR
                     eew := decodedEew
-                    transferVl := Mux(whole, ((count.pad(9) << 5) >> decodedEew)(8, 0),
-                        Mux(maskMemory, (metadata.state.vl(8, 0) +& 7.U) >> 3, metadata.state.vl(8, 0)))
+                    transferVl := operandVl
                     registerShift := Mux(exponent > 0.S, exponent.asUInt(1, 0), 0.U)
                     fields := instruction.scalar.inst(31, 29) +& 1.U
                     base := io.scalarData
@@ -327,13 +364,17 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 val issued = Mux(io.request.fire, UIntToOH(streamRequestGroup, 8), 0.U)
                 val returned = Mux(io.response.valid, UIntToOH(io.response.bits.slot(2, 0), 8), 0.U)
                 val retry = Mux(io.response.bits.retry, returned, 0.U)
+                def pair(first: UInt): Bool = !(base(5) ^ first(0)) && first +& 1.U < count
+                val returnedGroup = io.response.bits.slot(2, 0)
+                val returnedGroups = returned | Mux(pair(returnedGroup), (returned << 1)(7, 0), 0.U)
                 streamOutstanding := (streamOutstanding | issued) & ~returned
                 streamRetry := (streamRetry | retry) & ~issued
-                streamDone := streamDone | (returned & ~retry)
+                streamDone := streamDone | Mux(io.response.valid && !io.response.bits.retry, returnedGroups, 0.U)
                 when(io.request.fire) {
-                    when(!streamReplay && streamRequestGroup +& 1.U < count) {
-                        streamRequestGroup := streamRequestGroup + 1.U
-                        streamRequestAddress := streamRequestAddress + 32.U
+                    val following = streamRequestGroup +& Mux(pair(streamRequestGroup), 2.U, 1.U)
+                    when(!streamReplay && following < count) {
+                        streamRequestGroup := following(2, 0)
+                        streamRequestAddress := streamRequestAddress + Mux(pair(streamRequestGroup), 64.U, 32.U)
                     }.otherwise { streamRequestValid := false.B }
                 }
                 when(!streamRequestValid && streamRetry.orR) {
@@ -347,17 +388,23 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     val slot = io.response.bits.slot(2, 0)
                     assert(io.response.bits.wide && io.response.bits.exception === 0.U)
                     assert(streamOutstanding(slot), "Wide Load response retains its group owner")
-                    when(!io.response.bits.retry) {
-                        streamWriteValid := true.B
-                        streamWrite.address := metadata.destination.physical(slot)
-                        streamWrite.data := Mux(base(5) ^ slot(0),
-                            io.response.bits.line(511, 256), io.response.bits.line(255, 0)).asTypeOf(Vec(8, UInt(32.W)))
-                        streamWrite.bytes := VecInit.fill(8)(15.U(4.W))
-                        streamWrite.ready := true.B
-                    }
+                    when(!io.response.bits.retry) { assert(streamLines.io.enq.ready) }
+                }
+                when(streamLines.io.deq.valid) {
+                    val firstGroup = streamLines.io.deq.bits.group
+                    val slot = firstGroup + streamHigh.asUInt
+                    streamWriteValid := true.B
+                    streamWrite.address := metadata.destination.physical(slot)
+                    streamWrite.data := Mux(streamHigh || base(5) ^ firstGroup(0),
+                        streamLines.io.deq.bits.line(511, 256), streamLines.io.deq.bits.line(255, 0))
+                        .asTypeOf(Vec(8, UInt(32.W)))
+                    streamWrite.bytes := VecInit.fill(8)(15.U(4.W))
+                    streamWrite.ready := true.B
+                    streamLines.io.deq.ready := streamHigh || !pair(firstGroup)
+                    streamHigh := !streamLines.io.deq.ready
                 }
                 when(streamDone === streamExpected && !streamWriteValid &&
-                    !streamRequestValid && !streamOutstanding.orR) { nextState := complete }
+                    !streamRequestValid && !streamOutstanding.orR && streamCredits === 0.U) { nextState := complete }
             }
             is(streamDrain) { when(!io.cachePending) { nextState := idle } }
         }
@@ -391,6 +438,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             incoming.groups.sourceCount(0), incoming.destination.count) =/= 0.U)
     }
     when(state =/= idle) { assert(groupOH === UIntToOH(group, 8)) }
-    assert(io.readRequest === (state === operands || state === strideOperand ||
-        state === collect || state === indexOperand))
+    assert(streamCredits <= 4.U)
+    when(streamReturned) { assert(streamCredits =/= 0.U) }
 }
