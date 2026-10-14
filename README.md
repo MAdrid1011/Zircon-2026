@@ -156,7 +156,7 @@ flowchart LR
 
 相同硬件配置下，五项 RVV 程序相对标量的计算阶段加速比几何平均为 **3.158 倍**，
 SGEMM 加速为 **5.306 倍**；性能核心的标量 CoreMark 为 **5.093 CoreMark/MHz**。
-各项周期、自动向量化结果与测量方法见 [性能测量](docs/PerformanceCore.md#性能测量)。
+计算程序与测量方法见 [性能测量](docs/PerformanceCore.md#性能测量)。
 
 ## 快速开始
 

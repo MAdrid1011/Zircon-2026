@@ -37,6 +37,6 @@ vivado -mode batch -source eda/vivado/create_project.tcl -nolog -nojournal \
 RTL 与工程输出位于 `build/eda/vivado-vu13p-performance/`，与默认系统核心分开。
 存储阵列使用 Xilinx BRAM 模板，ASIC 路径的 BSG 绑定由独立生成入口选择。
 
-RTL 版本 `8476363` 的性能配置在 100 MHz 布线后达到 setup WNS +0.793 ns、
+性能配置在 100 MHz 布线后达到 setup WNS +0.793 ns、
 TNS 0，hold WHS +0.011 ns、THS 0，setup/hold 均无违例端点。
 资源用量为 222393 LUT、101933 FF、134.5 BRAM、0 DSP，LUT 占器件的 12.87%。
