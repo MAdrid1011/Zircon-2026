@@ -19,7 +19,12 @@ class VectorComputeHarness extends Module {
         val configuration = Output(Valid(new VectorCSRState))
         val flush = Input(Bool())
     })
-    val compute = Module(new VectorCompute)
+    val compute = Module(new VectorCompute(shareSerialMultiply = true))
+    compute.io.serialActive.get := false.B
+    compute.io.serialMultiply.get.in.valid := false.B
+    compute.io.serialMultiply.get.in.bits := 0.U.asTypeOf(compute.io.serialMultiply.get.in.bits)
+    compute.io.serialMultiply.get.out.ready := true.B
+    compute.io.serialMultiply.get.flush := io.flush
     val file = Module(new VectorRegisterFile)
     compute.io.in <> io.in
     compute.io.read <> file.io.read

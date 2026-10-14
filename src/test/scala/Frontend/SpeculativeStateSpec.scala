@@ -4,7 +4,7 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.FrontendParams
 
 class SpeculativeStateSpec extends AnyFreeSpec with ChiselSim {
-    private val p = FrontendParams(fetchWidth = 4, rasDepth = 4)
+    private val p = ZirconConfig.CoreProfile.Performance.frontend(observe = false).copy(rasDepth = 4)
     private val pointerMask = p.rasDepth - 1
 
     private case class RasState(ras: Vector[BigInt], top: BigInt, pointer: Int, count: Int)

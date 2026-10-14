@@ -19,7 +19,14 @@ class VectorSerialHarness extends Module {
         val legal = Output(Bool())
         val flush = Input(Bool())
     })
-    val serial = Module(new VectorSerial)
+    val serial = Module(new VectorSerial(externalMultiply = true))
+    val arithmetic = Module(new VectorArithmetic(shareSerialMultiply = true))
+    arithmetic.io.serialMultiply.get <> serial.io.multiply.get
+    arithmetic.io.serialActive.get := !serial.io.idle
+    arithmetic.io.in.valid := false.B
+    arithmetic.io.in.bits := 0.U.asTypeOf(arithmetic.io.in.bits)
+    arithmetic.io.out.ready := true.B
+    arithmetic.io.flush := io.flush
     val file = Module(new VectorRegisterFile(observe = true))
     val decode = Module(new VectorDecoder)
     val groups = Module(new VectorRegisterGroups)

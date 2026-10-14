@@ -206,19 +206,19 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "eight lane PRF supports three reads, compute/load writes and byte preservation" in {
-        simulate(new VectorRegisterFile) { dut =>
+    for (registers <- Seq(56, 64)) s"$registers-entry lane PRF preserves three reads, two writes and bytes" in {
+        simulate(new VectorRegisterFile(ZirconConfig.VectorParams(physicalRegisters = registers))) { dut =>
             val rng = new Random(20261013)
-            val reference = Array.fill(64, 8)(BigInt(0))
+            val reference = Array.fill(registers, 8)(BigInt(0))
             for (r <- dut.io.read) { r.address.poke(0); r.oneHot.poke(1) }
             for (w <- dut.io.write) { w.valid.poke(false); w.address.poke(0); w.data.foreach(_.poke(0)); w.bytes.foreach(_.poke(0)) }
-            for (address <- 0 until 64) {
+            for (address <- 0 until registers) {
                 val w = dut.io.write(0)
                 w.valid.poke(true); w.address.poke(address); w.data.foreach(_.poke(0)); w.bytes.foreach(_.poke(15))
                 dut.clock.step()
             }
             for (_ <- 0 until 500) {
-                val addresses = rng.shuffle((0 until 64).toList).take(2)
+                val addresses = rng.shuffle((0 until registers).toList).take(2)
                 for (port <- 0 until 2) {
                     val w = dut.io.write(port); val addr = addresses(port)
                     w.valid.poke(true); w.address.poke(addr)
@@ -233,7 +233,7 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
                 }
                 dut.clock.step()
                 for (r <- dut.io.read) {
-                    val addr = if (rng.nextBoolean()) addresses.head else rng.nextInt(64)
+                    val addr = if (rng.nextBoolean()) addresses.head else rng.nextInt(registers)
                     r.address.poke(addr)
                     r.oneHot.poke(BigInt(1) << addr)
                     for (lane <- 0 until 8) r.data(lane).expect(reference(addr)(lane))
@@ -248,6 +248,8 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
             val random = new Random(20261014)
             def destination(x: VectorDestination, base: Int, physical: Seq[Int], previous: Seq[Int]): Unit = {
                 x.base.poke(base); x.count.poke(physical.size)
+                if (x eq dut.io.preview.bits) dut.io.previewBanks.poke(
+                    (0 until physical.size).foldLeft(BigInt(0))((mask, i) => mask.setBit((base + i) & 7)))
                 for (i <- 0 until 8) {
                     x.physical(i).poke(physical.lift(i).getOrElse(0))
                     x.previous(i).poke(previous.lift(i).getOrElse(0))
@@ -311,10 +313,48 @@ class VectorStateSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "group rename excludes held tags, recycles on retirement and restores committed maps" in {
+    "held bank selection preserves partial and wrapped groups through stall, acceptance and recovery" in {
         simulate(new VectorRename) { dut =>
+            VectorTestUtils.clear(dut.io.preview.bits)
+            for (retire <- dut.io.retire) {
+                retire.valid.poke(false); VectorTestUtils.clear(retire.bits)
+            }
+            dut.io.preview.valid.poke(false); dut.io.previewBanks.poke(0)
+            dut.io.accept.poke(false); dut.io.restore.poke(false)
+            dut.io.sourceBase.foreach(_.poke(0)); dut.io.sourceCount.foreach(_.poke(8))
+            dut.io.destinationBase.poke(0); dut.io.destinationCount.poke(0)
+            dut.clock.step()
+            for (base <- 0 until 32; count <- 0 to math.min(8, 32 - base)) {
+                dut.io.sourceBase(0).poke(base)
+                dut.io.destinationBase.poke(base); dut.io.destinationCount.poke(count)
+                val tags = dut.io.destination.physical.take(count).map(_.peek().litValue)
+                dut.io.preview.bits.base.poke(base); dut.io.preview.bits.count.poke(count)
+                for (i <- 0 until 8) {
+                    dut.io.preview.bits.physical(i).poke(tags.lift(i).getOrElse(BigInt(0)))
+                    dut.io.preview.bits.previous(i).poke((base + i) & 31)
+                }
+                dut.io.previewBanks.poke((0 until count).foldLeft(BigInt(0))(
+                    (mask, i) => mask.setBit((base + i) & 7)))
+                dut.io.preview.valid.poke(true)
+                def checkSources(): Unit = for (i <- 0 until 8)
+                    dut.io.source(0)(i).expect(if (i < count) tags(i) else BigInt((base + i) & 31))
+                checkSources()
+                dut.clock.step(2); checkSources() // A held preview consumes no tags.
+                dut.io.accept.poke(true); dut.clock.step()
+                dut.io.accept.poke(false); dut.io.preview.valid.poke(false)
+                checkSources()
+                dut.io.restore.poke(true); dut.clock.step(); dut.io.restore.poke(false)
+                for (i <- 0 until 8) dut.io.source(0)(i).expect((base + i) & 31)
+            }
+        }
+    }
+
+    for (registers <- Seq(56, 64)) s"$registers-register group rename excludes held tags, recycles and restores" in {
+        simulate(new VectorRename(physicalRegisters = registers)) { dut =>
             def destination(x: VectorDestination, base: Int, physical: Seq[Int], previous: Seq[Int]): Unit = {
                 x.base.poke(base); x.count.poke(physical.size)
+                if (x eq dut.io.preview.bits) dut.io.previewBanks.poke(
+                    (0 until physical.size).foldLeft(BigInt(0))((mask, i) => mask.setBit((base + i) & 7)))
                 for (i <- 0 until 8) {
                     x.physical(i).poke(physical.lift(i).getOrElse(0))
                     x.previous(i).poke(previous.lift(i).getOrElse(0))

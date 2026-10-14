@@ -406,7 +406,7 @@ object SharedMultiplyLogic {
   * tag is opaque backend identity carried through the stages in meta.
   */
 class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false,
-                     val blockWidth: Int = 8) extends Module {
+                     val blockWidth: Int = 8, val holdInvalidData: Boolean = false) extends Module {
     require(tagWidth > 0)
     require(blockWidth == 4 || blockWidth == 8)
     val io = IO(new MultiplyIO(tagWidth))
@@ -651,6 +651,12 @@ class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false
         assert(req.bSigned === (!req.fp && op =/= MULHU && op =/= MULHSU))
     }
     // Data contents are don't-care after flush; keep flush out of every wide register D path.
-    when(advance) { r1 := s1; r2 := s2; r3 := s3; r4 := s4 }
-    normalized.foreach { register => when(advance) { register := normalize(r3) } }
+    // Validity still advances through bubbles. Only the unowned payload holds;
+    // every occupied stage advances at the original edge, including under stalls.
+    def payloadAdvance(owned: Bool): Bool = advance && (if (holdInvalidData) owned else true.B)
+    when(payloadAdvance(io.in.valid)) { r1 := s1 }
+    when(payloadAdvance(valid(0))) { r2 := s2 }
+    when(payloadAdvance(valid(1))) { r3 := s3 }
+    when(payloadAdvance(valid(valid.size - 2))) { r4 := s4 }
+    normalized.foreach { register => when(payloadAdvance(valid(2))) { register := normalize(r3) } }
 }

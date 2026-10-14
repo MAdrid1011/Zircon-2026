@@ -25,7 +25,7 @@ class ZirconCore(
     override val desiredName = "ZirconCore"
     val io = IO(new ZirconCoreIO(simulationDebug, profile))
 
-    private val frontendParams = FrontendParams(observe = simulationDebug)
+    private val frontendParams = profile.frontend(simulationDebug)
     private val issueParams = IssueParams()
     private val vectorEnabled = profile.vlen != 0
     private val commitParams = CommitParams(vectorEnabled = vectorEnabled)
@@ -34,11 +34,12 @@ class ZirconCore(
         tlbEnabled = profile.privileged, issue = issueParams, ramBackend = ramBackend,
         vectorEnabled = vectorEnabled))
     val middleend = Module(new Middleend(frontendParams = frontendParams, issueParams = issueParams,
-        privileged = profile.privileged, vectorEnabled = vectorEnabled, commitParams = commitParams))
+        privileged = profile.privileged, vectorEnabled = vectorEnabled, commitParams = commitParams,
+        vectorParams = profile.vector))
     val backend = Module(new Backend(issueParams = issueParams, ramBackend = ramBackend,
         observe = simulationDebug, tlbEnabled = profile.privileged,
         atomicEnabled = profile.privileged, dcacheSets = profile.dcacheSets,
-        directPhysical = !profile.privileged, vectorEnabled = vectorEnabled))
+        directPhysical = !profile.privileged, vectorEnabled = vectorEnabled, vectorParams = profile.vector))
     val commit = Module(new Commit(fp = frontendParams, issue = issueParams,
         simulationDebug = simulationDebug, privileged = profile.privileged, cp = commitParams))
     val l2 = Module(new L2Cache(ramBackend = ramBackend, p = actualL2Params, observe = simulationDebug))

@@ -45,7 +45,8 @@ class VectorRegisterFile(val p: VectorParams = VectorParams(), val observe: Bool
             bank.io.write(port).bytes.get := io.write(port).bytes(lane)
         }
         if (observe) for (register <- 0 until 64) {
-            observed.get(register)(lane) := bank.io.observation.get(register)
+            observed.get(register)(lane) := (if (register < p.physicalRegisters)
+                bank.io.observation.get(register) else 0.U)
         }
     }
     // Keep each physical register separate at the simulation boundary. Flattening

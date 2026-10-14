@@ -24,7 +24,7 @@ class VectorComputeTask(p: BackendParams) extends Bundle {
   * arithmetic lanes. SEW8/16 reuse lanes over subelements; SEW32 issues one
   * complete physical register per cycle, including across LMUL groups.
   */
-class VectorCompute(val p: BackendParams = BackendParams()) extends Module {
+class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMultiply: Boolean = false) extends Module {
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction(p)))
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
@@ -38,6 +38,8 @@ class VectorCompute(val p: BackendParams = BackendParams()) extends Module {
         val readAvailable = Input(Bool())
         val readRequest = Output(Bool())
         val idle = Output(Bool())
+        val serialMultiply = if (shareSerialMultiply) Some(new MultiplyIO(1)) else None
+        val serialActive = if (shareSerialMultiply) Some(Input(Bool())) else None
     })
     val instruction = Reg(new VectorInstruction(p))
     val busy = RegInit(false.B)
@@ -89,7 +91,12 @@ class VectorCompute(val p: BackendParams = BackendParams()) extends Module {
 
     val collectorValid = RegInit(false.B)
     val collector = Reg(new VectorComputeTask(p))
-    val arithmetic = Module(new VectorArithmetic(p.robWidth))
+    val arithmetic = Module(new VectorArithmetic(p.robWidth, shareSerialMultiply))
+    if (shareSerialMultiply) {
+        arithmetic.io.serialMultiply.get <> io.serialMultiply.get
+        arithmetic.io.serialActive.get := io.serialActive.get
+        when(io.serialActive.get) { assert(io.idle && !busy && !collectorValid) }
+    }
     arithmetic.io.flush := io.flush
     arithmetic.io.in.valid := collectorValid && !io.flush
     arithmetic.io.in.bits := collector.arithmetic

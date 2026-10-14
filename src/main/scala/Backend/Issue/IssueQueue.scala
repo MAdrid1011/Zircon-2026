@@ -117,6 +117,7 @@ class IssueQueue(
     val q: IssueQueueParams = IssueParams().arith1,
     val directWakeupCandidates: Int = 0,
     val orderedIssue: Boolean = false,
+    val parallelSpeculationSummary: Boolean = false,
 ) extends Module {
     override def desiredName: String = s"${q.profile.label}IssueQueue"
 
@@ -298,6 +299,24 @@ class IssueQueue(
     private def speculationMask(item: BackendPackage): UInt =
         usedSources.map(item.sourceSpecMask(_)).reduce(_ | _)
 
+    // Reduce each wakeup's remaining tokens before selecting it. The summary
+    // follows updateReady's exact invalid/wakeup/failure priority, independently
+    // of the wide mask datapath stored with the source.
+    private def updatedSpeculationSummary(item: BackendPackage): Bool =
+        balancedBoolOr(usedSources.map { source =>
+            val producers = io.wakeup.map(wakeup =>
+                (wakeup.prd =/= 0.U && wakeup.prd === item.prs(source), wakeup.specMask)).toSeq ++
+                io.directWakeup.toSeq.flatten.map(wakeup =>
+                    (wakeup.valid && wakeup.prd =/= 0.U && wakeup.prd === item.prs(source), wakeup.specMask))
+            val wake = balancedBoolOr(producers.map(_._1))
+            val wakeRemaining = balancedBoolOr(producers.map { case (hit, mask) =>
+                hit && (mask & ~maintenanceResolvedMask).orR
+            })
+            val failed = (item.sourceSpecMask(source) & maintenanceFailedMask).orR
+            val remaining = (item.sourceSpecMask(source) & ~maintenanceResolvedMask).orR
+            item.sourceValid(source) && (wakeRemaining || !wake && !failed && remaining)
+        })
+
     private def resourceReady(entry: IQEntry): Bool = q.profile match {
         case IssueQueueProfile.Vector => entry.vectorReady.get.andR
         case IssueQueueProfile.MixArith =>
@@ -355,7 +374,11 @@ class IssueQueue(
         awakened(position) := entries(position)
         awakened(position).item := updateReady(entries(position).item)
         awakened(position).isSystem := entries(position).isSystem
-        awakened(position).speculative := speculationMask(awakened(position).item).orR
+        awakened(position).speculative := (if (parallelSpeculationSummary)
+            updatedSpeculationSummary(entries(position).item) else speculationMask(awakened(position).item).orR)
+        if (parallelSpeculationSummary) when(valid(position)) {
+            assert(awakened(position).speculative === speculationMask(awakened(position).item).orR)
+        }
         awakened(position).issued := entries(position).issued
         awakened(position).csrAuthorized := entries(position).csrAuthorized
         if (vectorEnabled) awakened(position).vectorReady.get := updateVectorReady(entries(position))
@@ -368,7 +391,8 @@ class IssueQueue(
         updatedReplay(position) := replayEntries(position)
         updatedReplay(position).item := updateReady(replayEntries(position).item)
         updatedReplay(position).isSystem := replayEntries(position).isSystem
-        updatedReplay(position).speculative := speculationMask(updatedReplay(position).item).orR
+        updatedReplay(position).speculative := (if (parallelSpeculationSummary)
+            updatedSpeculationSummary(replayEntries(position).item) else speculationMask(updatedReplay(position).item).orR)
         updatedReplay(position).issued := replayEntries(position).issued
         updatedReplay(position).csrAuthorized := replayEntries(position).csrAuthorized
         val activePosition = (position < q.replayEntries).B
@@ -549,7 +573,8 @@ class IssueQueue(
         incomingCandidates(lane).isSystem := (if (q.profile == IssueQueueProfile.MixArith) {
             io.enq.candidates(lane).fu === DecodeUnit.System.U
         } else false.B)
-        incomingCandidates(lane).speculative := speculationMask(incomingCandidates(lane).item).orR
+        incomingCandidates(lane).speculative := (if (parallelSpeculationSummary)
+            updatedSpeculationSummary(io.enq.candidates(lane)) else speculationMask(incomingCandidates(lane).item).orR)
         incomingCandidates(lane).issued := false.B
         incomingCandidates(lane).csrAuthorized := false.B
         if (vectorEnabled) {

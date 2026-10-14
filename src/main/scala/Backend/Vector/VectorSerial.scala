@@ -6,7 +6,7 @@ import ZirconConfig.{BackendParams, DivideOp, FpMiscOp, MultiplyOp, VectorParams
   * read ports. Divide/sqrt and conversion reuse the scalar arithmetic modules;
   * the instruction retains its PRF/ROB ownership until all elements complete.
   */
-class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
+class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply: Boolean = false) extends Module {
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction(p)))
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
@@ -19,6 +19,7 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
         val completion = Decoupled(new VectorCompletion(p))
         val flush = Input(Bool())
         val idle = Output(Bool())
+        val multiply = if (externalMultiply) Some(Flipped(new MultiplyIO(1))) else None
     })
     val idle :: prepareRead :: operands :: initialize :: readElement :: gatherElement :: evaluate :: finishArithmetic :: issue :: awaitResult :: update :: writeback :: complete :: Nil = Enum(13)
     val phase = RegInit(idle)
@@ -47,6 +48,7 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
     val outputElement = RegInit(0.U(9.W))
     val compressTail = RegInit(false.B)
     val sourceBit = Reg(Bool())
+    val arithmeticCarry = Reg(Bool())
     val element = RegInit(0.U(9.W))
     val flags = RegInit(0.U(5.W))
     val saturated = RegInit(false.B)
@@ -182,37 +184,30 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
         0x1c.U -> (less || a === b), 0x1d.U -> (less || a === b),
         0x1e.U -> (!less && a =/= b), 0x1f.U -> (!less && a =/= b)))
     val logicRequest = Wire(new FpLogicRequest(1))
-    logicRequest.src1 := Mux(funct === 0x1d.U || funct === 0x1f.U, b, a)
-    logicRequest.src2 := Mux(funct === 0x1d.U || funct === 0x1f.U, a, b)
-    logicRequest.op := Mux(funct === 0x18.U || funct === 0x1c.U, FpMiscOp.FEQ.U,
-        Mux(funct === 0x19.U || funct === 0x1f.U, FpMiscOp.FLE.U, FpMiscOp.FLT.U))
+    val fpReducing = op === VectorSerialOperation.FloatReduction.U
+    logicRequest.src1 := Mux(fpReducing, accumulator, Mux(funct === 0x1d.U || funct === 0x1f.U, b, a))
+    logicRequest.src2 := Mux(fpReducing, a, Mux(funct === 0x1d.U || funct === 0x1f.U, a, b))
+    logicRequest.op := Mux(fpReducing, Mux(funct === 5.U, FpMiscOp.FMIN.U, FpMiscOp.FMAX.U),
+        Mux(funct === 0x18.U || funct === 0x1c.U, FpMiscOp.FEQ.U,
+            Mux(funct === 0x19.U || funct === 0x1f.U, FpMiscOp.FLE.U, FpMiscOp.FLT.U)))
     logicRequest.tag := 0.U
-    val fpComparison = FpLogic.execute(logicRequest)
-    val reductionRequest = Wire(new FpLogicRequest(1))
-    reductionRequest.src1 := accumulator
-    reductionRequest.src2 := a
-    reductionRequest.op := Mux(funct === 5.U, FpMiscOp.FMIN.U, FpMiscOp.FMAX.U)
-    reductionRequest.tag := 0.U
-    val fpReduction = FpLogic.execute(reductionRequest)
+    val fpLogic = FpLogic.execute(logicRequest)
     val maskA = a(0)
     val maskB = b(0)
     val maskLogic = MuxLookup(funct(2, 0), false.B)(Seq(
         0.U -> (maskA && !maskB), 1.U -> (maskA && maskB), 2.U -> (maskA || maskB),
         3.U -> (maskA ^ maskB), 4.U -> (maskA || !maskB), 5.U -> !(maskA && maskB),
         6.U -> !(maskA || maskB), 7.U -> !(maskA ^ maskB)))
-    val carryIn = !inst(25) && mask(element(7, 0))
-    val add = BLevelPAdder36.sum(a.pad(36), b.pad(36), carryIn.asUInt)(32, 0)
-    val subtractWithBorrow = BLevelPAdder36.sum(a.pad(36), ~b.pad(36), (!carryIn).asUInt)
-    val borrow = subtractWithBorrow(35)
-    val subtract = subtractWithBorrow(31, 0)
-    val carry = Mux(sew === 0.U, add(8), Mux(sew === 1.U, add(16), add(32)))
+    val carrying = op === VectorSerialOperation.Carry.U || op === VectorSerialOperation.MaskCarry.U
     val subtracting = funct(1)
-    // Saturation, averaging and widening share one adder. Operand complement
+    // Carry, saturation, averaging and widening share one adder. Operand complement
     // is collected with B; post-add policy/rounding uses a separate boundary.
     val fixedAdder = Module(new BLevelPAdder33)
-    fixedAdder.io.src1 := Cat(funct(0) && a(31), a)
+    fixedAdder.io.src1 := Cat(!carrying && funct(0) && a(31), a)
     fixedAdder.io.src2 := arithmeticB
-    fixedAdder.io.cin := subtracting.asUInt
+    fixedAdder.io.cin := arithmeticCarry.asUInt
+    val carryResult = fixedAdder.io.res
+    val carry = Mux(sew === 0.U, carryResult(8), Mux(sew === 1.U, carryResult(16), carryResult(32)))
     val addSubtract = arithmeticResult(31, 0)
     val signResult = Mux(sew === 0.U, addSubtract(7), Mux(sew === 1.U, addSubtract(15), addSubtract(31)))
     val signedOverflow = Mux(subtracting, a(31) =/= b(31), a(31) === b(31)) && signResult =/= a(31)
@@ -256,17 +251,17 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
         1.U -> (!seen && !sourceBit), 2.U -> (!seen && sourceBit), 3.U -> !seen))
     val directCandidates = Seq(
         VectorSerialOperation.IntegerCompare.U -> integerCompare.asUInt,
-        VectorSerialOperation.FloatCompare.U -> (fpComparison.res ^ (funct === 0x1c.U).asUInt),
+        VectorSerialOperation.FloatCompare.U -> (fpLogic.res ^ (funct === 0x1c.U).asUInt),
         VectorSerialOperation.Merge.U -> Mux(mask(element(7, 0)), b, a),
         VectorSerialOperation.Insert.U -> scalar,
         VectorSerialOperation.MaskLogic.U -> maskLogic.asUInt,
-        VectorSerialOperation.Carry.U -> Mux(funct(1), subtract, add(31, 0)),
-        VectorSerialOperation.MaskCarry.U -> Mux(funct(1), borrow, carry).asUInt,
+        VectorSerialOperation.Carry.U -> carryResult(31, 0),
+        VectorSerialOperation.MaskCarry.U -> Mux(funct(1), carryResult(32), carry).asUInt,
         VectorSerialOperation.MaskPrefix.U -> prefix.asUInt,
         VectorSerialOperation.Iota.U -> population.pad(32),
         VectorSerialOperation.Index.U -> element.pad(32),
         VectorSerialOperation.IntegerReduction.U -> integerReduction,
-        VectorSerialOperation.FloatReduction.U -> fpReduction.res,
+        VectorSerialOperation.FloatReduction.U -> fpLogic.res,
         VectorSerialOperation.Permute.U -> a,
         VectorSerialOperation.Extend.U -> a,
         VectorSerialOperation.Compress.U -> a)
@@ -274,7 +269,8 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
 
     val divide = Module(new DivSqrtSRT4(1))
     val convert = Module(new FpConvert(1, narrowIntegerEnabled = true))
-    val multiply = Module(new MulBooth2Wallce(1, splitFpFinish = true, blockWidth = 4))
+    val multiply = if (externalMultiply) io.multiply.get else
+        Module(new MulBooth2Wallce(1, splitFpFinish = true, blockWidth = 4)).io
     val estimate = Module(new FpEstimate)
     val wideningProduct = widening && funct >= 0x38.U
     val wideningAccumulate = widening && funct >= 0x3c.U
@@ -312,11 +308,11 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
     convert.io.in.bits.roundingMode := Mux(inst(17), 1.U, rounding)
     convert.io.in.bits.tag := 0.U
     convert.io.out.ready := phase === awaitResult && conversion
-    multiply.io.flush := io.flush
-    multiply.io.in.valid := phase === issue && useMultiply && !io.flush
-    multiply.io.out.ready := phase === awaitResult && useMultiply
+    multiply.flush := io.flush
+    multiply.in.valid := phase === issue && useMultiply && !io.flush
+    multiply.out.ready := phase === awaitResult && useMultiply
     val multiplyInput = Reg(new MultiplyRequest(1))
-    multiply.io.in.bits := multiplyInput
+    multiply.in.bits := multiplyInput
     val multiplyValues = Seq(Mux(floatingSum, accumulator, a),
         Mux(floatingSum, a, b), 0.U(32.W))
     val mr = WireDefault(0.U.asTypeOf(new MultiplyRequest(1)))
@@ -334,10 +330,10 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
     mr.fpZero1 := !multiplyValues(0)(30, 0).orR
     mr.fpZero2 := !multiplyValues(1)(30, 0).orR
     mr.fpZero3 := true.B
-    val fractionalLow = Mux(sew === 2.U, productLow, multiply.io.out.bits.res)
+    val fractionalLow = Mux(sew === 2.U, productLow, multiply.out.bits.res)
     val fractionalBase = Mux(sew === 0.U, (fractionalLow.asSInt >> 7).asUInt,
         Mux(sew === 1.U, (fractionalLow.asSInt >> 15).asUInt,
-            Cat(multiply.io.out.bits.res(30, 0), fractionalLow(31))))
+            Cat(multiply.out.bits.res(30, 0), fractionalLow(31))))
     val fractionalGuard = Mux(sew === 0.U, fractionalLow(6),
         Mux(sew === 1.U, fractionalLow(14), fractionalLow(30)))
     val fractionalSticky = Mux(sew === 0.U, fractionalLow(5, 0).orR,
@@ -416,10 +412,12 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
                 b := collectedB
                 shiftAmount := collectedB(4, 0) & Mux(sourceWidth === 0.U, 7.U,
                     Mux(sourceWidth === 1.U, 15.U, 31.U))
-                arithmeticB := Cat(funct(0) && collectedB(31), collectedB) ^ Fill(33, subtracting)
+                arithmeticB := Cat(!carrying && funct(0) && collectedB(31), collectedB) ^ Fill(33, subtracting)
                 c := extendWidth((io.read(2).data(wordLane(destinationWidth, element)) >>
                     wordShift(destinationWidth, element))(31, 0), signedOperands, destinationWidth)
                 sourceBit := (io.read(0).data.asUInt >> element(7, 0))(0)
+                // Capture the carry policy with B; no mask selection precedes the adder.
+                arithmeticCarry := subtracting ^ (carrying && !inst(25) && mask(element(7, 0)))
                 val gatheredIndex = Mux(gather, Mux(control.immediate, inst(19, 15).pad(32),
                     extendWidth(rawB, false.B, operandBWidth)),
                     Mux(slideUp, element.pad(32) - Mux(slideOne, 1.U, offset),
@@ -448,8 +446,9 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
                 }.otherwise {
                     result := Mux(fill && !active, "hffffffff".U,
                         Mux(wideningReduction, BLevelPAdder32.sum(accumulator, a, 0.U), direct))
-                    when(active && op === VectorSerialOperation.FloatCompare.U) { flags := flags | fpComparison.fflags }
-                    when(active && op === VectorSerialOperation.FloatReduction.U) { flags := flags | fpReduction.fflags }
+                    when(active && (op === VectorSerialOperation.FloatCompare.U || fpReducing)) {
+                        flags := flags | fpLogic.fflags
+                    }
                     when(body && enabled && sourceBit && maskSource) {
                         population := population + 1.U
                         when(!seen) { first := element }
@@ -467,11 +466,11 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
                 when(narrowing && narrowingClip && narrowOverflow) { saturated := true.B }
                 nextPhase := update
             }
-            is(issue) { when(divide.io.in.fire || convert.io.in.fire || multiply.io.in.fire || estimate.io.in.fire) { nextPhase := awaitResult } }
+            is(issue) { when(divide.io.in.fire || convert.io.in.fire || multiply.in.fire || estimate.io.in.fire) { nextPhase := awaitResult } }
             is(awaitResult) {
-                when(divide.io.out.fire || convert.io.out.fire || multiply.io.out.fire || estimate.io.out.fire) {
+                when(divide.io.out.fire || convert.io.out.fire || multiply.out.fire || estimate.io.out.fire) {
                     when(fractionalMultiply && sew === 2.U && !productHigh) {
-                        productLow := multiply.io.out.bits.res
+                        productLow := multiply.out.bits.res
                         productHigh := true.B
                         multiplyInput.op := MultiplyOp.MULH
                         nextPhase := issue
@@ -479,11 +478,11 @@ class VectorSerial(val p: BackendParams = BackendParams()) extends Module {
                         result := Mux(estimation, estimate.io.out.bits.result,
                             Mux(fractionalMultiply, Mux(fractionalOverflow, positiveLimit, fractionalRounded),
                             Mux(conversion, convert.io.out.bits.res, Mux(useMultiply,
-                                Mux(wideningAccumulate, BLevelPAdder32.sum(c, multiply.io.out.bits.res, 0.U),
-                                    multiply.io.out.bits.res), divide.io.out.bits.res))))
+                                Mux(wideningAccumulate, BLevelPAdder32.sum(c, multiply.out.bits.res, 0.U),
+                                    multiply.out.bits.res), divide.io.out.bits.res))))
                         flags := flags | Mux(estimation, estimate.io.out.bits.flags,
                             Mux(conversion, convert.io.out.bits.fflags,
-                                Mux(useMultiply, multiply.io.out.bits.fflags, divide.io.out.bits.fflags)))
+                                Mux(useMultiply, multiply.out.bits.fflags, divide.io.out.bits.fflags)))
                         when(fractionalMultiply && fractionalOverflow) { saturated := true.B }
                         productHigh := false.B
                         nextPhase := update

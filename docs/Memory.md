@@ -7,7 +7,7 @@ L2 Cache，以及连接外部 AXI4 主接口的 `L2AXI4Bridge`。L1 与 L2 使�
 | 配置 | ICache | DCache | L2 | AXI4 数据宽度 |
 | --- | ---: | ---: | ---: | ---: |
 | `system` | 2 KiB | 2 KiB | 8 KiB | 64 bit |
-| `performance` | 2 KiB | 16 KiB | 64 KiB | 256 bit |
+| `performance` | 2 KiB | 16 KiB | 32 KiB | 256 bit |
 
 两种配置使用相同 Cache 模块与 64 B Line。性能配置扩展 DCache 的宽数据请求和响应，
 使向量 Load/Store 复用已有 RAM 端口与 miss 单元；标量访问仍保持原来的字节语义。

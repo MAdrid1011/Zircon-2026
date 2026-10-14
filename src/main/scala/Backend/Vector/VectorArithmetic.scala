@@ -28,7 +28,7 @@ class VectorArithmeticResponse(tagWidth: Int) extends Bundle {
   * register boundaries and advance together under output backpressure.
   * Operand collection and destination merging belong to the vector backend.
   */
-class VectorArithmetic(val tagWidth: Int = 16) extends Module {
+class VectorArithmetic(val tagWidth: Int = 16, val shareSerialMultiply: Boolean = false) extends Module {
     private val productLatency = 5
     val latency = productLatency + 1
     require(tagWidth > 0)
@@ -37,13 +37,18 @@ class VectorArithmetic(val tagWidth: Int = 16) extends Module {
         val out = Decoupled(new VectorArithmeticResponse(tagWidth))
         val flush = Input(Bool())
         val outputAdvance = Output(Bool())
+        val serialMultiply = if (shareSerialMultiply) Some(new MultiplyIO(1)) else None
+        val serialActive = if (shareSerialMultiply) Some(Input(Bool())) else None
     })
     // Pack only control into the existing multiplier tag pipeline. Sending all
     // accepted tasks through its valid pipeline keeps ALU and MUL stalls equal.
     val packedTagWidth = tagWidth + 12
     val products = Seq.fill(8)(Module(new MulBooth2Wallce(packedTagWidth,
-        splitFpFinish = true, blockWidth = 4)))
-    io.in.ready := products.head.io.in.ready
+        splitFpFinish = true, blockWidth = 4, holdInvalidData = true)))
+    val serialActive = io.serialActive.getOrElse(false.B)
+    // Serial ownership begins only after the compute completion drains and
+    // remains asserted through the serial instruction's completion handshake.
+    io.in.ready := products(1).io.in.ready && !serialActive
     val outputValid = RegInit(false.B)
     val output = Reg(new VectorArithmeticResponse(tagWidth))
     val outputReady = !outputValid || io.out.ready
@@ -51,8 +56,8 @@ class VectorArithmetic(val tagWidth: Int = 16) extends Module {
     io.out.valid := outputValid && !io.flush
     io.out.bits := output
     when(io.flush) { outputValid := false.B }
-    .elsewhen(outputReady) { outputValid := products.head.io.out.valid }
-    val advance = products.head.io.in.ready
+    .elsewhen(outputReady) { outputValid := products.head.io.out.valid && !serialActive }
+    val advance = io.in.ready
     val packedTag = Cat(io.in.bits.integerAccumulate, io.in.bits.negateProduct,
         io.in.bits.fpLogic, io.in.bits.multiply, io.in.bits.active, io.in.bits.tag)
     val outputTag = products.head.io.out.bits.tag
@@ -70,7 +75,6 @@ class VectorArithmetic(val tagWidth: Int = 16) extends Module {
         alu.io.src1 := io.in.bits.source(0)(lane)
         alu.io.src2 := io.in.bits.source(1)(lane)
         alu.io.op := io.in.bits.aluOp
-        val aluStages = Seq.fill(productLatency)(Reg(UInt(32.W)))
         val logicRequest = Wire(new FpLogicRequest(1))
         logicRequest.src1 := io.in.bits.source(0)(lane)
         logicRequest.src2 := io.in.bits.source(1)(lane)
@@ -84,20 +88,18 @@ class VectorArithmetic(val tagWidth: Int = 16) extends Module {
         val integerResult = Mux(io.in.bits.minmax,
             Mux(lesser ^ io.in.bits.maximum, io.in.bits.source(0)(lane), io.in.bits.source(1)(lane)), alu.io.res)
         when(advance) {
-            aluStages.head := integerResult
-            auxiliary.head := logic.res
+            auxiliary.head := Mux(io.in.bits.fpLogic, logic.res, integerResult)
             auxiliaryFlags.head := logic.fflags
             addends.head := io.in.bits.source(2)(lane)
-            for (stage <- 1 until productLatency) aluStages(stage) := aluStages(stage - 1)
             for (stage <- 1 until productLatency) {
                 auxiliary(stage) := auxiliary(stage - 1)
                 auxiliaryFlags(stage) := auxiliaryFlags(stage - 1)
                 addends(stage) := addends(stage - 1)
             }
         }
-        val request = product.io.in.bits
+        val request = Wire(new MultiplyRequest(packedTagWidth))
         product.io.flush := io.flush
-        product.io.in.valid := io.in.valid
+        product.io.in.valid := io.in.valid && !serialActive
         product.io.out.ready := outputReady
         request.op := Mux(io.in.bits.multiply, io.in.bits.multiplyOp, 0.U)
         request.fp := io.in.bits.multiply && io.in.bits.fp
@@ -118,15 +120,36 @@ class VectorArithmetic(val tagWidth: Int = 16) extends Module {
         request.fpZero1 := !values(0)(30, 0).orR
         request.fpZero2 := !values(1)(30, 0).orR
         request.fpZero3 := !values(2)(30, 0).orR
+        product.io.in.bits := request
+        if (lane == 0 && shareSerialMultiply) {
+            val serial = io.serialMultiply.get
+            val serialRequest = Wire(new MultiplyRequest(packedTagWidth))
+            for ((name, field) <- serialRequest.elements) {
+                field := (if (name == "tag") 0.U else serial.in.bits.elements(name))
+            }
+            product.io.in.bits := Mux(serialActive, serialRequest, request)
+            product.io.in.valid := Mux(serialActive, serial.in.valid, io.in.valid)
+            product.io.out.ready := Mux(serialActive, serial.out.ready, outputReady)
+            serial.in.ready := serialActive && product.io.in.ready
+            serial.out.valid := serialActive && product.io.out.valid
+            serial.out.bits.res := product.io.out.bits.res
+            serial.out.bits.fflags := product.io.out.bits.fflags
+            serial.out.bits.tag := 0.U
+            serial.present := product.io.present
+            serial.wbInput := 0.U.asTypeOf(serial.wbInput)
+            when(serialActive) { assert(serial.flush === io.flush && !io.in.valid && !outputValid) }
+        }
         val accumulateAdder = BLevelPAdder32(addends.last,
             product.io.out.bits.res ^ Fill(32, negateProduct), negateProduct.asUInt)
         val integerResultWithAddend = accumulateAdder.io.res
-        completed.data(lane) := Mux(useLogic, auxiliary.last,
-            Mux(useProduct, Mux(accumulate, integerResultWithAddend, product.io.out.bits.res), aluStages.last))
+        completed.data(lane) := Mux(useProduct && !useLogic,
+            Mux(accumulate, integerResultWithAddend, product.io.out.bits.res), auxiliary.last)
         logicFlags(lane) := auxiliaryFlags.last
-        assert(product.io.in.ready === io.in.ready)
-        assert(product.io.out.valid === products.head.io.out.valid)
-        when(product.io.out.valid) { assert(product.io.out.bits.tag === outputTag) }
+        when(!serialActive) {
+            assert(product.io.in.ready === io.in.ready)
+            assert(product.io.out.valid === products.head.io.out.valid)
+            when(product.io.out.valid) { assert(product.io.out.bits.tag === outputTag) }
+        }
     }
     completed.fflags := products.zipWithIndex.map { case (product, lane) =>
         Mux(completed.active(lane), Mux(useLogic, logicFlags(lane),

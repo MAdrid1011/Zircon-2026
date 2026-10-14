@@ -11,10 +11,11 @@ class VectorDestination extends Bundle {
 
 /** Group adapter around eight instances of the shared Rename/SRat/FreeList.
   * Architectural index mod 8 selects a bank with four architectural and eight
-  * physical registers. A group needs at most one destination in each bank.
+  * physical registers at most. A group needs at most one destination in each bank.
   */
-class VectorRename(val sourceCandidates: Int = 1) extends Module {
+class VectorRename(val sourceCandidates: Int = 1, val physicalRegisters: Int = 64) extends Module {
     require(sourceCandidates > 0)
+    require(physicalRegisters >= 56 && physicalRegisters <= 64 && physicalRegisters % 8 == 0)
     val io = IO(new Bundle {
         val sourceBase = Input(Vec(3, UInt(5.W)))
         val sourceCandidates = if (VectorRename.this.sourceCandidates > 1)
@@ -30,11 +31,13 @@ class VectorRename(val sourceCandidates: Int = 1) extends Module {
         val available = Output(Bool())
         val bankAvailable = Output(UInt(8.W))
         val preview = Input(Valid(new VectorDestination))
+        // Same held group as preview, decoded before the Rename/Dispatch edge.
+        val previewBanks = Input(UInt(8.W))
         val accept = Input(Bool())
         val retire = Input(Vec(3, Valid(new VectorDestination)))
         val restore = Input(Bool())
     })
-    val params = RenameParams(numPhys = 8, renameWidth = 1, commitWidth = 3,
+    val params = RenameParams(numPhys = physicalRegisters / 8, renameWidth = 1, commitWidth = 3,
         numSources = 4, hasZeroReg = false, numArch = 4)
     val banks = Seq.fill(8)(Module(new Rename(params, maskUnusedOutputs = false)))
 
@@ -46,7 +49,11 @@ class VectorRename(val sourceCandidates: Int = 1) extends Module {
     def groupSelection(group: VectorDestination, bank: Int): Seq[Bool] =
         (0 until 8).map(i => distance(group.base, bank) === i.U)
     def groupContains(group: VectorDestination, bank: Int): Bool =
-        distance(group.base, bank) < group.count
+        // Thresholds depend only on count and are shared by all banks. Decode
+        // the late base separately instead of subtracting it before comparison.
+        Mux1H(UIntToOH(group.base(2, 0), 8), (0 until 8).map { first =>
+            group.count > ((bank - first + 8) & 7).U
+        })
     val bases = io.sourceCandidates.map(_.toSeq).getOrElse(Seq(io.sourceBase))
     def selectSource(values: Seq[UInt]): UInt =
         io.sourceSelection.map(Mux1H(_, values)).getOrElse(values.head)
@@ -71,7 +78,7 @@ class VectorRename(val sourceCandidates: Int = 1) extends Module {
 
         val preview = bank.io.preview(0)
         val selection = groupSelection(io.preview.bits, index)
-        preview.valid := io.preview.valid && groupContains(io.preview.bits, index)
+        preview.valid := io.preview.valid && io.previewBanks(index)
         preview.bits.rd := localAddress(io.preview.bits.base, index)
         preview.bits.prd := Mux1H(selection, io.preview.bits.physical.map(_(5, 3)))
         bank.io.writeback(0).valid := io.accept && preview.valid
@@ -105,11 +112,18 @@ class VectorRename(val sourceCandidates: Int = 1) extends Module {
     }
     io.available := banks.map(_.io.available).reduce(_ && _)
     io.bankAvailable := VecInit(banks.map(_.io.freeAvailable)).asUInt
+    when(io.preview.valid) {
+        for (bank <- 0 until 8) {
+            assert(io.previewBanks(bank) === groupContains(io.preview.bits, bank),
+                "Held vector bank selection must match its destination group")
+        }
+    }
     when(io.accept) {
         assert(io.preview.valid && !io.restore)
         assert(io.preview.bits.base +& io.preview.bits.count <= 32.U)
         for (i <- 0 until 8) when(i.U < io.preview.bits.count) {
             assert(io.preview.bits.physical(i)(2, 0) === (io.preview.bits.base + i.U)(2, 0))
+            assert(io.preview.bits.physical(i) < physicalRegisters.U)
         }
     }
     assert(io.destinationCount <= 8.U)

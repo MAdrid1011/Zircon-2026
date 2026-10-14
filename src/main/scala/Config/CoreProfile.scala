@@ -8,6 +8,8 @@ sealed trait CoreProfile {
     def dcacheSets: Int
     def l2: L2CacheParams
     def vlen: Int
+    def vector: VectorParams = VectorParams()
+    def frontend(observe: Boolean): FrontendParams = FrontendParams(observe = observe)
     final def icache: ICacheParams = ICacheParams(tlbEnabled = privileged, directPhysical = !privileged)
 }
 
@@ -25,8 +27,10 @@ object CoreProfile {
         val privileged = false
         val axiDataBits = 256
         val dcacheSets = 128
-        val l2 = L2CacheParams(sets = 256)
+        val l2 = L2CacheParams(sets = 128)
         val vlen = 256
+        override def frontend(observe: Boolean): FrontendParams = FrontendParams(
+            historyLengths = Seq(4, 8, 16, 32, 64), rasDepth = 8, observe = observe)
     }
     def named(name: String): CoreProfile = name match {
         case "system" => System
@@ -40,9 +44,10 @@ case class VectorParams(
     elen: Int = 32,
     lanes: Int = 8,
     physicalRegisters: Int = 64,
-    computeEntries: Int = 12,
-    memoryEntries: Int = 8,
+    computeEntries: Int = 6,
+    memoryEntries: Int = 4,
 ) {
     require(vlen == 256 && elen == 32 && lanes == 8)
-    require(physicalRegisters == 64)
+    require(physicalRegisters >= 56 && physicalRegisters <= 64 && physicalRegisters % 8 == 0)
+    require(computeEntries >= 2 && memoryEntries >= 2)
 }

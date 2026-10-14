@@ -554,7 +554,17 @@ class VectorGroupCounts(inst: UInt, vtype: UInt) {
     }
     def allocationBlocked(available: UInt): Bool = {
         require(available.getWidth == 8)
-        (allocationBanks & ~available).orR
+        // Resolve bank capacity for each constant group before group-size
+        // selection. The late instruction class selects one bit, not a mask.
+        val base = (0 until 8).map(index => inst(9, 7) === index.U)
+        val blocked = (0 until 16).map { count =>
+            if (count == 0) 0.U(1.W)
+            else if (count >= 8) (!available.andR).asUInt
+            else Mux1H(base, (0 until 8).map { first =>
+                (0 until count).map(offset => !available((first + offset) & 7)).reduce(_ || _)
+            }).asUInt
+        }
+        selectAllocation(blocked).orR
     }
 }
 

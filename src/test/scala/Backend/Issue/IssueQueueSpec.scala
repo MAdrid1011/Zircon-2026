@@ -183,7 +183,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
 
     "candidate-level arithmetic wakeup updates a waiting source in the issue cycle" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, wakeupPorts = 1)
-        simulate(new IssueQueue(backend, q, directWakeupCandidates = 2)) { dut =>
+        simulate(new IssueQueue(backend, q, directWakeupCandidates = 2, parallelSpeculationSummary = true)) { dut =>
             initialize(dut)
             enqueue(dut, Seq((1, DecodeUnit.ALU, 0, Some(9), false)))
             dut.io.issue.valid.expect(false)
@@ -498,7 +498,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
         for (profile <- Seq(IssueQueueProfile.ArithBranch, IssueQueueProfile.MixArith)) {
             val q = IssueQueueParams(6, profile, wakeupPorts = 2,
                 replayEntries = if (profile == IssueQueueProfile.ArithBranch) 1 else 0)
-            simulate(new IssueQueue(backend, q, directWakeupCandidates = 1)) { dut =>
+            simulate(new IssueQueue(backend, q, directWakeupCandidates = 1, parallelSpeculationSummary = true)) { dut =>
                 val fu = if (profile == IssueQueueProfile.ArithBranch) DecodeUnit.ALU else DecodeUnit.Multiply
                 for ((ordinaryMask, directMask, failure, ready) <- Seq(
                     (0, 0, 0, true),
@@ -934,7 +934,7 @@ class IssueQueueSpec extends AnyFreeSpec with ChiselSim {
     "registered replay capacity includes consecutive pending reservations and resolution" in {
         val q = IssueQueueParams(6, IssueQueueProfile.ArithBranch, enqueueWidth = 3,
             wakeupPorts = 1, replayEntries = 2)
-        simulate(new IssueQueue(backend, q)) { dut =>
+        simulate(new IssueQueue(backend, q, parallelSpeculationSummary = true)) { dut =>
             initialize(dut)
             dut.io.issue.ready.poke(true)
             dut.io.enq.valid.poke(7)

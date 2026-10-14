@@ -56,6 +56,7 @@ class Backend(
     val dcacheSets: Int = 16,
     val directPhysical: Boolean = false,
     val vectorEnabled: Boolean = false,
+    val vectorParams: VectorParams = VectorParams(),
 ) extends Module {
     require(p == BackendParams(), "The current execution pipeline interfaces use the default BackendParams")
     require(p == loadParams.backend, "Backend and LoadPipeline parameters must describe the same physical machine")
@@ -73,7 +74,7 @@ class Backend(
     /* IssueQueueIndex is the shared ordering contract for dispatch, counters and execution pipes. */
     val queues = issueParams.queueParams.zipWithIndex.map { case (params, index) =>
         val directCandidates = if (index <= IssueQueueIndex.MixArith) 2 else 0
-        Module(new IssueQueue(p, params, directCandidates))
+        Module(new IssueQueue(p, params, directCandidates, parallelSpeculationSummary = vectorEnabled))
     }
     val arith0IQ = queues(IssueQueueIndex.Arith0)
     val arith1IQ = queues(IssueQueueIndex.Arith1)
@@ -148,19 +149,21 @@ class Backend(
                 "A vector scalar wakeup must not overwrite a retained tag")
         }
     }
-    val vectorCompute = if (vectorEnabled) Some(Module(new VectorCompute(p))) else None
+    val vectorCompute = if (vectorEnabled) Some(Module(new VectorCompute(p, shareSerialMultiply = true))) else None
     val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams))) else None
-    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p))) else None
+    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p, externalMultiply = true))) else None
     vectorCompute.foreach { compute =>
         val port = io.vector.get
-        val iq = Module(new IssueQueue(p, IssueQueueParams(12, IssueQueueProfile.Vector,
+        val iq = Module(new IssueQueue(p, IssueQueueParams(vectorParams.computeEntries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = issueParams.wakeupPorts)))
         val memory = vectorMemory.get
         val serial = vectorSerial.get
-        val memoryIQ = Module(new IssueQueue(p, IssueQueueParams(8, IssueQueueProfile.Vector,
+        compute.io.serialMultiply.get <> serial.io.multiply.get
+        compute.io.serialActive.get := !serial.io.idle
+        val memoryIQ = Module(new IssueQueue(p, IssueQueueParams(vectorParams.memoryEntries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = issueParams.wakeupPorts), orderedIssue = true))
-        val ready = Module(new VectorReadyBoard)
-        val file = Module(new VectorRegisterFile(observe = observe))
+        val ready = Module(new VectorReadyBoard(vectorParams.physicalRegisters))
+        val file = Module(new VectorRegisterFile(vectorParams, observe = observe))
         io.vectorObservation.foreach(_ := file.io.observation.get)
         ready.io.allocate := port.allocate
         ready.io.flush := io.commit.flush
@@ -242,7 +245,7 @@ class Backend(
                 serial.io.read(read).address, compute.io.read(read).address))
             // Arbitrate six-bit tags before the shared RF decoder. Selecting
             // three 64-bit masks makes the read-owner control drive every row.
-            file.io.read(read).oneHot := UIntToOH(file.io.read(read).address, 64)
+            file.io.read(read).oneHot := UIntToOH(file.io.read(read).address, vectorParams.physicalRegisters)
             compute.io.read(read).data := file.io.read(read).data
             memory.io.read(read).data := file.io.read(read).data
             serial.io.read(read).data := file.io.read(read).data

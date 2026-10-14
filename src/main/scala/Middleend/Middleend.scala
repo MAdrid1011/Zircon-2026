@@ -101,6 +101,7 @@ class Middleend(
     val commitParams: CommitParams = CommitParams(),
     val privileged: Boolean = true,
     val vectorEnabled: Boolean = false,
+    val vectorParams: VectorParams = VectorParams(),
 ) extends Module {
     require(frontendParams.fetchWidth >= issueParams.dispatchWidth)
 
@@ -137,7 +138,9 @@ class Middleend(
     // PD classifies scalar and RVV operands before FQ stores their domain bits.
     val renameInstructions = instructions
     val vectorStage = if (vectorEnabled) Some(Reg(new VectorInstructionMetadata)) else None
-    val vectorRename = if (vectorEnabled) Some(Module(new VectorRename(sourceCandidates = width))) else None
+    val vectorStageBanks = if (vectorEnabled) Some(Reg(UInt(8.W))) else None
+    val vectorRename = if (vectorEnabled) Some(Module(new VectorRename(sourceCandidates = width,
+        physicalRegisters = vectorParams.physicalRegisters))) else None
     val vectorState = if (vectorEnabled) Some(RegInit({
         val initial = WireDefault(0.U.asTypeOf(new VectorCSRState))
         initial.vtype := "h80000000".U
@@ -454,6 +457,7 @@ class Middleend(
         rename.io.retire := port.retire
         rename.io.preview.valid := vectorStageSelection.orR
         rename.io.preview.bits := vectorStage.get.destination
+        rename.io.previewBanks := vectorStageBanks.get
         rename.io.accept := (accepted & vectorStageSelection).orR
         val metadata = Wire(new VectorInstructionMetadata)
         metadata.control := vectorControl.get.io.control
@@ -469,7 +473,10 @@ class Middleend(
         val writesVector = Mux1H(vectorSelection, vectorCandidateGroups.map(_.shape.writesVector))
         port.allocate.valid := vectorDecodeFire && writesVector
         port.allocate.bits := rename.io.destination
-        when(stageCanLoad) { vectorStage.get := metadata }
+        when(stageCanLoad) {
+            vectorStage.get := metadata
+            vectorStageBanks.get := vectorAllocationBanks.get
+        }
         port.enqueue.valid := (accepted & vectorStageSelection).orR
         port.enqueue.bits.vector := vectorStage.get
         port.enqueue.bits.scalar := Mux1H(vectorStageSelection, dispatcher.io.in.entries)

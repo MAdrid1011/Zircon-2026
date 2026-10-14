@@ -16,7 +16,12 @@ class VectorArithmeticSpec extends AnyFreeSpec with ChiselSim {
         }.toVector finally source.close()
     }
     "eight shared lanes sustain FMA each cycle and preserve tags, masking, stalls and cancellation" in {
-        simulate(new VectorArithmetic) { dut =>
+        simulate(new VectorArithmetic(shareSerialMultiply = true)) { dut =>
+            VectorTestUtils.clear(dut.io.serialMultiply.get.in.bits)
+            dut.io.serialMultiply.get.in.valid.poke(false)
+            dut.io.serialMultiply.get.out.ready.poke(true)
+            dut.io.serialMultiply.get.flush.poke(false)
+            dut.io.serialActive.get.poke(false)
             val rng = new Random(20261013)
             val oracle = samples
             var pipe = Vector.fill[Option[Task]](6)(None)
@@ -123,6 +128,45 @@ class VectorArithmeticSpec extends AnyFreeSpec with ChiselSim {
                 tick(Some(task))
                 if (tag % 47 == 17) tick(None, flush = true)
             }
+            for (_ <- 0 until 6) tick(None)
+            tick(None, flush = true)
+            dut.io.flush.poke(false)
+            // The serial client owns lane zero across issue, stalled response
+            // and drain. No serial result may escape as a normal SIMD task.
+            val serial = dut.io.serialMultiply.get
+            dut.io.serialActive.get.poke(true)
+            dut.io.in.valid.poke(false)
+            for (sample <- oracle.groupBy(_.op).toSeq.sortBy(_._1).flatMap(_._2.take(4))) {
+                val request = serial.in.bits
+                request.src1.poke(sample.a); request.src2.poke(sample.b); request.src3.poke(sample.c)
+                request.fpSrc1.poke(sample.a); request.fpSrc2.poke(sample.b); request.fpSrc3.poke(sample.c)
+                for ((exp, zero, value) <- Seq((request.fpEffectiveExp1, request.fpZero1, sample.a),
+                     (request.fpEffectiveExp2, request.fpZero2, sample.b),
+                     (request.fpEffectiveExp3, request.fpZero3, sample.c))) {
+                    val exponent = (value >> 23) & 255
+                    exp.poke(if (exponent == 0) BigInt(1) else exponent)
+                    zero.poke((value & 0x7fffffffL) == 0)
+                }
+                request.op.poke(sample.op); request.fp.poke(sample.op >= 4)
+                request.aSigned.poke(sample.op < 4 && sample.op != 3)
+                request.bSigned.poke(sample.op < 4 && sample.op != 2 && sample.op != 3)
+                request.roundingMode.poke(sample.rm); request.tag.poke(0)
+                serial.in.valid.poke(true); serial.out.ready.poke(false)
+                serial.in.ready.expect(true); dut.clock.step(); serial.in.valid.poke(false)
+                for (_ <- 0 until 4) { dut.io.out.valid.expect(false); dut.clock.step() }
+                for (_ <- 0 until 3) {
+                    serial.out.valid.expect(true); serial.out.bits.res.expect(sample.res)
+                    serial.out.bits.fflags.expect(sample.flags); dut.io.out.valid.expect(false)
+                    dut.io.in.ready.expect(false); dut.clock.step()
+                }
+                serial.out.ready.poke(true); dut.clock.step()
+            }
+            serial.in.valid.poke(true); dut.clock.step(); serial.in.valid.poke(false)
+            dut.io.flush.poke(true); serial.flush.poke(true); dut.clock.step()
+            dut.io.flush.poke(false); serial.flush.poke(false)
+            for (_ <- 0 until 6) { serial.out.valid.expect(false); dut.clock.step() }
+            dut.io.serialActive.get.poke(false)
+            tick(Some(Task(Seq.fill(8)(fma.head), 255, 60000)))
             for (_ <- 0 until 6) tick(None)
             info(s"$cycle cycles; eight-lane SoftFloat/BigInt, 128 consecutive FMA tasks, stall and flush coverage")
         }
