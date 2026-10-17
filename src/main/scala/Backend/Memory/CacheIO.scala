@@ -98,6 +98,9 @@ class DForwardResult(val p: DCacheParams = DCacheParams()) extends Bundle {
     val blocked = Bool()
 }
 
+/** Cached write acquires an entire replacement line; L1 owns all new bytes.
+  * Uncached write carries data/mask to lower memory.
+  */
 class DMemoryRequest extends Bundle {
     val paddr = UInt(34.W)
     val write = Bool()
@@ -155,6 +158,7 @@ class DCacheIO(
     val tlbEnabled: Boolean = false,
     val observe: Boolean = false,
 ) extends Bundle {
+    val prefetch = if(p.directPhysical) Some(Flipped(Vec(2,Valid(UInt(32.W))))) else None
     // Lane 0 is LS0 / RAM A; lane 1 is LS1 / RAM B. Committed writes use the separate store interface.
     val load = Vec(2, new DCacheLoadIO(p))
     val store = new DCacheStoreIO

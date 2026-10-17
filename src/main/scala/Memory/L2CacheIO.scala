@@ -62,6 +62,7 @@ class L2CacheIO(c: ICacheParams, p: L2CacheParams, observe: Boolean = false) ext
     val dptw = Flipped(new L2PTWIO)
     val memory = new L2MemoryIO(p)
     val idle = Output(Bool())
+    val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new L2PerformanceCounters)) else None
 }
 

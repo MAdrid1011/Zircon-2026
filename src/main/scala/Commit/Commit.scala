@@ -286,11 +286,12 @@ class Commit(
     val headAtomic = if (privileged) rob.io.head(0).valid && rob.io.head(0).bits.isAtomic else false.B
     val headSystemOp = rob.io.head(0).bits.systemOp
     val fence = headSystem && headSystemOp === SystemOp.FENCE.U
-    val fenceI = if (privileged) headSystem && headSystemOp === SystemOp.FENCE_I.U else false.B
+    val fenceI = headSystem && headSystemOp === SystemOp.FENCE_I.U
     val sfence = if (privileged) headSystem && headSystemOp === SystemOp.SFENCE_VMA.U else false.B
-    val memoryDrained = sq.io.committedEmpty && sb.io.empty && io.memoryIdle
+    val committedStoresDrained = sq.io.committedEmpty && sb.io.empty
+    val memoryDrained = committedStoresDrained && io.memoryIdle
     io.backend.loadGrant.valid := rob.io.head(0).valid && !rob.io.head(0).bits.complete &&
-        memoryDrained && !delayedRecovery
+        committedStoresDrained && !delayedRecovery
     io.backend.loadGrant.bits.robIdx := rob.io.head(0).bits.robIdx
     sq.io.atomic.sqIdx.valid := headAtomic && !delayedRecovery
     sq.io.atomic.sqIdx.bits := rob.io.head(0).bits.sqIdx
@@ -376,7 +377,8 @@ class Commit(
         val systemException = if (privileged) ecall || ebreak || mretIllegal || sretIllegal else false.B
         val exceptionValid = if (privileged) entry.exception.valid else false.B
         val atomic = if (privileged) entry.isAtomic else false.B
-        val systemRecovery = if (privileged) commitSystem else entry.isSystem && entry.systemOp === SystemOp.FENCE.U
+        val systemRecovery = if (privileged) commitSystem else entry.isSystem &&
+            (entry.systemOp === SystemOp.FENCE.U || entry.systemOp === SystemOp.FENCE_I.U)
         recoveryCandidate(lane) := exceptionValid || entry.mispredicted || systemRecovery ||
             entry.writesExecutionState || atomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate(lane)

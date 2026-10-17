@@ -101,6 +101,7 @@ class VectorRetireTrace extends Bundle {
 }
 
 class VectorCoreDebug extends Bundle {
+    val performance = Vec(8,UInt(64.W))
     val registers = Vec(64, UInt(256.W))
     val retire = Vec(3, new VectorRetireTrace)
     val state = new VectorCSRState

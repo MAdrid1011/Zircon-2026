@@ -103,8 +103,13 @@ class ZirconCore(
     frontend.io.maintenance.invalidate := true.B
     backend.io.maintenance.request := commit.io.maintenance.request
     backend.io.maintenance.invalidate := commit.io.maintenance.invalidate
-    commit.io.maintenance.done := backend.io.maintenance.done &&
+    val l1MaintenanceDone = backend.io.maintenance.done &&
         (!commit.io.maintenance.invalidate || frontend.io.maintenance.done)
+    l2.io.maintenance.request := commit.io.maintenance.request &&
+        commit.io.maintenance.invalidate && l1MaintenanceDone
+    l2.io.maintenance.invalidate := true.B
+    commit.io.maintenance.done := l1MaintenanceDone &&
+        (!commit.io.maintenance.invalidate || l2.io.maintenance.done)
 
     if (profile.privileged) {
     val ptw = Module(new PageTableWalker)
@@ -156,6 +161,7 @@ class ZirconCore(
     if (simulationDebug) {
         if (vectorEnabled) {
             io.debug.get.vector.get.registers := backend.io.vectorObservation.get
+            io.debug.get.vector.get.performance := backend.io.vectorPerformance.get
             io.debug.get.vector.get.retire := commit.io.debug.vector.get
             io.debug.get.vector.get.state := commit.io.vector.get.state
             io.debug.get.vector.get.store := commit.io.debug.vectorStore.get

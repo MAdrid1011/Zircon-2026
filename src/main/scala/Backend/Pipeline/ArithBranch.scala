@@ -9,6 +9,7 @@ class ArithBranchCommitIO extends Bundle {
 }
 
 class ArithBranchIO extends Bundle {
+    val prefetch = Output(Valid(UInt(32.W)))
     val iq = Flipped(Decoupled(new BackendPackage))
     val rf = new ArithRegfileIO
     val cmt = new ArithBranchCommitIO
@@ -129,6 +130,10 @@ class ArithBranch extends Module {
 
     val packageAfterEX = WireDefault(packageEX)
     packageAfterEX.result := alu.io.res
+    io.prefetch.valid := execute && packageEX.fu===DecodeUnit.ALU.U &&
+        packageEX.inst(6,0)===0x13.U && packageEX.inst(14,12)===6.U &&
+        packageEX.inst(11,7)===0.U && packageEX.inst(24,20)===1.U
+    io.prefetch.bits := alu.io.res
     packageAfterEX.branchTaken := branch.io.realJp
     packageAfterEX.branchTarget := branch.io.jumpTgt
     packageAfterEX.predFail := branch.io.predFail || (branch.io.realJp =/= packageEX.predictedTaken)

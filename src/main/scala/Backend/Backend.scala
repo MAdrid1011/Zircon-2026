@@ -36,6 +36,7 @@ class BackendIO(
     val debug = if (observe) Some(Output(new BackendDebugIO)) else None
     val vector = if (vectorEnabled) Some(new VectorBackendIO(p)) else None
     val vectorObservation = if (vectorEnabled && observe) Some(Output(Vec(64, UInt(256.W)))) else None
+    val vectorPerformance = if (vectorEnabled && observe) Some(Output(Vec(8,UInt(64.W)))) else None
 }
 
 /**
@@ -91,6 +92,10 @@ class Backend(
     val ls0 = Module(new LoadPipeline(loadParams))
     val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled, directPhysical))
     val dcache = Module(new DCache(ramBackend, dcacheParams, tlbEnabled, observe))
+    dcache.io.prefetch.foreach { hints =>
+        hints(0) := arith0.io.prefetch
+        hints(1) := arith1.io.prefetch
+    }
     val atomic = if (atomicEnabled) Module(new AtomicUnit(p, dcacheParams, observe)).io else {
         val disabled = Wire(new AtomicUnitIO(p, dcacheParams, observe))
         disabled.request.ready := false.B
@@ -261,6 +266,15 @@ class Backend(
         file.io.write(1).address := memory.io.writeback.bits.address
         file.io.write(1).data := memory.io.writeback.bits.data
         file.io.write(1).bytes := memory.io.writeback.bits.bytes
+        io.vectorPerformance.foreach { counters =>
+            val events = Cat(!compute.io.activity(3) && !iq.io.issue.valid,
+                !memory.io.idle,compute.io.activity)
+            for (event <- 0 until 8) {
+                val count = RegInit(0.U(64.W))
+                when(events(event)) { count := count+1.U }
+                counters(event) := count
+            }
+        }
         port.availableCompute := iq.io.freePrefix(0)
         port.availableMemory := memoryIQ.io.freePrefix(0)
         val scalarWakeAvailable = vectorScalarWake.get === 0.U || ls1.io.wk.wakeWB.prd === 0.U

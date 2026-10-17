@@ -38,10 +38,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val group = Reg(UInt(3.W))
     val groupOH = RegInit(1.U(8.W))
     val second = RegInit(false.B)
-    val idle :: readElementAddress :: prepare :: send :: response :: done :: Nil = Enum(6)
+    val idle :: readElementAddress :: prepare :: response :: done :: Nil = Enum(5)
     val state = RegInit(idle)
     val active = RegInit(false.B)
-    val request = Reg(new DStoreRequest)
     val commitHit = io.commit.map(event => event.valid && event.bits === identity).reduce(_ || _)
     io.collect.ready := !io.flush && (!valid || !filled && io.collect.bits.sqIdx === identity)
     io.drain.start.ready := valid && committed && filled && state === idle
@@ -62,20 +61,24 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
                 elementAddresses(group * 32 + index))).asUInt
         }
     }
-    io.cache.request.valid := state === send
-    io.cache.request.bits := request
     io.cache.response.ready := state === response
     val item = Mux1H(groupOH, payload)
     val address = Mux(scattered, elementAddress, item.address)
+    // Two adjacent register groups already occupy one cache line. Reuse the
+    // collected payload to issue their combined data and byte mask together.
+    val nextItem = Mux1H(Cat(groupOH(6,0),groupOH(7)),payload)
+    val pair = !scattered && !second && !address(5,0).orR && group+&1.U<count &&
+        nextItem.address===Cat(address(31,6),32.U(6.W))
+    val step = Mux(pair,2.U(2.W),1.U(2.W))
     val elementBytes = (1.U(3.W) << eew)(2, 0)
     val dataMask = Mux(eew === 0.U, 255.U(32.W), Mux(eew === 1.U, 65535.U(32.W), "hffffffff".U))
     val narrowData = (item.data >> (position << 3))(31, 0) & dataMask
     val narrowMask = (item.mask >> position)(3, 0) & Mux(eew === 0.U, 1.U, Mux(eew === 1.U, 3.U, 15.U))
     val shiftedData = (Mux(scattered, narrowData.pad(256), item.data).pad(1024) << (address(5, 0) << 3))(1023, 0)
     val shiftedMask = (Mux(scattered, narrowMask.pad(32), item.mask).pad(128) << address(5, 0))(127, 0)
-    val lineMask = Mux(second, shiftedMask(127, 64), shiftedMask(63, 0))
+    val lineMask = Mux(pair,Cat(nextItem.mask,item.mask),Mux(second, shiftedMask(127, 64), shiftedMask(63, 0)))
     val hasSecond = shiftedMask(127, 64).orR && !second
-    val last = group +& 1.U === count
+    val last = group +& step === count
     val fieldStride = (1.U(4.W) << fieldRegisterShift)(3, 0)
     val withinField = group & Cat(fieldRegisterShift === 3.U,
         fieldRegisterShift >= 2.U, fieldRegisterShift >= 1.U)
@@ -106,8 +109,8 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
                 }
             }.otherwise {
                 position := 0.U
-                group := group + 1.U
-                groupOH := Cat(groupOH(6, 0), groupOH(7))
+                group := group + step
+                groupOH := Mux(pair,Cat(groupOH(5,0),groupOH(7,6)),Cat(groupOH(6,0),groupOH(7)))
                 state := Mux(last, done, Mux(scattered, readElementAddress, prepare))
                 when(last) { active := false.B }
             }
@@ -155,16 +158,15 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         elementAddress := elementAddresses(Cat(group, position))
         state := prepare
     }
-    when(state === prepare) {
-        request := 0.U.asTypeOf(new DStoreRequest)
-        request.wide := true.B
-        request.paddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
+    io.cache.request.bits := 0.U.asTypeOf(new DStoreRequest)
+    io.cache.request.bits.wide := true.B
+    io.cache.request.bits.paddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
             Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W)).pad(34)
-        request.line := Mux(second, shiftedData(1023, 512), shiftedData(511, 0))
-        request.lineMask := lineMask
-        request.size := 2.U
-        when(lineMask.orR) { state := send }.otherwise { advance() }
-    }
+    io.cache.request.bits.line := Mux(pair,Cat(nextItem.data,item.data),Mux(second, shiftedData(1023, 512), shiftedData(511, 0)))
+    io.cache.request.bits.lineMask := lineMask
+    io.cache.request.bits.size := 2.U
+    io.cache.request.valid := state === prepare && lineMask.orR
+    when(state === prepare && !lineMask.orR) { advance() }
     when(io.cache.request.fire) { state := response }
     when(io.cache.response.fire) {
         assert(io.cache.response.bits.exception === 0.U)
