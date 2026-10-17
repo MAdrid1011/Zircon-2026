@@ -133,7 +133,9 @@ class ArithBranch extends Module {
     io.prefetch.valid := execute && packageEX.fu===DecodeUnit.ALU.U &&
         packageEX.inst(6,0)===0x13.U && packageEX.inst(14,12)===6.U &&
         packageEX.inst(11,7)===0.U && packageEX.inst(24,20)===1.U
-    io.prefetch.bits := alu.io.res
+    // PREFETCH.R always adds rs1 and its signed immediate. It does not need
+    // the scalar ALU's operand/opcode selection or its result-selection mux.
+    io.prefetch.bits := BLevelPAdder32.sum(source1, packageEX.imm, 0.U(1.W))
     packageAfterEX.branchTaken := branch.io.realJp
     packageAfterEX.branchTarget := branch.io.jumpTgt
     packageAfterEX.predFail := branch.io.predFail || (branch.io.realJp =/= packageEX.predictedTaken)

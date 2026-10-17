@@ -150,7 +150,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.request.valid := state === request && io.ordering.clear && !io.flush
     io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
     io.request.bits.wide := true.B
-    io.request.bits.vaddr := Cat(address(31, 6), 0.U(6.W)) + Mux(second, 64.U, 0.U)
+    io.request.bits.vaddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
+        Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
     io.request.bits.paddr := io.request.bits.vaddr
     io.request.bits.mtype := 2.U
     when(state === streamLoad) {

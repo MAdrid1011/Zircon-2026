@@ -22,6 +22,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         val observation = if (observe) Some(Output(new VectorStoreTrace)) else None
     })
     val payload = Reg(Vec(8, new VectorStoreTask(p)))
+    val nextLineAddress = Reg(Vec(8, UInt(26.W)))
+    val adjacentPair = RegInit(VecInit.fill(8)(false.B))
+    val contiguousMasks = Reg(Vec(8, UInt(128.W)))
     val elementAddresses = Mem(256, UInt(32.W))
     val scattered = Reg(Bool())
     val eew = Reg(UInt(2.W))
@@ -67,15 +70,15 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     // Two adjacent register groups already occupy one cache line. Reuse the
     // collected payload to issue their combined data and byte mask together.
     val nextItem = Mux1H(Cat(groupOH(6,0),groupOH(7)),payload)
-    val pair = !scattered && !second && !address(5,0).orR && group+&1.U<count &&
-        nextItem.address===Cat(address(31,6),32.U(6.W))
+    val pair = !scattered && !second && (groupOH & adjacentPair.asUInt).orR
     val step = Mux(pair,2.U(2.W),1.U(2.W))
     val elementBytes = (1.U(3.W) << eew)(2, 0)
     val dataMask = Mux(eew === 0.U, 255.U(32.W), Mux(eew === 1.U, 65535.U(32.W), "hffffffff".U))
     val narrowData = (item.data >> (position << 3))(31, 0) & dataMask
     val narrowMask = (item.mask >> position)(3, 0) & Mux(eew === 0.U, 1.U, Mux(eew === 1.U, 3.U, 15.U))
     val shiftedData = (Mux(scattered, narrowData.pad(256), item.data).pad(1024) << (address(5, 0) << 3))(1023, 0)
-    val shiftedMask = (Mux(scattered, narrowMask.pad(32), item.mask).pad(128) << address(5, 0))(127, 0)
+    val scatteredMask = (narrowMask.pad(128) << elementAddress(5, 0))(127, 0)
+    val shiftedMask = Mux(scattered, scatteredMask, Mux1H(groupOH, contiguousMasks))
     val lineMask = Mux(pair,Cat(nextItem.mask,item.mask),Mux(second, shiftedMask(127, 64), shiftedMask(63, 0)))
     val hasSecond = shiftedMask(127, 64).orR && !second
     val last = group +& step === count
@@ -126,6 +129,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             eew := io.collect.bits.eew
             fieldRegisterShift := io.collect.bits.fieldRegisterShift
             lastField := io.collect.bits.lastField
+            adjacentPair.foreach(_ := false.B)
         }.otherwise {
             assert(io.collect.bits.index === nextCollect)
             assert(!committed)
@@ -135,6 +139,20 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             nextCollect := io.collect.bits.index
         }.otherwise {
             payload(io.collect.bits.index) := io.collect.bits
+            contiguousMasks(io.collect.bits.index) :=
+                (io.collect.bits.mask.pad(128) << io.collect.bits.address(5, 0))(127, 0)
+            nextLineAddress(io.collect.bits.index) := BLevelPAdder32.sum(
+                Cat(io.collect.bits.address(31, 6), 0.U(6.W)), 64.U(32.W), 0.U(1.W))(31, 6)
+            // A successor is known while its payload arrives. No address
+            // comparison or increment remains after the drain group mux.
+            for (previous <- 0 until 7) {
+                when(io.collect.bits.index === (previous + 1).U) {
+                    val aligned = !payload(previous).address(5, 0).orR
+                    val adjacent = io.collect.bits.address ===
+                        Cat(payload(previous).address(31, 6), 32.U(6.W))
+                    adjacentPair(previous) := aligned && adjacent
+                }
+            }
             nextCollect := io.collect.bits.index + 1.U
         }
         when(io.collect.bits.last) {
@@ -160,8 +178,11 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     }
     io.cache.request.bits := 0.U.asTypeOf(new DStoreRequest)
     io.cache.request.bits.wide := true.B
-    io.cache.request.bits.paddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
-            Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W)).pad(34)
+    val contiguousLine = Mux(second, Mux1H(groupOH, nextLineAddress), item.address(31, 6))
+    val scatteredAddress = BLevelPAdder32.sum(Cat(elementAddress(31, 6), 0.U(6.W)),
+        Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
+    io.cache.request.bits.paddr := Mux(scattered, scatteredAddress,
+        Cat(contiguousLine, 0.U(6.W))).pad(34)
     io.cache.request.bits.line := Mux(pair,Cat(nextItem.data,item.data),Mux(second, shiftedData(1023, 512), shiftedData(511, 0)))
     io.cache.request.bits.lineMask := lineMask
     io.cache.request.bits.size := 2.U

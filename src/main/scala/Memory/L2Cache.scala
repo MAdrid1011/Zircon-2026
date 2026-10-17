@@ -342,8 +342,10 @@ class L2Cache(
     val dataTab = VecInit.fill(p.ways)(
         Module(new DualPortMaskedRam(p.sets, p.lineBytes, 8, ramBackend, readWritePort = 1)).io
     )
-    val validTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 2, 3, Some(false.B))).io)
-    val dirtyTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 1, 3, Some(false.B))).io)
+    // Maintenance reads the same bit arrays through its own narrow address
+    // selection, without a maintenance mux before demand hit/consume logic.
+    val validTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 2, 4, Some(false.B))).io)
+    val dirtyTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 1, 4, Some(false.B))).io)
     val instructionTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 1, 3, Some(false.B))).io)
     val plruTab = Module(new AsyncRegRam(UInt(3.W), p.sets, 1, 3, Some(0.U(3.W)))).io
 
@@ -362,6 +364,8 @@ class L2Cache(
     val dValidWays = VecInit(validTab.map(_.rdata(1))).asUInt
     val iDirtyWays = VecInit(dirtyTab.map(_.rdata(0))).asUInt
     val dDirtyWays = VecInit(dirtyTab.map(_.rdata(1))).asUInt
+    val cleanValidWays = VecInit(validTab.map(_.rdata(3))).asUInt
+    val cleanDirtyWays = VecInit(dirtyTab.map(_.rdata(3))).asUInt
     val iInstructionWays = VecInit(instructionTab.map(_.rdata(0))).asUInt
     val dInstructionWays = VecInit(instructionTab.map(_.rdata(1))).asUInt
     val iHit = VecInit((0 until p.ways).map(way => iValidWays(way) && iTags(way) === tag(iS2.paddr))).asUInt
@@ -578,7 +582,7 @@ class L2Cache(
         }}
         is(cleanRead) { cleanState := cleanLookup }
         is(cleanLookup) {
-            when(dValidWays(cleanWay) && dDirtyWays(cleanWay)) {
+            when(cleanValidWays(cleanWay) && cleanDirtyWays(cleanWay)) {
                 cleanAddress := Cat(dTags(cleanWay),cleanSet,0.U(p.offsetBits.W))
                 cleanData := dLines(cleanWay); cleanState := cleanSend
             }.otherwise { cleanClear := true.B; advanceClean() }
@@ -824,6 +828,7 @@ class L2Cache(
         validTab(way).raddr(0) := index(iMetaAddress)
         validTab(way).raddr(1) := index(dMetaAddress)
         validTab(way).raddr(2) := index(engineVictimAddress)
+        validTab(way).raddr(3) := cleanSet
         validTab(way).wen(0) := Mux(engineInstall, installValidWay(way), iFastConsumeWay)
         validTab(way).waddr(0) := Mux(engineInstall, index(engineVictimAddress), index(iS2.paddr))
         validTab(way).wdata(0) := engineInstall
@@ -834,6 +839,7 @@ class L2Cache(
         dirtyTab(way).raddr(0) := index(iMetaAddress)
         dirtyTab(way).raddr(1) := index(dMetaAddress)
         dirtyTab(way).raddr(2) := index(engineVictimAddress)
+        dirtyTab(way).raddr(3) := cleanSet
         dirtyTab(way).wen(0) := installDirtyWay(way)
         dirtyTab(way).waddr(0) := index(engineVictimAddress)
         dirtyTab(way).wdata(0) := engineVictimDirty
@@ -849,8 +855,6 @@ class L2Cache(
             tagTab(way).enb := true.B
             dataTab(way).addrb := cleanSet
             dataTab(way).enb := true.B
-            validTab(way).raddr(1) := cleanSet
-            dirtyTab(way).raddr(1) := cleanSet
         }
         when(cleanClear) {
             validTab(way).wen(1) := cleanWay === way.U
