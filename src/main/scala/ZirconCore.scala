@@ -9,8 +9,10 @@ class ZirconInterrupts extends Bundle {
     val seip = Bool()
 }
 
-class ZirconCoreIO(simulationDebug: Boolean, profile: CoreProfile = CoreProfile.System) extends Bundle {
+class ZirconCoreIO(simulationDebug: Boolean, profile: CoreProfile = CoreProfile.System,
+    scratchpadEnabled: Boolean = false) extends Bundle {
     val axi = new AXI4MasterIO(profile.axiDataBits)
+    val scratchpad = if (scratchpadEnabled) Some(new PeScratchpadPort) else None
     val interrupts = if (profile.privileged) Some(Input(new ZirconInterrupts)) else None
     val debug = if (simulationDebug) Some(new ZirconDebugIO(profile.vlen != 0)) else None
 }
@@ -21,9 +23,12 @@ class ZirconCore(
     val ramBackend: DualPortRamBackend = DualPortRamBackend.Vivado,
     val l2Params: L2CacheParams = L2CacheParams(),
     val profile: CoreProfile = CoreProfile.System,
+    val scratchpadEnabled: Boolean = false,
 ) extends Module {
+    require(!scratchpadEnabled || profile == CoreProfile.Performance,
+        "The native scratchpad port requires the performance profile")
     override val desiredName = "ZirconCore"
-    val io = IO(new ZirconCoreIO(simulationDebug, profile))
+    val io = IO(new ZirconCoreIO(simulationDebug, profile, scratchpadEnabled))
 
     private val frontendParams = profile.frontend(simulationDebug)
     private val issueParams = IssueParams()
@@ -39,7 +44,8 @@ class ZirconCore(
     val backend = Module(new Backend(issueParams = issueParams, ramBackend = ramBackend,
         observe = simulationDebug, tlbEnabled = profile.privileged,
         atomicEnabled = profile.privileged, dcacheSets = profile.dcacheSets,
-        directPhysical = !profile.privileged, vectorEnabled = vectorEnabled, vectorParams = profile.vector))
+        directPhysical = !profile.privileged, vectorEnabled = vectorEnabled, vectorParams = profile.vector,
+        scratchpadEnabled = scratchpadEnabled))
     val commit = Module(new Commit(fp = frontendParams, issue = issueParams,
         simulationDebug = simulationDebug, privileged = profile.privileged, cp = commitParams))
     val l2 = Module(new L2Cache(ramBackend = ramBackend, p = actualL2Params, observe = simulationDebug))
@@ -52,6 +58,7 @@ class ZirconCore(
     frontend.io.commit <> commit.io.frontend
     middleend.io.commit <> commit.io.middleend
     backend.io.commit <> commit.io.backend
+    io.scratchpad.foreach(_ <> backend.io.scratchpad.get)
     if (vectorEnabled) {
         backend.io.vector.get.enqueue := middleend.io.vector.get.enqueue
         backend.io.vector.get.allocate := middleend.io.vector.get.allocate

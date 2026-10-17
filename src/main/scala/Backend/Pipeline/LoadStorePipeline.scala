@@ -33,8 +33,8 @@ class StoreDataResult(p: LoadPipelineParams) extends Bundle {
 
 /** LS1 binds to DCache lane 1 / port B, shares LD/STA execution and collects STD independently. */
 class LoadStorePipeline(p: LoadPipelineParams = LoadPipelineParams(), tlbEnabled: Boolean = false,
-    directPhysical: Boolean = false)
-    extends LoadPipeline(p, withStore = true, tlbEnabled, directPhysical)
+    directPhysical: Boolean = false, scratchpadEnabled: Boolean = false)
+    extends LoadPipeline(p, withStore = true, tlbEnabled, directPhysical, scratchpadEnabled)
 
 object ElaborateLoadStorePipeline {
     def main(args: Array[String]): Unit = {

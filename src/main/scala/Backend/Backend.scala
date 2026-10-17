@@ -24,10 +24,12 @@ class BackendIO(
     tlbEnabled: Boolean,
     observe: Boolean,
     vectorEnabled: Boolean = false,
+    scratchpadEnabled: Boolean = false,
 ) extends Bundle {
     val middleend = new BackendMiddleendIO(p, issue)
     val commit = new BackendCommitIO(p, load)
     val l2 = new DCacheL2IO
+    val scratchpad = if (scratchpadEnabled) Some(new PeScratchpadPort) else None
     val dtlb = if (tlbEnabled) Some(new TLBManagementIO) else None
     val dtlbMiss = if (tlbEnabled) Some(Output(Vec(2, Valid(new DTLBMissRequest)))) else None
     val dcacheIdle = Output(Bool())
@@ -58,7 +60,9 @@ class Backend(
     val directPhysical: Boolean = false,
     val vectorEnabled: Boolean = false,
     val vectorParams: VectorParams = VectorParams(),
+    val scratchpadEnabled: Boolean = false,
 ) extends Module {
+    require(!scratchpadEnabled || vectorEnabled)
     require(p == BackendParams(), "The current execution pipeline interfaces use the default BackendParams")
     require(p == loadParams.backend, "Backend and LoadPipeline parameters must describe the same physical machine")
     require(issueParams.wakeupPorts == 8, "Backend wakeup routing has eight fixed producer positions")
@@ -68,9 +72,10 @@ class Backend(
         if (vectorEnabled) math.max(loadParams.entries, 8) else loadParams.entries,
         sets = dcacheSets,
         directPhysical = directPhysical,
+        scratchpadEnabled = scratchpadEnabled,
     )
     require(!vectorEnabled || (!atomicEnabled && directPhysical))
-    val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe, vectorEnabled))
+    val io = IO(new BackendIO(p, issueParams, loadParams, dcacheParams, tlbEnabled, observe, vectorEnabled, scratchpadEnabled))
 
     /* IssueQueueIndex is the shared ordering contract for dispatch, counters and execution pipes. */
     val queues = issueParams.queueParams.zipWithIndex.map { case (params, index) =>
@@ -90,8 +95,10 @@ class Backend(
     val arithPipes = Seq(arith0, arith1)
     val mixArith = Module(new MixArithPipeline)
     val ls0 = Module(new LoadPipeline(loadParams))
-    val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled, directPhysical))
+    val ls1 = Module(new LoadStorePipeline(loadParams, tlbEnabled, directPhysical, scratchpadEnabled))
     val dcache = Module(new DCache(ramBackend, dcacheParams, tlbEnabled, observe))
+    val scratchpad = if (scratchpadEnabled) Some(Module(new PeScratchpadBridge(dcacheParams))) else None
+    scratchpad.foreach(_.io.memory <> io.scratchpad.get)
     dcache.io.prefetch.foreach { hints =>
         hints(0) := arith0.io.prefetch
         hints(1) := arith1.io.prefetch
@@ -531,7 +538,9 @@ class Backend(
     ls0.connectCache(dcache.io)
     val scalarLoadRequest = Wire(new DLoadRequest(dcacheParams))
     scalarLoadRequest := ls1.io.cache.req.bits
-    val vectorRequest = vectorMemory.map(_.io.request.valid).getOrElse(false.B)
+    val nativeVector = vectorMemory.map(m =>
+        scratchpadEnabled.B && PeScratchpadBridge.matches(m.io.request.bits.paddr)).getOrElse(false.B)
+    val vectorRequest = vectorMemory.map(_.io.request.valid).getOrElse(false.B) && !nativeVector
     val preferVector = if (vectorEnabled) Some(RegInit(false.B)) else None
     val loadSelectionLocked = if (vectorEnabled) Some(RegInit(false.B)) else None
     val lockedVectorSelection = if (vectorEnabled) Some(Reg(Bool())) else None
@@ -553,10 +562,24 @@ class Backend(
         vectorMemory.map(memory => Mux(vectorGrant, memory.io.request.bits, scalarLoadRequest))
             .getOrElse(scalarLoadRequest))
     vectorMemory.foreach { memory =>
-        memory.io.request.ready := vectorGrant && dcache.io.load(1).req.ready
-        memory.io.response.valid := dcache.io.load(1).rsp.valid && dcache.io.load(1).rsp.bits.wide
-        memory.io.response.bits := dcache.io.load(1).rsp.bits
-        memory.io.cachePending := dcache.io.load(1).widePending
+        val cachedResponse = dcache.io.load(1).rsp.valid && dcache.io.load(1).rsp.bits.wide
+        if (scratchpadEnabled) {
+            val native = scratchpad.get.io
+            native.load.request.valid := memory.io.request.valid && nativeVector
+            native.load.request.bits := memory.io.request.bits
+            memory.io.request.ready := Mux(nativeVector, native.load.request.ready,
+                vectorGrant && dcache.io.load(1).req.ready)
+            assert(!(cachedResponse && native.load.response.valid))
+            memory.io.response.valid := cachedResponse || native.load.response.valid
+            memory.io.response.bits := Mux(native.load.response.valid,
+                native.load.response.bits, dcache.io.load(1).rsp.bits)
+            memory.io.cachePending := dcache.io.load(1).widePending || native.loadPending
+        } else {
+            memory.io.request.ready := vectorGrant && dcache.io.load(1).req.ready
+            memory.io.response.valid := cachedResponse
+            memory.io.response.bits := dcache.io.load(1).rsp.bits
+            memory.io.cachePending := dcache.io.load(1).widePending
+        }
     }
     atomic.load.request.ready := atomic.busy && dcache.io.load(1).req.ready
     ls1.io.cache.req.ready := !atomic.busy && !vectorGrant && dcache.io.load(1).req.ready
@@ -611,14 +634,30 @@ class Backend(
     atomic.store.response <> sharedStore.io.atomicResponse
     sharedStore.io.committedRequest <> io.commit.store.request
     io.commit.store.response <> sharedStore.io.committedResponse
-    dcache.io.store.req <> sharedStore.io.cacheRequest
-    sharedStore.io.cacheResponse <> dcache.io.store.rsp
+    if (scratchpadEnabled) {
+        val native = scratchpad.get.io
+        val select = sharedStore.io.cacheRequest.bits.wide &&
+            PeScratchpadBridge.matches(sharedStore.io.cacheRequest.bits.paddr)
+        native.store.req.valid := sharedStore.io.cacheRequest.valid && select
+        native.store.req.bits := sharedStore.io.cacheRequest.bits
+        dcache.io.store.req.valid := sharedStore.io.cacheRequest.valid && !select
+        dcache.io.store.req.bits := sharedStore.io.cacheRequest.bits
+        sharedStore.io.cacheRequest.ready := Mux(select,native.store.req.ready,dcache.io.store.req.ready)
+        assert(!(native.store.rsp.valid && dcache.io.store.rsp.valid))
+        sharedStore.io.cacheResponse.valid := native.store.rsp.valid || dcache.io.store.rsp.valid
+        sharedStore.io.cacheResponse.bits := Mux(native.store.rsp.valid,native.store.rsp.bits,dcache.io.store.rsp.bits)
+        native.store.rsp.ready := sharedStore.io.cacheResponse.ready
+        dcache.io.store.rsp.ready := sharedStore.io.cacheResponse.ready
+    } else {
+        dcache.io.store.req <> sharedStore.io.cacheRequest
+        sharedStore.io.cacheResponse <> dcache.io.store.rsp
+    }
     atomic.committedStore.valid := sharedStore.io.committedRequest.fire
     atomic.committedStore.bits := sharedStore.io.committedRequest.bits.paddr
     when(dcache.io.load(1).rsp.valid) {
         assert(
             PopCount(VecInit(Seq(atomic.load.response.valid, ls1.io.cache.rsp.valid,
-                vectorMemory.map(_.io.response.valid).getOrElse(false.B)))) === 1.U,
+                (dcache.io.load(1).rsp.bits.wide && vectorEnabled.B)))) === 1.U,
             "DCache lane 1 response must have exactly one owner",
         )
     }
@@ -628,7 +667,8 @@ class Backend(
         assert(!atomic.busy, "Commit must not flush an active atomic operation")
     }
     io.l2 <> dcache.io.l2
-    io.dcacheIdle := ls0.io.idle && ls1.io.idle && dcache.io.idle && !atomic.busy
+    io.dcacheIdle := ls0.io.idle && ls1.io.idle && dcache.io.idle && !atomic.busy &&
+        scratchpad.map(_.io.idle).getOrElse(true.B)
     dcache.io.maintenance.request := io.maintenance.request
     dcache.io.maintenance.invalidate := io.maintenance.invalidate
     io.maintenance.done := dcache.io.maintenance.done

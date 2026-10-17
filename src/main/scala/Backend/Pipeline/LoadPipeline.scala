@@ -108,6 +108,7 @@ class LoadPipeline(
     withStore: Boolean = false,
     val tlbEnabled: Boolean = false,
     val directPhysical: Boolean = false,
+    val scratchpadEnabled: Boolean = false,
 ) extends Module {
     val io = IO(new LoadPipelineIO(p, withStore, tlbEnabled))
     val cacheLane: Int = if (withStore) 1 else 0
@@ -338,7 +339,7 @@ class LoadPipeline(
         if (directPhysical) {
             require(!tlbEnabled)
             val physical = Cat(0.U(2.W), addressVaddr)
-            val pma = PMA.attribute(physical)
+            val pma = PMA.attribute(physical, scratchpadEnabled)
             translatedUncache := addressItem.uncache || pma =/= PMAAttribute.cached
             translatedWriteCombine := pma === PMAAttribute.uncached
         }

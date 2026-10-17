@@ -164,7 +164,7 @@ class DCache(
             incomingRequest(0).mtype := 2.U
         }
         val candidates = io.prefetch.get.map(hint => hint.valid &&
-            PMA.attribute(hint.bits.pad(34))===PMAAttribute.cached)
+            PMA.attribute(hint.bits.pad(34), p.scratchpadEnabled)===PMAAttribute.cached)
         val remaining = count - injectPrefetch.asUInt
         val acceptFirst = candidates.reduce(_ || _) && remaining<2.U
         val acceptSecond = candidates.reduce(_ && _) && remaining===0.U
@@ -205,7 +205,7 @@ class DCache(
         // AGU outputs only drive the preceding request boundary.
         for (lane <- 0 until 2) {
             resolvedLookup(lane).uncache := lookup(lane).uncache ||
-                PMA.attribute(lookup(lane).paddr) =/= PMAAttribute.cached
+                PMA.attribute(lookup(lane).paddr, p.scratchpadEnabled) =/= PMAAttribute.cached
         }
     }
 
@@ -712,14 +712,14 @@ class DCache(
             )
             resolvedLookup(lane).uncache := Mux(
                 direct,
-                PMA.attribute(Cat(0.U(2.W), lookup(lane).vaddr)) =/= PMAAttribute.cached,
+                PMA.attribute(Cat(0.U(2.W), lookup(lane).vaddr), p.scratchpadEnabled) =/= PMAAttribute.cached,
                 translation.io.response(lane).pma =/= PMAAttribute.cached
             )
             resolvedLookup(lane).exception := Mux(
                 lookup(lane).exception =/= 0.U,
                 lookup(lane).exception,
                 Mux(
-                    direct && !PMA.readable(Cat(0.U(2.W), lookup(lane).vaddr)),
+                    direct && !PMA.readable(Cat(0.U(2.W), lookup(lane).vaddr), p.scratchpadEnabled),
                     5.U,
                     Mux(permissionFault, 13.U, Mux(accessFault, 5.U, 0.U)),
                 )
@@ -763,10 +763,10 @@ class DCache(
         val accessFault = !storeDirect && hit && translation.io.response(2).pma === PMAAttribute.invalid
         val directAccessFault = Mux(
             io.storeTranslation.get.request.bits.atomic,
-            !PMA.readable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) ||
+            !PMA.readable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr), p.scratchpadEnabled) ||
                 (!io.storeTranslation.get.request.bits.lr &&
-                    !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr))),
-            !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)),
+                    !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr), p.scratchpadEnabled)),
+            !PMA.writable(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr), p.scratchpadEnabled),
         )
         val faultCause = Mux(io.storeTranslation.get.request.bits.lr, 5.U, 7.U)
         val pageFaultCause = Mux(io.storeTranslation.get.request.bits.lr, 13.U, 15.U)
@@ -777,13 +777,13 @@ class DCache(
         )
         io.storeTranslation.get.response.uncache := Mux(
             storeDirect,
-            PMA.attribute(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) =/=
+            PMA.attribute(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr), p.scratchpadEnabled) =/=
                 PMAAttribute.cached,
             translation.io.response(2).pma =/= PMAAttribute.cached
         )
         io.storeTranslation.get.response.writeCombine := Mux(
             storeDirect,
-            PMA.attribute(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr)) ===
+            PMA.attribute(Cat(0.U(2.W), io.storeTranslation.get.request.bits.vaddr), p.scratchpadEnabled) ===
                 PMAAttribute.uncached,
             translation.io.response(2).pma === PMAAttribute.uncached
         ) && !io.storeTranslation.get.request.bits.atomic
