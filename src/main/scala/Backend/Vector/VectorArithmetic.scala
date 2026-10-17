@@ -69,30 +69,38 @@ class VectorArithmetic(val tagWidth: Int = 16, val shareSerialMultiply: Boolean 
     val negateProduct = outputTag(tagWidth + 10)
     val accumulate = outputTag(tagWidth + 11)
     val logicFlags = Wire(Vec(8, UInt(5.W)))
+    // Use the first two existing auxiliary stages for operand capture and ALU
+    // evaluation. Arithmetic and product completion retain the same latency.
+    val auxiliaryFpLogic = RegEnable(io.in.bits.fpLogic, advance)
+    val auxiliaryMinmax = RegEnable(io.in.bits.minmax, advance)
+    val auxiliaryMaximum = RegEnable(io.in.bits.maximum, advance)
 
     for ((product, lane) <- products.zipWithIndex) {
-        val alu = Module(new ALU)
+        val auxiliary = Seq.fill(productLatency)(Reg(UInt(32.W)))
+        val auxiliarySource2 = RegEnable(io.in.bits.source(1)(lane), advance)
+        val alu = Module(new ALU(pipelined = true))
         alu.io.src1 := io.in.bits.source(0)(lane)
         alu.io.src2 := io.in.bits.source(1)(lane)
         alu.io.op := io.in.bits.aluOp
+        alu.io.advance.get := advance
         val logicRequest = Wire(new FpLogicRequest(1))
         logicRequest.src1 := io.in.bits.source(0)(lane)
         logicRequest.src2 := io.in.bits.source(1)(lane)
         logicRequest.op := io.in.bits.aluOp(3, 0)
         logicRequest.tag := 0.U
         val logic = FpLogic.execute(logicRequest)
-        val auxiliary = Seq.fill(productLatency)(Reg(UInt(32.W)))
         val auxiliaryFlags = Seq.fill(productLatency)(Reg(UInt(5.W)))
         val addends = Seq.fill(productLatency)(Reg(UInt(32.W)))
         val lesser = alu.io.res(0)
-        val integerResult = Mux(io.in.bits.minmax,
-            Mux(lesser ^ io.in.bits.maximum, io.in.bits.source(0)(lane), io.in.bits.source(1)(lane)), alu.io.res)
+        val integerResult = Mux(auxiliaryMinmax,
+            Mux(lesser ^ auxiliaryMaximum, auxiliary.head, auxiliarySource2), alu.io.res)
         when(advance) {
-            auxiliary.head := Mux(io.in.bits.fpLogic, logic.res, integerResult)
+            auxiliary.head := Mux(io.in.bits.fpLogic, logic.res, io.in.bits.source(0)(lane))
+            auxiliary(1) := Mux(auxiliaryFpLogic, auxiliary.head, integerResult)
             auxiliaryFlags.head := logic.fflags
             addends.head := io.in.bits.source(2)(lane)
             for (stage <- 1 until productLatency) {
-                auxiliary(stage) := auxiliary(stage - 1)
+                if (stage > 1) { auxiliary(stage) := auxiliary(stage - 1) }
                 auxiliaryFlags(stage) := auxiliaryFlags(stage - 1)
                 addends(stage) := addends(stage - 1)
             }

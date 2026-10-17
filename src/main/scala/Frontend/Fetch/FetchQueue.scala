@@ -130,11 +130,14 @@ class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
         previousPacketPcWord := Mux1H(consumedClasses.drop(1), packetPcWords)
         previousPacketNextPc := Mux1H(consumedClasses.drop(1), packetNextPcs)
     }
+    val consumedStarts = (0 until dequeueWidth).map(lane =>
+        queue.io.deq(lane).fire && queue.io.deq(lane).bits.packetStart)
     for (record <- 0 until dequeueWidth) {
-        // A packet start already names its record rank. Grant that record
-        // directly when its instruction transfers; no accepted-length decode.
-        records.io.deq(record).ready := (0 until dequeueWidth).map { lane =>
-            queue.io.deq(lane).ready && packetStarts(lane) && packetRanks(lane)(record)
+        // Transfers form a prefix: record r is consumed iff at least r+1
+        // packet starts transfer. Parallel threshold terms avoid rank decode
+        // after the late Rename admission decision.
+        records.io.deq(record).ready := consumedStarts.indices.combinations(record + 1).map { lanes =>
+            lanes.map(consumedStarts(_)).reduce(_ && _)
         }.reduce(_ || _)
     }
     queue.io.flush := io.flush

@@ -28,6 +28,7 @@ class VectorMemoryHarness extends Module {
     val memory = Module(new VectorMemory(cache = cache))
     val file = Module(new VectorRegisterFile)
     val dcache = Module(new DCache(p = cache))
+    dcache.io.prefetch.foreach(_.foreach(_ := 0.U.asTypeOf(Valid(UInt(32.W)))))
     memory.io.in <> io.in
     memory.io.scalarData := Mux(memory.io.scalarAddress === 2.U, io.stride, io.base)
     memory.io.readAvailable := io.readAvailable
