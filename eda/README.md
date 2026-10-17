@@ -11,5 +11,5 @@ BSG Fakeram 模型，Vivado 使用可推断 Xilinx BRAM 的模板。
 | [EDA 脚本](../scripts/eda/README.md) | RTL 生成、综合和时序报告接口 |
 
 生成的 RTL、网表、Vivado 工程及报告分别保存在 `build/eda/nangate45/` 与
-`build/eda/vivado-vu13p/`，均不进入版本库。Nangate45 评估方法和测量结果见
+`build/eda/vivado-vu13p/`，均不进入版本库。Nangate45 流程与约束见
 [逻辑时序评估](../docs/Nangate45Timing.md)。

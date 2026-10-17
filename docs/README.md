@@ -24,7 +24,7 @@
 
 - [Linux 启动与复现](Linux-Bringup.md)：软件镜像、PGO 仿真、Spike 差分、检查点与交互终端
 - [TACLeBench](../RV-Software/taclebench/README.md)：54 个嵌入式基准与 lift 控制负载
-- [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、当前结果与评估说明
+- [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、约束与脚本接口
 
 文档中的类名、接口名和流水级名称与源码保持一致，便于从设计说明直接定位实现。仓库 README
 提供项目入口和常用任务，本目录说明模块职责与验证方法。
