@@ -16,6 +16,7 @@ class VectorComputeTask(p: BackendParams) extends Bundle {
     val last = Bool()
     val configuration = Bool()
     val writesVector = Bool()
+    val fma = Bool()
     val state = new VectorCSRState
     val scalar = Valid(new VectorScalarWrite(p))
 }
@@ -40,6 +41,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         val readAvailable = Input(Bool())
         val readRequest = Output(Bool())
         val idle = Output(Bool())
+        val activity = Output(UInt(6.W))
         val serialMultiply = if (shareSerialMultiply) Some(new MultiplyIO(1)) else None
         val serialActive = if (shareSerialMultiply) Some(Input(Bool())) else None
     })
@@ -123,6 +125,13 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         inputConfiguration && io.in.bits.scalar.inst(31, 30) =/= 3.U
     val scalarTagReady = nextScalarAddress === io.in.bits.scalar.prs(0)
     io.in.ready := (!busy || collect && last) && (!inputScalar || io.scalarAvailable && scalarTagReady)
+    io.activity := VecInit(Seq(
+        busy && prepare===2.U && !groupReady,
+        busy && prepare===2.U && groupReady && !io.readAvailable,
+        io.in.valid && (!busy || collect && last) && inputScalar && !(io.scalarAvailable && scalarTagReady),
+        busy,
+        arithmetic.io.in.fire && collector.fma,
+        io.in.fire)).asUInt
     val incoming = WireDefault(0.U.asTypeOf(new VectorComputeTask(p)))
     incoming.address := Mux1H(groupOH, instruction.vector.destination.physical)
     incoming.firstSubelement := subelement === 0.U
@@ -207,6 +216,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         incoming.old(lane) := Mux(instruction.vector.groups.sourceCount(2).orR,
             io.read(2).data(lane), "hffffffff".U)
     }
+    incoming.fma := control.floating && sew === 2.U && inst(31, 29) === 5.U
     incoming.arithmetic.active := active.asUInt
     incoming.fill := fill.asUInt
 
@@ -218,6 +228,8 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     }
     when(arithmetic.io.outputAdvance) { sideband.last := sideband(arithmetic.latency - 2) }
     val output = sideband.last
+    val fmaElements = RegInit(0.U(7.W))
+    val combinedFma = fmaElements + Mux(output.fma, PopCount(arithmetic.io.out.bits.active), 0.U)
     val flags = RegInit(0.U(5.W))
     val combinedFlags = flags | arithmetic.io.out.bits.fflags
     val arithmeticCompletion = arithmetic.io.out.valid && output.last
@@ -226,6 +238,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     io.completion.valid := (arithmeticCompletion || configurationValid) && !io.flush
     io.completion.bits.robIdx := arithmetic.io.out.bits.tag
     io.completion.bits.scalar := output.scalar
+    io.completion.bits.retirement.fmaElements := combinedFma
     io.completion.bits.retirement.configuration := output.configuration
     io.completion.bits.retirement.vl := output.state.vl
     io.completion.bits.retirement.vtype := output.state.vtype
@@ -252,6 +265,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         busy := false.B
         collectorValid := false.B
         flags := 0.U
+        fmaElements := 0.U
         configurationValid := false.B
         configurationHeld := false.B
     }.otherwise {
@@ -265,6 +279,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
                 configurationState := incoming.state
                 configurationResult.robIdx := instruction.scalar.robIdx
                 configurationResult.scalar := incoming.scalar
+                configurationResult.retirement.fmaElements := 0.U
                 configurationResult.retirement.configuration := true.B
                 configurationResult.retirement.vl := configuration.io.vl
                 configurationResult.retirement.vtype := configuration.io.vtype
@@ -309,7 +324,10 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
                 io.in.bits.vector.control.execution === VectorExecution.FpLogic.U ||
                 io.in.bits.vector.control.execution === VectorExecution.Configuration.U)
         }
-        when(arithmetic.io.out.fire) { flags := Mux(output.last, 0.U, combinedFlags) }
+        when(arithmetic.io.out.fire) {
+            flags := Mux(output.last, 0.U, combinedFlags)
+            fmaElements := Mux(output.last, 0.U, combinedFma)
+        }
     }
     when(busy) {
         assert(groupOH === UIntToOH(group, 8))

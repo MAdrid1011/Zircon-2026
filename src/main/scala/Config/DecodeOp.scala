@@ -94,7 +94,7 @@ object DecodeSupport {
     val performance = DecodeSupport(
         DecodeUnit.all - DecodeUnit.Atomic,
         floatingState = true,
-        systemOps = csr + SystemOp.FENCE,
+        systemOps = csr + SystemOp.FENCE + SystemOp.FENCE_I,
     )
     // Floating execution also needs ordered frm/fflags/FS handling outside this decoder.
     val current = DecodeSupport(

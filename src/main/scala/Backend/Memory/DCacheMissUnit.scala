@@ -5,6 +5,7 @@ import ZirconConfig.DCacheParams
 import ZirconUtil.InheritFields
 
 class DCacheMissEntry(p: DCacheParams) extends DLoadRequest(p) {
+    val prefetch = Bool()
     val store = Bool()
     val writeCombine = Bool()
     val lane = Bool()
@@ -33,6 +34,7 @@ class DCacheInstall extends Bundle {
 }
 
 class DCacheMissCompletion(p: DCacheParams) extends Bundle {
+    val prefetch = Bool()
     val store = Bool()
     val lane = Bool()
     val response = new DLoadResponse(p)
@@ -45,7 +47,14 @@ class DCacheMissMemoryIO extends Bundle {
     val rsp = Flipped(Decoupled(new DMemoryResponse))
 }
 
+class DCachePrefetchClaim(p: DCacheParams) extends DLoadRequest(p) {
+    val lane = Bool()
+    val forwardData = UInt(32.W)
+    val forwardMask = UInt(4.W)
+}
 class DCacheMissUnitIO(p: DCacheParams) extends Bundle {
+    val claim = Flipped(Decoupled(new DCachePrefetchClaim(p)))
+    val prefetchLine = Output(UInt((34-l1Offset).W))
     val allocate = Flipped(Decoupled(new DCacheMissAllocate(p)))
     val flush = Input(Bool())
     val memory = new DCacheMissMemoryIO
@@ -80,6 +89,24 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
         1.U -> Cat(Fill(16, data(15) && !mtype(2)), data(15, 0))
     ))
 
+    // A full-line Store owns every byte; L2 acquires its replacement without a target read.
+    val overwrite = entry.store && entry.wide && !entry.uncache && entry.storeLineMask.andR
+    io.prefetchLine := entry.paddr(33,l1Offset)
+    io.claim.ready := entry.prefetch && !entry.store && !entry.uncache && !discard && !io.flush &&
+        (state===waitResponse || state===install)
+    when(io.claim.fire) {
+        // Transfer only the response owner; the selected way and victim stay unchanged.
+        entry.prefetch := false.B
+        entry.lane := io.claim.bits.lane
+        entry.slot := io.claim.bits.slot
+        entry.vaddr := io.claim.bits.vaddr
+        entry.paddr := io.claim.bits.paddr
+        entry.mtype := io.claim.bits.mtype
+        entry.wide := io.claim.bits.wide
+        entry.atomic := io.claim.bits.atomic
+        entry.forwardData := io.claim.bits.forwardData
+        entry.forwardMask := io.claim.bits.forwardMask
+    }
     val preserve = entry.store || (entry.uncache && entry.ioAuthorized)
     val flushed = io.flush && !preserve
     val cachedWord = line.asTypeOf(Vec(l1Line / 4, UInt(32.W)))(entry.paddr(l1Offset - 1, 2))
@@ -112,7 +139,7 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
         entry.paddr,
         Cat(entry.paddr(33, l1Offset), 0.U(l1Offset.W))
     )
-    io.memory.req.bits.write := entry.store && entry.uncache
+    io.memory.req.bits.write := entry.store && entry.uncache || overwrite
     io.memory.req.bits.uncache := entry.uncache
     io.memory.req.bits.size := Mux(entry.store, entry.storeSize, entry.mtype(1, 0))
     io.memory.req.bits.data := entry.storeData
@@ -131,6 +158,7 @@ class DCacheMissUnit(val p: DCacheParams = DCacheParams()) extends Module {
     io.install.bits.dirty := entry.store || lineDirty
 
     io.complete.valid := state === respond && !discard
+    io.complete.bits.prefetch := entry.prefetch
     io.complete.bits.store := entry.store
     io.complete.bits.lane := entry.lane
     io.complete.bits.preserve := preserve

@@ -145,6 +145,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         data: BigInt = 0,
         mask: BigInt = 0,
         size: Int = 2,
+        drainVictim: Boolean = true,
     ): (BigInt, Boolean) = {
         dut.io.dcache.req.valid.poke(true)
         dut.io.dcache.req.bits.paddr.poke(address)
@@ -165,6 +166,9 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
         lastDcacheDirty = dut.io.dcache.rsp.bits.dirty.peek().litToBoolean
         val error = dut.io.dcache.rsp.bits.error.peek().litToBoolean
         tick()
+        // Functional callers observe a warmed victim cache. Timing tests can
+        // explicitly keep the clean insertion in flight after demand completion.
+        if (drainVictim && !dut.io.idle.peek().litToBoolean) drain()
         result -> error
     }
 
@@ -538,6 +542,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
             val iAddress = 0x72020L
             dcache(0x73040L, Some((dAddress, line(dAddress), false)))
             icache(0x74060L, Some((iAddress, line(iAddress))))
+            drain() // Both warm targets must be installed before measuring hit latency.
             val hitReads = reads
 
             driveD(dAddress)
@@ -576,6 +581,7 @@ class L2CacheSpec extends AnyFreeSpec with ChiselSim {
                     Some((iBurst(i), line(iBurst(i))))
                 )
             }
+            drain() // Complete the final prewarm insertion before issuing the burst.
             val burstReads = reads
             val burstIssueCycle = cycle
             for (i <- dBurst.indices) {

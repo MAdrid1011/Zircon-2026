@@ -71,6 +71,7 @@ class VectorCSRState extends Bundle {
 }
 
 class VectorCSRRetirement extends Bundle {
+    val fmaElements = UInt(7.W)
     val configuration = Bool()
     val vl = UInt(32.W)
     val vtype = UInt(32.W)

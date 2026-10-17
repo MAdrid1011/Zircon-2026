@@ -6,6 +6,7 @@ import ZirconConfig.DCacheParams
 import ZirconUtil.InheritFields
 
 class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
+    val prefetch = Bool()
     private val l1Index = p.indexBits
     private val l1IndexNum = p.sets
     val hit = UInt(l1Way.W)
@@ -26,6 +27,7 @@ class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
 }
 
 class DCacheLookupStage(p: DCacheParams) extends DLoadRequest(p) {
+    val prefetch = Bool()
     val cacheIndex = UInt(p.indexBits.W)
     val permission = new DCachePermissionContext
 }
@@ -141,6 +143,40 @@ class DCache(
     // ==================== Registered interface boundaries ====================
     val requestBuffer = Reg(Vec(2, new DLoadRequest(p)))
     val requestBufferValid = RegInit(VecInit.fill(2)(false.B))
+    val requestBufferPrefetch = RegInit(VecInit.fill(2)(false.B))
+    val prefetchCount = if(p.directPhysical) Some(RegInit(0.U(2.W))) else None
+    val prefetchPending = prefetchCount.map(_ =/= 0.U)
+    val prefetchAddress = if(p.directPhysical) Some(Reg(Vec(2,UInt(32.W)))) else None
+    val injectPrefetch = WireDefault(false.B)
+    val prefetchMissReady = Wire(Bool())
+    val incomingRequest = Wire(Vec(2,new DLoadRequest(p)))
+    incomingRequest := VecInit(io.load.map(_.req.bits))
+    if(p.directPhysical) {
+        val pending = prefetchPending.get
+        val address = prefetchAddress.get
+        val count = prefetchCount.get
+        injectPrefetch := pending && io.load(0).req.ready && !io.load(0).req.valid &&
+            !io.flush && !io.maintenance.request && prefetchMissReady
+        when(injectPrefetch) {
+            incomingRequest(0) := 0.U.asTypeOf(new DLoadRequest(p))
+            incomingRequest(0).vaddr := address(0)
+            incomingRequest(0).paddr := address(0)
+            incomingRequest(0).mtype := 2.U
+        }
+        val candidates = io.prefetch.get.map(hint => hint.valid &&
+            PMA.attribute(hint.bits.pad(34))===PMAAttribute.cached)
+        val remaining = count - injectPrefetch.asUInt
+        val acceptFirst = candidates.reduce(_ || _) && remaining<2.U
+        val acceptSecond = candidates.reduce(_ && _) && remaining===0.U
+        val firstHint = Mux(candidates(0),io.prefetch.get(0).bits,io.prefetch.get(1).bits)
+        when(injectPrefetch) { address(0) := address(1) }
+        when(acceptFirst) { address(remaining(0)) := Cat(firstHint(31,l1Offset),0.U(l1Offset.W)) }
+        when(acceptSecond) { address(1) := Cat(io.prefetch.get(1).bits(31,l1Offset),0.U(l1Offset.W)) }
+        when(acceptFirst || injectPrefetch) {
+            count := remaining + acceptFirst.asUInt + acceptSecond.asUInt
+        }
+        when(io.flush || io.maintenance.request) { count := 0.U }
+    }
     val responseWB = Reg(Vec(2, new DLoadResponse(p)))
     val responseValid = RegInit(VecInit.fill(2)(false.B))
     val recovering = RegNext(io.flush, false.B)
@@ -255,13 +291,13 @@ class DCache(
 
     val storeDirectLookup = io.store.req.fire && !postedStoreRequest && !missUnit.io.busy
     val storeLookupIssue = storeDirectLookup || (storeState === storeBuffered && !missUnit.io.busy)
+    // A blocked committed Store cannot select RAM B while a Load uses that port.
     val storeDirectAddress = io.store.req.valid && !postedStoreRequest &&
-        (storeState === storeIdle || storeCanReplaceResponse) &&
-        !io.maintenance.request && !missUnit.io.busy
+        normalStoreReady && !missUnit.io.busy
     val storeLookupAddressOwner = storeDirectAddress ||
         (storeState === storeBuffered && !missUnit.io.busy)
     val storeLookupAddress = Mux(storeDirectAddress, io.store.req.bits.paddr, storeRequest.paddr)
-    when(storeDirectAddress && !storeDirectLookup) { assert(recovering) }
+    assert(storeDirectAddress === storeDirectLookup)
     val storeArrayWrite = WireDefault(false.B)
     val storeHitNow = VecInit((0 until l1Way).map { way =>
         tagTab(way).doutb === tag(storeRequest.paddr) && validTab(way).rdata(2)
@@ -421,10 +457,26 @@ class DCache(
         !fullForward(lane) && (changedWays & relevantWays).orR
     })
     val needsMiss = VecInit((0 until 2).map(lane => requiresMemory(lane) && !staleLookup(lane)))
+    prefetchMissReady := !missUnit.io.busy && !needsMiss.asUInt.orR &&
+        !(requestBufferValid(0) && requestBufferPrefetch(0) ||
+          lookupValid(0) && lookup(0).prefetch || executeValid(0) && execute(0).prefetch)
 
     val missRoundRobin = RegInit(false.B)
+    val claimMatches = VecInit((0 until 2).map(lane => needsMiss(lane) &&
+        !execute(lane).prefetch && !execute(lane).uncache &&
+        execute(lane).paddr(33,l1Offset)===missUnit.io.prefetchLine))
+    val claimLane = Mux(claimMatches.asUInt.andR,missRoundRobin,claimMatches(1))
+    val claimExecute = Mux(claimLane,execute(1),execute(0))
+    missUnit.io.claim.valid := claimMatches.asUInt.orR && !io.flush && missUnit.io.claim.ready
+    missUnit.io.claim.bits := 0.U.asTypeOf(new DCachePrefetchClaim(p))
+    InheritFields(missUnit.io.claim.bits,claimExecute)
+    missUnit.io.claim.bits.lane := claimLane
+    missUnit.io.claim.bits.forwardData := Mux(claimLane,effectiveForwardData(1),effectiveForwardData(0))
+    missUnit.io.claim.bits.forwardMask := Mux(claimLane,effectiveForwardMask(1),effectiveForwardMask(0)) & claimExecute.byteEnable
+    val claimed = VecInit((0 until 2).map(lane => missUnit.io.claim.fire && claimLane===(lane==1).B))
     val bothNeedMiss = needsMiss.asUInt.andR
-    val selectedMissLane = Mux(bothNeedMiss, missRoundRobin, needsMiss(1))
+    val selectedMissLane = Mux(bothNeedMiss,
+        Mux(execute(0).prefetch ^ execute(1).prefetch,execute(0).prefetch,missRoundRobin),needsMiss(1))
     val selectedExecute = Mux(selectedMissLane, execute(1), execute(0))
     val laneVictimWay = VecInit((0 until 2).map(lane => execute(lane).victimWay))
     val victimWay = Mux(selectedMissLane, laneVictimWay(1), laneVictimWay(0))
@@ -488,7 +540,7 @@ class DCache(
     )
 
     val missCompletionForLane = VecInit((0 until 2).map { lane =>
-        missUnit.io.complete.valid && !missUnit.io.complete.bits.store &&
+        missUnit.io.complete.valid && !missUnit.io.complete.bits.store && !missUnit.io.complete.bits.prefetch &&
         missUnit.io.complete.bits.lane === (lane == 1).B
     })
     val localResponseValid = Wire(Vec(2, Bool()))
@@ -516,7 +568,7 @@ class DCache(
             )
         }).asUInt
 
-        localResponseValid(lane) := forwardComplete(lane) && !selectedForAllocation && !io.flush
+        localResponseValid(lane) := forwardComplete(lane) && !execute(lane).prefetch && !claimed(lane) && !selectedForAllocation && !io.flush
         localResponse(lane) := 0.U.asTypeOf(new DLoadResponse(p))
         localResponse(lane).slot := execute(lane).slot
         localResponse(lane).wide := execute(lane).wide
@@ -587,7 +639,10 @@ class DCache(
         lookupValid(lane) && lookupFresh(lane) && executeAvailable(lane) && !io.flush
     })
     val lookupAvailable = VecInit((0 until 2).map(lane => !lookupValid(lane) || lookupMove(lane)))
-    val inputFire = VecInit((0 until 2).map(lane => io.load(lane).req.fire))
+    val inputFire = VecInit((0 until 2).map(lane => io.load(lane).req.fire || (lane==0).B && injectPrefetch))
+    val incomingPrefetch = VecInit(Seq(injectPrefetch,false.B))
+    val candidatePrefetch = VecInit((0 until 2).map(lane =>
+        Mux(requestBufferValid(lane),requestBufferPrefetch(lane),incomingPrefetch(lane))))
     val candidateValid = Wire(Vec(2, Bool()))
     val rawCandidate = Wire(Vec(2, new DLoadRequest(p)))
     val arrayBlocked = Wire(Vec(2, Bool()))
@@ -602,7 +657,7 @@ class DCache(
     val installActive = missUnit.io.install.valid
     for (lane <- 0 until 2) {
         candidateValid(lane) := requestBufferValid(lane) || inputFire(lane)
-        rawCandidate(lane) := Mux(requestBufferValid(lane), requestBuffer(lane), io.load(lane).req.bits)
+        rawCandidate(lane) := Mux(requestBufferValid(lane), requestBuffer(lane), incomingRequest(lane))
         arrayBlocked(lane) := maintenanceActive || installActive || storeArrayWrite ||
             (if (lane == 1) storeLookupIssue else false.B)
         lookupNeedsRead(lane) := lookupValid(lane) && !lookupFresh(lane)
@@ -622,7 +677,7 @@ class DCache(
         arrayAddress(lane) := Mux1H(Seq(
             reissue -> Cat(lookup(lane).cacheIndex, 0.U(l1Offset.W)),
             buffered -> lookupAddress(requestBuffer(lane)),
-            incoming -> lookupAddress(io.load(lane).req.bits),
+            incoming -> lookupAddress(incomingRequest(lane)),
         ))
     }
     if (tlbEnabled) {
@@ -750,7 +805,7 @@ class DCache(
         // the returned data after the existing lookup-to-execute boundary.
         // Wide loads resolve Store ordering before issue and do not use scalar forwarding.
         io.forward(lane).query.valid := lookupValid(lane) && lookupFresh(lane) &&
-            !lookup(lane).wide && lookup(lane).exception === 0.U
+            !lookup(lane).wide && !lookup(lane).prefetch && lookup(lane).exception === 0.U
         io.forward(lane).query.bits.wordAddress := resolvedLookup(lane).paddr(33, 2)
         io.forward(lane).query.bits.slot := resolvedLookup(lane).slot
         io.forward(lane).query.bits.mask := accessMask(resolvedLookup(lane))
@@ -780,7 +835,8 @@ class DCache(
                 executeValid(lane) := false.B
             }
             when(inputFire(lane) && preserved(io.load(lane).req.bits.uncache, io.load(lane).req.bits.ioAuthorized)) {
-                requestBuffer(lane) := io.load(lane).req.bits
+                requestBuffer(lane) := incomingRequest(lane)
+                requestBufferPrefetch(lane) := incomingPrefetch(lane)
                 requestBufferValid(lane) := true.B
             }
         }
@@ -790,13 +846,15 @@ class DCache(
                 requestBufferValid(lane) := false.B
             }
             when(inputFire(lane) && !loadIssue(lane)) {
-                requestBuffer(lane) := io.load(lane).req.bits
+                requestBuffer(lane) := incomingRequest(lane)
+                requestBufferPrefetch(lane) := incomingPrefetch(lane)
                 requestBufferValid(lane) := true.B
             }
 
             when(lookupMove(lane)) {
                 execute(lane) := 0.U.asTypeOf(new DCacheExecuteStage(p))
                 InheritFields(execute(lane), resolvedLookup(lane))
+                execute(lane).prefetch := lookup(lane).prefetch
                 execute(lane).hit := hitNow(lane)
                 execute(lane).lines := linesNow(lane)
                 execute(lane).victimWay := victimWayNow(lane)
@@ -805,7 +863,7 @@ class DCache(
                 execute(lane).generation := cacheGeneration(index(resolvedLookup(lane).paddr))
                 execute(lane).byteEnable := accessMask(resolvedLookup(lane))
                 execute(lane).setOH := UIntToOH(index(resolvedLookup(lane).paddr), l1IndexNum)
-                val noForward = resolvedLookup(lane).translationMiss || resolvedLookup(lane).uncache ||
+                val noForward = lookup(lane).prefetch || resolvedLookup(lane).translationMiss || resolvedLookup(lane).uncache ||
                     resolvedLookup(lane).exception =/= 0.U ||
                     misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))
                 execute(lane).forwardValid := noForward
@@ -834,6 +892,7 @@ class DCache(
             when(loadIssue(lane)) {
                 lookup(lane) := 0.U.asTypeOf(new DCacheLookupStage(p))
                 InheritFields(lookup(lane), rawCandidate(lane))
+                lookup(lane).prefetch := candidatePrefetch(lane)
                 lookup(lane).cacheIndex := index(lookupAddress(rawCandidate(lane)))
                 lookup(lane).permission := currentPermission
                 lookupValid(lane) := true.B
@@ -923,32 +982,44 @@ class DCache(
     }
 
     // ==================== Lower-memory transaction ====================
-    val writeCombineOut = writeCombineQueue.io.out.valid
-    val missRequestEligible = missUnit.io.memory.req.valid && !writeCombineQueue.io.busy
     val lowerOwnerWriteCombine = RegInit(false.B)
-    io.l2.req.valid := Mux(
+    val lowerPending = RegInit(false.B)
+    val lowerLocked = RegInit(false.B)
+    // Keep the offered request stable under backpressure and retain the
+    // untagged response owner until completion. Existing producers hold data.
+    val writeCombineOut = Mux(lowerLocked,lowerOwnerWriteCombine,writeCombineQueue.io.out.valid)
+    val missRequestEligible = missUnit.io.memory.req.valid &&
+        (lowerLocked || !writeCombineQueue.io.busy)
+    val lowerRequestValid = Mux(writeCombineOut,writeCombineQueue.io.out.valid,missRequestEligible)
+    val lowerAvailable = !lowerPending || io.l2.rsp.fire
+    io.l2.req.valid := lowerAvailable && Mux(
         maintenanceActive,
         maintenanceRequest.valid,
-        missRequestEligible || writeCombineOut,
+        lowerRequestValid,
     )
     io.l2.req.bits := Mux(
         maintenanceActive,
         maintenanceRequest.bits,
         Mux(writeCombineOut, writeCombineQueue.io.out.bits, missUnit.io.memory.req.bits),
     )
-    maintenanceRequest.ready := maintenanceActive && io.l2.req.ready
-    // The L2 response channel has one owner. Once a posted burst has been
-    // accepted, keep MissUnit from starting a competing transaction until the
-    // burst response clears lowerOwnerWriteCombine.
-    missUnit.io.memory.req.ready := !maintenanceActive &&
-        !writeCombineQueue.io.busy && io.l2.req.ready
-    writeCombineQueue.io.out.ready := !maintenanceActive && io.l2.req.ready
-    when(io.l2.req.fire && !maintenanceActive) {
+    maintenanceRequest.ready := maintenanceActive && lowerAvailable && io.l2.req.ready
+    missUnit.io.memory.req.ready := !maintenanceActive && lowerAvailable &&
+        !writeCombineOut && (lowerLocked || !writeCombineQueue.io.busy) && io.l2.req.ready
+    writeCombineQueue.io.out.ready := !maintenanceActive && lowerAvailable &&
+        writeCombineOut && io.l2.req.ready
+    val lowerOfferHeld = io.l2.req.valid && !io.l2.req.ready && !maintenanceActive
+    when(lowerOfferHeld) {
+        lowerLocked := true.B
         lowerOwnerWriteCombine := writeCombineOut
     }
-    when(io.l2.rsp.fire && lowerOwnerWriteCombine) {
+    when(lowerLocked && !lowerRequestValid) { lowerLocked := false.B }
+    when(io.l2.req.fire) {
+        lowerLocked := false.B
+        lowerOwnerWriteCombine := !maintenanceActive && writeCombineOut
+    }.elsewhen(io.l2.rsp.fire && !lowerOfferHeld) {
         lowerOwnerWriteCombine := false.B
     }
+    when(io.l2.req.fire || io.l2.rsp.fire) { lowerPending := io.l2.req.fire }
     missUnit.io.memory.rsp.valid := !maintenanceActive && !lowerOwnerWriteCombine && io.l2.rsp.valid
     missUnit.io.memory.rsp.bits := io.l2.rsp.bits
     writeCombineQueue.io.rsp.valid := !maintenanceActive && lowerOwnerWriteCombine && io.l2.rsp.valid
@@ -1095,7 +1166,7 @@ class DCache(
         }
     }
 
-    io.idle := pipelineIdle && maintenanceState(0) && writeCombineQueue.io.empty && !postedResponsePending
+    io.idle := !prefetchPending.getOrElse(false.B) && pipelineIdle && maintenanceState(0) && writeCombineQueue.io.empty && !postedResponsePending
 
     assert(!(installFire && storeArrayWrite), "DCache: refill and committed store write overlap")
     for (lane <- 0 until 2) {

@@ -72,6 +72,13 @@ class Decoder(
     instPkgOut.src1Sel := Mux(execute, control(2)(_.src1Sel), DecodeSource.Register.U)
     instPkgOut.src2Imm := execute && any(_.src2Imm)
     instPkgOut.imm := Mux(execute, immediate, 0.U)
+    // PREFETCH.R is an ORI-x0 HINT. Its offset uses the S-type low field (zero).
+    val prefetchRead = inst(6,0)===0x13.U && inst(14,12)===6.U &&
+        inst(11,7)===0.U && inst(24,20)===1.U
+    when(execute && prefetchRead) {
+        instPkgOut.op := EXEOp.ADD
+        instPkgOut.imm := Cat(Fill(20,inst(31)),inst(31,25),0.U(5.W))
+    }
     instPkgOut.rm := Mux(execute && usesRounding, inst(14, 12), 0.U)
     instPkgOut.aq := execute && any(_.aqrl) && inst(26)
     instPkgOut.rl := execute && any(_.aqrl) && inst(25)

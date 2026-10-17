@@ -191,7 +191,11 @@ object DecoderReference {
     def decode(inst: BigInt): Option[(Encoding, Control)] = {
         val matches = encodings.filter(_.matches(inst))
         require(matches.size <= 1, s"Overlapping reference encodings for ${inst.toString(16)}")
-        matches.headOption.map(e => e -> controls(e.name)).filter { case (_, c) =>
+        matches.headOption.map { e =>
+            val c = controls(e.name)
+            val readHint = e.name=="ORI" && ((inst>>7)&31)==0 && ((inst>>20)&31)==1
+            e -> (if(readHint) c.copy(op=0,immediate="s") else c)
+        }.filter { case (_, c) =>
             val rm = ((inst >> 12) & 7).toInt
             !c.rounding || rm <= 4 || rm == 7
         }
