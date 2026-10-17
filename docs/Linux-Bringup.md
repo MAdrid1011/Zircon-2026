@@ -68,19 +68,6 @@ RV-Software/linux-system/build/linux-latest.host
 `fw_payload.elf` 和平台配置，并向仿真器传入
 `--checkpoint-load RV-Software/linux-system/build/linux-latest`。
 
-## 已验证结果
-
-使用 Clang 23.1.2 构建的 PGO 仿真器完成了 Spike 差分启动、用户空间检查和交互命令：
-
-```text
-ZIRCON_LINUX_BOOT_PASS
-~ # whoami
-root
-```
-
-启动标记约在 1.38 亿周期出现。验证主机上的仿真吞吐为每秒约 12.3 万周期；
-该速度描述主机仿真能力，不是处理器的工作频率。
-
 ## 参考资料
 
 - [Buildroot 2024.02.12 RV32 配置](https://github.com/buildroot/buildroot/blob/2024.02.12/configs/qemu_riscv32_virt_defconfig)

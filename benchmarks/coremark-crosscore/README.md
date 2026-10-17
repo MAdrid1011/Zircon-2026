@@ -44,7 +44,7 @@ LLVM 需要包含 RISC-V 后端、LLD、`llvm-objcopy` 与 `llvm-objdump`；Spik
   构建。工作负载源码与测量方法相同，目标 ELF 不按字节相同。
 
 此分数衡量每周期吞吐，不代表面积、功耗或最高时钟频率。EEMBC 正式提交还要求在目标实现
-上运行至少十秒。参考分数与配置见[结果](results/reference/2026-09-18/report.md)和
+上运行至少十秒。参考数据与配置见[测量数据](results/reference/2026-09-18/results.csv)和
 [配置说明](results/reference/2026-09-18/CONFIGURATION.md)。
 
 ## 文件组织

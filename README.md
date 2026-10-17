@@ -9,7 +9,7 @@
 [![Difftest](https://img.shields.io/badge/Difftest-Spike-2E7D32?style=for-the-badge)](https://github.com/riscv-software-src/riscv-isa-sim)
 [![License](https://img.shields.io/badge/License-MPL--2.0-1565C0?style=for-the-badge)](LICENSE)
 
-[架构概览](#架构概览) · [快速开始](#快速开始) · [验证状态](#验证状态) · [模块文档](docs/README.md)
+[架构概览](#架构概览) · [快速开始](#快速开始) · [测试入口](#测试入口) · [模块文档](docs/README.md)
 
 </div>
 
@@ -154,9 +154,7 @@ flowchart LR
 保留上游算法、数据集和校验。入口分别为 [SIMD 程序](RV-Software/simd/README.md) 和
 [CoreMark-PRO](RV-Software/coremark-pro/README.md)。
 
-相同硬件配置下，五项 RVV 程序相对标量的计算阶段加速比几何平均为 **3.158 倍**，
-SGEMM 加速为 **5.306 倍**；性能核心的标量 CoreMark 为 **5.093 CoreMark/MHz**。
-计算程序与测量方法见 [性能测量](docs/PerformanceCore.md#性能测量)。
+计算程序组织与计时接口见 [性能测量](docs/PerformanceCore.md#性能测量)。
 
 ## 快速开始
 
@@ -235,8 +233,7 @@ sbt "runMain Elaborate --simulation generated"
 ```
 
 Vivado 2025 核心工程面向 SCARF Stage-B 的 `xcvu13p-fhgb2104-2-i`。裸核使用
-Xilinx BRAM，在默认流程下完成 100 MHz 综合与布线：路由后 setup WNS 为
-`+1.716 ns`，使用 115,422 LUT（6.68%）、62,198 FF、135 BRAM tile 和 0 DSP。
+Xilinx BRAM，工程中的 XDC 将核心时钟约束为 100 MHz。
 生成并运行工程：
 
 ```sh
@@ -262,19 +259,16 @@ python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target
 仍使用默认的 32-set L2。去掉 `--logic-only` 后，流程还会执行 placement-based RC 估算和
 标准 OpenROAD Resizer 修复。
 
-## 验证状态
+## 测试入口
 
-| 验证层级 | 当前状态 |
-| --- | --- |
-| CoreMark + Spike 提交级差分 | CRC `0xf8b3`，IPC 1.324128，CoreMark/MHz 5.114 |
-| TACLeBench lift 控制负载 | 校验通过，设备提交加速 2.16x，端到端加速 1.27x |
-| RISC-V Architecture Test 149 项 + Spike 提交级差分 | 通过 |
-| 整数、乘除与 FP32 模块向量测试 | 已提供 |
-| ICache、DCache 与 L2 随机压力测试 | 已提供 |
-| ITLB、DTLB 与 L1 集成测试 | 已提供 |
-| Linux 6.1.44 启动、交互 shell 与 Spike 差分 | 通过 |
-| Nangate45 BSG 纯逻辑时序分析 | 两种配置均在 1.5 ns 周期闭合，TNS 0 ns、零违例端点 |
-| 特权架构 | M/S 模式、Sv32、定时器中断、原子操作和 `FENCE.I`/`SFENCE.VMA` |
+RTL 模块测试由 sbt 组织，测试代码位于 `src/test/scala/`：
+
+```sh
+sbt -batch test
+```
+
+处理器程序通过 ZirconSim 与进程内 Spike 执行提交级差分。CoreMark、功能测试、
+RISC-V 架构测试和 Linux 使用各自的软件入口，运行日志与报告保存在对应输出目录。
 
 ## 模块文档
 
