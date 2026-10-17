@@ -123,6 +123,18 @@ RF 需求在前一拍寄存，仲裁控制从寄存器 Q 端开始。
 256 bit AXI 用两个 beat 传输 64 B Cache Line。普通设备访问保留原始窄传输地址、
 尺寸和 strobe；写合并保持原有 8 B beat 的 INCR burst 及顺序，不将总线宽度等同于设备写宽度。
 
+### SRAM 集成接口
+
+性能核心可在生成时启用独立的 256 bit 原生 SRAM 接口。该选项默认关闭，
+通过 `runMain Elaborate --profile=performance --scratchpad <output-directory>` 启用。
+启用后，`0xb0000000..0xb00fffff` 为设备属性窗口，向量访问经 `PeScratchpadBridge`
+直达 SRAM；标量访问仍通过 AXI 完成。窗口不可执行，也不接受原子访问。
+
+原生通路将一次 64 B 向量访存请求拆成两个 32 B 请求，保留数据、字节掩码、
+请求身份与错误状态。接口使用 `valid/ready` 握手，在背压期间保持请求；已接受的
+Load 在处理器恢复时继续排空响应，再由向量访存单元处理恢复。平台负责实现
+该窗口的 SRAM 及标量 AXI 访问。未启用时，核心仅导出原有 AXI 接口。
+
 ### 缓存与输入预取
 
 `PREFETCH.R` 将缓存行地址送入两项提示队列，经空闲加载端口复用 DCache

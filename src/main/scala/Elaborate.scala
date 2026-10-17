@@ -7,8 +7,8 @@ object Elaborate {
         val options = args.filter(_.startsWith("--"))
         val remaining = args.filterNot(_.startsWith("--"))
         require(
-            options.forall(option => Set("--simulation", "--bsg")(option) || option.startsWith("--profile=")),
-            "Usage: runMain Elaborate [--simulation] [--bsg] [--profile=system|performance] [output-directory]",
+            options.forall(option => Set("--simulation", "--bsg", "--scratchpad")(option) || option.startsWith("--profile=")),
+            "Usage: runMain Elaborate [--simulation] [--bsg] [--profile=system|performance] [--scratchpad] [output-directory]",
         )
         require(remaining.length <= 1, "Only one output directory may be specified")
         val simulation = options.contains("--simulation")
@@ -22,7 +22,8 @@ object Elaborate {
             if (simulation) "disallowPackedArrays"
             else "disallowPackedArrays,disallowLocalVariables"
         ChiselStage.emitSystemVerilogFile(
-            new ZirconCore(simulationDebug = simulation, ramBackend = ramBackend, l2Params = l2Params, profile = profile),
+            new ZirconCore(simulationDebug = simulation, ramBackend = ramBackend, l2Params = l2Params, profile = profile,
+                scratchpadEnabled = options.contains("--scratchpad")),
             Array("--target-dir", remaining.headOption.getOrElse(s"generated/${profile.name}")),
             Array(
                 "--disable-all-randomization",

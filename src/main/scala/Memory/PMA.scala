@@ -9,17 +9,22 @@ object PMA {
     private val writeCombineBase = "ha2000000".U(34.W)
     private val writeCombineLimit = "ha3000000".U(34.W)
 
-    def attribute(paddr: UInt): UInt = {
+    def attribute(paddr: UInt, scratchpadEnabled: Boolean = false): UInt = {
         val mainMemory = (paddr & mainMemoryMask) === mainMemoryBase
         val device = (paddr & deviceMask) === deviceBase
         val writeCombine = paddr >= writeCombineBase && paddr < writeCombineLimit
+        val scratchpad = scratchpadEnabled.B && paddr(33, 20) === "hb00".U
         Mux(mainMemory, PMAAttribute.cached,
-            Mux(writeCombine, PMAAttribute.uncached,
-                Mux(device, PMAAttribute.device, PMAAttribute.invalid)))
+            Mux(scratchpad, PMAAttribute.device, Mux(writeCombine, PMAAttribute.uncached,
+                Mux(device, PMAAttribute.device, PMAAttribute.invalid))))
     }
 
-    def readable(paddr: UInt): Bool = attribute(paddr) =/= PMAAttribute.invalid
-    def writable(paddr: UInt): Bool = attribute(paddr) =/= PMAAttribute.invalid
-    def executable(paddr: UInt): Bool = attribute(paddr) === PMAAttribute.cached
-    def atomic(paddr: UInt): Bool = attribute(paddr) === PMAAttribute.cached
+    def readable(paddr: UInt, scratchpadEnabled: Boolean = false): Bool =
+        attribute(paddr, scratchpadEnabled) =/= PMAAttribute.invalid
+    def writable(paddr: UInt, scratchpadEnabled: Boolean = false): Bool =
+        attribute(paddr, scratchpadEnabled) =/= PMAAttribute.invalid
+    def executable(paddr: UInt, scratchpadEnabled: Boolean = false): Bool =
+        attribute(paddr, scratchpadEnabled) === PMAAttribute.cached
+    def atomic(paddr: UInt, scratchpadEnabled: Boolean = false): Bool =
+        attribute(paddr, scratchpadEnabled) === PMAAttribute.cached
 }
