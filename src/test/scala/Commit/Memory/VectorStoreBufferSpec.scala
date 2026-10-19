@@ -21,11 +21,13 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                     task.robIdx.poke(7); task.index.poke(group); task.last.poke(false)
                     task.addressOnly.poke(true); dut.io.collect.valid.poke(true)
                     for (position <- 0 until 32 by bytes) {
-                        val address = 0x80003000L + group * 256 + (32 - position) * 8
+                        // Exercise first/second fragments, including the 32-bit wrap.
+                        val address = if (group == 0) 0x8000303fL + (32 - position) * 128
+                            else 0xffffffc0L + ((position * 13 + 63) & 63)
                         task.element.poke(position); task.address.poke(address)
                         dut.io.collect.ready.expect(true); dut.io.cache.request.valid.expect(false); dut.clock.step()
                         if (position % (3 * bytes) != bytes) for (byte <- 0 until bytes)
-                            expected(address + byte) = (group * 17 + position + byte) & 255
+                            expected((address + byte) & 0xffffffffL) = (group * 17 + position + byte) & 255
                     }
                     val data = (0 until 32).foldLeft(BigInt(0))((v, byte) => v | BigInt((group * 17 + byte) & 255) << (byte * 8))
                     val mask = (0 until 32).filter(byte => (byte / bytes) % 3 != 1)

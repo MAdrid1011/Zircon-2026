@@ -39,6 +39,10 @@ Load 通路在发射后先写入流水寄存器，下一拍读取 PRF 并由 AGU
 DCache 请求寄存器和同步 RAM 读地址；随后 DTLB 地址翻译与 Tag/Data RAM 返回并行完成。两条
 Load 通路都查询 SQ 与 Store Buffer，按字节合并比 Cache 更新的 Store 数据。
 
+Dispatch 与 typed IssueQueue 保证 LS0/LS1 的操作类别。Load 接收许可由上下文容量、
+issue 阻塞和 RF 交接决定，不依赖所选 payload 的 FU 译码；接受事件断言路由契约，
+LS0 的 Store 判定在展开时固定为 false。
+
 LS1 的 Store Address 使用相同的发射、PRF 和 AGU 边界，并在 AGU 后增加独立的 D1 寄存器。
 DTLB 查询、PMA 属性、对齐检查和 SQ 地址写入均使用该寄存器中的地址与任务信息。D1 支持在
 当前地址写入 SQ 的同时接收下一条 Store Address；DTLB miss 或 SQ 反压会保留当前内容。
@@ -51,6 +55,10 @@ SQ；指令到达 ROB 头且更早的存储访问排空后，原子单元复用 
 DCache 根据 PMA 属性区分可缓存、可合并和强顺序 Store。可合并 Store 在提交后进入专用队列，
 普通设备 Store 与原子操作仍沿原有单次事务路径执行。合并条件、AXI burst 和顺序保证见
 [存储系统](Memory.md#pma-与非缓存写合并)。
+
+`DivSqrtSRT4` 在 EX2 RESOLVE 使用 36-bit 分组进位加法器合并 carry-save residual，
+在舍入阶段用 32-bit 分组加法器生成低 24-bit significand。分类、迭代、修正与舍入
+保持原寄存器边界；整数结果、浮点特殊值、舍入模式和异常标志遵循相同接口契约。
 
 ## PRF、旁路与唤醒
 

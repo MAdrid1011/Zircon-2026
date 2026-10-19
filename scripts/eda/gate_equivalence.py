@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 
 from adder_mapping import quote
 
@@ -47,14 +48,14 @@ def boundaries(module):
     memories = {}
     for name, cell in module['cells'].items():
         kind = cell['type']
-        if kind == '$_DFF_P_' or kind.startswith('DFF'):
+        if kind == '$_DFF_P_' or kind.startswith(('DFF', 'DFQD')):
             if len(cell['connections']['Q']) != 1 or len(cell['connections']['D']) != 1:
                 raise ValueError(f'Unsupported register: {name}')
-            clock = cell['connections'].get('C', cell['connections'].get('CK'))
+            clock = cell['connections'].get('C', cell['connections'].get('CK', cell['connections'].get('CP')))
             if clock != module['ports']['clock']['bits']:
                 raise ValueError('Expected one ungated positive-edge clock')
             registers[cell['connections']['Q'][0]] = (name, cell['connections']['D'][0])
-        elif kind.startswith('fakeram45_'):
+        elif kind.startswith(('fakeram45_', 'SinglePortMaskedRam_', 'PredictorBsgFakeram_', 'BsgFakeram1RW1R_')):
             memories[name] = cell
         elif 'DFF' in kind or 'LATCH' in kind:
             raise ValueError(f'Unsupported state: {name} {kind}')
@@ -64,10 +65,10 @@ def boundaries(module):
 def aliases(module):
     result = {}
     for name, net in module['netnames'].items():
-        if name.startswith('$') or name.startswith('_') or net.get('hide_name'):
+        if name.startswith('$') or net.get('hide_name'):
             continue
         for index, bit in enumerate(net['bits']):
-            result[(name, index)] = bit
+            result[(name, index + net.get('offset', 0))] = bit
     return result
 
 
@@ -79,8 +80,8 @@ def make_cuts(reference, mapped, top, output):
     if len(gr) != len(cr) or set(gm) != set(cm):
         raise ValueError('Register or memory count changed')
     ga, ca = aliases(gold), aliases(gate)
-    buffers = {cell['connections']['Z'][0]: cell['connections']['A'][0]
-               for cell in gate['cells'].values() if cell['type'].startswith('BUF_X')}
+    buffers = {cell['connections']['Z'][0]: cell['connections'].get('A', cell['connections'].get('I'))[0]
+               for cell in gate['cells'].values() if cell['type'].startswith(('BUF_X', 'BUFFD', 'CKBD'))}
 
     def state_source(bit):
         visited = set()
@@ -103,12 +104,27 @@ def make_cuts(reference, mapped, top, output):
         raise ValueError('Every state bit must have an unchanged named correspondence')
     pairs = sorted(matches.items())
     memory_inputs, memory_outputs = {}, {}
+    # Writers may materialize an explicitly unconnected SRAM output as dummy
+    # wires. Only a width-zero output with no loads on the other side is inert.
+    def sink_bits(module):
+        return {b for p in module['ports'].values() if p['direction'] == 'output' for b in p['bits']} | {
+            b for c in module['cells'].values() for p, bits in c['connections'].items()
+            if c['port_directions'][p] == 'input' for b in bits}
+
+    sinks = (sink_bits(gold), sink_bits(gate))
+    unused_memory_output_bits = 0
     for name in sorted(gm):
         a, b = gm[name], cm[name]
         if a['type'] != b['type'] or a['port_directions'] != b['port_directions']:
             raise ValueError('Memory interface changed')
         for pin in sorted(a['port_directions']):
             if len(a['connections'][pin]) != len(b['connections'][pin]):
+                av, bv = a['connections'][pin], b['connections'][pin]
+                if a['port_directions'][pin] == 'output' and (
+                        (not av and not set(bv) & sinks[1]) or
+                        (not bv and not set(av) & sinks[0])):
+                    unused_memory_output_bits += max(len(av), len(bv))
+                    continue
                 raise ValueError('Memory width changed')
             target = memory_inputs if a['port_directions'][pin] == 'input' else memory_outputs
             target[(name, pin)] = (a['connections'][pin], b['connections'][pin])
@@ -140,33 +156,49 @@ def make_cuts(reference, mapped, top, output):
                 }
         (Path(output) / f'{name}-cut.json').write_text(json.dumps({'modules': {name: cut}}))
     return {'register_bits': len(pairs), 'memory_instances': len(gm),
-            'memory_input_groups': len(memory_inputs), 'memory_output_groups': len(memory_outputs)}
+            'memory_input_groups': len(memory_inputs), 'memory_output_groups': len(memory_outputs),
+            'unused_memory_output_bits': unused_memory_output_bits}
 
 
 def prove_cut(directory, library, run, yosys):
+    cache = directory / 'proof-cache.json'
+    normalized = cache.exists() and json.loads(cache.read_text()).get('normalized', False)
+    normalization = 'opt -full\ntechmap\nopt -full\naigmap\nopt_merge -share_all\nopt_clean\n'
     script = f'''read_liberty -ignore_miss_func {quote(library)}
 read_json {quote(directory / 'gold-cut.json')}
 read_json {quote(directory / 'gate-cut.json')}
 miter -equiv -ignore_gold_x -flatten gold gate miter
 prep -top miter
-sat -verify -prove trigger 0 -set-def-inputs -timeout 120
+{normalization if normalized else ''}sat -verify -prove trigger 0 -set-def-inputs -timeout 120
 '''
     path = directory / 'equivalence.ys'
     path.write_text(script)
     hashes = {name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
               for name in ('gold-cut.json', 'gate-cut.json', 'equivalence.ys')}
     hashes['library'] = hashlib.sha256(Path(library).read_bytes()).hexdigest()
-    cache = directory / 'proof-cache.json'
     log_path = directory / 'equivalence.log'
     if cache.exists() and log_path.exists():
         saved = json.loads(cache.read_text())
         if saved['inputs'] == hashes and saved['log_sha256'] == hashlib.sha256(log_path.read_bytes()).hexdigest():
             if 'SAT proof finished - no model found: SUCCESS!' in log_path.read_text():
                 return
-    log = run([yosys, '-Q', '-T', '-s', str(path)], directory / 'equivalence.log')
+    try:
+        log = run([yosys, '-Q', '-T', '-s', str(path)], directory / 'equivalence.log')
+    except subprocess.CalledProcessError:
+        if normalized or 'proof did time out' not in log_path.read_text():
+            raise
+        # Exact Boolean normalization shares equivalent gate variants before
+        # SAT. It adds no cut, assumption, don't-care or state relation.
+        log_path.replace(directory / 'equivalence-before-normalization.log')
+        script = script.replace('prep -top miter\n', 'prep -top miter\n' + normalization)
+        path.write_text(script)
+        hashes['equivalence.ys'] = file_sha256(path)
+        normalized = True
+        log = run([yosys, '-Q', '-T', '-s', str(path)], log_path)
     if 'SAT proof finished - no model found: SUCCESS!' not in log:
         raise RuntimeError(f'Equivalence did not complete: {directory}')
-    cache.write_text(json.dumps({'inputs': hashes, 'log_sha256': hashlib.sha256(log_path.read_bytes()).hexdigest()},
+    cache.write_text(json.dumps({'inputs': hashes, 'normalized': normalized,
+                                'log_sha256': hashlib.sha256(log_path.read_bytes()).hexdigest()},
                                indent=4) + '\n')
 
 

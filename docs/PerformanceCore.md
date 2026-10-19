@@ -61,21 +61,23 @@ FP 舍入与异常标志、整数饱和标志按指令收集，退休时更新 C
 常用分组运算在标量源、mask 和三个向量源的首组就绪后发射。执行端逐组查询公共
 ReadyBoard，只有对应物理寄存器已经写入 RF 才收集该组，因此同一条 Load 的前半组返回时，
 计算可以与后半组访存重叠。多拍运算和访存仍在全部源组就绪后发射。
-计算器在处理当前指令时寄存下一条标量源地址，在接收指令的边界捕获其 RF 数据；
-连续 LMUL=4 的 VF 运算可每四拍接收一条指令，每拍向八路流水送入一组。
+计算器并行预读下一条标量源，在接收边界捕获 RF 数据；连续 LMUL=4 的 VF 运算
+可每四拍接收一条指令，每拍向八路流水送入一组。
 
-多拍通路使用 `DivSqrtSRT4`、`FpConvert` 与共享比较逻辑，乘法与浮点归约加法使用
-八路算术流水的 lane 0。
-按元素执行除法、平方根、转换、归约、排列及宽窄整数运算。七位浮点估值使用标准查表，
-规格化与查表之间设置寄存边界。整数乘加复用八路乘法器，并在乘积之后使用共享
-加法器实现模 SEW 累加。常用运算通过八 lane
-流水处理，多拍通路与其共享计算写回口，向量 Load 使用独立写回口。
+多拍通路使用 `DivSqrtSRT4`、`FpConvert` 与共享比较逻辑；乘法与浮点归约加法使用
+八路算术流水的 lane 0。该通路按元素执行除法、平方根、转换、归约、排列及宽窄整数运算。
+七位浮点估值在规格化与查表之间设置寄存边界。整数乘加复用八路乘法器，
+乘积经共享加法器实现模 SEW 累加；常用运算通过八 lane 流水处理，
+多拍通路与其共享计算写回口，向量 Load 使用独立写回口。
 计算流水排空后，多拍指令取得 lane 0 的所有权，并保持到完成握手。
 八路常用运算仍可每拍接收一组任务；整数与浮点逻辑结果共用对齐寄存器。
-八路乘法流水的载荷寄存器仅在对应有效任务推进时更新，空泡仍按原有有效位传递；
+八路乘法流水的载荷寄存器仅在对应有效任务推进时更新，空泡传递有效位；
 反压保持整条流水，恢复清除有效位，载荷不需要复位。
 进位、借位、饱和、平均与宽整数运算共享 33 位加法器；操作数与进位策略
 在收集阶段寄存，组合算术从寄存器 Q 端开始。
+平均运算在 `evaluate` → `finishArithmetic` 边界保存缩放值与舍入增量，
+后续与舍入移位共享增量器。Gather 用 VLMAX 的零或二次幂性质形成低位掩码，
+同时检查索引高位；索引和 slide 仍按完整 32 bit 计算。
 
 ## 向量状态
 
@@ -110,6 +112,8 @@ DCache 命中通路每拍处理一个 256 bit 向量访问，与标量访问仲�
 连续访问按 Cache Line 拆分，起始地址可按元素对齐而不按 32 B 对齐。
 stride、indexed、segment、mask 与 whole-register 访问展开为内部任务。
 分组偏移在操作数收集阶段计算并寄存，地址阶段将该偏移与基址、字段偏移合并。
+三位组内编号选择三个移位部分积，经 carry-save 压缩和 32-bit 分组进位加法器形成
+`groupOffset`；元素地址增量同样使用分组加法器，保持模 2^32 回绕和既有状态转换。
 
 对齐且未屏蔽的完整寄存器组 Load 每个 64 B Line 只发送一次请求，完整行返回后
 通过一个 Load 写口分两拍写入相邻的 256 bit 物理寄存器。四项响应缓冲为每个在途请求
@@ -120,6 +124,8 @@ RF 需求在前一拍寄存，仲裁控制从寄存器 Q 端开始。
 标量与向量 Store 共用程序顺序管理，宽数据保存在独立缓冲。Load 等待更老 Store
 解析地址；与尚未写入 Cache 的 Store 重叠时等待。Store 仅在提交后写入存储系统。
 取消的 Load 丢弃返回值，在途请求在响应结束前保持原有所有权。
+宽 Store 缓冲在读取 scattered 元素地址时同时保存当前行与后继行号，后继行号按
+26 bit 回绕。跨行第二段选择寄存的后继行，地址、数据、掩码与 drain 进度保持配对。
 
 256 bit AXI 用两个 beat 传输 64 B Cache Line。普通设备访问保留原始窄传输地址、
 尺寸和 strobe；写合并保持原有 8 B beat 的 INCR burst 及顺序，不将总线宽度等同于设备写宽度。
@@ -207,9 +213,8 @@ ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量
 RTL 单元测试位于 `src/test/scala/Backend/Vector`，裸机测试及生成器说明见
 [向量指令与状态测试](../RV-Software/simd/tests/README.md)。
 
-系统核心的架构测试与 Linux 运行环境使用独立的软件入口，见
-[架构测试](../RV-Software/arch-test/README.md)和 [Linux 启动](Linux-Bringup.md)。
-性能核心使用非特权裸机运行时。
+系统核心的架构测试与 Linux 使用独立入口，见[架构测试](../RV-Software/arch-test/README.md)
+和 [Linux 启动](Linux-Bringup.md)；性能核心使用非特权裸机运行时。
 
 EDA 按配置生成独立 RTL：Nangate45 使用 BSG Fakeram 进行 1.5 ns 的纯逻辑时序分析，
 Vivado 2025.2 使用 VU13P、Xilinx BRAM、100 MHz 时钟与默认综合实现策略，DSP 上限为零。
@@ -220,5 +225,4 @@ Vivado 2025.2 使用 VU13P、Xilinx BRAM、100 MHz 时钟与默认综合实现�
 寄存器堆与八路算术实现见 [VectorRegisterFile](../src/main/scala/Backend/Vector/VectorRegisterFile.scala)
 和 [VectorArithmetic](../src/main/scala/Backend/Vector/VectorArithmetic.scala)。
 [VectorStateSpec](../src/test/scala/Backend/Vector/VectorStateSpec.scala) 检查分组、配置与映射恢复，
-[VectorArithmeticSpec](../src/test/scala/Backend/Vector/VectorArithmeticSpec.scala) 检查八路运算、
-浮点标志、连续 FMA 吞吐及反压取消。
+[VectorArithmeticSpec](../src/test/scala/Backend/Vector/VectorArithmeticSpec.scala) 检查八路运算、浮点标志、连续 FMA 吞吐及反压取消。

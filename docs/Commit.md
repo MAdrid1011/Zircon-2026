@@ -41,6 +41,9 @@ CSR 保存 M/S 特权状态、异常向量、`satp`、浮点状态和计数器�
 保证读改写与异常顺序一致。`FENCE` 等待 SQ、Store Buffer 和存储系统排空；`FENCE.I` 随后
 请求 Cache 维护；`SFENCE.VMA` 还清空 ITLB、DTLB 和 PTW 状态。
 
+中断恢复目标在既有延迟恢复边界保存。Direct 模式使用对齐向量基址，vectored 模式
+使用基址加四倍中断 cause；加法通过 32-bit 分组进位结构完成，地址按模 2^32 计算。
+
 性能配置的 `PerformanceCSR` 保存 `fcsr`、七个向量 CSR 和非特权计数器。
 `vset*` 的执行结果供后续 Rename 使用，退休更新已提交配置；恢复时，Rename 从已提交状态
 恢复向量配置与映射。FP 异常标志和整数饱和标志随指令退休汇总，已退休向量指令清除 `vstart`。

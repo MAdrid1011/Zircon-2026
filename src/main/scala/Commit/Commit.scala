@@ -549,7 +549,8 @@ class Commit(
     val vectorOffset = Cat(0.U(25.W), interruptCause, 0.U(2.W))
     def interruptVectorTarget(vector: UInt): UInt = {
         val base = Cat(vector(31, 2), 0.U(2.W))
-        Mux(vector(1, 0) === 1.U, base + vectorOffset, base)
+        val vectored = BLevelPAdder32.sum(base, vectorOffset, 0.U)
+        Mux(vector(1, 0) === 1.U, vectored, base)
     }
     val interruptTarget = Mux(
         privilege =/= 3.U && delegatedInterrupt,

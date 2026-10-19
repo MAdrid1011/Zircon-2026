@@ -101,10 +101,9 @@ object SRT4Logic {
         val inexact = window(2, 0).orR
         val up = increment(window(2), window(1, 0).orR, q(0))
         val carry = q.andR && up
-        val roundCarries = VecInit((0 until 24).map { bit =>
-            if (bit == 0) up else up && q(bit - 1, 0).andR
-        }).asUInt
-        val rounded = q ^ roundCarries
+        // Keep the incrementer's grouped carry structure through ASIC mapping.
+        // A flat family of overlapping prefix reductions can map to a long chain.
+        val rounded = BLevelPAdder32.sum(q.pad(32), 0.U(32.W), up.asUInt)(23, 0)
         val sig = Mux(carry, "h800000".U(24.W), rounded)
         // Tininess is checked at unbounded exponent precision, before narrowing
         // to the subnormal grid. This also handles rounding to the smallest normal.
@@ -402,7 +401,7 @@ class DivSqrtSRT4(val tagWidth: Int = 32) extends Module {
     step.io.position := iterPosition(Width - 1, 2)
 
     // -- EX2 RESOLVE: residual CPA and correction-multiple generation in parallel --
-    val resolved = r2.residual + iterCarry
+    val resolved = BLevelPAdder36.sum(r2.residual, iterCarry, 0.U)
     val lastBit = iterPosition & ~(iterPosition << 1)
     val rootCorrection = ((r2.resultMinus.pad(Width) << 3) | (lastBit << 2))(Width - 1, 0)
     val correction = Mux(r2.meta.op === FSQRT.U, rootCorrection, (r2.multiple << 2)(Width - 1, 0))

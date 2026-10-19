@@ -18,8 +18,9 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 流水线，以及两条访存流水线。存储系统由独立 L1 ICache/DCache、Sv32 ITLB/DTLB、硬件页表
 遍历器和一颗偏 victim 组织的共享 L2 Cache 构成。
 
-项目同时面向两类实现环境：Vivado 路径使用可推断双口 BRAM，ASIC 静态分析路径将全部 SRAM
-统一绑定到 BSG Fakeram 时序模型。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
+项目同时面向两类实现环境：Vivado 路径使用可推断双口 BRAM，ASIC 静态分析在 Nangate45 下
+将 SRAM 绑定到 BSG Fakeram 时序模型；[TSMC28](docs/TSMC28Timing.md) 使用外部
+标准单元库并保留 SRAM 黑盒边界。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
 
 本项目延续早期的 [Zircon](https://github.com/MAdrid1011/Zircon) 与
 [Zircon-2024](https://github.com/MAdrid1011/Zircon-2024) 处理器工作，在取指预测、乱序执行和

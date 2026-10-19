@@ -28,7 +28,7 @@ class AdderMapping:
     def discover(cls, files, mode=DEFAULT_MODE, delay_ps=DEFAULT_DELAY_PS):
         modules = set()
         for path in files:
-            modules.update(re.findall(r'\bmodule\s+(BLevelPAdder(?:32|33|64)(?:_\d+)?)\s*\(', Path(path).read_text()))
+            modules.update(re.findall(r'\bmodule\s+(BLevelPAdder(?:32|33|36|64)(?:_\d+)?)\s*\(', Path(path).read_text()))
         return cls(tuple(sorted(modules)), mode, delay_ps)
 
     def preserve(self, additional_modules=()):

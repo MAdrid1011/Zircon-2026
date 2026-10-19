@@ -276,7 +276,13 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     position := 0.U
                     // collect already precedes groupAddress for every element
                     // task. Resolve its small multiply at this existing edge.
-                    groupOffset := (withinField * groupStep)(31, 0)
+                    val partial0 = Mux(withinField(0), groupStep, 0.U(32.W))
+                    val partial1 = Mux(withinField(1), (groupStep << 1)(31, 0), 0.U(32.W))
+                    val partial2 = Mux(withinField(2), (groupStep << 2)(31, 0), 0.U(32.W))
+                    val productSum = partial0 ^ partial1 ^ partial2
+                    val productCarry = (((partial0 & partial1) |
+                        ((partial0 ^ partial1) & partial2)) << 1)(31, 0)
+                    groupOffset := BLevelPAdder32.sum(productSum, productCarry, 0.U)
                     when(fullGroupLoad) {
                         streamRequestValid := true.B
                         streamRequestAddress := base
@@ -305,7 +311,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 address := elementAddress
                 when(!store && !byteMask(position)) {
                     position := nextPosition(4, 0)
-                    elementAddress := elementAddress + step
+                    elementAddress := BLevelPAdder32.sum(elementAddress, step, 0.U)
                     nextState := Mux(lastElement, writeback, gather)
                 }.elsewhen(indexed) {
                     indexReadAddress := metadata.source(1)(indexGroup)
@@ -334,7 +340,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             }
             is(storeAddress) { when(io.store.fire) {
                 position := nextPosition(4, 0)
-                elementAddress := elementAddress + step
+                elementAddress := BLevelPAdder32.sum(elementAddress, step, 0.U)
                 nextState := Mux(lastElement, writeback, gather)
             } }
             is(merge) {
@@ -344,7 +350,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 val positionedMask = (lowMask.pad(256) << (position << 3))(255, 0)
                 data := (data & ~positionedMask) | (positioned & positionedMask)
                 position := nextPosition(4, 0)
-                elementAddress := elementAddress + step
+                elementAddress := BLevelPAdder32.sum(elementAddress, step, 0.U)
                 nextState := Mux(lastElement, writeback, gather)
             }
             is(request) { when(io.request.fire) { nextState := response } }
