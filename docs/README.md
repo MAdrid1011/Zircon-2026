@@ -8,7 +8,7 @@
 1. 从仓库 [README](../README.md#架构概览) 了解整核目标、默认配置和主数据流。
 2. 阅读 [处理器顶层](Core.md)，再按数据流进入前端、中端、后端和提交模块。
 3. 阅读 [存储系统](Memory.md) 了解 Cache、地址翻译、PMA、非缓存写合并和 RAM 后端。
-4. 使用 Linux、TACLeBench 与 Nangate45 文档复现系统启动、控制负载和静态时序评估。
+4. 使用 Linux、TACLeBench 与 EDA 文档复现系统启动、控制负载和静态时序评估。
 
 ## 模块设计
 
@@ -25,6 +25,7 @@
 - [Linux 启动与复现](Linux-Bringup.md)：软件镜像、PGO 仿真、Spike 差分、检查点与交互终端
 - [TACLeBench](../RV-Software/taclebench/README.md)：54 个嵌入式基准与 lift 控制负载
 - [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、约束与脚本接口
+- [TSMC28 实现与验证](TSMC28Timing.md)：目标工艺角、标准单元映射、边界等价与 SRAM/物理实现要求
 
 文档中的类名、接口名和流水级名称与源码保持一致，便于从设计说明直接定位实现。仓库 README
 提供项目入口和常用任务，本目录说明模块职责与验证方法。

@@ -9,7 +9,8 @@ import tempfile
 import unittest
 
 from adder_mapping import AdderMapping
-from gate_equivalence import boundaries, file_sha256, prove
+from gate_equivalence import aliases, boundaries, file_sha256, make_cuts, prove
+from resize_tsmc28 import restore_memories
 from logic_path_audit import parse_full_paths
 from logic_only_sta import _violating_endpoint_count, _worst_data_arrival
 from nangate_memories import DUAL_PORT_MACROS, generate as generate_nangate_memories
@@ -264,6 +265,76 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
                 "68bbd055c1b06b5013b6bc74bf567fefd4cf0c332f72d947a576d351ae0a956a",
             )
 
+    def test_equivalence_preserves_trimmed_bus_indices(self):
+        module = {"netnames": {
+            "state": {"bits": [10, 11], "offset": 3},
+            "_retire_valid": {"bits": [12]},
+            "_generated": {"bits": [13], "hide_name": 1}
+        }}
+        self.assertEqual(aliases(module), {
+            ("state", 3): 10, ("state", 4): 11, ("_retire_valid", 0): 12
+        })
+
+    def test_logic_resizer_retains_memory_and_constant_outputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original, raw, result = [root / n for n in ("mapped.v", "raw.v", "complete.v")]
+            original.write_text("module ZirconCore;\n  BsgFakeram1RW1R_32 ram (\n"
+                                "    .dout1(data)\n  );\nendmodule\n")
+            original.with_suffix('.json').write_text(
+                '{"modules":{"ZirconCore":{"ports":{'
+                '"out":{"direction":"output","bits":["1",7,"0"]}}}}}')
+            raw.write_text("module ZirconCore; wire [2:0] out; endmodule\n")
+            restore_memories(original, raw, result, 1)
+            self.assertIn("BsgFakeram1RW1R_32 ram", result.read_text())
+            self.assertIn("assign out[0] = 1'b1;", result.read_text())
+            self.assertIn("assign out[2] = 1'b0;", result.read_text())
+            self.assertNotIn("assign out[1]", result.read_text())
+            with self.assertRaisesRegex(ValueError, "Expected 2 memory"):
+                restore_memories(original, raw, result, 2)
+
+    def test_equivalence_only_ignores_unloaded_dummy_memory_outputs(self):
+        import copy
+        import json
+        module = {"ports": {"clock": {"direction": "input", "bits": [1]}},
+                  "netnames": {}, "cells": {"ram": {
+                      "type": "PredictorBsgFakeram_256_8",
+                      "port_directions": {"clock": "input", "dout0": "output"},
+                      "connections": {"clock": [1], "dout0": []}}}}
+        gate = copy.deepcopy(module)
+        gate["cells"]["ram"]["connections"]["dout0"] = [3, 4]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            def write():
+                for label, design in [("gold", module), ("gate", gate)]:
+                    (root / f'{label}.json').write_text(json.dumps({"modules": {"Top": design}}))
+            write()
+            result = make_cuts(root / 'gold.json', root / 'gate.json', 'Top', root)
+            self.assertEqual(result['unused_memory_output_bits'], 2)
+            self.assertEqual(result['memory_input_groups'], 1)
+            module['ports']['visible'] = {"direction": "output", "bits": ["0"]}
+            gate['ports']['visible'] = {"direction": "output", "bits": [3]}
+            write()
+            with self.assertRaisesRegex(ValueError, "Memory width changed"):
+                make_cuts(root / 'gold.json', root / 'gate.json', 'Top', root)
+
+    def test_equivalence_cuts_tsmc28_register_and_sram(self):
+        module = {
+            "ports": {"clock": {"bits": [1]}},
+            "cells": {
+                "state": {"type": "DFQD4BWP40P140",
+                          "connections": {"CP": [1], "D": [2], "Q": [3]}},
+                "ram": {"type": "SinglePortMaskedRam_16_1_24",
+                        "connections": {"clock": [1], "dataOut": [4]}}
+            }
+        }
+        registers, memories = boundaries(module)
+        self.assertEqual(registers, {3: ("state", 2)})
+        self.assertEqual(set(memories), {"ram"})
+        module["cells"]["state"]["connections"]["CP"] = [9]
+        with self.assertRaisesRegex(ValueError, "ungated"):
+            boundaries(module)
+
     def test_equivalence_rejects_nonpositive_worker_count_before_proof(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -300,6 +371,18 @@ Endpoint: _4_ (rising edge-triggered flip-flop clocked by core_clock)
             validate_no_simulation_debug([clean])
             with self.assertRaisesRegex(RuntimeError, "Simulation-only debug logic"):
                 validate_no_simulation_debug([clean, debug])
+
+    def test_residual_adder_keeps_36_bit_mapping_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "Adders.sv"
+            source.write_text("module BLevelPAdder36(input a); endmodule\n"
+                              "module BLevelPAdder36_2(input a); endmodule\n"
+                              "module BLevelPAdder16(input a); endmodule\n")
+            mapping = AdderMapping.discover([source], delay_ps=500)
+            self.assertEqual(mapping.modules, ("BLevelPAdder36", "BLevelPAdder36_2"))
+            self.assertIn("BLevelPAdder36_2", mapping.preserve())
+            self.assertIn("BLevelPAdder36_2", mapping.commands(
+                "cells.lib", "abc.constr", temp, stage="pre_flatten"))
 
     def test_adder_mapping_builds_pre_and_post_flatten_commands(self):
         with tempfile.TemporaryDirectory() as temp:

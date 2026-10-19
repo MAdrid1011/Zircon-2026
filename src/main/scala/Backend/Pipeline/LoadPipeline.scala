@@ -149,8 +149,8 @@ class LoadPipeline(
     val sent = RegInit(VecInit.fill(p.entries)(false.B))
     def killed(x: BackendPackage): Bool = io.cmt.flush
 
-    val storeRF = instPkgRF.store
-    val storeIS = io.iq.instPkg.bits.store
+    val storeRF = if (withStore) instPkgRF.store else false.B
+    val storeIS = if (withStore) io.iq.instPkg.bits.store else false.B
     val acceptedUnit = Mux(
         storeIS,
         io.iq.instPkg.bits.fu === ZirconConfig.DecodeUnit.Store.U ||
@@ -164,7 +164,9 @@ class LoadPipeline(
         !valid(i) || (io.cache.rsp.valid && io.cache.rsp.bits.slot === i.U)
     )).asUInt
     val indexIS = PriorityEncoder(free)
-    io.iq.instPkg.ready := acceptedUnit && !io.blockIssue && (storeIS || free.orR) &&
+    // Dispatch and the typed IQ own operation routing. Capacity must not wait
+    // for the selected payload's FU decode after the wakeup/age selector.
+    io.iq.instPkg.ready := !io.blockIssue && (storeIS || free.orR) &&
         (!validRF || addressAccept)
 
     io.rf.rd.prj := instPkgRF.prj(p.intWidth - 1, 0)
@@ -266,6 +268,8 @@ class LoadPipeline(
         address(indexRF) := agu.io.res
     }
     when(io.iq.instPkg.fire) {
+        assert(acceptedUnit, "Issue queue routed an unsupported operation to LoadPipeline")
+        if (!withStore) { assert(!io.iq.instPkg.bits.store, "LS0 accepts only loads") }
         instPkgRF := io.iq.instPkg.bits
         sqTailOHRF := UIntToOH(
             io.iq.instPkg.bits.sqTail,

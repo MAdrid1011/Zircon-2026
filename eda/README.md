@@ -1,15 +1,16 @@
-# EDA 评估
+# EDA 平台
 
-本目录提供 Nangate45 静态时序评估所需的标准单元库、SRAM 模型和物理参数，以及面向 VU13P
-器件的 Vivado 核心工程定义。两条路径使用独立的 RTL 生成配置：Nangate45 将 SRAM 绑定到
-BSG Fakeram 模型，Vivado 使用可推断 Xilinx BRAM 的模板。
+本目录保存公开的 Nangate45 标准单元与 SRAM 估算视图、Vivado 工程定义，以及
+TSMC28 标准单元测量摘要。TSMC 工艺库由外部安装提供，不复制到仓库。
 
 | 入口 | 内容 |
 | --- | --- |
 | [Nangate45 平台](platforms/nangate45/README.md) | 工艺角、标准单元、SRAM 视图和输入来源 |
-| [Vivado 工程](vivado/README.md) | VU13P 器件、100 MHz 时钟约束与工程创建命令 |
-| [EDA 脚本](../scripts/eda/README.md) | RTL 生成、综合和时序报告接口 |
+| [Nangate45 逻辑时序](../docs/Nangate45Timing.md) | BSG SRAM 绑定、约束与复现方法 |
+| [TSMC28 实现与验证](../docs/TSMC28Timing.md) | TT / 0.8 V / 85°C 的逻辑实现、等价检查与 SRAM 边界 |
+| [TSMC28 测量摘要](tsmc28-results.json) | 绑定输入版本、配置和约束的机器可读结果 |
+| [Vivado 工程](vivado/README.md) | VU13P 器件与时钟约束 |
+| [EDA 脚本](../scripts/eda/README.md) | RTL 生成、综合与时序接口 |
 
-生成的 RTL、网表、Vivado 工程及报告分别保存在 `build/eda/nangate45/` 与
-`build/eda/vivado-vu13p/`，均不进入版本库。Nangate45 流程与约束见
-[逻辑时序评估](../docs/Nangate45Timing.md)。
+RTL、网表、日志和完整报告写入 `build/eda/`。标准单元逻辑结果与包含 SRAM、
+时钟树和布线寄生的物理实现结果使用不同的验证范围。

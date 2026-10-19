@@ -30,6 +30,7 @@ class LoadPipelineSystem(
         val other = new Bundle {
             val req = Flipped(Decoupled(new DLoadRequest(DCacheParams(p.entries))))
             val fixedLatency = Output(Bool())
+            val widePending = Output(Bool())
             val wbSelect = Valid(new DLoadWBSelect(DCacheParams(p.entries)))
             val rsp = Valid(new DLoadResponse(DCacheParams(p.entries)))
         }
