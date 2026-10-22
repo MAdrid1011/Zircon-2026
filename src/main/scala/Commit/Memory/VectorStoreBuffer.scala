@@ -32,6 +32,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val lastField = Reg(UInt(3.W))
     val position = RegInit(0.U(5.W))
     val elementAddress = Reg(UInt(32.W))
+    val nextElementLine = Reg(UInt(26.W))
     val valid = RegInit(false.B)
     val committed = RegInit(false.B)
     val filled = RegInit(false.B)
@@ -173,14 +174,17 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         state := Mux(scattered, readElementAddress, prepare)
     }
     when(state === readElementAddress) {
-        elementAddress := elementAddresses(Cat(group, position))
+        val selectedAddress = elementAddresses(Cat(group, position))
+        elementAddress := selectedAddress
+        // Prepare both line addresses at the existing element-read boundary.
+        // The second-fragment selector must not precede a cache-address adder.
+        nextElementLine := selectedAddress(31, 6) + 1.U
         state := prepare
     }
     io.cache.request.bits := 0.U.asTypeOf(new DStoreRequest)
     io.cache.request.bits.wide := true.B
     val contiguousLine = Mux(second, Mux1H(groupOH, nextLineAddress), item.address(31, 6))
-    val scatteredAddress = BLevelPAdder32.sum(Cat(elementAddress(31, 6), 0.U(6.W)),
-        Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
+    val scatteredAddress = Cat(Mux(second, nextElementLine, elementAddress(31, 6)), 0.U(6.W))
     io.cache.request.bits.paddr := Mux(scattered, scatteredAddress,
         Cat(contiguousLine, 0.U(6.W))).pad(34)
     io.cache.request.bits.line := Mux(pair,Cat(nextItem.data,item.data),Mux(second, shiftedData(1023, 512), shiftedData(511, 0)))

@@ -1197,41 +1197,41 @@ class DCache(
             val cachedLookup = lookupMove(lane) && resolvedLookup(lane).exception === 0.U &&
                 !resolvedLookup(lane).translationMiss && !resolvedLookup(lane).uncache
             when(cachedLookup) {
-                loadVisits(lane) := loadVisits(lane) + 1.U
-                when(hitNow(lane).orR) { loadHits(lane) := loadHits(lane) + 1.U }
+                loadVisits(lane) := AsicEventCounter.next(loadVisits(lane), 1.U)
+                when(hitNow(lane).orR) { loadHits(lane) := AsicEventCounter.next(loadHits(lane), 1.U) }
             }
             when(offerMiss && missUnit.io.allocate.fire && selectedMissLane === (lane == 1).B &&
                 !selectedExecute.uncache) {
-                loadMisses(lane) := loadMisses(lane) + 1.U
+                loadMisses(lane) := AsicEventCounter.next(loadMisses(lane), 1.U)
             }
             when(localResponseFire(lane) && localResponse(lane).retry) {
-                loadRetries(lane) := loadRetries(lane) + 1.U
+                loadRetries(lane) := AsicEventCounter.next(loadRetries(lane), 1.U)
                 when(execute(lane).translationMiss) {
-                    loadRetryTranslation(lane) := loadRetryTranslation(lane) + 1.U
+                    loadRetryTranslation(lane) := AsicEventCounter.next(loadRetryTranslation(lane), 1.U)
                 }.elsewhen(effectiveForwardBlocked(lane)) {
-                    loadRetryForwardBlocked(lane) := loadRetryForwardBlocked(lane) + 1.U
+                    loadRetryForwardBlocked(lane) := AsicEventCounter.next(loadRetryForwardBlocked(lane), 1.U)
                 }.elsewhen(execute(lane).uncache && !execute(lane).ioAuthorized) {
-                    loadRetryUncachedOrder(lane) := loadRetryUncachedOrder(lane) + 1.U
+                    loadRetryUncachedOrder(lane) := AsicEventCounter.next(loadRetryUncachedOrder(lane), 1.U)
                 }.elsewhen(staleLookup(lane)) {
-                    loadRetryStaleLookup(lane) := loadRetryStaleLookup(lane) + 1.U
+                    loadRetryStaleLookup(lane) := AsicEventCounter.next(loadRetryStaleLookup(lane), 1.U)
                 }.elsewhen(missUnit.io.busy) {
-                    loadRetryMissBusy(lane) := loadRetryMissBusy(lane) + 1.U
+                    loadRetryMissBusy(lane) := AsicEventCounter.next(loadRetryMissBusy(lane), 1.U)
                 }.elsewhen(storeState =/= storeIdle && !storeResolveAllowsLoadMiss(lane)) {
-                    loadRetryStoreConflict(lane) := loadRetryStoreConflict(lane) + 1.U
+                    loadRetryStoreConflict(lane) := AsicEventCounter.next(loadRetryStoreConflict(lane), 1.U)
                 }.otherwise {
-                    loadRetryLaneConflict(lane) := loadRetryLaneConflict(lane) + 1.U
+                    loadRetryLaneConflict(lane) := AsicEventCounter.next(loadRetryLaneConflict(lane), 1.U)
                 }
             }
         }
         val cachedStoreLookup = storeState === storeLookup && storeException === 0.U && !storeRequest.uncache
         when(cachedStoreLookup) {
-            storeVisits := storeVisits + 1.U
-            when(storeHitNow.orR) { storeHits := storeHits + 1.U }
+            storeVisits := AsicEventCounter.next(storeVisits, 1.U)
+            when(storeHitNow.orR) { storeHits := AsicEventCounter.next(storeHits, 1.U) }
         }
         when(storeNeedsMiss && missUnit.io.allocate.fire && !storeRequest.uncache) {
-            storeMisses := storeMisses + 1.U
+            storeMisses := AsicEventCounter.next(storeMisses, 1.U)
         }
-        when(missUnit.io.busy) { missBusyCycles := missBusyCycles + 1.U }
+        when(missUnit.io.busy) { missBusyCycles := AsicEventCounter.next(missBusyCycles, 1.U) }
         io.performance.get.loadVisits := loadVisits
         io.performance.get.loadHits := loadHits
         io.performance.get.loadMisses := loadMisses

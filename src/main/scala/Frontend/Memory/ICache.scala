@@ -373,9 +373,9 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
         val hitReg = RegInit(0.U(64.W))
         val missCycleReg = RegInit(0.U(64.W))
         val visit = c1s2Go && !faultC1s2 && !translatedUncache
-        when(visit) { visitReg := visitReg + 1.U }
-        when(visit && hitC1s2.orR) { hitReg := hitReg + 1.U }
-        when(missC1) { missCycleReg := missCycleReg + 1.U }
+        when(visit) { visitReg := AsicEventCounter.next(visitReg, 1.U) }
+        when(visit && hitC1s2.orR) { hitReg := AsicEventCounter.next(hitReg, 1.U) }
+        when(missC1) { missCycleReg := AsicEventCounter.next(missCycleReg, 1.U) }
         io.dbg.get.visit := visitReg
         io.dbg.get.hit := hitReg
         io.dbg.get.missCycle := missCycleReg

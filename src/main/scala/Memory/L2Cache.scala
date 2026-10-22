@@ -907,26 +907,26 @@ class L2Cache(
         val instructionVisit = iS2Advance && !iS2.ptw && !iS2.uncache
         val dataVisit = dS2Advance && !dS2.ptw && !dS2.uncache && !dS2.victimOnly
         when(instructionVisit) {
-            instructionVisits := instructionVisits + 1.U
-            when(iHit.orR) { instructionHits := instructionHits + 1.U }
-                .otherwise { instructionMisses := instructionMisses + 1.U }
+            instructionVisits := AsicEventCounter.next(instructionVisits, 1.U)
+            when(iHit.orR) { instructionHits := AsicEventCounter.next(instructionHits, 1.U) }
+                .otherwise { instructionMisses := AsicEventCounter.next(instructionMisses, 1.U) }
         }
         when(dataVisit) {
-            dataVisits := dataVisits + 1.U
-            when(dHit.orR) { dataHits := dataHits + 1.U }
-                .otherwise { dataMisses := dataMisses + 1.U }
+            dataVisits := AsicEventCounter.next(dataVisits, 1.U)
+            when(dHit.orR) { dataHits := AsicEventCounter.next(dataHits, 1.U) }
+                .otherwise { dataMisses := AsicEventCounter.next(dataMisses, 1.U) }
         }
         when(iS2Advance && !iS2.ptw && iS2.victimValid) {
-            instructionVictimInsertions := instructionVictimInsertions + 1.U
+            instructionVictimInsertions := AsicEventCounter.next(instructionVictimInsertions, 1.U)
         }
         when(dS2Advance && !dS2.ptw && dS2.victimValid) {
-            dataVictimInsertions := dataVictimInsertions + 1.U
+            dataVictimInsertions := AsicEventCounter.next(dataVictimInsertions, 1.U)
         }
         when(io.memory.req.fire) {
-            when(io.memory.req.bits.write) { lowerMemoryWrites := lowerMemoryWrites + 1.U }
-                .otherwise { lowerMemoryReads := lowerMemoryReads + 1.U }
+            when(io.memory.req.bits.write) { lowerMemoryWrites := AsicEventCounter.next(lowerMemoryWrites, 1.U) }
+                .otherwise { lowerMemoryReads := AsicEventCounter.next(lowerMemoryReads, 1.U) }
         }
-        when(engineState =/= engineIdle) { engineBusyCycles := engineBusyCycles + 1.U }
+        when(engineState =/= engineIdle) { engineBusyCycles := AsicEventCounter.next(engineBusyCycles, 1.U) }
         io.performance.get.instructionVisits := instructionVisits
         io.performance.get.instructionHits := instructionHits
         io.performance.get.instructionMisses := instructionMisses

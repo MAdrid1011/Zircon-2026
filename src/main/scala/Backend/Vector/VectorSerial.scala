@@ -222,21 +222,18 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
     val saturatedResult = Mux(overflow, saturationLimit, addSubtract)
     def fixedRound(guard: Bool, sticky: Bool, retained: Bool): Bool = MuxLookup(state.vxrm, false.B)(Seq(
         0.U -> guard, 1.U -> (guard && (sticky || retained)), 3.U -> (!retained && (guard || sticky))))
-    val averageFull = arithmeticResult
     val unsignedAverageMask = Cat(widthMask, 1.U(1.W))
-    val averageBase = Mux(funct(0), (averageFull.asSInt >> 1).asUInt,
-        (averageFull & unsignedAverageMask) >> 1)(31, 0)
+    val averageBase = Mux(funct(0), (carryResult.asSInt >> 1).asUInt,
+        (carryResult & unsignedAverageMask) >> 1)(31, 0)
     val shiftAmount = Reg(UInt(5.W))
     val shiftRound = Reg(Bool())
     val shiftedArithmetic = op === VectorSerialOperation.RoundedShift.U || narrowing
     val shifter = Shifter.Shifter(a, shiftAmount, funct(0))
     val shiftGuard = VecInit((0 until 32).map(bit => a(bit) && shiftAmount === (bit + 1).U)).asUInt.orR
     val shiftSticky = VecInit((0 until 31).map(bit => a(bit) && shiftAmount > (bit + 1).U)).asUInt.orR
-    // Shift and policy collection end at the existing arithmetic boundary.
-    // Rounding shares the averaging incrementer on its following cycle.
-    val roundedArithmetic = BLevelPAdder32.sum(Mux(shiftedArithmetic, addSubtract, averageBase),
-        0.U(32.W), Mux(shiftedArithmetic, shiftRound,
-            fixedRound(averageFull(0), false.B, averageFull(1))).asUInt)
+    // Average scaling and its rounding policy are collected at the same
+    // boundary as shifts. The following incrementer has no operation mux.
+    val roundedArithmetic = BLevelPAdder32.sum(addSubtract, 0.U(32.W), shiftRound.asUInt)
     val narrowingClip = funct(1)
     val narrowResult = Mux(narrowingClip, roundedArithmetic, addSubtract)
     val narrowNegativeLimit = Mux(sew === 0.U, "hffffff80".U, "hffff8000".U)
@@ -438,8 +435,11 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
             is(evaluate) {
                 when(useMultiply) { multiplyInput := mr }
                 when(active && fixedArithmetic) {
-                    arithmeticResult := Mux(shiftedArithmetic, shifter.io.res.pad(33), fixedAdder.io.res)
-                    shiftRound := fixedRound(shiftGuard, shiftSticky, shifter.io.res(0))
+                    arithmeticResult := Mux(shiftedArithmetic, shifter.io.res.pad(33),
+                        Mux(op === VectorSerialOperation.Average.U, averageBase.pad(33), fixedAdder.io.res))
+                    shiftRound := Mux(shiftedArithmetic,
+                        fixedRound(shiftGuard, shiftSticky, shifter.io.res(0)),
+                        fixedRound(carryResult(0), false.B, carryResult(1)))
                     nextPhase := finishArithmetic
                 }.elsewhen(active && (op === VectorSerialOperation.Divide.U || conversion || useMultiply || estimation)) {
                     nextPhase := issue

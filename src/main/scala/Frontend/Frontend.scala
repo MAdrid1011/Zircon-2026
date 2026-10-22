@@ -200,8 +200,8 @@ class Frontend(
 
         val fqBlockedCycles = RegInit(0.U(64.W))
         val fqEmptyCycles = RegInit(0.U(64.W))
-        when(validPD && !fq.io.enq(0).ready && !cmtFlush) { fqBlockedCycles := fqBlockedCycles + 1.U }
-        when(!fq.io.out.map(_.valid).reduce(_ || _)) { fqEmptyCycles := fqEmptyCycles + 1.U }
+        when(validPD && !fq.io.enq(0).ready && !cmtFlush) { fqBlockedCycles := AsicEventCounter.next(fqBlockedCycles, 1.U) }
+        when(!fq.io.out.map(_.valid).reduce(_ || _)) { fqEmptyCycles := AsicEventCounter.next(fqEmptyCycles, 1.U) }
         observe.fqBlockedCycles := fqBlockedCycles
         observe.fqEmptyCycles := fqEmptyCycles
     }

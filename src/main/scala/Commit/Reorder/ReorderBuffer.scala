@@ -220,7 +220,7 @@ class ReorderBuffer(
     queue.io.flush := io.clear
 
     val fullCycles = RegInit(0.U(64.W))
-    when(!ready) { fullCycles := fullCycles + 1.U }
+    when(!ready) { fullCycles := AsicEventCounter.next(fullCycles, 1.U) }
     io.fullCycles := fullCycles
 
     /* Simulation-only result values are isolated from the architectural ROB state. */

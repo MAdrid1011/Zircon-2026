@@ -570,14 +570,14 @@ class Middleend(
         val floatingBlocked = VecInit((0 until width).map { lane =>
             decodeNeedsFp(lane) && !floatingRename.io.freePrefix(lane)
         }).asUInt.orR
-        when(integerBlocked) { integerFreeListBlockedCycles := integerFreeListBlockedCycles + 1.U }
-        when(floatingBlocked) { floatingFreeListBlockedCycles := floatingFreeListBlockedCycles + 1.U }
+        when(integerBlocked) { integerFreeListBlockedCycles := AsicEventCounter.next(integerFreeListBlockedCycles, 1.U) }
+        when(floatingBlocked) { floatingFreeListBlockedCycles := AsicEventCounter.next(floatingFreeListBlockedCycles, 1.U) }
         val dispatchBlocked = renameStageValid.orR && accepted =/= renameStageValid
-        when(dispatchBlocked) { dispatchBlockedCycles := dispatchBlockedCycles + 1.U }
+        when(dispatchBlocked) { dispatchBlockedCycles := AsicEventCounter.next(dispatchBlockedCycles, 1.U) }
         val ftqBlocked = io.commit.request.valid.orR && io.commit.request.packetStart.orR &&
             (io.commit.resourcePrefix & io.commit.request.valid) =/= io.commit.request.valid
         when(ftqBlocked && !io.commit.flush) {
-            ftqBlockedCycles := ftqBlockedCycles + 1.U
+            ftqBlockedCycles := AsicEventCounter.next(ftqBlockedCycles, 1.U)
         }
         io.performance.get.integerFreeListBlockedCycles := integerFreeListBlockedCycles
         io.performance.get.floatingFreeListBlockedCycles := floatingFreeListBlockedCycles

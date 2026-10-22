@@ -278,7 +278,7 @@ class Backend(
                 !memory.io.idle,compute.io.activity)
             for (event <- 0 until 8) {
                 val count = RegInit(0.U(64.W))
-                when(events(event)) { count := count+1.U }
+                count := AsicEventCounter.next(count, events(event).asUInt)
                 counters(event) := count
             }
         }
@@ -689,7 +689,7 @@ class Backend(
         val divideBusyCycles = RegInit(0.U(64.W))
         for ((queue, index) <- queues.zipWithIndex) {
             when(queue.io.freeCount === 0.U) {
-                issueQueueFullCycles(index) := issueQueueFullCycles(index) + 1.U
+                issueQueueFullCycles(index) := AsicEventCounter.next(issueQueueFullCycles(index), 1.U)
             }
         }
         for ((queue, index) <- queues.zipWithIndex) {
@@ -698,18 +698,18 @@ class Backend(
             val executionBlocked = !issued && !replayBlocked &&
                 (queue.io.resourceBlocked || (queue.io.issue.valid && !queue.io.issue.ready))
             val operandBlocked = !issued && !replayBlocked && !executionBlocked && queue.io.operandBlocked
-            when(issued) { pipelineIssueCycles(index) := pipelineIssueCycles(index) + 1.U }
+            when(issued) { pipelineIssueCycles(index) := AsicEventCounter.next(pipelineIssueCycles(index), 1.U) }
             when(operandBlocked) {
-                pipelineOperandWaitCycles(index) := pipelineOperandWaitCycles(index) + 1.U
+                pipelineOperandWaitCycles(index) := AsicEventCounter.next(pipelineOperandWaitCycles(index), 1.U)
             }
             when(replayBlocked) {
-                pipelineReplayBlockedCycles(index) := pipelineReplayBlockedCycles(index) + 1.U
+                pipelineReplayBlockedCycles(index) := AsicEventCounter.next(pipelineReplayBlockedCycles(index), 1.U)
             }
             when(executionBlocked) {
-                pipelineExecutionBlockedCycles(index) := pipelineExecutionBlockedCycles(index) + 1.U
+                pipelineExecutionBlockedCycles(index) := AsicEventCounter.next(pipelineExecutionBlockedCycles(index), 1.U)
             }
         }
-        when(mixArith.io.divideBusy) { divideBusyCycles := divideBusyCycles + 1.U }
+        when(mixArith.io.divideBusy) { divideBusyCycles := AsicEventCounter.next(divideBusyCycles, 1.U) }
         io.performance.get.issueQueueFullCycles := issueQueueFullCycles
         io.performance.get.pipelineIssueCycles := pipelineIssueCycles
         io.performance.get.pipelineOperandWaitCycles := pipelineOperandWaitCycles

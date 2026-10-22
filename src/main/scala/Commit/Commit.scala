@@ -835,18 +835,18 @@ class Commit(
     val retiredPredictionFail = VecInit(retireFire.zip(rob.io.head).map {
         case (fire, entry) => fire && entry.bits.mispredicted
     })
-    branchCount := branchCount + PopCount(retiredBranch)
-    branchFailCount := branchFailCount + PopCount(retiredBranch.asUInt & retiredPredictionFail.asUInt)
-    directJumpCount := directJumpCount + PopCount(retiredDirectJump)
-    directJumpFailCount := directJumpFailCount + PopCount(retiredDirectJump.asUInt & retiredPredictionFail.asUInt)
-    callCount := callCount + PopCount(retiredCall)
-    callFailCount := callFailCount + PopCount(retiredCall.asUInt & retiredPredictionFail.asUInt)
-    retCount := retCount + PopCount(retiredRet)
-    retFailCount := retFailCount + PopCount(retiredRet.asUInt & retiredPredictionFail.asUInt)
-    indirectCount := indirectCount + PopCount(retiredIndirect)
-    indirectFailCount := indirectFailCount + PopCount(retiredIndirect.asUInt & retiredPredictionFail.asUInt)
-    when(sb.io.enqueue.valid && !sb.io.enqueue.ready) { storeBufferFullCycles := storeBufferFullCycles + 1.U }
-    when(!sb.io.empty) { storeBufferBusyCycles := storeBufferBusyCycles + 1.U }
+    branchCount := AsicEventCounter.next(branchCount, PopCount(retiredBranch))
+    branchFailCount := AsicEventCounter.next(branchFailCount, PopCount(retiredBranch.asUInt & retiredPredictionFail.asUInt))
+    directJumpCount := AsicEventCounter.next(directJumpCount, PopCount(retiredDirectJump))
+    directJumpFailCount := AsicEventCounter.next(directJumpFailCount, PopCount(retiredDirectJump.asUInt & retiredPredictionFail.asUInt))
+    callCount := AsicEventCounter.next(callCount, PopCount(retiredCall))
+    callFailCount := AsicEventCounter.next(callFailCount, PopCount(retiredCall.asUInt & retiredPredictionFail.asUInt))
+    retCount := AsicEventCounter.next(retCount, PopCount(retiredRet))
+    retFailCount := AsicEventCounter.next(retFailCount, PopCount(retiredRet.asUInt & retiredPredictionFail.asUInt))
+    indirectCount := AsicEventCounter.next(indirectCount, PopCount(retiredIndirect))
+    indirectFailCount := AsicEventCounter.next(indirectFailCount, PopCount(retiredIndirect.asUInt & retiredPredictionFail.asUInt))
+    when(sb.io.enqueue.valid && !sb.io.enqueue.ready) { storeBufferFullCycles := AsicEventCounter.next(storeBufferFullCycles, 1.U) }
+    when(!sb.io.empty) { storeBufferBusyCycles := AsicEventCounter.next(storeBufferBusyCycles, 1.U) }
 
     for (lane <- 0 until cp.width) {
         val entry = rob.io.head(lane).bits
