@@ -670,11 +670,19 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                     dut.io.scalarReadRequest.expect(false)
                     tick()
                 }
+                // Keep a third instruction offered across the blocked
+                // successor's RF rearm. Admission must coincide with that
+                // successor's real capture, not just newly available SQ room.
+                dut.io.in.bits.scalar.robIdx.poke(27)
+                dut.io.in.bits.scalar.sqIdx.poke(6)
+                for(group <- 0 until 8)dut.io.in.bits.vector.source(0)(group).poke(34+group)
+                dut.io.in.valid.poke(true)
                 dut.io.store.ready.poke(true)
-                for(_ <- 0 until 3)tick()
                 dut.io.completion.ready.poke(true)
+                waitUntil(dut.io.in.ready.peek().litToBoolean);tick()
+                dut.io.in.valid.poke(false)
                 waitUntil(dut.io.idle.peek().litToBoolean)
-                assert(completed.drop(before).map(_._2)==Vector(25,26))
+                assert(completed.drop(before).map(_._2)==Vector(25,26,27))
             }
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }

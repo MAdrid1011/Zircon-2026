@@ -156,10 +156,11 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val legacyCompletionHeld = RegInit(false.B)
     val wordDone = wordValid && (wordSent || io.store.ready) && legacyCompletionReady && !io.flush
     val wordRoom = !wordValid || wordDone
+    val operandCapture = Wire(Bool())
     val incomingWord = fullWordStore(legacyIn.bits) && legacyIn.bits.vector.groups.sourceCount(0)===1.U
     legacyIn.ready := wordRoom && (state === idle ||
         finalFullStore && io.store.ready && legacyCompletionReady ||
-        wordOperand && io.readAvailable && incomingWord) && !io.flush
+        wordOperand && operandCapture && incomingWord) && !io.flush
     io.idle := state === idle
     // A queued word owns the shared payload until SQ and ROB accept it. Do
     // not keep the RF ports reserved while its successor waits for that slot:
@@ -183,6 +184,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
         nextState === indexOperand
     io.readRequest := RegNext(nextReadRequest && wordRoom && !io.flush, false.B)
+    operandCapture := io.readAvailable && legacyScalarRequest && wordRoom &&
+        (!fullWordStore(instruction) || io.readRequest)
     io.scalarAddress := Mux(state === strideOperand, instruction.scalar.prs(1), instruction.scalar.prs(0))
     io.read(0).address := sourceReadAddress
     io.read(1).address := indexReadAddress
@@ -292,8 +295,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }.otherwise {
         switch(state) {
             is(operands) {
-                when(io.readAvailable && legacyScalarRequest && wordRoom &&
-                    (!fullWordStore(instruction) || io.readRequest)) {
+                when(operandCapture) {
                     indexWidth := decodedIndexWidth
                     indexed := instruction.scalar.inst(26)
                     elementAccess := strided || instruction.scalar.inst(26) ||
@@ -528,6 +530,10 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }
     when(state === response && discard && !io.cachePending) { nextState := idle }
     when(legacyIn.fire) {
+        when(state===operands) {
+            assert(wordOperand && operandCapture,
+                "Store turnover requires actual scalar/vector operand capture")
+        }
         assert(legacyIn.bits.vector.control.execution === VectorExecution.Load.U ||
             legacyIn.bits.vector.control.execution === VectorExecution.Store.U)
         val incoming = legacyIn.bits.vector
@@ -661,13 +667,24 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         (prepareRetry(i).orR || prepareCursor(i) < fastCount(i))))
     val contextOrder = VecInit((0 until 4).map(i => (fastHead + i.U)(1, 0)))
     val todoByAge = VecInit(contextOrder.map(index => fastTodo(index)))
-    val selectedContext = contextOrder(PriorityEncoder(todoByAge))
-    val canPrepare = fastMode && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        fastTodo.asUInt.orR && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
+    // Capture the first aligned address into the ordinary request register at
+    // the scalar-operand edge. Existing prepared work keeps priority; a newly
+    // captured context need not wait another cycle merely to reread that base.
+    val capturedAligned = Mux(shortWordLoad(fastInstruction(fastScalarOwner)),
+        !io.scalarData(3,0).orR,!io.scalarData(4,0).orR)
+    val capturedReady = fastScalarCapture && capturedAligned
+    val selectedContext = Mux(todoByAge.asUInt.orR,
+        contextOrder(PriorityEncoder(todoByAge)),fastScalarOwner)
+    val selectedBase = Mux(capturedReady && selectedContext===fastScalarOwner,
+        io.scalarData,fastBase(selectedContext))
+    val headReady = fastBaseReady(fastHead) && fastAligned(fastHead) ||
+        capturedReady && fastScalarOwner===fastHead
+    val canPrepare = fastMode && headReady &&
+        (fastTodo.asUInt.orR || capturedReady) && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
     val selectedRetry = prepareRetry(selectedContext).orR
     val selectedGroup = Mux(selectedRetry, PriorityEncoder(prepareRetry(selectedContext)),
         prepareCursor(selectedContext)(2, 0))
-    val selectedPair = !(fastBase(selectedContext)(5) ^ selectedGroup(0)) &&
+    val selectedPair = !(selectedBase(5) ^ selectedGroup(0)) &&
         selectedGroup +& 1.U < fastCount(selectedContext)
     val responseTicket = io.response.bits.slot(1, 0)
     val responseOH = UIntToOH(responseTicket, 4)
@@ -699,7 +716,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastHeldTicket := PriorityEncoder(freeTickets)
         fastHeldPair := selectedPair
         fastHeldRetry := selectedRetry
-        fastHeldAddress := Cat((fastBase(selectedContext) + Cat(selectedGroup, 0.U(5.W)))(31, 6), 0.U(6.W))
+        fastHeldAddress := Cat((selectedBase + Cat(selectedGroup, 0.U(5.W)))(31, 6), 0.U(6.W))
     }
     when(issueFast) {
         fastHeld := canPrepare

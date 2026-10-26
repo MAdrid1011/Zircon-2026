@@ -148,6 +148,22 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
         io.load.request.ready := (state===idle || finishing) && !selectStore &&
             (!readPending || finalIssue) && readRoom
     }
+    // With no retained address ahead of it, the accepted first half can use
+    // SRAM immediately. A stalled SRAM request is captured in the same old
+    // address/slot registers, retaining its payload after upstream recovery.
+    val streamStart = io.load.request.fire && incomingStream
+    val streamDirect = streamStart && !readPending
+    val directFull = io.load.request.bits.halfMask===0.U || io.load.request.bits.halfMask===3.U
+    val directUpper = io.load.request.bits.halfMask===2.U
+    val directIssue = streamDirect && io.memory.request.ready
+    when(streamDirect) {
+        io.memory.request.valid := true.B
+        io.memory.request.bits.address := (io.load.request.bits.paddr |
+            Mux(directUpper,32.U,0.U)).pad(36)
+        io.memory.request.bits.write := false.B
+        io.memory.request.bits.data := 0.U
+        io.memory.request.bits.strobe := 0.U
+    }
     when(readPending) {
         io.memory.request.valid := true.B
         io.memory.request.bits.address := (address | Mux(readUpper || issueHigh,32.U,0.U)).pad(36)
@@ -155,10 +171,10 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
         io.memory.request.bits.data := 0.U
         io.memory.request.bits.strobe := 0.U
     }
-    readReplies.io.enq.valid := readIssue && !issueHigh
-    readReplies.io.enq.bits.slot := slot
-    readReplies.io.enq.bits.upper := readUpper
-    readReplies.io.enq.bits.full := readFull
+    readReplies.io.enq.valid := readIssue && !issueHigh || directIssue
+    readReplies.io.enq.bits.slot := Mux(streamDirect,io.load.request.bits.slot,slot)
+    readReplies.io.enq.bits.upper := Mux(streamDirect,directUpper,readUpper)
+    readReplies.io.enq.bits.full := Mux(streamDirect,directFull,readFull)
     readReplies.io.deq.ready := readResponse
     when(readReplies.io.deq.valid) {
         io.memory.response.ready := true.B
@@ -186,14 +202,14 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
         when(readFull && !issueHigh) { issueHigh := true.B }
             .otherwise { readPending := false.B; issueHigh := false.B }
     }
-    when(io.load.request.fire && incomingStream) {
+    when(streamStart) {
         assert(!io.load.request.bits.paddr(5,0).orR && PeScratchpadBridge.matches(io.load.request.bits.paddr))
         address := io.load.request.bits.paddr
         slot := io.load.request.bits.slot
-        readUpper := io.load.request.bits.halfMask === 2.U
-        readFull := io.load.request.bits.halfMask === 0.U || io.load.request.bits.halfMask === 3.U
-        issueHigh := false.B
-        readPending := true.B
+        readUpper := directUpper
+        readFull := directFull
+        issueHigh := directIssue && directFull
+        readPending := !directIssue || directFull
     }
     // Auxiliary replies use the same ordered port and never coexist with an
     // older assembled line or Store response.

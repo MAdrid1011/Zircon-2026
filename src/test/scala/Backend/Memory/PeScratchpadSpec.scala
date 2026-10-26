@@ -241,6 +241,8 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
                 val address=0xb0030000L+index*64L
                 val value=read(address,64)
                 load(address,index%8)
+                if(index==0)assert(requestCycles.head==0,
+                    "The first ready SRAM request accompanies Load admission")
                 (index%8,value,0)
             }
             drain()
