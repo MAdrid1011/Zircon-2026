@@ -39,8 +39,10 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     val half = Reg(UInt(256.W))
     val highMask = Reg(UInt(32.W))
     val firstReturned = RegInit(false.B)
+    val single = RegInit(false.B)
+    val empty = RegInit(false.B)
     val errors = RegInit(0.U(2.W))
-    val lastReply = state===replies && firstReturned && io.memory.response.valid
+    val lastReply = state===replies && (empty || (single || firstReturned) && io.memory.response.valid)
     io.load.response.valid := lastReply && !write
     io.load.response.bits := 0.U.asTypeOf(new DLoadResponse(p))
     io.load.response.bits.wide := true.B
@@ -49,22 +51,31 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     io.load.response.bits.uncache := true.B
     io.load.response.bits.exception := Mux((errors|io.memory.response.bits.error).orR,5.U,0.U)
     io.store.rsp.valid := lastReply && write
-    io.store.rsp.bits.exception := Mux((errors|io.memory.response.bits.error).orR,7.U,0.U)
+    io.store.rsp.bits.exception := Mux(!empty && (errors|io.memory.response.bits.error).orR,7.U,0.U)
     io.memory.response.ready := !lastReply || !write || io.store.rsp.ready
     val finishing = lastReply && io.memory.response.ready
     val available = state===idle || finishing
     val selectStore = io.store.req.valid
+    val lowActive = io.store.req.bits.lineMask(31,0).orR
+    val highActive = io.store.req.bits.lineMask(63,32).orR
+    val storeEmpty = selectStore && !lowActive && !highActive
+    val storeSingle = selectStore && !(lowActive && highActive)
+    val upperOnly = selectStore && !lowActive && highActive
     val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid)
-    io.memory.request.valid := state===low || state===high || available && firstValid
+    io.memory.request.valid := state===low || state===high || available && firstValid && !storeEmpty
     val incomingAddress = Mux(selectStore,io.store.req.bits.paddr,io.load.request.bits.paddr)
-    io.memory.request.bits.address := Mux(available,incomingAddress,
+    // A masked Store still has one logical completion. Its live half alone
+    // owns an SRAM request/reply; an all-masked Store completes without I/O.
+    // Loads retain the full-line contract and always drain both replies.
+    val firstAddress = incomingAddress | Mux(upperOnly,32.U,0.U)
+    io.memory.request.bits.address := Mux(available,firstAddress,
         address + Mux(state===high,32.U,0.U)).pad(36)
     io.memory.request.bits.write := Mux(available,selectStore,write)
     io.memory.request.bits.data := Mux(available,
-        Mux(selectStore,io.store.req.bits.line(255,0),0.U),Mux(write,half,0.U))
+        Mux(selectStore,Mux(upperOnly,io.store.req.bits.line(511,256),io.store.req.bits.line(255,0)),0.U),Mux(write,half,0.U))
     io.memory.request.bits.strobe := Mux(available,
-        Mux(selectStore,io.store.req.bits.lineMask(31,0),0.U),Mux(write,highMask,0.U))
-    io.store.req.ready := available && io.memory.request.ready
+        Mux(selectStore,Mux(upperOnly,io.store.req.bits.lineMask(63,32),io.store.req.bits.lineMask(31,0)),0.U),Mux(write,highMask,0.U))
+    io.store.req.ready := available && (storeEmpty || io.memory.request.ready)
     // Reads acquire their address even when SRAM is stalled. This retains an
     // accepted speculative request until both replies drain across recovery.
     io.load.request.ready := available && !selectStore
@@ -72,7 +83,11 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     val startStore = io.store.req.fire
     when(io.memory.response.fire) {
         assert(state===high || state===replies)
-        when(!firstReturned) {
+        when(single) {
+            assert(state===replies)
+            state := idle
+            firstReturned := false.B
+        }.elsewhen(!firstReturned) {
             firstReturned := true.B
             errors := io.memory.response.bits.error
             when(!write) { half := io.memory.response.bits.data }
@@ -82,17 +97,20 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
             firstReturned := false.B
         }
     }
-    when(state===low && io.memory.request.fire) { state := high }
+    when(empty && state===replies && io.store.rsp.fire) { state := idle }
+    when(state===low && io.memory.request.fire) { state := Mux(single,replies,high) }
     when(state===high && io.memory.request.fire) { state := replies }
     when(startLoad || startStore) {
         assert(!incomingAddress(5,0).orR && PeScratchpadBridge.matches(incomingAddress))
         when(startStore) { assert(io.store.req.bits.wide) }
-        state := Mux(io.memory.request.fire,high,low)
+        state := Mux(storeEmpty,replies,Mux(io.memory.request.fire,Mux(storeSingle,replies,high),low))
         address := incomingAddress
         write := selectStore
         slot := io.load.request.bits.slot
         errors := 0.U
         firstReturned := false.B
+        single := storeSingle
+        empty := storeEmpty
         when(startStore) {
             half := io.store.req.bits.line(511,256)
             highMask := io.store.req.bits.lineMask(63,32)

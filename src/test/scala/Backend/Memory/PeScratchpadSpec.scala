@@ -135,6 +135,57 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "masked Stores issue only live halves and keep one backpressured completion" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            ready=c=>c%5!=1 && c%5!=2
+            val masks=Seq(BigInt("ffffffff",16),BigInt("ffffffff00000000",16),
+                BigInt(0),BigInt(1),BigInt(1)<<63,BigInt("ff000000000000ff",16))
+            for((mask,index)<-masks.zipWithIndex) {
+                val address=0xb0005000L+index*64L
+                val data=(0 until 64).foldLeft(BigInt(0))((v,i)=>v|(BigInt((i*17+index)&255)<<(8*i)))
+                val expected=(0 until 64).foldLeft(read(address,64)) { (v,i)=>
+                    if(mask.testBit(i)) (v & ~(BigInt(255)<<(8*i))) | (data & (BigInt(255)<<(8*i))) else v
+                }
+                val before=requests.size
+                dut.io.store.rsp.ready.poke(false)
+                store(address,data,mask)
+                for(_<-0 until 12)tick()
+                dut.io.store.rsp.valid.expect(true)
+                dut.io.store.rsp.bits.exception.expect(0)
+                assert(stores.size==index && read(address,64)==expected)
+                val offsets=Seq(0,32).filter(offset=>((mask>>offset)&BigInt("ffffffff",16))!=0)
+                assert(requests.drop(before).map(_._1).toVector==offsets.map(address+_).toVector)
+                dut.io.store.rsp.ready.poke(true);drain()
+                assert(stores.size==index+1 && stores.last==0)
+                load(address,index%8);drain()
+                assert(loads.last==((index%8,expected,0)))
+            }
+        }
+    }
+
+    "inactive Store halves do not raise SRAM errors and single replies hand off to Loads" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            for(upper<-Seq(false,true)) {
+                val address=if(upper)0xb0006080L else 0xb0006000L
+                val active=address+(if(upper)32 else 0)
+                val inactive=address+(if(upper)0 else 32)
+                val mask=BigInt("ffffffff",16)<<(if(upper)32 else 0)
+                fault+=inactive
+                val before=requests.size
+                store(address,BigInt("12345678"*16,16),mask)
+                load(address,4);drain()
+                assert(stores.last==0)
+                assert(requests.drop(before).map(_._1).toVector==Vector(active,address,address+32))
+                assert(loads.last._3==5)
+                fault-=inactive;fault+=active
+                store(address,BigInt(0),mask);drain();assert(stores.last==7)
+                fault-=active
+            }
+        }
+    }
+
     "a completing Store can hand the SRAM port to a waiting Load" in {
         simulate(new PeScratchpadBridge) { dut =>
             val d=new Driver(dut);import d._
