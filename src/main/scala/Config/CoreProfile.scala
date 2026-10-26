@@ -29,7 +29,6 @@ object CoreProfile {
         val dcacheSets = 128
         val l2 = L2CacheParams(sets = 128)
         val vlen = 256
-        override def vector: VectorParams = VectorParams(computeEntries = 8, memoryEntries = 8)
         override def frontend(observe: Boolean): FrontendParams = FrontendParams(
             historyLengths = Seq(4, 8, 16, 32, 64), rasDepth = 8, observe = observe)
     }
