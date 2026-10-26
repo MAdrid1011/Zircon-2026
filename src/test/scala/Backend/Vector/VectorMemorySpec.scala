@@ -378,6 +378,62 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 dut.io.lower.req.ready.poke(true)
                 begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
             }
+            // Ordinary unit-stride word loads share the same two owners. A
+            // short tail-agnostic load selects any aligned quarter-line; the
+            // following full load may finish its writes before the older
+            // architectural completion is accepted.
+            for (vl <- 1 to 4; quarter <- 0 until 4) {
+                delay = 13
+                val firstBase = 0x80050000L + (vl * 4 + quarter) * 0x1000L + quarter * 16
+                val secondBase = firstBase - quarter * 16 + 0x420L
+                val before = writes
+                dut.io.completion.ready.poke(false)
+                val stallScalar = vl == 1 && quarter == 0
+                if (stallScalar) dut.io.readAvailable.poke(false)
+                begin(2, 1, firstBase, vl, 0, false, 3, rob = 11, destination = 16)
+                if (stallScalar) {
+                    val beforeRequests = requests
+                    tick(); tick(); tick()
+                    assert(requests == beforeRequests, "short Load issued before collecting its scalar base")
+                    dut.io.readAvailable.poke(true)
+                }
+                tick()
+                begin(2, 2, secondBase, 16, 0, false, 0, rob = 12, destination = 32)
+                waitUntil(writes == before + 3)
+                dut.io.completion.valid.expect(true); dut.io.completion.bits.robIdx.expect(11)
+                dut.io.address.poke(16)
+                for (lane <- 0 until 8) {
+                    val value = if (lane >= vl) BigInt("ffffffff", 16) else
+                        (0 until 4).foldLeft(BigInt(0))((v, b) =>
+                            v | (BigInt(byteAt(BigInt(firstBase + lane * 4 + b))) << (8 * b)))
+                    dut.io.data(lane).expect(value, s"short Load VL=$vl quarter=$quarter lane=$lane")
+                }
+                for (group <- 0 until 2) {
+                    dut.io.address.poke(32 + group)
+                    for (lane <- 0 until 8) {
+                        val value = (0 until 4).foldLeft(BigInt(0))((v, b) =>
+                            v | (BigInt(byteAt(BigInt(secondBase + group * 32 + lane * 4 + b))) << (8 * b)))
+                        dut.io.data(lane).expect(value)
+                    }
+                }
+                tick(); tick(); assert(writes == before + 3)
+                dut.io.completion.ready.poke(true); tick()
+                dut.io.completion.valid.expect(true); dut.io.completion.bits.robIdx.expect(12)
+                dut.io.completion.ready.poke(false); tick(); tick()
+                dut.io.completion.ready.poke(true); tick(); dut.io.idle.expect(true)
+                // Undisturbed tails and bases outside the quarter-line
+                // alignment retain the ordinary merge/fallback semantics.
+                for (offset <- Seq(0, 4)) {
+                    begin(2, 1, firstBase + offset, vl, 0, false, 0); finish()
+                    dut.io.address.poke(32)
+                    for (lane <- 0 until 8) {
+                        val value = if (lane >= vl) BigInt("17171717", 16) else
+                            (0 until 4).foldLeft(BigInt(0))((v, b) =>
+                                v | (BigInt(byteAt(BigInt(firstBase + offset + lane * 4 + b))) << (8 * b)))
+                        dut.io.data(lane).expect(value)
+                    }
+                }
+            }
             // Independent whole-register Loads must both finish their PRF
             // writes while the older architectural completion is held. Cold
             // lines exercise retry tickets; alternating half-line alignment
@@ -434,6 +490,19 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             dut.io.flush.poke(true); tick(); dut.io.flush.poke(false)
             waitUntil(dut.io.idle.peek().litToBoolean)
             assert(writes == beforeOverlapWrites)
+            dut.io.completion.valid.expect(false)
+            begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
+            // A partial quarter-line owner obeys the same cancellation and
+            // lower-response drain rules as a complete register group.
+            val beforeShortRequests = requests
+            begin(2, 1, 0x80078010L, 3, 0, false, 3, rob = 15, destination = 16)
+            tick()
+            begin(2, 2, 0x80079020L, 16, 0, false, 0, rob = 16, destination = 32)
+            waitUntil(requests > beforeShortRequests && lowerResponse.nonEmpty)
+            val beforeShortWrites = writes
+            dut.io.flush.poke(true); tick(); dut.io.flush.poke(false)
+            waitUntil(dut.io.idle.peek().litToBoolean)
+            assert(writes == beforeShortWrites)
             dut.io.completion.valid.expect(false)
             begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")

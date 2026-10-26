@@ -493,8 +493,18 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val incoming = io.in.bits.vector
     val incomingWhole = io.in.bits.scalar.inst(27, 26) === 0.U &&
         io.in.bits.scalar.inst(24, 20) === 8.U
+    def unitWordLoad(task: VectorInstruction): Bool =
+        task.scalar.inst(31, 26) === 0.U && task.scalar.inst(24, 20) === 0.U &&
+            task.scalar.inst(14, 12) === 6.U &&
+            task.vector.state.vtype(5, 3) === 2.U
+    def shortWordLoad(task: VectorInstruction): Bool =
+        unitWordLoad(task) && task.vector.destination.count === 1.U &&
+            task.vector.state.vl.orR && task.vector.state.vl <= 4.U && task.vector.state.vtype(6)
+    val incomingFullWords = unitWordLoad(io.in.bits) &&
+        incoming.state.vl === (incoming.destination.count.pad(32) << 3)
     val incomingFast = incoming.control.execution === VectorExecution.Load.U &&
-        incomingWhole && !incoming.groups.mask && incoming.state.vstart === 0.U
+        (incomingWhole || incomingFullWords || shortWordLoad(io.in.bits)) &&
+        !incoming.groups.mask && incoming.state.vstart === 0.U
     val fallbackRequest = fastOwned && fastBaseReady(fastHead) &&
         !fastAligned(fastHead) && !fastFallbackStarted && !fastDrain && state === idle
     val directLegacy = !fastOwned && !fastDrain && !incomingFast
@@ -530,18 +540,27 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }
     when(fastDrain) { io.writeback.valid := false.B }
 
-    val fastTodo = VecInit((0 until 2).map(i => fastValid(i) && fastBaseReady(i) && fastAligned(i) &&
-        (fastRetry(i).orR || fastCursor(i) < fastCount(i))))
-    val selectedContext = Mux(fastTodo(fastHead), fastHead, !fastHead)
-    val canPrepare = fastMode && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        fastTodo.asUInt.orR && !fastHeld && !ticketValid.andR && !io.flush
-    val selectedRetry = fastRetry(selectedContext).orR
-    val selectedGroup = Mux(selectedRetry, PriorityEncoder(fastRetry(selectedContext)),
-        fastCursor(selectedContext)(2, 0))
-    val selectedPair = !(fastBase(selectedContext)(5) ^ selectedGroup(0)) &&
-        selectedGroup +& 1.U < fastCount(selectedContext)
     val issueFast = fastMode && io.request.fire
     val issuedTicket = UIntToOH(fastHeldTicket, 4)
+    // Prepare behind an accepted request, keeping its old payload stable until
+    // fire. Admission must see the advanced cursor and reserve a different
+    // ticket; otherwise the same group or response owner would be reused.
+    val prepareCursor = VecInit((0 until 2).map(i =>
+        Mux(issueFast && fastHeldContext === i.U && !fastHeldRetry,
+            fastHeldGroup +& Mux(fastHeldPair, 2.U, 1.U), fastCursor(i))))
+    val prepareRetry = VecInit((0 until 2).map(i => fastRetry(i) &
+        ~Mux(issueFast && fastHeldContext === i.U, UIntToOH(fastHeldGroup, 8), 0.U)))
+    val freeTickets = ~(ticketValid | Mux(issueFast, issuedTicket, 0.U))
+    val fastTodo = VecInit((0 until 2).map(i => fastValid(i) && fastBaseReady(i) && fastAligned(i) &&
+        (prepareRetry(i).orR || prepareCursor(i) < fastCount(i))))
+    val selectedContext = Mux(fastTodo(fastHead), fastHead, !fastHead)
+    val canPrepare = fastMode && fastBaseReady(fastHead) && fastAligned(fastHead) &&
+        fastTodo.asUInt.orR && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
+    val selectedRetry = prepareRetry(selectedContext).orR
+    val selectedGroup = Mux(selectedRetry, PriorityEncoder(prepareRetry(selectedContext)),
+        prepareCursor(selectedContext)(2, 0))
+    val selectedPair = !(fastBase(selectedContext)(5) ^ selectedGroup(0)) &&
+        selectedGroup +& 1.U < fastCount(selectedContext)
     val responseTicket = io.response.bits.slot(1, 0)
     val responseOH = UIntToOH(responseTicket, 4)
     val replyFast = fastMode && io.response.valid && !io.flush
@@ -570,13 +589,13 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastHeld := true.B
         fastHeldContext := selectedContext
         fastHeldGroup := selectedGroup
-        fastHeldTicket := PriorityEncoder(~ticketValid)
+        fastHeldTicket := PriorityEncoder(freeTickets)
         fastHeldPair := selectedPair
         fastHeldRetry := selectedRetry
         fastHeldAddress := Cat((fastBase(selectedContext) + Cat(selectedGroup, 0.U(5.W)))(31, 6), 0.U(6.W))
     }
     when(issueFast) {
-        fastHeld := false.B
+        fastHeld := canPrepare
         ticketContext(fastHeldTicket) := fastHeldContext
         ticketGroup(fastHeldTicket) := fastHeldGroup
         ticketPair(fastHeldTicket) := fastHeldPair
@@ -600,8 +619,20 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastWriteContext := queuedContext
         fastWriteGroup := queuedGroup + fastHigh.asUInt
         streamWrite.address := fastInstruction(queuedContext).vector.destination.physical(queuedGroup + fastHigh.asUInt)
-        streamWrite.data := Mux(fastHigh || fastBase(queuedContext)(5) ^ queuedGroup(0),
+        val line = streamLines.io.deq.bits.line
+        val ordinary = Mux(fastHigh || fastBase(queuedContext)(5) ^ queuedGroup(0),
             streamLines.io.deq.bits.line(511, 256), streamLines.io.deq.bits.line(255, 0))
+        // An unmasked short SEW32 load with tail-agnostic policy needs no old
+        // destination read. Select one aligned 16-byte quarter of the existing
+        // response line and fill inactive lanes; tickets, ownership and the
+        // response FIFO are exactly the same as for a whole-register load.
+        val quarter = MuxLookup(fastBase(queuedContext)(5, 4), line(127, 0))(Seq(
+            1.U -> line(255, 128), 2.U -> line(383, 256), 3.U -> line(511, 384)))
+            .asTypeOf(Vec(4, UInt(32.W)))
+        val short = VecInit((0 until 8).map(lane =>
+            if (lane < 4) Mux(lane.U < fastInstruction(queuedContext).vector.state.vl,
+                quarter(lane), "hffffffff".U) else "hffffffff".U(32.W)))
+        streamWrite.data := Mux(shortWordLoad(fastInstruction(queuedContext)), short.asUInt, ordinary)
             .asTypeOf(Vec(8, UInt(32.W)))
         streamWrite.bytes := VecInit.fill(8)(15.U(4.W))
         streamWrite.ready := true.B
@@ -634,7 +665,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         when(fastScalarCapture && fastScalarOwner === i.U) {
             fastBase(i) := io.scalarData
             fastBaseReady(i) := true.B
-            fastAligned(i) := io.scalarData(4, 0) === 0.U
+            fastAligned(i) := Mux(shortWordLoad(fastInstruction(i)),
+                io.scalarData(3, 0) === 0.U, io.scalarData(4, 0) === 0.U)
         }
         when((fastRelease || fallbackRelease) && fastHead === i.U) { fastValid(i) := false.B }
         when(fastAdmit && fastTail === i.U) {
