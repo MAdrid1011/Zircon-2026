@@ -36,7 +36,14 @@ class VectorMemoryHarness extends Module {
     memory.io.readAvailable := io.readAvailable
     io.readRequest := memory.io.readRequest
     io.scalarReadRequest := memory.io.scalarReadRequest
-    memory.io.read <> file.io.read
+    for (port <- 0 until 3) {
+        file.io.read(port).address := memory.io.read(port).address
+        file.io.read(port).oneHot := memory.io.read(port).oneHot
+        // Single-read collection must remain correct when the other ports
+        // return an arithmetic instruction's unrelated data.
+        memory.io.read(port).data := Mux((port != 0).B && memory.io.singleRead,
+            VecInit.fill(8)("hdeadbeef".U(32.W)), file.io.read(port).data)
+    }
     memory.io.ordering.clear := io.ordered
     memory.io.flush := io.flush
     memory.io.request <> dcache.io.load(1).req
