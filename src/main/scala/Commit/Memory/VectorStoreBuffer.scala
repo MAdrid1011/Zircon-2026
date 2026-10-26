@@ -53,24 +53,32 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val active = RegInit(false.B)
     val finishNow = WireDefault(false.B)
     val commitHit = io.commit.map(event => event.valid && event.bits === identity).reduce(_ || _)
-    // When the active instruction uses at most four groups, its unused upper
-    // payload registers queue complete single-group Stores. No data storage
-    // is added. Vector memory issues in program order; SQ/SB still determines
-    // retirement and grants each queued instruction its own outward drain.
-    val pendingValid = RegInit(VecInit.fill(4)(false.B))
-    val pendingCommitted = RegInit(VecInit.fill(4)(false.B))
-    val pendingHead = RegInit(0.U(2.W))
-    val pendingTail = RegInit(0.U(2.W))
+    // A single-group primary leaves seven of the existing eight payload rows
+    // available; larger primaries retain the four upper queue rows. Keep the
+    // chosen layout until the entire queue drains, including after promotion.
+    // SQ/SB still owns retirement and each instruction's outward write grant.
+    val densePending = RegInit(false.B)
+    val pendingSlots = Mux(densePending,7.U(4.W),4.U(4.W))
+    val pendingValid = RegInit(VecInit.fill(7)(false.B))
+    val pendingCommitted = RegInit(VecInit.fill(7)(false.B))
+    val pendingHead = RegInit(0.U(3.W))
+    val pendingTail = RegInit(0.U(3.W))
     val pendingCount = RegInit(0.U(3.W))
-    val pendingCommitHit = VecInit((0 until 4).map(i => io.commit.map(event =>
-        event.valid && event.bits === payload(i + 4).sqIdx).reduce(_ || _)))
-    val retained = VecInit((0 until 4).map(i => pendingValid(i) &&
+    def pendingSlot(index: UInt): UInt = Mux(densePending,index+1.U,
+        Cat(1.U(1.W),index(1,0)))
+    def advancePending(index: UInt,amount: UInt): UInt = {
+        val sum = index+&amount
+        Mux(sum>=pendingSlots,sum-pendingSlots,sum)(2,0)
+    }
+    val pendingCommitHit = VecInit((0 until 7).map(i => io.commit.map(event =>
+        event.valid && event.bits === payload(pendingSlot(i.U(3.W))).sqIdx).reduce(_ || _)))
+    val retained = VecInit((0 until 7).map(i => pendingValid(i) &&
         (pendingCommitted(i) || pendingCommitHit(i))))
     val promote = (state === done || finishNow) && pendingCount =/= 0.U &&
         (!io.flush || retained(pendingHead))
     val incomingSingle = io.collect.bits.index === 0.U && io.collect.bits.last &&
         !io.collect.bits.scattered && !io.collect.bits.addressOnly
-    val queueRoom = pendingCount < 4.U || promote
+    val queueRoom = pendingCount < pendingSlots || promote
     val canQueue = valid && filled && count <= 4.U && incomingSingle && queueRoom &&
         io.collect.bits.sqIdx =/= identity &&
         (!(state === done || finishNow) || pendingCount =/= 0.U)
@@ -78,7 +86,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         ((!valid && pendingCount === 0.U) || !filled && io.collect.bits.sqIdx === identity || canQueue)
     val queueCollect = io.collect.fire && canQueue
     val primaryCollect = io.collect.fire && !canQueue
-    def conflicts(slot: Int,line: UInt): Bool = payload(slot).mask.orR &&
+    def conflicts(slot: UInt,line: UInt): Bool = payload(slot).mask.orR &&
         (!PeScratchpadBridge.matches(payload(slot).address.pad(34)) ||
             payload(slot).address(31,6) === line ||
             contiguousMasks(slot)(127,64).orR && nextLineAddress(slot) === line)
@@ -91,9 +99,10 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         retired || distance=/=0.U && distance<=entries.U
     }
     def clearFor(line: UInt,tail: UInt): Bool = {
-        val primaryConflict = VecInit((0 until 8).map(i => i.U < count && conflicts(i,line))).asUInt.orR
-        val pendingConflict = VecInit((0 until 4).map(i => pendingValid(i) &&
-            older(payload(i+4).sqIdx,tail,pendingCommitted(i) || pendingCommitHit(i)) && conflicts(i+4,line))).asUInt.orR
+        val primaryConflict = VecInit((0 until 8).map(i => i.U < count && conflicts(i.U,line))).asUInt.orR
+        val pendingConflict = VecInit((0 until 7).map(i => pendingValid(i) &&
+            older(payload(pendingSlot(i.U(3.W))).sqIdx,tail,pendingCommitted(i) || pendingCommitHit(i)) &&
+            conflicts(pendingSlot(i.U(3.W)),line))).asUInt.orR
         // Younger speculative Stores cannot block an older Load: their ROB
         // retirement may itself depend on that Load completing. Retired tokens
         // remain older even when their SQ ring identities have been recycled.
@@ -192,6 +201,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             fieldRegisterShift := io.collect.bits.fieldRegisterShift
             lastField := io.collect.bits.lastField
             adjacentPair.foreach(_ := false.B)
+            densePending := incomingSingle
+            pendingHead := 0.U
+            pendingTail := 0.U
         }.otherwise {
             assert(io.collect.bits.index === nextCollect)
             assert(!committed)
@@ -256,7 +268,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     // it on the SB grant edge, including a queued successor of the returning
     // token. The existing payload remains stable if the cache applies pressure;
     // no additional line buffer or speculative outward write is introduced.
-    val startItem = Mux(finishNow,payload(Cat(1.U(1.W),pendingHead)),payload(0))
+    val startItem = Mux(finishNow,payload(pendingSlot(pendingHead)),payload(0))
     val startSingle = Mux(finishNow,true.B,count===1.U && !scattered)
     val immediateStart = io.drain.start.fire && startSingle &&
         PeScratchpadBridge.matches(startItem.address.pad(34)) &&
@@ -283,7 +295,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         active := false.B
     }
     when(promote) {
-        val slot = Cat(1.U(1.W), pendingHead)
+        val slot = pendingSlot(pendingHead)
         payload(0) := payload(slot)
         contiguousMasks(0) := contiguousMasks(slot)
         nextLineAddress(0) := nextLineAddress(slot)
@@ -298,7 +310,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         eew := payload(slot).eew
         fieldRegisterShift := payload(slot).fieldRegisterShift
         lastField := payload(slot).lastField
-        pendingHead := pendingHead + 1.U
+        pendingHead := advancePending(pendingHead,1.U)
         when(finishNow && io.drain.start.fire) {
             state := prepare
             active := true.B
@@ -308,12 +320,12 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             second := false.B
         }
     }
-    for (i <- 0 until 4) {
+    for (i <- 0 until 7) {
         when(pendingValid(i) && pendingCommitHit(i)) { pendingCommitted(i) := true.B }
         when(promote && pendingHead === i.U) { pendingValid(i) := false.B }
     }
     when(queueCollect) {
-        val slot = Cat(1.U(1.W), pendingTail)
+        val slot = pendingSlot(pendingTail)
         payload(slot) := io.collect.bits
         contiguousMasks(slot) :=
             (io.collect.bits.mask.pad(128) << io.collect.bits.address(5, 0))(127, 0)
@@ -321,7 +333,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             Cat(io.collect.bits.address(31, 6), 0.U(6.W)),64.U(32.W),0.U)(31,6)
         pendingValid(pendingTail) := true.B
         pendingCommitted(pendingTail) := false.B
-        pendingTail := pendingTail + 1.U
+        pendingTail := advancePending(pendingTail,1.U)
     }
     when(queueCollect =/= promote) {
         pendingCount := Mux(queueCollect,pendingCount + 1.U,pendingCount - 1.U)
@@ -339,8 +351,8 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         // retirement; same-edge retirements retain their data and identity.
         val kept = PopCount(retained)
         pendingCount := kept - promote.asUInt
-        pendingTail := pendingHead + kept
-        for (i <- 0 until 4) {
+        pendingTail := advancePending(pendingHead,kept)
+        for (i <- 0 until 7) {
             pendingValid(i) := retained(i) && !(promote && pendingHead === i.U)
         }
     }
@@ -355,6 +367,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         second := false.B
     }
     assert(pendingCount === PopCount(pendingValid))
+    assert(pendingCount <= pendingSlots)
+    assert(pendingHead < pendingSlots && pendingTail < pendingSlots)
+    when(!densePending) { assert(!pendingValid.drop(4).reduce(_ || _)) }
     when(pendingCount =/= 0.U) { assert(valid && filled && count <= 4.U) }
     when(state =/= idle) {
         assert(valid && committed && filled)

@@ -350,8 +350,8 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.cache.request.ready.poke(false); dut.io.cache.response.valid.poke(false)
                 dut.clock.step()
             }
-            for (identity <- 1 to 5) send(identity)
-            for (identity <- 1 to 5) {
+            for (identity <- 1 to 8) send(identity)
+            for (identity <- 1 to 8) {
                 dut.io.loadLine.poke((0xb0000000L + identity * 96L) >> 6)
                 dut.io.loadClear.expect(false)
             }
@@ -364,15 +364,15 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.scalarLoadTail(1).poke(1); dut.io.scalarLoadClear(1).expect(true)
             dut.io.scalarLoadTail(1).poke(2); dut.io.scalarLoadClear(1).expect(false)
             dut.io.scalarLoadTail(1).poke(12)
-            dut.io.collect.bits.sqIdx.poke(6); dut.io.collect.valid.poke(true)
+            dut.io.collect.bits.sqIdx.poke(9); dut.io.collect.valid.poke(true)
             dut.io.collect.ready.expect(false); dut.clock.step(3); dut.io.collect.valid.poke(false)
-            retire(1,2,3); retire(4,5)
+            retire(1,2,3); retire(4,5,6); retire(7,8)
             dut.io.scalarLoadTail(1).poke(1); dut.io.scalarLoadClear(1).expect(false)
             dut.io.scalarLoadTail(1).poke(12)
             drain(1)
             dut.io.loadLine.poke((0xb0000000L + 96L) >> 6); dut.io.loadClear.expect(true)
-            send(6); retire(6)
-            for (identity <- 2 to 6) drain(identity)
+            send(9); retire(9)
+            for (identity <- 2 to 9) drain(identity)
             dut.io.empty.expect(true)
             // Keep a retired prefix, including a retirement on the recovery
             // edge; drop only later speculative payloads and reuse their slots.
