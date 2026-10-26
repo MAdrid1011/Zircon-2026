@@ -57,6 +57,55 @@ class VectorComputeHarness extends Module {
 }
 
 class VectorComputeSpec extends AnyFreeSpec with ChiselSim {
+    "redundant immediate configurations retire without publishing a stale decode state" in {
+        simulate(new VectorComputeHarness) { dut =>
+            VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)
+            dut.io.in.valid.poke(false); dut.io.address.poke(0); dut.io.scalarData.poke(0)
+            dut.io.registerReady.poke((BigInt(1) << 64) - 1)
+            dut.io.roundingMode.poke(0); dut.io.flush.poke(false); dut.io.completion.ready.poke(false)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            def configuration(tag: Int, avl: Int, oldVl: Int, oldType: Int, start: Int): Unit = {
+                val in = dut.io.in.bits
+                VectorTestUtils.clear(in)
+                in.scalar.inst.poke(BigInt("cd007057",16) | (avl << 15) | (1 << 7))
+                in.scalar.robIdx.poke(tag); in.scalar.prd.poke(5)
+                in.vector.control.execution.poke(VectorExecution.Configuration)
+                in.vector.state.vl.poke(oldVl); in.vector.state.vtype.poke(oldType)
+                in.vector.state.vstart.poke(start)
+                dut.io.in.valid.poke(true)
+                var cycles = 0
+                while (!dut.io.in.ready.peek().litToBoolean && cycles < 40) { dut.clock.step(); cycles += 1 }
+                assert(cycles < 40); dut.clock.step(); dut.io.in.valid.poke(false)
+            }
+            for ((tag,avl,oldVl,oldType,start,updates) <- Seq(
+                (1,8,8,0xd0,0,false), (2,4,8,0xd0,0,true),
+                (3,8,8,0xd1,0,true), (4,8,8,0xd0,1,true),
+                (5,8,8,0xd0,0,false))) {
+                configuration(tag,avl,oldVl,oldType,start)
+                var cycles = 0
+                while (!dut.io.completion.valid.peek().litToBoolean && cycles < 40) { dut.clock.step(); cycles += 1 }
+                assert(cycles < 40)
+                for (_ <- 0 until 4) {
+                    dut.io.completion.bits.robIdx.expect(tag)
+                    dut.io.completion.bits.scalar.valid.expect(true)
+                    dut.io.completion.bits.scalar.bits.data.expect(avl)
+                    dut.io.completion.bits.retirement.configuration.expect(true)
+                    dut.io.configuration.valid.expect(false); dut.clock.step()
+                }
+                dut.io.completion.ready.poke(true)
+                dut.io.configuration.valid.expect(updates)
+                dut.clock.step(); dut.io.completion.valid.expect(false)
+                dut.io.completion.ready.poke(false)
+            }
+            configuration(6,8,8,0xd0,0)
+            dut.clock.step(3); dut.io.flush.poke(true); dut.clock.step()
+            dut.io.flush.poke(false); dut.io.completion.ready.poke(true)
+            for (_ <- 0 until 8) {
+                dut.io.configuration.valid.expect(false); dut.io.completion.valid.expect(false); dut.clock.step()
+            }
+        }
+    }
+
     "a stalled configuration completion retains its payload when arithmetic completes" in {
         simulate(new VectorComputeHarness) { dut =>
             VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)

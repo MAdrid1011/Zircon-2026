@@ -482,9 +482,12 @@ class Middleend(
         port.enqueue.bits.scalar := Mux1H(vectorStageSelection, dispatcher.io.in.entries)
         val configurationDecode = vectorDecodeFire &&
             metadata.control.execution === VectorExecution.Configuration.U
+        val changesConfiguration = configurationDecode &&
+            !VectorConfiguration.unchangedImmediate(
+                Mux1H(vectorSelection, instructions.map(_.inst)), vectorState.get)
         when(io.commit.flush || io.commit.restore) {
             configurationPending.get := false.B
-        }.elsewhen(configurationDecode) {
+        }.elsewhen(changesConfiguration) {
             configurationPending.get := true.B
         }.elsewhen(port.configuration.valid) {
             configurationPending.get := false.B

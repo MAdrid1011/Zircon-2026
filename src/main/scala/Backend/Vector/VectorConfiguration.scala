@@ -10,6 +10,16 @@ class VectorConfigurationRequest extends Bundle {
     val oldVl = UInt(32.W)
 }
 
+object VectorConfiguration {
+    /** An immediate configuration that preserves all speculative vector state
+      * needs no decode fence. It still executes and retires normally, including
+      * its scalar VL result. Register AVL and VTYPE forms keep the full fence.
+      */
+    def unchangedImmediate(inst: UInt, state: VectorCSRState): Bool =
+        inst(31, 30) === 3.U && state.vtype === inst(29, 20).pad(32) &&
+            state.vl === inst(19, 15).pad(32) && state.vstart === 0.U
+}
+
 /** VSETVL/I/IVLI use the same deterministic min(AVL, VLMAX) policy. */
 class VectorConfiguration extends RawModule {
     val io = IO(new Bundle {

@@ -104,6 +104,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val configurationHeld = RegInit(false.B)
     val configurationResult = Reg(new VectorCompletion(p))
     val configurationState = Reg(new VectorCSRState)
+    val configurationUnchanged = Reg(Bool())
     val arithmetic = Module(new VectorArithmetic(p.robWidth, shareSerialMultiply))
     if (shareSerialMultiply) {
         arithmetic.io.serialMultiply.get <> io.serialMultiply.get
@@ -245,7 +246,10 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     io.completion.bits.retirement.fflags := combinedFlags
     io.completion.bits.retirement.saturated := false.B
     when(selectConfiguration) { io.completion.bits := configurationResult }
-    io.configuration.valid := io.completion.fire && selectConfiguration
+    // Redundant immediate configurations may overlap younger decode. Their
+    // delayed completion must not overwrite a newer speculative configuration
+    // or release the fence belonging to that newer instruction.
+    io.configuration.valid := io.completion.fire && selectConfiguration && !configurationUnchanged
     io.configuration.bits := configurationState
     io.writeback.valid := arithmetic.io.out.fire && output.writesVector && !io.flush
     io.writeback.bits.address := output.address
@@ -271,12 +275,13 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     }.otherwise {
         when(io.completion.fire) { configurationHeld := false.B }
             .elsewhen(selectConfiguration) { configurationHeld := true.B }
-        when(io.configuration.valid) { configurationValid := false.B }
+        when(io.completion.fire && selectConfiguration) { configurationValid := false.B }
         when(collectorReady) { collectorValid := collect && !isConfiguration }
         when(collect) {
             when(isConfiguration) {
                 configurationValid := true.B
                 configurationState := incoming.state
+                configurationUnchanged := VectorConfiguration.unchangedImmediate(inst,state)
                 configurationResult.robIdx := instruction.scalar.robIdx
                 configurationResult.scalar := incoming.scalar
                 configurationResult.retirement.fmaElements := 0.U
