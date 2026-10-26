@@ -114,17 +114,20 @@ class DualPortMaskedRam(
             io.doutb := ram.io.doutb
         case DualPortRamBackend.Registers =>
             withClockAndReset(io.clka, false.B) {
-                val memory = Reg(Vec(depth, Vec(lanes, UInt(laneBits.W))))
+                val memory = Mem(depth, Vec(lanes, UInt(laneBits.W)))
                 val addressA = RegEnable(io.addra, io.ena)
                 val addressB = RegEnable(io.addrb, io.enb)
-                for (lane <- 0 until lanes) {
-                    when(io.ena && io.wea(lane)) {
-                        memory(io.addra)(lane) := io.dina((lane + 1) * laneBits - 1, lane * laneBits)
-                    }
-                    when(io.enb && io.web(lane)) {
-                        memory(io.addrb)(lane) := io.dinb((lane + 1) * laneBits - 1, lane * laneBits)
-                    }
+                // Preserve the registered address and live held output. A masked
+                // memory write updates only addressed lanes, without a next-state
+                // mux for every storage bit in the behavioral RAM.
+                when(io.ena) {
+                    memory.write(io.addra, io.dina.asTypeOf(Vec(lanes, UInt(laneBits.W))), io.wea.asBools)
                 }
+                when(io.enb) {
+                    memory.write(io.addrb, io.dinb.asTypeOf(Vec(lanes, UInt(laneBits.W))), io.web.asBools)
+                }
+                assert(!(io.ena && io.enb && io.addra === io.addrb && (io.wea & io.web).orR),
+                    "RAM ports must not write the same lane at the same address")
                 io.douta := memory(addressA).asUInt
                 io.doutb := memory(addressB).asUInt
             }
