@@ -46,7 +46,30 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val state = RegInit(idle)
     val active = RegInit(false.B)
     val commitHit = io.commit.map(event => event.valid && event.bits === identity).reduce(_ || _)
-    io.collect.ready := !io.flush && (!valid || !filled && io.collect.bits.sqIdx === identity)
+    // When the active instruction uses at most four groups, its unused upper
+    // payload registers queue complete single-group Stores. No data storage
+    // is added. Vector memory issues in program order; SQ/SB still determines
+    // retirement and grants each queued instruction its own outward drain.
+    val pendingValid = RegInit(VecInit.fill(4)(false.B))
+    val pendingCommitted = RegInit(VecInit.fill(4)(false.B))
+    val pendingHead = RegInit(0.U(2.W))
+    val pendingTail = RegInit(0.U(2.W))
+    val pendingCount = RegInit(0.U(3.W))
+    val pendingCommitHit = VecInit((0 until 4).map(i => io.commit.map(event =>
+        event.valid && event.bits === payload(i + 4).sqIdx).reduce(_ || _)))
+    val retained = VecInit((0 until 4).map(i => pendingValid(i) &&
+        (pendingCommitted(i) || pendingCommitHit(i))))
+    val promote = state === done && pendingCount =/= 0.U &&
+        (!io.flush || retained(pendingHead))
+    val incomingSingle = io.collect.bits.index === 0.U && io.collect.bits.last &&
+        !io.collect.bits.scattered && !io.collect.bits.addressOnly
+    val queueRoom = pendingCount < 4.U || promote
+    val canQueue = valid && filled && count <= 4.U && incomingSingle && queueRoom &&
+        io.collect.bits.sqIdx =/= identity && (state =/= done || pendingCount =/= 0.U)
+    io.collect.ready := !io.flush &&
+        ((!valid && pendingCount === 0.U) || !filled && io.collect.bits.sqIdx === identity || canQueue)
+    val queueCollect = io.collect.fire && canQueue
+    val primaryCollect = io.collect.fire && !canQueue
     io.drain.start.ready := valid && committed && filled && state === idle
     io.drain.done := state === done
     io.empty := !valid
@@ -120,7 +143,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             }
         }
     }
-    when(io.collect.fire) {
+    when(primaryCollect) {
         when(!valid) {
             assert(io.collect.bits.index === 0.U)
             identity := io.collect.bits.sqIdx
@@ -203,6 +226,42 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         filled := false.B
         state := idle
     }
+    when(promote) {
+        val slot = Cat(1.U(1.W), pendingHead)
+        payload(0) := payload(slot)
+        contiguousMasks(0) := contiguousMasks(slot)
+        nextLineAddress(0) := nextLineAddress(slot)
+        adjacentPair(0) := false.B
+        identity := payload(slot).sqIdx
+        count := 1.U
+        nextCollect := 1.U
+        valid := true.B
+        committed := pendingCommitted(pendingHead) || pendingCommitHit(pendingHead)
+        filled := true.B
+        scattered := false.B
+        eew := payload(slot).eew
+        fieldRegisterShift := payload(slot).fieldRegisterShift
+        lastField := payload(slot).lastField
+        pendingHead := pendingHead + 1.U
+    }
+    for (i <- 0 until 4) {
+        when(pendingValid(i) && pendingCommitHit(i)) { pendingCommitted(i) := true.B }
+        when(promote && pendingHead === i.U) { pendingValid(i) := false.B }
+    }
+    when(queueCollect) {
+        val slot = Cat(1.U(1.W), pendingTail)
+        payload(slot) := io.collect.bits
+        contiguousMasks(slot) :=
+            (io.collect.bits.mask.pad(128) << io.collect.bits.address(5, 0))(127, 0)
+        nextLineAddress(slot) := BLevelPAdder32.sum(
+            Cat(io.collect.bits.address(31, 6), 0.U(6.W)),64.U(32.W),0.U)(31,6)
+        pendingValid(pendingTail) := true.B
+        pendingCommitted(pendingTail) := false.B
+        pendingTail := pendingTail + 1.U
+    }
+    when(queueCollect =/= promote) {
+        pendingCount := Mux(queueCollect,pendingCount + 1.U,pendingCount - 1.U)
+    }
     // Retired stores retain ownership across recovery, including a retirement
     // on the recovery edge. No cache request exists before SB accepts the token.
     when(io.flush && valid && !committed && !commitHit) {
@@ -210,6 +269,19 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         valid := false.B
         filled := false.B
     }
+    when(io.flush) {
+        // Retirement is an in-order prefix. Recovery discards only the
+        // speculative suffix, including a queued Store collected before its
+        // retirement; same-edge retirements retain their data and identity.
+        val kept = PopCount(retained)
+        pendingCount := kept - promote.asUInt
+        pendingTail := pendingHead + kept
+        for (i <- 0 until 4) {
+            pendingValid(i) := retained(i) && !(promote && pendingHead === i.U)
+        }
+    }
+    assert(pendingCount === PopCount(pendingValid))
+    when(pendingCount =/= 0.U) { assert(valid && filled && count <= 4.U) }
     when(state =/= idle) {
         assert(valid && committed && filled)
         assert(groupOH === UIntToOH(group, 8))

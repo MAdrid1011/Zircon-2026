@@ -225,4 +225,89 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             info(s"Verified $responses ordered cache writes over $cycle cycles")
         }
     }
+    "single-group Stores queue in unused payload groups and recover an uncommitted suffix" in {
+        simulate(new VectorStoreBuffer) { dut =>
+            VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.collect.valid.poke(false)
+            dut.io.commit.foreach { event => event.valid.poke(false); event.bits.poke(0) }
+            dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
+            dut.io.cache.request.ready.poke(false); dut.io.cache.response.valid.poke(false)
+            dut.io.cache.response.bits.exception.poke(0)
+            dut.io.flush.poke(false); dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            def send(identity: Int): Unit = {
+                val task = dut.io.collect.bits
+                task.sqIdx.poke(identity); task.robIdx.poke(identity)
+                task.index.poke(0); task.last.poke(true)
+                task.address.poke(0xb0000000L + identity * 96L)
+                task.data.poke(BigInt(f"${identity}%02x" * 32, 16))
+                task.mask.poke(BigInt("f7ffefff",16))
+                task.scattered.poke(false); task.addressOnly.poke(false)
+                dut.io.collect.valid.poke(true); dut.io.collect.ready.expect(true)
+                dut.io.cache.request.valid.expect(false)
+                dut.clock.step(); dut.io.collect.valid.poke(false)
+            }
+            def retire(identities: Int*): Unit = {
+                for ((identity, lane) <- identities.zipWithIndex) {
+                    dut.io.commit(lane).valid.poke(true); dut.io.commit(lane).bits.poke(identity)
+                }
+                dut.clock.step(); dut.io.commit.foreach(_.valid.poke(false))
+            }
+            def drain(identity: Int): Unit = {
+                dut.io.drain.start.ready.expect(true)
+                dut.io.drain.start.valid.poke(true); dut.clock.step(); dut.io.drain.start.valid.poke(false)
+                var cycle = 0
+                var replyAt = -1
+                var writes = Vector.empty[(BigInt,BigInt,BigInt)]
+                var held: Option[(BigInt,BigInt,BigInt)] = None
+                while (!dut.io.drain.done.peek().litToBoolean && cycle < 100) {
+                    val ready = cycle % 4 != 1
+                    dut.io.cache.request.ready.poke(ready)
+                    dut.io.cache.response.valid.poke(replyAt == cycle)
+                    val bits = dut.io.cache.request.bits
+                    val signature = (bits.paddr.peek().litValue,bits.line.peek().litValue,bits.lineMask.peek().litValue)
+                    val valid = dut.io.cache.request.valid.peek().litToBoolean
+                    held.foreach(old => assert(valid && signature == old))
+                    held = if (valid && !ready) Some(signature) else None
+                    if (valid && ready) {
+                        assert(replyAt < 0)
+                        writes :+= signature
+                        replyAt = cycle + 3
+                    }
+                    if (replyAt == cycle && dut.io.cache.response.ready.peek().litToBoolean) replyAt = -1
+                    dut.clock.step(); cycle += 1
+                }
+                assert(cycle < 100 && writes.size == 1)
+                val address = BigInt(0xb0000000L + identity * 96L)
+                val offset = (address & 63).toInt
+                assert(writes.head._1 == (address & ~BigInt(63)))
+                assert(writes.head._2 == (BigInt(f"${identity}%02x" * 32,16) << (offset * 8)))
+                assert(writes.head._3 == (BigInt("f7ffefff",16) << offset))
+                dut.io.cache.request.ready.poke(false); dut.io.cache.response.valid.poke(false)
+                dut.clock.step()
+            }
+            for (identity <- 1 to 5) send(identity)
+            dut.io.collect.bits.sqIdx.poke(6); dut.io.collect.valid.poke(true)
+            dut.io.collect.ready.expect(false); dut.clock.step(3); dut.io.collect.valid.poke(false)
+            retire(1,2,3); retire(4,5)
+            drain(1)
+            send(6); retire(6)
+            for (identity <- 2 to 6) drain(identity)
+            dut.io.empty.expect(true)
+            // Keep a retired prefix, including a retirement on the recovery
+            // edge; drop only later speculative payloads and reuse their slots.
+            for (identity <- 10 to 14) send(identity)
+            retire(10,11)
+            dut.io.commit(0).valid.poke(true); dut.io.commit(0).bits.poke(12)
+            dut.io.flush.poke(true); dut.clock.step()
+            dut.io.flush.poke(false); dut.io.commit(0).valid.poke(false)
+            for (identity <- 10 to 12) drain(identity)
+            dut.io.empty.expect(true)
+            for (identity <- 15 to 19) send(identity)
+            dut.io.flush.poke(true); dut.clock.step(); dut.io.flush.poke(false)
+            dut.io.empty.expect(true); dut.io.cache.request.valid.expect(false)
+            send(20); retire(20); drain(20)
+            dut.io.empty.expect(true)
+        }
+    }
+
 }
