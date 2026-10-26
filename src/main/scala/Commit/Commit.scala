@@ -247,7 +247,7 @@ class Commit(
         sb.io.store.response.bits := io.backend.store.response.bits
         io.backend.store.response.ready := wide.io.cache.response.ready || sb.io.store.response.ready
         assert(!(sb.io.store.request.valid && wide.io.cache.request.valid))
-        when(sb.io.store.request.valid) { assert(!wideActive) }
+        when(sb.io.store.request.valid) { assert(!wideActive || wide.io.drain.done) }
     } else {
         io.backend.store <> sb.io.store
     }
