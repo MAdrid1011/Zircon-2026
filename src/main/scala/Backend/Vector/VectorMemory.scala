@@ -14,7 +14,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         val scalarData = Input(UInt(32.W))
         val scalarReadRequest = Output(Bool())
         val readRequest = Output(Bool())
-        val singleRead = Output(Bool())
         val readAvailable = Input(Bool())
         val request = Decoupled(new DLoadRequest(cache))
         val response = Flipped(Valid(new DLoadResponse(cache)))
@@ -185,18 +184,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
         nextState === indexOperand
     io.readRequest := RegNext(nextReadRequest && wordRoom && !io.flush, false.B)
-    // Unmasked Store collection consumes only source port 0. The initial
-    // operand edge does so only for a complete word; subsequent group collect
-    // also supports partial words. Mask/index reads retain exclusive ports.
-    // Register this classification at the same Q boundary as readRequest.
-    io.singleRead := RegNext((nextState === operands &&
-        Mux(legacyIn.fire, fullWordStore(legacyIn.bits), fullWordStore(instruction)) ||
-        nextState === collect && store && !metadata.groups.mask) &&
-        wordRoom && !io.flush, false.B)
-    when(io.singleRead && io.readRequest) {
-        assert(state === operands && fullWordStore(instruction) ||
-            state === collect && store && !metadata.groups.mask)
-    }
     operandCapture := io.readAvailable && legacyScalarRequest && wordRoom &&
         (!fullWordStore(instruction) || io.readRequest)
     io.scalarAddress := Mux(state === strideOperand, instruction.scalar.prs(1), instruction.scalar.prs(0))

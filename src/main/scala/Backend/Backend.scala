@@ -244,22 +244,18 @@ class Backend(
         memory.io.flush := io.commit.flush
         memory.io.store <> port.store
         memory.io.ordering <> port.ordering
-        // A full Store may borrow a read port the arithmetic task does not
-        // consume. All other memory and serial collections stay exclusive.
+        // Both collectors reuse all three existing lane read ports. A memory
+        // collection lasts one cycle; arithmetic holds its task while denied.
         val memoryReads = memory.io.readRequest
         val serialReads = serial.io.readRequest
-        val readArbiter = Module(new VectorReadArbiter)
-        readArbiter.io.memory := memoryReads
-        readArbiter.io.memorySingle := memory.io.singleRead
-        readArbiter.io.serial := serialReads
-        readArbiter.io.spare := compute.io.spareReads
-        readArbiter.io.addresses := VecInit(Seq(memory.io.read, serial.io.read,
-            compute.io.read).map(reads => VecInit(reads.map(_.address))))
-        compute.io.readAvailable := readArbiter.io.computeAvailable
+        compute.io.readAvailable := !memoryReads && !serialReads
         serial.io.readAvailable := !memoryReads && !memory.io.scalarReadRequest
         memory.io.readAvailable := true.B
+        val readOwners = VecInit(Seq(memoryReads, !memoryReads && serialReads,
+            !memoryReads && !serialReads))
         for (read <- 0 until 3) {
-            file.io.read(read).address := readArbiter.io.selected(read)
+            file.io.read(read).address := Mux1H(readOwners, Seq(memory.io.read(read).address,
+                serial.io.read(read).address, compute.io.read(read).address))
             // Arbitrate six-bit tags before the shared RF decoder. Selecting
             // three 64-bit masks makes the read-owner control drive every row.
             file.io.read(read).oneHot := UIntToOH(file.io.read(read).address, vectorParams.physicalRegisters)
@@ -267,8 +263,7 @@ class Backend(
             memory.io.read(read).data := file.io.read(read).data
             serial.io.read(read).data := file.io.read(read).data
         }
-        memory.io.read(0).data := Mux1H(UIntToOH(readArbiter.io.memoryPort, 3),
-            file.io.read.map(_.data))
+        assert(PopCount(readOwners) === 1.U)
         file.io.write(0).valid := arithmeticWrite.valid
         file.io.write(0).address := arithmeticWrite.bits.address
         file.io.write(0).data := arithmeticWrite.bits.data

@@ -28,16 +28,7 @@ class VectorComputeHarness extends Module {
     compute.io.serialMultiply.get.flush := io.flush
     val file = Module(new VectorRegisterFile)
     compute.io.in <> io.in
-    for (port <- 0 until 3) {
-        file.io.read(port).address := compute.io.read(port).address
-        file.io.read(port).oneHot := compute.io.read(port).oneHot
-        // A borrowed RF port returns somebody else's data. Poison every port
-        // advertised as spare throughout the arithmetic/policy regressions,
-        // including FP NaNs, so the classification cannot hide a live operand.
-        val spare = if (port == 0) false.B else compute.io.spareReads(port - 1)
-        compute.io.read(port).data := Mux(spare,
-            VecInit.fill(8)("h7fc12345".U(32.W)), file.io.read(port).data)
-    }
+    compute.io.read <> file.io.read
     compute.io.scalarData := io.scalarData
     compute.io.scalarAvailable := true.B
     compute.io.registerReady := io.registerReady

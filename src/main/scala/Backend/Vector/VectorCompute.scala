@@ -40,7 +40,6 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         val flush = Input(Bool())
         val readAvailable = Input(Bool())
         val readRequest = Output(Bool())
-        val spareReads = Output(UInt(2.W))
         val idle = Output(Bool())
         val activity = Output(UInt(6.W))
         val serialMultiply = if (shareSerialMultiply) Some(new MultiplyIO(1)) else None
@@ -56,10 +55,6 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val group = RegInit(0.U(3.W))
     val groupOH = RegInit(1.U(8.W))
     val readAddresses = RegInit(VecInit.fill(3)(0.U(6.W)))
-    // Bits name physical read ports 1 and 2. Register the operand shape at
-    // admission, alongside the RF addresses, rather than decoding it on the
-    // asynchronous register-file data path.
-    val spareReads = RegInit(0.U(2.W))
     val pending = RegInit(0.U(5.W))
     io.idle := pending === 0.U
     when(io.flush) { pending := 0.U }
@@ -124,8 +119,6 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         group >= instruction.vector.groups.sourceCount(port) || io.registerReady(readAddresses(port))).reduce(_ && _)
     val configurationReady = !configurationValid || io.completion.ready && !arithmetic.io.out.valid
     io.readRequest := busy && (prepare =/= 2.U || collectorReady)
-    io.spareReads := Mux(busy && prepare === 2.U && !isConfiguration && !scalarMove,
-        spareReads, 0.U)
     val collect = busy && prepare === 2.U &&
         Mux(isConfiguration, configurationReady, collectorReady && groupReady && io.readAvailable) && !io.flush
     val inputConfiguration = io.in.bits.vector.control.execution === VectorExecution.Configuration.U
@@ -327,12 +320,6 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
             group := 0.U
             groupOH := 1.U
             subelement := 0.U
-            val next = io.in.bits
-            val nextWholeMove = next.scalar.inst(31, 26) === 0x27.U &&
-                next.scalar.inst(14, 12) === 3.U
-            spareReads := Cat(!next.vector.groups.sourceCount(2).orR &&
-                !next.vector.control.readsDestination,
-                next.vector.control.scalar || next.vector.control.immediate || nextWholeMove)
             for (port <- 0 until 3) {
                 readAddresses(port) := io.in.bits.vector.source(port)(0)
             }
