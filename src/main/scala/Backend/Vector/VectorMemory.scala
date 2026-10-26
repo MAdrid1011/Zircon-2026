@@ -58,6 +58,15 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // the scalar base. Reuse the ordinary SQ payload register; ordering and
     // outward memory writes remain the responsibility of the existing SQ.
     val fullStore = RegInit(false.B)
+    // One complete word can wait at SQ while the instruction register collects
+    // its successor. Data, address and byte enables reuse the legacy payload;
+    // only the outgoing instruction identity needs an independent register.
+    val wordValid = RegInit(false.B)
+    val wordSent = RegInit(false.B)
+    val wordRob = Reg(UInt(p.robWidth.W))
+    val wordSq = Reg(UInt(p.sqWidth.W))
+    val wordEew = Reg(UInt(2.W))
+    val wordShift = Reg(UInt(2.W))
     def fullWordStore(task: VectorInstruction): Bool = {
         val whole = task.scalar.inst(27, 26) === 0.U && task.scalar.inst(24, 20) === 8.U
         val words = task.scalar.inst(31, 26) === 0.U && task.scalar.inst(24, 20) === 0.U &&
@@ -140,11 +149,17 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val nextPosition = position +& elementBytes
     val lastElement = nextPosition === 32.U
     val finalFullStore = state === writeback && fullStore && last
-    val legacyCompletion = state === complete || finalFullStore && io.store.ready
+    val wordOperand = state === operands && count===1.U && fullWordStore(instruction) && !io.scalarData(4,0).orR
+    val legacyCompletion = state === complete || finalFullStore && io.store.ready ||
+        wordValid && (wordSent || io.store.ready)
     val legacyCompletionReady = WireDefault(io.completion.ready)
     val legacyCompletionHeld = RegInit(false.B)
-    legacyIn.ready := (state === idle ||
-        finalFullStore && io.store.ready && legacyCompletionReady) && !io.flush
+    val wordDone = wordValid && (wordSent || io.store.ready) && legacyCompletionReady && !io.flush
+    val wordRoom = !wordValid || wordDone
+    val incomingWord = fullWordStore(legacyIn.bits) && legacyIn.bits.vector.groups.sourceCount(0)===1.U
+    legacyIn.ready := wordRoom && (state === idle ||
+        finalFullStore && io.store.ready && legacyCompletionReady ||
+        wordOperand && io.readAvailable && incomingWord) && !io.flush
     io.idle := state === idle
     val legacyScalarRequest = RegNext(nextState === operands || nextState === strideOperand, false.B)
     io.scalarReadRequest := legacyScalarRequest
@@ -199,6 +214,19 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.store.bits.eew := eew
     io.store.bits.fieldRegisterShift := registerShift
     io.store.bits.lastField := Mux(whole, 0.U, instruction.scalar.inst(31, 29))
+    when(wordValid) {
+        io.store.valid := !wordSent && !io.flush
+        io.store.bits.sqIdx := wordSq
+        io.store.bits.robIdx := wordRob
+        io.store.bits.index := 0.U
+        io.store.bits.last := true.B
+        io.store.bits.scattered := false.B
+        io.store.bits.addressOnly := false.B
+        io.store.bits.element := 0.U
+        io.store.bits.eew := wordEew
+        io.store.bits.fieldRegisterShift := wordShift
+        io.store.bits.lastField := 0.U
+    }
     io.writeback.valid := state === writeback && !store && !io.flush
     io.writeback.bits.address := metadata.destination.physical(group)
     io.writeback.bits.data := data.asTypeOf(Vec(8, UInt(32.W)))
@@ -210,9 +238,11 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }
     // Completion may accompany the last accepted SQ group. If ROB completion
     // stalls, complete retains the tag without submitting the Store twice.
-    io.completion.valid := (state === complete || finalFullStore && io.store.ready) && !io.flush
+    io.completion.valid := legacyCompletion && !io.flush
     io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
-    io.completion.bits.robIdx := instruction.scalar.robIdx
+    io.completion.bits.robIdx := Mux(wordValid,wordRob,instruction.scalar.robIdx)
+    when(wordValid && io.store.fire) { wordSent := true.B }
+    when(wordDone) { wordValid := false.B; wordSent := false.B }
 
     val old = io.read(2).data.asUInt
     val oldBytes = old.asTypeOf(Vec(32, UInt(8.W)))
@@ -239,6 +269,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val streamReturned = state === streamLoad && io.response.valid
     val streamRetried = streamReturned && io.response.bits.retry
     when(io.flush) {
+        wordValid := false.B
+        wordSent := false.B
         fullStore := false.B
         streamCredits := 0.U
         streamHigh := false.B
@@ -256,7 +288,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }.otherwise {
         switch(state) {
             is(operands) {
-                when(io.readAvailable) {
+                when(io.readAvailable && (!wordOperand || wordRoom)) {
                     indexWidth := decodedIndexWidth
                     indexed := instruction.scalar.inst(26)
                     elementAccess := strided || instruction.scalar.inst(26) ||
@@ -274,7 +306,18 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     sourceReadAddress := metadata.source(0)(0)
                     sourceReadSelection := UIntToOH(metadata.source(0)(0), 64)
                     nextState := Mux(strided, strideOperand, collect)
-                    when(fullWordStore(instruction) && io.scalarData(4, 0) === 0.U) {
+                    when(wordOperand) {
+                        data := io.read(0).data.asUInt
+                        byteMask := Fill(32,1.U(1.W))
+                        address := io.scalarData
+                        wordValid := true.B
+                        wordSent := false.B
+                        wordRob := instruction.scalar.robIdx
+                        wordSq := instruction.scalar.sqIdx
+                        wordEew := decodedEew
+                        wordShift := Mux(exponent>0.S,exponent.asUInt(1,0),0.U)
+                        nextState := idle
+                    }.elsewhen(fullWordStore(instruction) && io.scalarData(4, 0) === 0.U) {
                         data := io.read(0).data.asUInt
                         byteMask := Fill(32, 1.U(1.W))
                         address := io.scalarData
@@ -543,7 +586,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val incomingFast = incoming.control.execution === VectorExecution.Load.U &&
         (incomingWhole || incomingFullWords || shortWordLoad(io.in.bits)) &&
         !incoming.groups.mask && incoming.state.vstart === 0.U
-    val fallbackRequest = fastOwned && fastBaseReady(fastHead) &&
+    val fallbackRequest = !wordValid && fastOwned && fastBaseReady(fastHead) &&
         !fastAligned(fastHead) && !fastFallbackStarted && !fastDrain && state === idle
     // The Store collector owns vector RF reads, while the fast Load engine
     // owns response slots and its independent address metadata. They can run
@@ -570,7 +613,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         directLegacy && legacyIn.ready)
     val fastAdmit = io.in.fire && incomingFast
     val fallbackRelease = fastFallbackStarted && io.completion.fire
-    io.idle := state === idle && !fastOwned && !fastDrain
+    io.idle := state === idle && !fastOwned && !fastDrain && !wordValid
 
     when(fastMode || fastDrain) {
         io.scalarReadRequest := legacyScalarRequest || fastScalarPending && !fastDrain && !io.flush

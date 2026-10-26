@@ -107,6 +107,7 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             var requestCycles = Vector.empty[Int]
             var writeCycles = Vector.empty[Int]
             var completed = Vector.empty[(Int, Int)]
+            var storeSqIds = Vector.empty[Int]
             var storeGroups = Vector.empty[(Int, Int, Int, BigInt, BigInt, BigInt, Boolean)]
             def tick(): Unit = {
                 assert(!dut.io.scalarForwardQuery.peek().litToBoolean,
@@ -129,6 +130,7 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 }
                 if (dut.io.store.valid.peek().litToBoolean && dut.io.store.ready.peek().litToBoolean) {
                     val b = dut.io.store.bits
+                    storeSqIds :+= b.sqIdx.peek().litValue.toInt
                     storeGroups :+= ((cycle, b.robIdx.peek().litValue.toInt, b.index.peek().litValue.toInt,
                         b.address.peek().litValue, b.data.peek().litValue, b.mask.peek().litValue,
                         b.last.peek().litToBoolean))
@@ -149,10 +151,10 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             def begin(eew: Int, count: Int, base: Long, vl: Int, start: Int,
                       masked: Boolean, policy: Int, store: Boolean = false, stride: Option[Int] = None,
                       lumop: Int = 0, fields: Int = 1, indexWidth: Option[Int] = None,
-                      rob: Int = 7, destination: Int = 32): Unit = {
+                      rob: Int = 7, destination: Int = 32, sq: Int = 2, source: Int = 32): Unit = {
                 val in = dut.io.in.bits
                 VectorTestUtils.clear(in)
-                in.scalar.robIdx.poke(rob); in.scalar.sqIdx.poke(2); in.scalar.sqTail.poke(3)
+                in.scalar.robIdx.poke(rob); in.scalar.sqIdx.poke(sq); in.scalar.sqTail.poke(3)
                 in.scalar.prs(1).poke(2)
                 in.scalar.inst.poke((if (masked) 0L else 1L << 25) |
                     ((Seq(0L, 5L, 6L)(indexWidth.getOrElse(eew))) << 12) |
@@ -169,7 +171,7 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 in.vector.state.vl.poke(vl); in.vector.state.vstart.poke(start)
                 for (group <- 0 until 8) {
                     in.vector.destination.physical(group).poke(destination + group)
-                    in.vector.source(0)(group).poke(32 + group)
+                    in.vector.source(0)(group).poke(source + group)
                     in.vector.source(1)(group).poke(48 + group)
                     in.vector.source(2)(group).poke(10 + group)
                 }
@@ -618,6 +620,37 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             dut.io.store.ready.poke(true)
             waitUntil(dut.io.idle.peek().litToBoolean)
             assert(completed.takeRight(2).map(_._2) == Vector(30,31))
+            // The outgoing SQ payload keeps its identity while the ordinary
+            // instruction register reads the next word's scalar/vector sources.
+            // Different source registers expose overwrite or tag-handoff bugs.
+            for(index <- 0 until 4) {
+                dut.io.initialize.valid.poke(true); dut.io.initialize.address.poke(32+index)
+                for(lane <- 0 until 8) {
+                    dut.io.initialize.data(lane).poke(0x600+index*32+lane)
+                    dut.io.initialize.bytes(lane).poke(15)
+                }
+                tick()
+            }
+            dut.io.initialize.valid.poke(false)
+            for(whole <- Seq(false,true)) {
+                val firstGroup=storeGroups.size
+                val firstId=storeSqIds.size
+                val firstCompletion=completed.size
+                for(index <- 0 until 4)
+                    begin(if(whole)0 else 2,1,0xb0004000L,if(whole)1 else 8,0,false,0,
+                        store=true,lumop=if(whole)8 else 0,rob=20+index,sq=index,source=32+index)
+                waitUntil(dut.io.idle.peek().litToBoolean)
+                val groups=storeGroups.drop(firstGroup)
+                assert(groups.size==4 && groups.sliding(2).forall(p=>p(1)._1==p(0)._1+1),
+                    s"Complete word collection must sustain consecutive SQ groups: ${groups.map(_._1)}")
+                assert(storeSqIds.drop(firstId)==Vector(0,1,2,3))
+                assert(completed.drop(firstCompletion).map(_._2)==Vector(20,21,22,23))
+                for((entry,index) <- groups.zipWithIndex) {
+                    val expected=(0 until 8).foldLeft(BigInt(0))((v,lane)=>v|(BigInt(0x600+index*32+lane)<<(32*lane)))
+                    assert(entry._2==20+index && entry._3==0 && entry._4==BigInt(0xb0004000L))
+                    assert(entry._5==expected && entry._6==BigInt("ffffffff",16) && entry._7)
+                }
+            }
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }
     }

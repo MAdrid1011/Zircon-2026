@@ -252,6 +252,23 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     io.cache.request.bits.lineMask := lineMask
     io.cache.request.bits.size := 2.U
     io.cache.request.valid := state === prepare && lineMask.orR
+    // A native, aligned register word needs only a half-line selection. Start
+    // it on the SB grant edge, including a queued successor of the returning
+    // token. The existing payload remains stable if the cache applies pressure;
+    // no additional line buffer or speculative outward write is introduced.
+    val startItem = Mux(finishNow,payload(Cat(1.U(1.W),pendingHead)),payload(0))
+    val startSingle = Mux(finishNow,true.B,count===1.U && !scattered)
+    val immediateStart = io.drain.start.fire && startSingle &&
+        PeScratchpadBridge.matches(startItem.address.pad(34)) &&
+        !startItem.address(4,0).orR && startItem.mask.andR
+    when(immediateStart) {
+        io.cache.request.valid := true.B
+        io.cache.request.bits.paddr := Cat(startItem.address(31,6),0.U(6.W)).pad(34)
+        io.cache.request.bits.line := Mux(startItem.address(5),
+            Cat(startItem.data,0.U(256.W)),Cat(0.U(256.W),startItem.data))
+        io.cache.request.bits.lineMask := Mux(startItem.address(5),
+            Cat(startItem.mask,0.U(32.W)),Cat(0.U(32.W),startItem.mask))
+    }
     when(state === prepare && !lineMask.orR) { advance() }
     when(io.cache.request.fire) { state := response }
     when(io.cache.response.fire) {
@@ -326,6 +343,16 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         for (i <- 0 until 4) {
             pendingValid(i) := retained(i) && !(promote && pendingHead === i.U)
         }
+    }
+    when(immediateStart) {
+        // This assignment follows promotion and the old acknowledgement's
+        // state updates. A blocked request resumes through the ordinary path.
+        state := Mux(io.cache.request.fire,response,prepare)
+        active := true.B
+        group := 0.U
+        groupOH := 1.U
+        position := 0.U
+        second := false.B
     }
     assert(pendingCount === PopCount(pendingValid))
     when(pendingCount =/= 0.U) { assert(valid && filled && count <= 4.U) }

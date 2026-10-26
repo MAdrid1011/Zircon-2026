@@ -405,6 +405,54 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "retired native words sustain one Store per cycle through the existing SB grant" in {
+        simulate(new VectorStorePipelineHarness) { dut =>
+            VectorTestUtils.clear(dut.io.enqueue.bits); VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.enqueue.valid.poke(false); dut.io.collect.valid.poke(false)
+            dut.io.commit.foreach { p => p.valid.poke(false); p.bits.poke(0) }
+            dut.io.cache.request.ready.poke(false); dut.io.cache.response.valid.poke(false)
+            dut.io.cache.response.bits.exception.poke(0)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            for(index <- 0 until 4) {
+                val task=dut.io.collect.bits
+                task.sqIdx.poke(index+1); task.robIdx.poke(index+1)
+                task.index.poke(0); task.last.poke(true); task.address.poke(0xb0001000L+index*32)
+                task.data.poke(BigInt(f"${index+1}%02x"*32,16)); task.mask.poke(BigInt("ffffffff",16))
+                dut.io.collect.valid.poke(true); dut.io.collect.ready.expect(true); dut.clock.step()
+            }
+            dut.io.collect.valid.poke(false)
+            for(i <- 0 until 3) { dut.io.commit(i).valid.poke(true); dut.io.commit(i).bits.poke(i+1) }
+            dut.clock.step(); dut.io.commit.foreach(_.valid.poke(false))
+            dut.io.commit(0).valid.poke(true); dut.io.commit(0).bits.poke(4)
+            dut.clock.step(); dut.io.commit(0).valid.poke(false)
+            for(_ <- 0 until 4) {
+                dut.io.enqueue.bits.vector.poke(true); dut.io.enqueue.valid.poke(true)
+                dut.io.enqueue.ready.expect(true); dut.clock.step()
+            }
+            dut.io.enqueue.valid.poke(false)
+            var pending:Option[Int]=None
+            var cycles=Vector.empty[Int]
+            var cycle=0
+            while((!dut.io.empty.peek().litToBoolean || pending.nonEmpty) && cycle<40) {
+                dut.io.cache.request.ready.poke(true)
+                val reply=pending.contains(cycle)
+                dut.io.cache.response.valid.poke(reply)
+                if(reply) { dut.io.cache.response.ready.expect(true);pending=None }
+                if(dut.io.cache.request.valid.peek().litToBoolean) {
+                    assert(pending.isEmpty)
+                    val index=cycles.size
+                    dut.io.cache.request.bits.paddr.expect((0xb0001000L+index*32)& ~63L)
+                    val offset=if(index%2==0)0 else 256
+                    dut.io.cache.request.bits.line.expect(BigInt(f"${index+1}%02x"*32,16)<<offset)
+                    dut.io.cache.request.bits.lineMask.expect(BigInt("ffffffff",16)<<(offset/8))
+                    cycles :+= cycle;pending=Some(cycle+1)
+                }
+                dut.clock.step();cycle+=1
+            }
+            assert(cycles.size==4 && cycles.sliding(2).forall(p=>p(1)==p(0)+1),s"Native Store bubbles: $cycles")
+        }
+    }
+
     "the shared Store port hands acknowledged wide tokens to scalar and queued vector successors" in {
         simulate(new VectorStorePipelineHarness) { dut =>
             VectorTestUtils.clear(dut.io.enqueue.bits); dut.io.enqueue.valid.poke(false)
