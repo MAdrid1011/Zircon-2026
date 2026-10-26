@@ -204,7 +204,8 @@ class StoreQueue(
             val identity = narrow(entry.identity)
             val distance = Mux(boundary >= identity, boundary - identity,
                 boundary + ringEntries.U - identity)
-            valid(index) && distance =/= 0.U && distance <= entries.U
+            valid(index) && distance =/= 0.U && distance <= entries.U &&
+                (!port.ordering.native || !entry.vector || !entry.addressValid)
         }).asUInt.orR
     }
 

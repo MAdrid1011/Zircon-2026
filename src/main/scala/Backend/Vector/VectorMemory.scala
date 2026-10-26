@@ -748,4 +748,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         }
         assert(!fastHeld || fastHeldContext =/= fastHead)
     }
+    // Native SRAM has one physical address space. Its Load may pass complete
+    // non-overlapping vector Stores; cached, scalar and unknown-address Stores
+    // retain the conservative ordering path, including possible SRAM aliases.
+    io.ordering.native := PeScratchpadBridge.matches(io.request.bits.paddr)
+    io.ordering.line := io.request.bits.paddr(31, 6)
 }

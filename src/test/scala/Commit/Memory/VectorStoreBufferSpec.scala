@@ -1,10 +1,52 @@
+import chisel3._
+import chisel3.util._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
+
+/** Uses the same request selection and response ownership as Commit. */
+class VectorStorePipelineHarness extends Module {
+    val io = IO(new Bundle {
+        val enqueue = Flipped(Decoupled(new CommittedStore))
+        val collect = Flipped(Decoupled(new VectorStoreTask))
+        val commit = Input(Vec(3,Valid(UInt(ZirconConfig.BackendParams().sqWidth.W))))
+        val cache = new StoreBufferCacheIO
+        val empty = Output(Bool())
+    })
+    val scalar = Module(new StoreBuffer(cp=ZirconConfig.CommitParams(vectorEnabled=true)))
+    val vector = Module(new VectorStoreBuffer)
+    val port = Module(new SharedStorePort)
+    scalar.io.enqueue <> io.enqueue
+    scalar.io.query.foreach { query => query.request := 0.U.asTypeOf(query.request) }
+    vector.io.collect <> io.collect
+    vector.io.commit := io.commit
+    vector.io.flush := false.B
+    vector.io.loadLine := 0.U
+    vector.io.drain <> scalar.io.vector.get
+    port.io.reserveAtomic := false.B
+    port.io.atomicRequest.valid := false.B
+    port.io.atomicRequest.bits := 0.U.asTypeOf(new DStoreRequest)
+    port.io.atomicResponse.ready := true.B
+    port.io.committedRequest.valid := scalar.io.store.request.valid || vector.io.cache.request.valid
+    port.io.committedRequest.bits := Mux(vector.io.cache.request.valid,
+        vector.io.cache.request.bits,scalar.io.store.request.bits)
+    scalar.io.store.request.ready := port.io.committedRequest.ready
+    vector.io.cache.request.ready := port.io.committedRequest.ready
+    scalar.io.store.response.valid := port.io.committedResponse.valid && !vector.io.active
+    scalar.io.store.response.bits := port.io.committedResponse.bits
+    vector.io.cache.response.valid := port.io.committedResponse.valid && vector.io.active
+    vector.io.cache.response.bits := port.io.committedResponse.bits
+    port.io.committedResponse.ready := Mux(vector.io.active,
+        vector.io.cache.response.ready,scalar.io.store.response.ready)
+    io.cache.request <> port.io.cacheRequest
+    port.io.cacheResponse <> io.cache.response
+    io.empty := scalar.io.empty && vector.io.empty
+}
 
 class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
     "scattered descriptors share wide storage and drain masked elements only after commit" in {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.loadLine.poke(0)
             dut.io.collect.valid.poke(false)
             dut.io.commit.foreach { port => port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -67,6 +109,7 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
     "ordered segment stores visit elements before fields when addresses overlap" in {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.loadLine.poke(0)
             dut.io.collect.valid.poke(false)
             dut.io.commit.foreach { port => port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -142,6 +185,7 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
     "wide data waits for retirement and ordered SB grant, and survives flush until final cache acknowledgement" in {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.loadLine.poke(0)
             dut.io.collect.valid.poke(false)
             for (port <- dut.io.commit) { port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -187,7 +231,8 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             var responses = 0
             var acknowledge = -1
             var held: Option[(BigInt, BigInt, BigInt)] = None
-            while (!dut.io.drain.done.peek().litToBoolean && cycle < 300) {
+            var drained = false
+            while (!drained && cycle < 300) {
                 dut.io.active.expect(true)
                 dut.io.cache.request.ready.poke(cycle % 5 == 4)
                 dut.io.cache.response.valid.poke(cycle == acknowledge)
@@ -214,6 +259,7 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.cache.response.ready.expect(true)
                     responses += 1
                 }
+                drained = dut.io.drain.done.peek().litToBoolean
                 dut.clock.step(); cycle += 1
             }
             assert(cycle < 300 && responses > 8 && observed == expected)
@@ -228,6 +274,7 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
     "single-group Stores queue in unused payload groups and recover an uncommitted suffix" in {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.loadLine.poke(0)
             dut.io.collect.valid.poke(false)
             dut.io.commit.foreach { event => event.valid.poke(false); event.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -259,7 +306,8 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                 var replyAt = -1
                 var writes = Vector.empty[(BigInt,BigInt,BigInt)]
                 var held: Option[(BigInt,BigInt,BigInt)] = None
-                while (!dut.io.drain.done.peek().litToBoolean && cycle < 100) {
+                var drained = false
+                while (!drained && cycle < 100) {
                     val ready = cycle % 4 != 1
                     dut.io.cache.request.ready.poke(ready)
                     dut.io.cache.response.valid.poke(replyAt == cycle)
@@ -274,6 +322,7 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                         replyAt = cycle + 3
                     }
                     if (replyAt == cycle && dut.io.cache.response.ready.peek().litToBoolean) replyAt = -1
+                    drained = dut.io.drain.done.peek().litToBoolean
                     dut.clock.step(); cycle += 1
                 }
                 assert(cycle < 100 && writes.size == 1)
@@ -286,10 +335,16 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                 dut.clock.step()
             }
             for (identity <- 1 to 5) send(identity)
+            for (identity <- 1 to 5) {
+                dut.io.loadLine.poke((0xb0000000L + identity * 96L) >> 6)
+                dut.io.loadClear.expect(false)
+            }
+            dut.io.loadLine.poke(0xb0040000L >> 6); dut.io.loadClear.expect(true)
             dut.io.collect.bits.sqIdx.poke(6); dut.io.collect.valid.poke(true)
             dut.io.collect.ready.expect(false); dut.clock.step(3); dut.io.collect.valid.poke(false)
             retire(1,2,3); retire(4,5)
             drain(1)
+            dut.io.loadLine.poke((0xb0000000L + 96L) >> 6); dut.io.loadClear.expect(true)
             send(6); retire(6)
             for (identity <- 2 to 6) drain(identity)
             dut.io.empty.expect(true)
@@ -300,6 +355,8 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.commit(0).valid.poke(true); dut.io.commit(0).bits.poke(12)
             dut.io.flush.poke(true); dut.clock.step()
             dut.io.flush.poke(false); dut.io.commit(0).valid.poke(false)
+            dut.io.loadLine.poke((0xb0000000L + 12*96L) >> 6); dut.io.loadClear.expect(false)
+            dut.io.loadLine.poke((0xb0000000L + 13*96L) >> 6); dut.io.loadClear.expect(true)
             for (identity <- 10 to 12) drain(identity)
             dut.io.empty.expect(true)
             for (identity <- 15 to 19) send(identity)
@@ -307,6 +364,76 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.empty.expect(true); dut.io.cache.request.valid.expect(false)
             send(20); retire(20); drain(20)
             dut.io.empty.expect(true)
+            // Cached vector Stores can alias a native SRAM window outside
+            // this core. Keep them conservative even at a different line.
+            dut.io.collect.bits.sqIdx.poke(21); dut.io.collect.bits.robIdx.poke(21)
+            dut.io.collect.bits.address.poke(0x80001000L)
+            dut.io.collect.valid.poke(true); dut.clock.step(); dut.io.collect.valid.poke(false)
+            dut.io.loadLine.poke(0xb0040000L >> 6); dut.io.loadClear.expect(false)
+            dut.io.flush.poke(true); dut.clock.step(); dut.io.flush.poke(false)
+            dut.io.loadClear.expect(true)
+        }
+    }
+
+    "the shared Store port hands acknowledged wide tokens to scalar and queued vector successors" in {
+        simulate(new VectorStorePipelineHarness) { dut =>
+            VectorTestUtils.clear(dut.io.enqueue.bits); dut.io.enqueue.valid.poke(false)
+            VectorTestUtils.clear(dut.io.collect.bits); dut.io.collect.valid.poke(false)
+            dut.io.commit.foreach { p => p.valid.poke(false); p.bits.poke(0) }
+            dut.io.cache.request.ready.poke(false); dut.io.cache.response.valid.poke(false)
+            dut.io.cache.response.bits.exception.poke(0)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            val addresses=Seq(0xb0000100L,0xb0000120L,0xb0000180L)
+            for (index <- 0 until 3) {
+                val task=dut.io.collect.bits
+                task.sqIdx.poke(index+1); task.robIdx.poke(index+1)
+                task.index.poke(0); task.last.poke(true); task.address.poke(addresses(index))
+                task.data.poke(BigInt(f"${index+1}%02x"*32,16)); task.mask.poke(BigInt("ffffffff",16))
+                dut.io.collect.valid.poke(true); dut.io.collect.ready.expect(true); dut.clock.step()
+                dut.io.collect.valid.poke(false)
+                dut.io.commit(index).valid.poke(true); dut.io.commit(index).bits.poke(index+1)
+            }
+            dut.clock.step(); dut.io.commit.foreach(_.valid.poke(false))
+            val tokens=Seq((true,0L,0),(false,0x9000L,11),(true,0L,0),(true,0L,0))
+            for ((wide,address,data) <- tokens) {
+                dut.io.enqueue.bits.vector.poke(wide); dut.io.enqueue.bits.paddr.poke(address)
+                dut.io.enqueue.bits.data.poke(data); dut.io.enqueue.bits.mask.poke(15)
+                dut.io.enqueue.bits.size.poke(2); dut.io.enqueue.valid.poke(true)
+                dut.io.enqueue.ready.expect(true); dut.clock.step(); dut.io.enqueue.valid.poke(false)
+            }
+            var pending: Option[Int]=None
+            var observed=Vector.empty[(Boolean,BigInt,BigInt,BigInt)]
+            var held: Option[(Boolean,BigInt,BigInt,BigInt)]=None
+            var cycle=0
+            while ((!dut.io.empty.peek().litToBoolean || pending.nonEmpty) && cycle < 100) {
+                val reply=pending.contains(cycle)
+                dut.io.cache.response.valid.poke(reply)
+                val ready=(pending.isEmpty || reply) && cycle%5!=1
+                dut.io.cache.request.ready.poke(ready)
+                val request=dut.io.cache.request.bits
+                val valid=dut.io.cache.request.valid.peek().litToBoolean
+                val wide=request.wide.peek().litToBoolean
+                val signature=(wide,request.paddr.peek().litValue,
+                    if(wide) request.line.peek().litValue else request.data.peek().litValue,
+                    if(wide) request.lineMask.peek().litValue else request.mask.peek().litValue)
+                held.foreach(old=>assert(valid && signature==old))
+                held=if(valid && !ready)Some(signature)else None
+                if(reply) { dut.io.cache.response.ready.expect(true); pending=None }
+                if(valid && ready) {
+                    assert(pending.isEmpty)
+                    observed :+= signature; pending=Some(cycle+2)
+                }
+                dut.clock.step(); cycle+=1
+            }
+            assert(cycle<100 && observed.size==4)
+            assert(observed.map(_._1)==Vector(true,false,true,true))
+            assert(observed(1)==((false,BigInt(0x9000),BigInt(11),BigInt(15))))
+            for ((entry,index) <- Seq(observed(0),observed(2),observed(3)).zipWithIndex) {
+                val offset=(addresses(index)&63).toInt
+                assert(entry._2==BigInt(addresses(index) & ~63L))
+                assert(entry._3==(BigInt(f"${index+1}%02x"*32,16)<<(offset*8)))
+                assert(entry._4==(BigInt("ffffffff",16)<<offset))
+            }
         }
     }
 

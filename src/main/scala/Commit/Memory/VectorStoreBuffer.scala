@@ -19,6 +19,8 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         val flush = Input(Bool())
         val empty = Output(Bool())
         val active = Output(Bool())
+        val loadLine = Input(UInt(26.W))
+        val loadClear = Output(Bool())
         val observation = if (observe) Some(Output(new VectorStoreTrace)) else None
     })
     val payload = Reg(Vec(8, new VectorStoreTask(p)))
@@ -45,6 +47,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val idle :: readElementAddress :: prepare :: response :: done :: Nil = Enum(5)
     val state = RegInit(idle)
     val active = RegInit(false.B)
+    val finishNow = WireDefault(false.B)
     val commitHit = io.commit.map(event => event.valid && event.bits === identity).reduce(_ || _)
     // When the active instruction uses at most four groups, its unused upper
     // payload registers queue complete single-group Stores. No data storage
@@ -59,19 +62,32 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         event.valid && event.bits === payload(i + 4).sqIdx).reduce(_ || _)))
     val retained = VecInit((0 until 4).map(i => pendingValid(i) &&
         (pendingCommitted(i) || pendingCommitHit(i))))
-    val promote = state === done && pendingCount =/= 0.U &&
+    val promote = (state === done || finishNow) && pendingCount =/= 0.U &&
         (!io.flush || retained(pendingHead))
     val incomingSingle = io.collect.bits.index === 0.U && io.collect.bits.last &&
         !io.collect.bits.scattered && !io.collect.bits.addressOnly
     val queueRoom = pendingCount < 4.U || promote
     val canQueue = valid && filled && count <= 4.U && incomingSingle && queueRoom &&
-        io.collect.bits.sqIdx =/= identity && (state =/= done || pendingCount =/= 0.U)
+        io.collect.bits.sqIdx =/= identity &&
+        (!(state === done || finishNow) || pendingCount =/= 0.U)
     io.collect.ready := !io.flush &&
         ((!valid && pendingCount === 0.U) || !filled && io.collect.bits.sqIdx === identity || canQueue)
     val queueCollect = io.collect.fire && canQueue
     val primaryCollect = io.collect.fire && !canQueue
-    io.drain.start.ready := valid && committed && filled && state === idle
-    io.drain.done := state === done
+    def conflicts(slot: Int): Bool = payload(slot).mask.orR &&
+        (!PeScratchpadBridge.matches(payload(slot).address.pad(34)) ||
+            payload(slot).address(31,6) === io.loadLine ||
+            contiguousMasks(slot)(127,64).orR && nextLineAddress(slot) === io.loadLine)
+    // Compare only the existing eight payload addresses. Scattered, partial
+    // collection and non-native Stores stay conservative; ordinary native
+    // Loads need neither forwarding data nor a second memory port.
+    val primaryConflict = VecInit((0 until 8).map(i => i.U < count && conflicts(i))).asUInt.orR
+    val pendingConflict = VecInit((0 until 4).map(i => pendingValid(i) && conflicts(i+4))).asUInt.orR
+    io.loadClear := (!valid || filled && !scattered && !primaryConflict) && !pendingConflict
+    io.drain.start.ready := valid && committed && filled && state === idle ||
+        finishNow && pendingCount =/= 0.U && pendingValid(pendingHead) &&
+            (pendingCommitted(pendingHead) || pendingCommitHit(pendingHead))
+    io.drain.done := state === done || finishNow
     io.empty := !valid
     io.active := active
     io.observation.foreach { trace =>
@@ -106,6 +122,10 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val lineMask = Mux(pair,Cat(nextItem.mask,item.mask),Mux(second, shiftedMask(127, 64), shiftedMask(63, 0)))
     val hasSecond = shiftedMask(127, 64).orR && !second
     val last = group +& step === count
+    // The final accepted cache acknowledgement is already the architectural
+    // drain boundary. Return its SB token at that edge, allowing a queued
+    // instruction to acquire the drain without done/idle/start bubbles.
+    finishNow := state === response && !scattered && !hasSecond && last && io.cache.response.fire
     val fieldStride = (1.U(4.W) << fieldRegisterShift)(3, 0)
     val withinField = group & Cat(fieldRegisterShift === 3.U,
         fieldRegisterShift >= 2.U, fieldRegisterShift >= 1.U)
@@ -220,11 +240,12 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         assert(io.cache.response.bits.exception === 0.U)
         advance()
     }
-    when(state === done) {
+    when(state === done || finishNow) {
         valid := false.B
         committed := false.B
         filled := false.B
         state := idle
+        active := false.B
     }
     when(promote) {
         val slot = Cat(1.U(1.W), pendingHead)
@@ -243,6 +264,14 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         fieldRegisterShift := payload(slot).fieldRegisterShift
         lastField := payload(slot).lastField
         pendingHead := pendingHead + 1.U
+        when(finishNow && io.drain.start.fire) {
+            state := prepare
+            active := true.B
+            group := 0.U
+            groupOH := 1.U
+            position := 0.U
+            second := false.B
+        }
     }
     for (i <- 0 until 4) {
         when(pendingValid(i) && pendingCommitHit(i)) { pendingCommitted(i) := true.B }

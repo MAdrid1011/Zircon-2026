@@ -27,6 +27,7 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
         dut.io.vector.foreach { port =>
             VectorTestUtils.clear(port.store.bits)
             port.store.valid.poke(false); port.ordering.tail.poke(0)
+            port.ordering.native.poke(false); port.ordering.line.poke(0)
         }
         dut.reset.poke(true)
         dut.clock.step()
@@ -49,9 +50,14 @@ class StoreQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.request.valid.poke(0); dut.io.enqueue.valid.poke(0); dut.io.enqueue.writeValid.poke(0)
             vector.ordering.tail.poke(0); vector.ordering.clear.expect(true)
             vector.ordering.tail.poke(1); vector.ordering.clear.expect(false)
+            vector.ordering.native.poke(true); vector.ordering.clear.expect(false)
+            vector.ordering.native.poke(false)
             vector.store.valid.poke(true); vector.store.bits.sqIdx.poke(0)
             vector.store.bits.robIdx.poke(4); vector.store.bits.last.poke(true)
             dut.clock.step(); vector.store.valid.poke(false)
+            vector.ordering.native.poke(true); vector.ordering.clear.expect(true)
+            vector.ordering.tail.poke(2); vector.ordering.clear.expect(false)
+            vector.ordering.tail.poke(1); vector.ordering.native.poke(false)
             dut.io.completion.foreach(_.valid.expect(false))
             val query = dut.io.query(0).request
             query.valid.poke(true); query.bits.wordAddress.poke(0x80000000L >> 2)

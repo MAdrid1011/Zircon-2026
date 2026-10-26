@@ -18,6 +18,7 @@ class StoreBufferIO(cp: CommitParams, cache: DCacheParams) extends Bundle {
     val query = Vec(2, new StoreBufferQueryIO(cache))
     val responseError = Valid(UInt(4.W))
     val empty = Output(Bool())
+    val scalarEmpty = Output(Bool())
     val vector = if (cp.vectorEnabled) Some(new VectorStoreDrain) else None
 }
 
@@ -105,6 +106,8 @@ class StoreBuffer(
         count := Mux(io.enqueue.fire, count + 1.U, count - 1.U)
     }
     io.empty := count === 0.U
+    io.scalarEmpty := (if (cp.vectorEnabled) !VecInit((0 until entries).map(i =>
+        valid(i) && !storage(i).vector)).asUInt.orR else io.empty)
     io.responseError.valid := io.store.response.fire && io.store.response.bits.exception.orR
     io.responseError.bits := io.store.response.bits.exception
 

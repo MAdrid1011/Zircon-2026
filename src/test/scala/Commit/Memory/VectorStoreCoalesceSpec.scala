@@ -8,6 +8,7 @@ class VectorStoreCoalesceSpec extends AnyFreeSpec with ChiselSim {
     s"adjacent groups at $base coalesce with masks, backpressure and committed recovery" in {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.loadLine.poke(0)
             dut.io.collect.valid.poke(false)
             for (port <- dut.io.commit) { port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -53,7 +54,8 @@ class VectorStoreCoalesceSpec extends AnyFreeSpec with ChiselSim {
             var responses = 0
             var acknowledge = -1
             var held: Option[(BigInt, BigInt, BigInt)] = None
-            while (!dut.io.drain.done.peek().litToBoolean && cycle < 300) {
+            var drained = false
+            while (!drained && cycle < 300) {
                 dut.io.active.expect(true)
                 dut.io.cache.request.ready.poke(cycle % 5 == 4)
                 dut.io.cache.response.valid.poke(cycle == acknowledge)
@@ -80,6 +82,7 @@ class VectorStoreCoalesceSpec extends AnyFreeSpec with ChiselSim {
                     dut.io.cache.response.ready.expect(true)
                     responses += 1
                 }
+                drained = dut.io.drain.done.peek().litToBoolean
                 dut.clock.step(); cycle += 1
             }
             assert(cycle < 300 && responses == expectedRequests && observed == expected)

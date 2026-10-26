@@ -90,6 +90,8 @@ class VectorStoreTask(p: BackendParams = BackendParams()) extends Bundle {
 
 class VectorLoadOrdering(p: BackendParams = BackendParams()) extends Bundle {
     val tail = Output(UInt(p.sqWidth.W))
+    val native = Output(Bool())
+    val line = Output(UInt(26.W))
     val clear = Input(Bool())
 }
 

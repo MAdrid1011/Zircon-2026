@@ -228,12 +228,16 @@ class Commit(
         sq.io.vector.get.store.valid := wide.io.collect.fire && !wide.io.collect.bits.addressOnly
         sq.io.vector.get.store.bits := wide.io.collect.bits
         sq.io.vector.get.ordering.tail := io.vector.get.ordering.tail
-        io.vector.get.ordering.clear := sq.io.vector.get.ordering.clear && sb.io.empty
+        sq.io.vector.get.ordering.native := io.vector.get.ordering.native
+        sq.io.vector.get.ordering.line := io.vector.get.ordering.line
+        wide.io.loadLine := io.vector.get.ordering.line
+        io.vector.get.ordering.clear := sq.io.vector.get.ordering.clear &&
+            Mux(io.vector.get.ordering.native,sb.io.scalarEmpty && wide.io.loadClear,sb.io.empty)
         val wideActive = wide.io.active
         // SB owns selection and never launches a scalar request during a wide
         // drain. Wide cache responses remain local until the whole token ends.
         io.backend.store.request.valid := sb.io.store.request.valid || wide.io.cache.request.valid
-        io.backend.store.request.bits := Mux(wideActive,
+        io.backend.store.request.bits := Mux(wide.io.cache.request.valid,
             wide.io.cache.request.bits, sb.io.store.request.bits)
         sb.io.store.request.ready := io.backend.store.request.ready
         wide.io.cache.request.ready := io.backend.store.request.ready
