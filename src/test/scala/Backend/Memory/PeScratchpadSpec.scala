@@ -11,6 +11,7 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
         val bytes=mutable.Map.empty[Long,Int]
         val fault=mutable.Set.empty[Long]
         val requests=mutable.ArrayBuffer.empty[(Long,Boolean,BigInt,BigInt)]
+        val requestCycles=mutable.ArrayBuffer.empty[Int]
         val loads=mutable.ArrayBuffer.empty[(Int,BigInt,Int)]
         val stores=mutable.ArrayBuffer.empty[Int]
         var cycles=0
@@ -46,6 +47,7 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             if(reply.nonEmpty && dut.io.memory.response.ready.peek().litToBoolean) pending.dequeue()
             if(valid && ready(cycles)) {
                 requests+=signature
+                requestCycles+=cycles
                 val (address,write,data,mask)=signature
                 val error=if(fault(address)) 2 else 0
                 if(write && error==0) for(i<-0 until 32 if mask.testBit(i))
@@ -229,6 +231,49 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             assert(loads.takeRight(2).map(_._3).toVector==Vector(5,0))
             assert(stores.toVector==Vector(0))
             assert(loads.last._2==BigInt("89abcdef"*16,16))
+        }
+    }
+
+    "full-line reads sustain consecutive SRAM requests using the existing half register" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            val expected=(0 until 16).map { index =>
+                val address=0xb0030000L+index*64L
+                val value=read(address,64)
+                load(address,index%8)
+                (index%8,value,0)
+            }
+            drain()
+            assert(loads.toVector==expected.toVector)
+            assert(requests.size==32)
+            assert(requestCycles.sliding(2).forall(pair=>pair.size<2 || pair(1)==pair(0)+1),
+                s"Ready SRAM requests must have no inter-line bubble: $requestCycles")
+        }
+    }
+
+    "mixed half/full read streams keep each slot, error and line assembly through backpressure" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            latency=4
+            ready=c=>c%9!=2 && c%9!=3
+            val expected=(0 until 32).map { index =>
+                val address=0xb0040000L+index*64L
+                val mask=index%4
+                val full=mask==0 || mask==3
+                var error=0
+                if(!full)fault+=address+(if(mask==1)32 else 0)
+                else if(index%8==0 || index%8==3) {
+                    fault+=address+(if(mask==0)32 else 0)
+                    error=5
+                }
+                val value=if(full)read(address,64) else if(mask==1)read(address,32) else read(address+32,32)<<256
+                load(address,index%8,mask)
+                (index%8,value,error)
+            }
+            drain()
+            assert(loads.toVector==expected.toVector)
+            assert(requests.size==48 && requests.forall(!_._2))
+            assert(stores.isEmpty)
         }
     }
 }

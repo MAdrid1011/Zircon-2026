@@ -42,19 +42,21 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     val single = RegInit(false.B)
     val empty = RegInit(false.B)
     val errors = RegInit(0.U(2.W))
-    // Single-half reads need no line assembly. Two small reply descriptors
-    // overlap their SRAM latency without adding a data buffer or another
-    // memory port. An accepted command retains the shared address/slot regs
-    // until its request fires, including recovery upstream.
-    val singlePending = RegInit(false.B)
-    val singleUpper = Reg(Bool())
-    val singleReplies = Module(new Queue(new Bundle {
+    // Two reply descriptors overlap full-line and single-half reads. Full
+    // lines reuse the existing half register for assembly; payload storage
+    // and the SRAM port do not grow. Accepted addresses survive recovery.
+    val readPending = RegInit(false.B)
+    val readUpper = Reg(Bool())
+    val readFull = Reg(Bool())
+    val issueHigh = RegInit(false.B)
+    val returnHigh = RegInit(false.B)
+    val readReplies = Module(new Queue(new Bundle {
         val slot = UInt(p.slotWidth.W)
         val upper = Bool()
+        val full = Bool()
     }, 2, pipe = true))
-    val singleActive = singlePending || singleReplies.io.deq.valid
-    val incomingSingle = io.load.request.bits.wide &&
-        (io.load.request.bits.halfMask === 1.U || io.load.request.bits.halfMask === 2.U)
+    val readActive = readPending || readReplies.io.deq.valid
+    val incomingStream = io.load.request.bits.wide
     val lastReply = state===replies && (empty || (single || firstReturned) && io.memory.response.valid)
     io.load.response.valid := lastReply && !write
     io.load.response.bits := 0.U.asTypeOf(new DLoadResponse(p))
@@ -67,14 +69,14 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     io.store.rsp.bits.exception := Mux(!empty && (errors|io.memory.response.bits.error).orR,7.U,0.U)
     io.memory.response.ready := !lastReply || !write || io.store.rsp.ready
     val finishing = lastReply && io.memory.response.ready
-    val available = (state===idle || finishing) && !singleActive
+    val available = (state===idle || finishing) && !readActive
     val selectStore = io.store.req.valid
     val lowActive = io.store.req.bits.lineMask(31,0).orR
     val highActive = io.store.req.bits.lineMask(63,32).orR
     val storeEmpty = selectStore && !lowActive && !highActive
     val storeSingle = selectStore && !(lowActive && highActive)
     val upperOnly = selectStore && !lowActive && highActive
-    val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid && !incomingSingle)
+    val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid && !incomingStream)
     io.memory.request.valid := state===low || state===high || available && firstValid && !storeEmpty
     val incomingAddress = Mux(selectStore,io.store.req.bits.paddr,io.load.request.bits.paddr)
     // A masked Store still has one logical completion. Its live half alone
@@ -91,10 +93,10 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     io.store.req.ready := available && (storeEmpty || io.memory.request.ready)
     // Reads acquire their address even when SRAM is stalled. This retains an
     // accepted speculative request until both replies drain across recovery.
-    io.load.request.ready := available && !selectStore && !incomingSingle
-    val startLoad = io.load.request.fire && !incomingSingle
+    io.load.request.ready := available && !selectStore && !incomingStream
+    val startLoad = io.load.request.fire && !incomingStream
     val startStore = io.store.req.fire
-    when(io.memory.response.fire && !singleReplies.io.deq.valid) {
+    when(io.memory.response.fire && !readReplies.io.deq.valid) {
         assert(state===high || state===replies)
         when(single) {
             assert(state===replies)
@@ -129,48 +131,69 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
             highMask := io.store.req.bits.lineMask(63,32)
         }
     }
-    val singleIssue = singlePending && io.memory.request.ready
-    val singleResponse = singleReplies.io.deq.valid && io.memory.response.valid
-    val reserved = singleReplies.io.count +& singlePending.asUInt
-    val singleRoom = reserved < 2.U || singleResponse
-    when(incomingSingle) {
+    val readIssue = readPending && io.memory.request.ready
+    val finalIssue = readIssue && (!readFull || issueHigh)
+    val readResponse = readReplies.io.deq.valid && io.memory.response.valid &&
+        (!readReplies.io.deq.bits.full || returnHigh)
+    // After a full line's first request, its queued descriptor already owns
+    // the second half; do not reserve a second descriptor for that same line.
+    val reserved = readReplies.io.count +& (readPending && !issueHigh).asUInt
+    val readRoom = reserved < 2.U || readResponse
+    when(incomingStream) {
         io.load.request.ready := (state===idle || finishing) && !selectStore &&
-            (!singlePending || singleIssue) && singleRoom
+            (!readPending || finalIssue) && readRoom
     }
-    when(singlePending) {
+    when(readPending) {
         io.memory.request.valid := true.B
-        io.memory.request.bits.address := (address | Mux(singleUpper,32.U,0.U)).pad(36)
+        io.memory.request.bits.address := (address | Mux(readUpper || issueHigh,32.U,0.U)).pad(36)
         io.memory.request.bits.write := false.B
         io.memory.request.bits.data := 0.U
         io.memory.request.bits.strobe := 0.U
     }
-    singleReplies.io.enq.valid := singleIssue
-    singleReplies.io.enq.bits.slot := slot
-    singleReplies.io.enq.bits.upper := singleUpper
-    singleReplies.io.deq.ready := io.memory.response.valid
-    when(singleReplies.io.deq.valid) {
+    readReplies.io.enq.valid := readIssue && !issueHigh
+    readReplies.io.enq.bits.slot := slot
+    readReplies.io.enq.bits.upper := readUpper
+    readReplies.io.enq.bits.full := readFull
+    readReplies.io.deq.ready := readResponse
+    when(readReplies.io.deq.valid) {
         io.memory.response.ready := true.B
-        io.load.response.valid := io.memory.response.valid
-        io.load.response.bits.slot := singleReplies.io.deq.bits.slot
-        io.load.response.bits.line := Mux(singleReplies.io.deq.bits.upper,
-            Cat(io.memory.response.bits.data,0.U(256.W)),
-            Cat(0.U(256.W),io.memory.response.bits.data))
-        io.load.response.bits.exception := Mux(io.memory.response.bits.error.orR,5.U,0.U)
+        io.load.response.valid := readResponse
+        io.load.response.bits.slot := readReplies.io.deq.bits.slot
+        io.load.response.bits.line := Mux(readReplies.io.deq.bits.full,
+            Cat(io.memory.response.bits.data,half),Mux(readReplies.io.deq.bits.upper,
+                Cat(io.memory.response.bits.data,0.U(256.W)),
+                Cat(0.U(256.W),io.memory.response.bits.data)))
+        val accumulated = Mux(readReplies.io.deq.bits.full && returnHigh,errors,0.U) |
+            io.memory.response.bits.error
+        io.load.response.bits.exception := Mux(accumulated.orR,5.U,0.U)
+        when(io.memory.response.valid) {
+            when(readReplies.io.deq.bits.full && !returnHigh) {
+                half := io.memory.response.bits.data
+                errors := io.memory.response.bits.error
+                returnHigh := true.B
+            }.otherwise { returnHigh := false.B }
+        }
     }
-    when(singleIssue) {
-        assert(singleReplies.io.enq.ready, "Every issued single-half read reserves one reply descriptor")
-        singlePending := false.B
+    when(readIssue) {
+        when(!issueHigh) {
+            assert(readReplies.io.enq.ready, "Every issued line reserves one reply descriptor")
+        }
+        when(readFull && !issueHigh) { issueHigh := true.B }
+            .otherwise { readPending := false.B; issueHigh := false.B }
     }
-    when(io.load.request.fire && incomingSingle) {
+    when(io.load.request.fire && incomingStream) {
         assert(!io.load.request.bits.paddr(5,0).orR && PeScratchpadBridge.matches(io.load.request.bits.paddr))
         address := io.load.request.bits.paddr
         slot := io.load.request.bits.slot
-        singleUpper := io.load.request.bits.halfMask === 2.U
-        singlePending := true.B
+        readUpper := io.load.request.bits.halfMask === 2.U
+        readFull := io.load.request.bits.halfMask === 0.U || io.load.request.bits.halfMask === 3.U
+        issueHigh := false.B
+        readPending := true.B
     }
     // Auxiliary replies use the same ordered port and never coexist with an
     // older assembled line or Store response.
-    when(singleReplies.io.deq.valid) { assert(state===idle) }
-    io.idle := state===idle && !singleActive
-    io.loadPending := (state=/=idle && !write) || singleActive
+    when(readReplies.io.deq.valid) { assert(state===idle) }
+    assert(reserved <= 2.U)
+    io.idle := state===idle && !readActive
+    io.loadPending := (state=/=idle && !write) || readActive
 }
