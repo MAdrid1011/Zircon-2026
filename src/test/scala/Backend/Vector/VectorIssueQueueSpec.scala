@@ -49,9 +49,12 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enq.valid.poke(0)
             dut.io.issue.valid.expect(false); dut.clock.step(3); dut.io.issue.valid.expect(false)
             dut.io.vector.get.wakeup(0).valid.poke(true); dut.io.vector.get.wakeup(0).bits.poke(40)
-            dut.clock.step(); dut.io.vector.get.wakeup(0).valid.poke(false)
+            // Collection occurs after the producer's write edge. The Store
+            // can reserve its task in that same wakeup cycle; the younger
+            // Load still follows it in order.
             dut.io.issue.valid.expect(true); dut.io.issue.bits.robIdx.expect(3)
-            dut.clock.step(); dut.io.issue.bits.robIdx.expect(4)
+            dut.clock.step(); dut.io.vector.get.wakeup(0).valid.poke(false)
+            dut.io.issue.bits.robIdx.expect(4)
             dut.clock.step(); dut.io.occupancy.expect(0)
         }
     }

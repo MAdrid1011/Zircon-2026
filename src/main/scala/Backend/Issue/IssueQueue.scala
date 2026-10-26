@@ -457,8 +457,13 @@ class IssueQueue(
             case _ => true.B
         }
         val losesReadiness = if (waitsForSpeculationResolution) losesReadyOnWakeup(item) else false.B
+        // Vector issue registers its operand tags before the execution unit
+        // reads the PRF. A writeback at this edge is visible at that next
+        // collection cycle, so readiness may include the existing wakeup
+        // comparisons without adding a wide PRF bypass or another data port.
+        val resourceEntry = if (vectorEnabled) awakened(position) else entries(position)
         val issueReady = ageAllowed && notIssued && operandsReady(item) &&
-            !losesReadiness && resourceReady(entries(position))
+            !losesReadiness && resourceReady(resourceEntry)
         val issueEligible = live && issueReady
         candidates(position) := issueReady
         nonSpeculativeCandidates(position) := issueReady && !entries(position).speculative
