@@ -277,16 +277,20 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     // no additional line buffer or speculative outward write is introduced.
     val startItem = Mux(finishNow,payload(Cat(1.U(1.W),pendingHead)),payload(0))
     val startSingle = Mux(finishNow,!pendingTwo,count===1.U && !scattered)
-    val immediateStart = io.drain.start.fire && startSingle &&
-        PeScratchpadBridge.matches(startItem.address.pad(34)) &&
-        !startItem.address(4,0).orR && startItem.mask.andR
+    val startNext = Mux(finishNow,payload(Cat(1.U(1.W),(pendingHead+1.U)(1,0))),payload(1))
+    val startPair = Mux(finishNow,pendingTwo,count===2.U && !scattered && adjacentPair(0))
+    val immediatePair = startPair && !startItem.address(5,0).orR &&
+        startItem.mask.andR && startNext.mask.andR
+    val immediateSingle = startSingle && !startItem.address(4,0).orR && startItem.mask.andR
+    val immediateStart = io.drain.start.fire &&
+        PeScratchpadBridge.matches(startItem.address.pad(34)) && (immediateSingle || immediatePair)
     when(immediateStart) {
         io.cache.request.valid := true.B
         io.cache.request.bits.paddr := Cat(startItem.address(31,6),0.U(6.W)).pad(34)
-        io.cache.request.bits.line := Mux(startItem.address(5),
-            Cat(startItem.data,0.U(256.W)),Cat(0.U(256.W),startItem.data))
-        io.cache.request.bits.lineMask := Mux(startItem.address(5),
-            Cat(startItem.mask,0.U(32.W)),Cat(0.U(32.W),startItem.mask))
+        io.cache.request.bits.line := Mux(immediatePair,Cat(startNext.data,startItem.data),
+            Mux(startItem.address(5),Cat(startItem.data,0.U(256.W)),Cat(0.U(256.W),startItem.data)))
+        io.cache.request.bits.lineMask := Mux(immediatePair,Cat(startNext.mask,startItem.mask),
+            Mux(startItem.address(5),Cat(startItem.mask,0.U(32.W)),Cat(0.U(32.W),startItem.mask)))
     }
     when(state === prepare && !lineMask.orR) { advance() }
     when(io.cache.request.fire) { state := response }

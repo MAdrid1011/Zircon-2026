@@ -46,8 +46,8 @@ class VectorStoreGroupsSpec extends AnyFreeSpec with ChiselSim {
                     val valid=dut.io.cache.request.valid.peek().litToBoolean
                     held.foreach(old=>assert(valid && value==old,"A stalled payload changed"))
                     held=if(valid && !ready)Some(value)else None
-                    if(valid && ready) { assert(replyAt<0); writes :+= value; replyAt=cycle+3 }
                     if(replyAt==cycle) { dut.io.cache.response.ready.expect(true); replyAt= -1 }
+                    if(valid && ready) { assert(replyAt<0); writes :+= value; replyAt=cycle+3 }
                     dut.clock.step(); cycle+=1
                 }
                 assert(cycle<100 && replyAt<0)

@@ -58,6 +58,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // the scalar base. Reuse the ordinary SQ payload register; ordering and
     // outward memory writes remain the responsibility of the existing SQ.
     val fullStore = RegInit(false.B)
+    // Full two-register Stores reuse an otherwise idle RF read and the old
+    // crossing-load register. Both groups are ready before memory IQ issue.
+    val pairStore = RegInit(false.B)
     // One complete word can wait at SQ while the instruction register collects
     // its successor. Data, address and byte enables reuse the legacy payload;
     // only the outgoing instruction identity needs an independent register.
@@ -331,6 +334,10 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                         second := false.B
                         position := 0.U
                         fullStore := true.B
+                        when(count===2.U) {
+                            first := io.read(2).data.asUInt
+                            pairStore := true.B
+                        }
                         nextState := writeback
                     }
                 }
@@ -438,6 +445,11 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     oldReadSelection := UIntToOH(metadata.source(2)(following), 64)
                     nextState := Mux(last,
                         Mux(fullStore && legacyCompletionReady, idle, complete), collect)
+                    when(pairStore && !last) {
+                        data := first(255,0)
+                        address := base+32.U
+                        nextState := writeback
+                    }
                 }
             }
             is(complete) { when(legacyCompletionReady) { nextState := idle } }
@@ -498,14 +510,17 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
             sourceReadAddress := firstSource
             sourceReadSelection := UIntToOH(firstSource, 64)
-            oldReadAddress := legacyIn.bits.vector.source(2)(0)
-            oldReadSelection := UIntToOH(legacyIn.bits.vector.source(2)(0), 64)
+            val pair = fullWordStore(legacyIn.bits) && legacyIn.bits.vector.groups.sourceCount(0)===2.U
+            val additional = Mux(pair,legacyIn.bits.vector.source(0)(1),legacyIn.bits.vector.source(2)(0))
+            oldReadAddress := additional
+            oldReadSelection := UIntToOH(additional,64)
             nextState := operands
             group := 0.U
             groupOH := 1.U
             discard := false.B
             cachedValid := false.B
             fullStore := false.B
+            pairStore := false.B
         }
     }
     // Even a flush-cycle response releases the old owner. Do not leave a

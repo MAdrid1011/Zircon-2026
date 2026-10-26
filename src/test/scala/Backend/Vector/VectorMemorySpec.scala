@@ -547,8 +547,12 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                     for (lane <- 0 until 8)
                         assert(((entry._5 >> (lane * 32)) & 0xffffffffL) == dut.io.data(lane).peek().litValue)
                 }
-                assert(collected.sliding(2).forall(pair => pair.size < 2 || pair(1)._1 - pair(0)._1 == 2),
-                    s"Full Stores must sustain one group every two cycles: ${collected.map(_._1)}")
+                assert(collected.sliding(2).forall(pair => pair.size < 2 || {
+                    // Two full groups collect together and reach SQ on
+                    // adjacent cycles; other groups keep the two-cycle path.
+                    val gap = if(count==2 && pair(1)._3==1) 1 else 2
+                    pair(1)._1-pair(0)._1==gap
+                }), s"Full Store group cadence: ${collected.map(_._1)}")
             }
             // SQ backpressure keeps the payload stable and cannot retire the
             // instruction before its final group has been accepted.
