@@ -58,8 +58,16 @@ class Regfile(
     val io = IO(new RegfileIO(p, directWritePort, readBypassOverridePort, selectiveReadBypassPort))
     // Keep the architectural p0 read constant; its unobservable storage row is removed by synthesis.
     private val firstWritable = if (p.hasZeroReg) 1 else 0
-    private val byteData = if (p.byteWrite) Some(Reg(Vec(p.numEntries, Vec(p.dataWidth / 8, UInt(8.W))))) else None
-    private val data = if (p.byteWrite) VecInit(byteData.get.map(_.asUInt))
+    // Uninitialized byte-masked RF storage has asynchronous reads and two
+    // independent write ports. Describe the storage directly instead of
+    // expanding a write-enable mux for every row and byte.
+    private val byteMemory = if (p.byteWrite && !p.initialize && !p.hasZeroReg && !p.oneHotRead)
+        Some(Mem(p.numEntries, Vec(p.dataWidth / 8, UInt(8.W)))) else None
+    private val byteData = if (p.byteWrite && byteMemory.isEmpty)
+        Some(Reg(Vec(p.numEntries, Vec(p.dataWidth / 8, UInt(8.W))))) else None
+    private val data = if (byteMemory.nonEmpty)
+        VecInit((0 until p.numEntries).map(row => byteMemory.get(row.U).asUInt))
+        else if (p.byteWrite) VecInit(byteData.get.map(_.asUInt))
         else if (p.initialize) RegInit(VecInit.fill(p.numEntries)(0.U(p.dataWidth.W)))
         else Reg(Vec(p.numEntries, UInt(p.dataWidth.W)))
     private val values = if (p.hasZeroReg) VecInit(Seq(0.U(p.dataWidth.W)) ++ data.toSeq.drop(1)) else data
@@ -97,9 +105,16 @@ class Regfile(
     for ((write, port) <- io.write.zipWithIndex) {
         if (p.byteWrite) {
             require(directWritePort.isEmpty)
-            for (entry <- firstWritable until p.numEntries; byte <- 0 until p.dataWidth / 8) {
-                when(write.we && write.addr === entry.U && write.bytes.get(byte)) {
-                    byteData.get(entry)(byte) := write.data(8 * byte + 7, 8 * byte)
+            if (byteMemory.nonEmpty) {
+                when(write.we) {
+                    byteMemory.get.write(write.addr,
+                        write.data.asTypeOf(Vec(p.dataWidth / 8, UInt(8.W))), write.bytes.get.asBools)
+                }
+            } else {
+                for (entry <- firstWritable until p.numEntries; byte <- 0 until p.dataWidth / 8) {
+                    when(write.we && write.addr === entry.U && write.bytes.get(byte)) {
+                        byteData.get(entry)(byte) := write.data(8 * byte + 7, 8 * byte)
+                    }
                 }
             }
         } else if (directWritePort.contains(port)) {
@@ -119,7 +134,12 @@ class Regfile(
     }
 
     io.read.zipWithIndex.foreach { case (r, index) =>
-        val stored = if (p.readBankEntries > 0) {
+        val stored = if (byteMemory.nonEmpty) {
+            // The existing banked decoder selects exactly addr. An indexed
+            // asynchronous memory read preserves that value without a row-wide
+            // OR network in the behavioral simulation model.
+            byteMemory.get(r.addr).asUInt
+        } else if (p.readBankEntries > 0) {
             // Decode row and bank independently. The bank select drives only
             // the final word mux, rather than every bit of every storage row.
             val rowBits = log2Ceil(p.readBankEntries)
