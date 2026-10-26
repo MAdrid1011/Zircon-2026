@@ -161,7 +161,11 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         finalFullStore && io.store.ready && legacyCompletionReady ||
         wordOperand && io.readAvailable && incomingWord) && !io.flush
     io.idle := state === idle
-    val legacyScalarRequest = RegNext(nextState === operands || nextState === strideOperand, false.B)
+    // A queued word owns the shared payload until SQ and ROB accept it. Do
+    // not keep the RF ports reserved while its successor waits for that slot:
+    // older arithmetic may need those ports before the queued Store retires.
+    val legacyScalarRequest = RegNext((nextState === operands || nextState === strideOperand) &&
+        wordRoom, false.B)
     io.scalarReadRequest := legacyScalarRequest
     // Scalar base/stride reads do not occupy the vector RF. Complete unmasked
     // Loads also need neither mask nor old-destination data at collection.
@@ -178,7 +182,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             metadata.groups.mask || fullWordStore(instruction)) ||
         nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
         nextState === indexOperand
-    io.readRequest := RegNext(nextReadRequest && !io.flush, false.B)
+    io.readRequest := RegNext(nextReadRequest && wordRoom && !io.flush, false.B)
     io.scalarAddress := Mux(state === strideOperand, instruction.scalar.prs(1), instruction.scalar.prs(0))
     io.read(0).address := sourceReadAddress
     io.read(1).address := indexReadAddress
@@ -288,7 +292,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }.otherwise {
         switch(state) {
             is(operands) {
-                when(io.readAvailable && (!wordOperand || wordRoom)) {
+                when(io.readAvailable && legacyScalarRequest && wordRoom &&
+                    (!fullWordStore(instruction) || io.readRequest)) {
                     indexWidth := decodedIndexWidth
                     indexed := instruction.scalar.inst(26)
                     elementAccess := strided || instruction.scalar.inst(26) ||

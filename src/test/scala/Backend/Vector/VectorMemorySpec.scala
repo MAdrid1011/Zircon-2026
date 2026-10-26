@@ -14,6 +14,8 @@ class VectorMemoryHarness extends Module {
         val base = Input(UInt(32.W))
         val stride = Input(UInt(32.W))
         val readAvailable = Input(Bool())
+        val readRequest = Output(Bool())
+        val scalarReadRequest = Output(Bool())
         val ordered = Input(Bool())
         val store = Decoupled(new VectorStoreTask)
         val completion = Decoupled(new VectorCompletion)
@@ -32,6 +34,8 @@ class VectorMemoryHarness extends Module {
     memory.io.in <> io.in
     memory.io.scalarData := Mux(memory.io.scalarAddress === 2.U, io.stride, io.base)
     memory.io.readAvailable := io.readAvailable
+    io.readRequest := memory.io.readRequest
+    io.scalarReadRequest := memory.io.scalarReadRequest
     memory.io.read <> file.io.read
     memory.io.ordering.clear := io.ordered
     memory.io.flush := io.flush
@@ -650,6 +654,27 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                     assert(entry._2==20+index && entry._3==0 && entry._4==BigInt(0xb0004000L))
                     assert(entry._5==expected && entry._6==BigInt("ffffffff",16) && entry._7)
                 }
+            }
+            // A successor can be admitted beside the first word's capture.
+            // If SQ then stalls, it must release the common RF ports so older
+            // arithmetic can retire and eventually make room in that same SQ.
+            for(blockCompletion <- Seq(false,true)) {
+                val before=completed.size
+                dut.io.store.ready.poke(false)
+                dut.io.completion.ready.poke(!blockCompletion)
+                begin(2,1,0xb0006000L,8,0,false,0,store=true,rob=25,sq=4,source=32)
+                begin(2,1,0xb0006000L,8,0,false,0,store=true,rob=26,sq=5,source=33)
+                for(_ <- 0 until 3)tick()
+                for(_ <- 0 until 8) {
+                    dut.io.readRequest.expect(false)
+                    dut.io.scalarReadRequest.expect(false)
+                    tick()
+                }
+                dut.io.store.ready.poke(true)
+                for(_ <- 0 until 3)tick()
+                dut.io.completion.ready.poke(true)
+                waitUntil(dut.io.idle.peek().litToBoolean)
+                assert(completed.drop(before).map(_._2)==Vector(25,26))
             }
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }
