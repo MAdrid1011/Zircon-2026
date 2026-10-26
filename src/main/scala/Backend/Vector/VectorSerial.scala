@@ -2,9 +2,10 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.{BackendParams, DivideOp, FpMiscOp, MultiplyOp, VectorParams}
 
-/** Multi-cycle operations collect one element through the same three vector
-  * read ports. Divide/sqrt and conversion reuse the scalar arithmetic modules;
-  * the instruction retains its PRF/ROB ownership until all elements complete.
+/** Multi-cycle operations collect operands through the same three vector read
+  * ports. Single-register SEW32 permutations reuse that complete register read;
+  * other operations traverse elements. Divide/sqrt and conversion reuse scalar
+  * arithmetic modules. PRF/ROB ownership lasts until the instruction completes.
   */
 class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply: Boolean = false) extends Module {
     val io = IO(new Bundle {
@@ -399,7 +400,50 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
                 output := Mux(reduction && state.vstart < state.vl,
                     (initial & ~destinationMask.pad(256)) | (seed & destinationMask).pad(256), initial)
                 accumulator := seed
-                enterRead(readElement)
+                // All operands of an M1 (or fractional LMUL) SEW32 shuffle are
+                // already present on the existing read ports. Re-reading the
+                // same registers for each element only serializes a lane mux.
+                // Keep larger groups and narrower elements on the iterative
+                // path; neither register-file ports nor payload buffers grow.
+                val registerShuffle = sew === 2.U && metadata.destination.count === 1.U &&
+                    metadata.groups.sourceCount(0) <= 1.U && metadata.groups.sourceCount(1) <= 1.U &&
+                    (permute || op === VectorSerialOperation.Merge.U)
+                val oldWords = old.asTypeOf(Vec(8, UInt(32.W)))
+                val indices16 = io.read(1).data.asUInt.asTypeOf(Vec(16, UInt(16.W)))
+                val shuffled = Wire(Vec(8, UInt(32.W)))
+                for (i <- 0 until 8) {
+                    val position = i.U(9.W)
+                    val inBody = position >= state.vstart && position < state.vl
+                    val laneEnabled = !metadata.groups.mask || mask(i)
+                    val indexOperand = Mux(control.immediate, inst(19, 15).pad(32),
+                        Mux(control.scalar, scalar, Mux(gather16, indices16(i).pad(32), io.read(1).data(i))))
+                    // Retain the carry on down-slides: a large unsigned XLEN
+                    // offset must yield zero, rather than wrap into lane zero.
+                    val distance = Mux(slideOne, 1.U(32.W), offset)
+                    val index = Mux(gather, indexOperand.pad(33),
+                        Mux(slideUp, position.pad(33) - distance.pad(33),
+                            position.pad(33) + distance.pad(33)))
+                    val sourceFits = index < vlmax
+                    val inserted = slideOne && !gather &&
+                        Mux(slideUp, position === 0.U, position + 1.U === state.vl)
+                    val permutation = Mux(inserted, scalar,
+                        Mux(sourceFits, io.read(0).data(index(2, 0)), 0.U))
+                    val mergeOperand = Mux(control.scalar, scalar,
+                        Mux(control.immediate, immediate, io.read(1).data(i)))
+                    val value = Mux(permute, permutation,
+                        Mux(mask(i), mergeOperand, io.read(0).data(i)))
+                    val writes = inBody && (laneEnabled || maskIsData) &&
+                        (!slideUp || slideOne || position >= offset)
+                    val agnostic = state.vstart < state.vl && position >= state.vstart &&
+                        (position >= state.vl && state.vtype(6) ||
+                            inBody && !laneEnabled && !maskIsData && state.vtype(7))
+                    shuffled(i) := Mux(writes, value, Mux(agnostic, "hffffffff".U, oldWords(i)))
+                }
+                when(registerShuffle) {
+                    output := shuffled.asUInt
+                    element := maximum
+                    nextPhase := writeback
+                }.otherwise { enterRead(readElement) }
             } }
             is(readElement) { when(io.readAvailable) {
                 a := Mux(maskSource, (io.read(0).data.asUInt >> element(7, 0))(0).asUInt,
