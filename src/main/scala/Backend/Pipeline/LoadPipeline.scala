@@ -177,6 +177,7 @@ class LoadPipeline(
     io.cache.req.valid := validRF && !storeRF && !killed(instPkgRF)
     io.cache.req.bits.vaddr := agu.io.res
     io.cache.req.bits.wide := false.B
+    io.cache.req.bits.halfMask := 0.U
     io.cache.req.bits.paddr := Cat(0.U(2.W), agu.io.res)
     io.cache.req.bits.slot := indexRF
     io.cache.req.bits.sqTailOH := sqTailOHRF

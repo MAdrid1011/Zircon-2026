@@ -441,30 +441,29 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                     }
                 }
             }
-            // Independent whole-register Loads must both finish their PRF
-            // writes while the older architectural completion is held. Cold
-            // lines exercise retry tickets; alternating half-line alignment
-            // exercises both single-group and paired-group responses.
+            // Four independent whole-register Loads share the original line
+            // FIFO while the oldest architectural completion is held. Cold
+            // misses, retries and alternating half-line alignment preserve
+            // each owner and in-order completion across queue wraparound.
             for (count <- Seq(1, 2, 4, 8)) {
                 delay = 13
-                val firstBase = 0x80020000L + count * 0x2000L
-                val secondBase = firstBase + 0x1020L
+                val firstBase = 0x80020000L + count * 0x4000L
+                val owners = Seq(8, 16, 32, 48).zipWithIndex.map { case (destination, owner) =>
+                    (firstBase + owner * 0x1000L + (owner % 2) * 32L, destination)
+                }
                 val before = writes
                 dut.io.completion.ready.poke(false)
-                begin(2, count, firstBase, 1, 0, false, 0,
-                    lumop = 8, rob = 11, destination = 16)
-                // Capture the first scalar base before changing the shared
-                // harness input for the second architectural instruction.
-                tick()
-                begin(2, count, secondBase, 1, 0, false, 0,
-                    lumop = 8, rob = 12, destination = 32)
-                waitUntil(writes == before + 2 * count)
+                for (((base, destination), owner) <- owners.zipWithIndex) {
+                    begin(2, count, base, 1, 0, false, 0,
+                        lumop = 8, rob = 11 + owner, destination = destination)
+                    tick()
+                }
+                waitUntil(writes == before + 4 * count)
                 dut.io.completion.valid.expect(true)
                 dut.io.completion.bits.robIdx.expect(11)
                 dut.io.in.ready.expect(false)
                 dut.io.idle.expect(false)
-                for ((base, destination) <- Seq((firstBase, 16), (secondBase, 32));
-                     group <- 0 until count) {
+                for ((base, destination) <- owners; group <- 0 until count) {
                     dut.io.address.poke(destination + group)
                     val expected = (0 until 32).foldLeft(BigInt(0)) { (value, byte) =>
                         value | (BigInt(byteAt(BigInt(base + group * 32 + byte))) << (8 * byte))
@@ -473,13 +472,14 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                         dut.io.data(lane).expect((expected >> (32 * lane)) & 0xffffffffL)
                 }
                 tick(); tick()
-                assert(writes == before + 2 * count)
-                dut.io.completion.ready.poke(true); tick()
-                dut.io.completion.valid.expect(true)
-                dut.io.completion.bits.robIdx.expect(12)
-                dut.io.completion.ready.poke(false); tick(); tick()
-                dut.io.completion.bits.robIdx.expect(12)
-                dut.io.completion.ready.poke(true); tick()
+                assert(writes == before + 4 * count)
+                for (owner <- 0 until 4) {
+                    dut.io.completion.valid.expect(true)
+                    dut.io.completion.bits.robIdx.expect(11 + owner)
+                    dut.io.completion.ready.poke(false); tick(); tick()
+                    dut.io.completion.bits.robIdx.expect(11 + owner)
+                    dut.io.completion.ready.poke(true); tick()
+                }
                 dut.io.idle.expect(true)
             }
             // Recovery cancels both instruction contexts. Their already

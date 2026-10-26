@@ -14,6 +14,7 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
         val loads=mutable.ArrayBuffer.empty[(Int,BigInt,Int)]
         val stores=mutable.ArrayBuffer.empty[Int]
         var cycles=0
+        var latency=1
         var ready: Int=>Boolean = _=>true
         var held: Option[(Long,Boolean,BigInt,BigInt)]=None
         VectorTestUtils.clear(dut.io.load.request.bits);dut.io.load.request.valid.poke(false)
@@ -49,7 +50,7 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
                 val error=if(fault(address)) 2 else 0
                 if(write && error==0) for(i<-0 until 32 if mask.testBit(i))
                     bytes(address+i)=((data>>(i*8))&255).toInt
-                pending.enqueue(Reply(cycles+1,if(write) BigInt(0) else read(address,32),error))
+                pending.enqueue(Reply(cycles+latency,if(write) BigInt(0) else read(address,32),error))
             }
             val loadFire=dut.io.load.request.valid.peek().litToBoolean && dut.io.load.request.ready.peek().litToBoolean
             val storeFire=dut.io.store.req.valid.peek().litToBoolean && dut.io.store.req.ready.peek().litToBoolean
@@ -61,10 +62,11 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             while((!dut.io.idle.peek().litToBoolean || pending.nonEmpty) && guard<1000) {tick();guard+=1}
             assert(guard<1000)
         }
-        def load(address: Long,slot: Int): Unit = {
+        def load(address: Long,slot: Int,halfMask: Int=0): Unit = {
             VectorTestUtils.clear(dut.io.load.request.bits)
             dut.io.load.request.bits.paddr.poke(address);dut.io.load.request.bits.vaddr.poke(address)
             dut.io.load.request.bits.wide.poke(true);dut.io.load.request.bits.slot.poke(slot)
+            dut.io.load.request.bits.halfMask.poke(halfMask)
             dut.io.load.request.bits.mtype.poke(2);dut.io.load.request.valid.poke(true)
             var guard=0
             var accepted=false
@@ -195,6 +197,38 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             load(address,4);drain()
             assert(stores.toVector==Vector(0) && loads.toVector==Vector((4,data,0)))
             assert(requests.map(_._2).toVector==Vector(true,true,false,false))
+        }
+    }
+
+    "single-half read streams retain ordered owners through stalls and share the Store port" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            latency=3
+            ready=c=>c%7!=2 && c%7!=3
+            val expected=(0 until 32).map { index =>
+                val address=0xb0010000L+index*64L
+                val upper=index%2==1
+                val active=address+(if(upper)32 else 0)
+                fault+=address+(if(upper)0 else 32)
+                val line=read(active,32)<<(if(upper)256 else 0)
+                load(address,index%8,if(upper)2 else 1)
+                (index%8,line,0)
+            }
+            drain()
+            assert(loads.toVector==expected.toVector)
+            assert(requests.size==32 && requests.forall(!_._2))
+            assert(requests.map(_._1).toVector==(0 until 32).map(i=>0xb0010000L+i*64L+(i%2)*32).toVector)
+            // Drain the read descriptors before accepting a Store, and keep
+            // each active-half error attached to its original Load slot.
+            val address=0xb0020000L
+            fault+=address+32
+            load(address,6,2)
+            store(address+64,BigInt("89abcdef"*16,16),BigInt("f"*16,16))
+            load(address+64,7)
+            drain()
+            assert(loads.takeRight(2).map(_._3).toVector==Vector(5,0))
+            assert(stores.toVector==Vector(0))
+            assert(loads.last._2==BigInt("89abcdef"*16,16))
         }
     }
 }

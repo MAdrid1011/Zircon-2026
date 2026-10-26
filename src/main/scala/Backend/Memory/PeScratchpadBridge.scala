@@ -42,6 +42,19 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     val single = RegInit(false.B)
     val empty = RegInit(false.B)
     val errors = RegInit(0.U(2.W))
+    // Single-half reads need no line assembly. Two small reply descriptors
+    // overlap their SRAM latency without adding a data buffer or another
+    // memory port. An accepted command retains the shared address/slot regs
+    // until its request fires, including recovery upstream.
+    val singlePending = RegInit(false.B)
+    val singleUpper = Reg(Bool())
+    val singleReplies = Module(new Queue(new Bundle {
+        val slot = UInt(p.slotWidth.W)
+        val upper = Bool()
+    }, 2, pipe = true))
+    val singleActive = singlePending || singleReplies.io.deq.valid
+    val incomingSingle = io.load.request.bits.wide &&
+        (io.load.request.bits.halfMask === 1.U || io.load.request.bits.halfMask === 2.U)
     val lastReply = state===replies && (empty || (single || firstReturned) && io.memory.response.valid)
     io.load.response.valid := lastReply && !write
     io.load.response.bits := 0.U.asTypeOf(new DLoadResponse(p))
@@ -54,14 +67,14 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     io.store.rsp.bits.exception := Mux(!empty && (errors|io.memory.response.bits.error).orR,7.U,0.U)
     io.memory.response.ready := !lastReply || !write || io.store.rsp.ready
     val finishing = lastReply && io.memory.response.ready
-    val available = state===idle || finishing
+    val available = (state===idle || finishing) && !singleActive
     val selectStore = io.store.req.valid
     val lowActive = io.store.req.bits.lineMask(31,0).orR
     val highActive = io.store.req.bits.lineMask(63,32).orR
     val storeEmpty = selectStore && !lowActive && !highActive
     val storeSingle = selectStore && !(lowActive && highActive)
     val upperOnly = selectStore && !lowActive && highActive
-    val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid)
+    val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid && !incomingSingle)
     io.memory.request.valid := state===low || state===high || available && firstValid && !storeEmpty
     val incomingAddress = Mux(selectStore,io.store.req.bits.paddr,io.load.request.bits.paddr)
     // A masked Store still has one logical completion. Its live half alone
@@ -78,10 +91,10 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     io.store.req.ready := available && (storeEmpty || io.memory.request.ready)
     // Reads acquire their address even when SRAM is stalled. This retains an
     // accepted speculative request until both replies drain across recovery.
-    io.load.request.ready := available && !selectStore
-    val startLoad = io.load.request.fire
+    io.load.request.ready := available && !selectStore && !incomingSingle
+    val startLoad = io.load.request.fire && !incomingSingle
     val startStore = io.store.req.fire
-    when(io.memory.response.fire) {
+    when(io.memory.response.fire && !singleReplies.io.deq.valid) {
         assert(state===high || state===replies)
         when(single) {
             assert(state===replies)
@@ -116,6 +129,48 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
             highMask := io.store.req.bits.lineMask(63,32)
         }
     }
-    io.idle := state===idle
-    io.loadPending := state=/=idle && !write
+    val singleIssue = singlePending && io.memory.request.ready
+    val singleResponse = singleReplies.io.deq.valid && io.memory.response.valid
+    val reserved = singleReplies.io.count +& singlePending.asUInt
+    val singleRoom = reserved < 2.U || singleResponse
+    when(incomingSingle) {
+        io.load.request.ready := (state===idle || finishing) && !selectStore &&
+            (!singlePending || singleIssue) && singleRoom
+    }
+    when(singlePending) {
+        io.memory.request.valid := true.B
+        io.memory.request.bits.address := (address | Mux(singleUpper,32.U,0.U)).pad(36)
+        io.memory.request.bits.write := false.B
+        io.memory.request.bits.data := 0.U
+        io.memory.request.bits.strobe := 0.U
+    }
+    singleReplies.io.enq.valid := singleIssue
+    singleReplies.io.enq.bits.slot := slot
+    singleReplies.io.enq.bits.upper := singleUpper
+    singleReplies.io.deq.ready := io.memory.response.valid
+    when(singleReplies.io.deq.valid) {
+        io.memory.response.ready := true.B
+        io.load.response.valid := io.memory.response.valid
+        io.load.response.bits.slot := singleReplies.io.deq.bits.slot
+        io.load.response.bits.line := Mux(singleReplies.io.deq.bits.upper,
+            Cat(io.memory.response.bits.data,0.U(256.W)),
+            Cat(0.U(256.W),io.memory.response.bits.data))
+        io.load.response.bits.exception := Mux(io.memory.response.bits.error.orR,5.U,0.U)
+    }
+    when(singleIssue) {
+        assert(singleReplies.io.enq.ready, "Every issued single-half read reserves one reply descriptor")
+        singlePending := false.B
+    }
+    when(io.load.request.fire && incomingSingle) {
+        assert(!io.load.request.bits.paddr(5,0).orR && PeScratchpadBridge.matches(io.load.request.bits.paddr))
+        address := io.load.request.bits.paddr
+        slot := io.load.request.bits.slot
+        singleUpper := io.load.request.bits.halfMask === 2.U
+        singlePending := true.B
+    }
+    // Auxiliary replies use the same ordered port and never coexist with an
+    // older assembled line or Store response.
+    when(singleReplies.io.deq.valid) { assert(state===idle) }
+    io.idle := state===idle && !singleActive
+    io.loadPending := (state=/=idle && !write) || singleActive
 }
