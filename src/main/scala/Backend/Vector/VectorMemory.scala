@@ -140,10 +140,14 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val nextPosition = position +& elementBytes
     val lastElement = nextPosition === 32.U
     val finalFullStore = state === writeback && fullStore && last
+    val legacyCompletion = state === complete || finalFullStore && io.store.ready
+    val legacyCompletionReady = WireDefault(io.completion.ready)
+    val legacyCompletionHeld = RegInit(false.B)
     legacyIn.ready := (state === idle ||
-        finalFullStore && io.store.ready && io.completion.ready) && !io.flush
+        finalFullStore && io.store.ready && legacyCompletionReady) && !io.flush
     io.idle := state === idle
-    io.scalarReadRequest := RegNext(nextState === operands || nextState === strideOperand, false.B)
+    val legacyScalarRequest = RegNext(nextState === operands || nextState === strideOperand, false.B)
+    io.scalarReadRequest := legacyScalarRequest
     // Scalar base/stride reads do not occupy the vector RF. Complete unmasked
     // Loads also need neither mask nor old-destination data at collection.
     val operandVl = Mux(whole, ((count.pad(9) << 5) >> decodedEew)(8, 0),
@@ -383,10 +387,10 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     oldReadAddress := metadata.source(2)(following)
                     oldReadSelection := UIntToOH(metadata.source(2)(following), 64)
                     nextState := Mux(last,
-                        Mux(fullStore && io.completion.ready, idle, complete), collect)
+                        Mux(fullStore && legacyCompletionReady, idle, complete), collect)
                 }
             }
-            is(complete) { when(io.completion.fire) { nextState := idle } }
+            is(complete) { when(legacyCompletionReady) { nextState := idle } }
             is(streamLoad) {
                 val issued = Mux(io.request.fire, UIntToOH(streamRequestGroup, 8), 0.U)
                 val returned = Mux(io.response.valid, UIntToOH(io.response.bits.slot(2, 0), 8), 0.U)
@@ -541,25 +545,32 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         !incoming.groups.mask && incoming.state.vstart === 0.U
     val fallbackRequest = fastOwned && fastBaseReady(fastHead) &&
         !fastAligned(fastHead) && !fastFallbackStarted && !fastDrain && state === idle
-    val directLegacy = !fastOwned && !fastDrain && !incomingFast
+    // The Store collector owns vector RF reads, while the fast Load engine
+    // owns response slots and its independent address metadata. They can run
+    // together after the scalar base has been captured, without a second
+    // payload buffer or RF port. Unsupported Loads retain the legacy fence.
+    val incomingStore = incoming.control.execution === VectorExecution.Store.U
+    val directLegacy = (!fastOwned || incomingStore && !fastScalarPending &&
+        !fallbackRequest && !fastFallbackStarted) && !fastDrain && !incomingFast
     legacyIn.valid := !io.flush && (fallbackRequest || io.in.valid && directLegacy)
     legacyIn.bits := Mux(fallbackRequest, fastInstruction(fastHead), io.in.bits)
     val fastRoom = !fastValid(fastTail) && !fastScalarPending
     io.in.ready := !io.flush && !fastDrain && Mux(incomingFast,
-        state === idle && !fastFallbackStarted && !fallbackRequest && fastRoom,
-        !fastOwned && legacyIn.ready)
+        (state === idle || store && state =/= operands && state =/= strideOperand &&
+            state =/= complete) && !fastFallbackStarted && !fallbackRequest && fastRoom,
+        directLegacy && legacyIn.ready)
     val fastAdmit = io.in.fire && incomingFast
-    val fastScalarCapture = fastScalarPending && io.readAvailable && !io.flush
+    val fastScalarCapture = fastScalarPending && !legacyScalarRequest && io.readAvailable && !io.flush
     val fastFinished = fastOwned && fastBaseReady(fastHead) && fastAligned(fastHead) &&
         fastWritten(fastHead) === fastExpected(fastHead)
-    val fastRelease = fastMode && fastFinished && io.completion.ready && !io.flush
+    val selectFastCompletion = fastMode && fastFinished && !legacyCompletionHeld
+    val fastRelease = selectFastCompletion && io.completion.ready && !io.flush
     val fallbackRelease = fastFallbackStarted && io.completion.fire
     io.idle := state === idle && !fastOwned && !fastDrain
 
     when(fastMode || fastDrain) {
-        io.readRequest := false.B
-        io.scalarReadRequest := fastScalarPending && !fastDrain && !io.flush
-        io.scalarAddress := fastInstruction(fastScalarOwner).scalar.prs(0)
+        io.scalarReadRequest := legacyScalarRequest || fastScalarPending && !fastDrain && !io.flush
+        when(!legacyScalarRequest) { io.scalarAddress := fastInstruction(fastScalarOwner).scalar.prs(0) }
         io.request.valid := fastHeld && io.ordering.clear && !io.flush && !fastDrain
         io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
         io.request.bits.wide := true.B
@@ -570,10 +581,17 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         io.request.bits.halfMask := Mux(fastHeldPair, 0.U,
             Mux(fastBase(fastHeldContext)(5) ^ fastHeldGroup(0), 2.U, 1.U))
         io.ordering.tail := fastInstruction(Mux(fastHeld, fastHeldContext, fastHead)).scalar.sqTail
-        io.completion.valid := fastFinished && !io.flush && !fastDrain
-        io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
-        io.completion.bits.robIdx := fastInstruction(fastHead).scalar.robIdx
+        legacyCompletionReady := io.completion.ready && !selectFastCompletion && !fastDrain
+        when(selectFastCompletion) {
+            io.completion.valid := !io.flush && !fastDrain
+            io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
+            io.completion.bits.robIdx := fastInstruction(fastHead).scalar.robIdx
+        }
     }
+    when(io.flush || legacyCompletion && legacyCompletionReady) { legacyCompletionHeld := false.B }
+        .elsewhen(legacyCompletion && !selectFastCompletion && !io.completion.ready) {
+            legacyCompletionHeld := true.B
+        }
     when(fastDrain) { io.writeback.valid := false.B }
 
     val issueFast = fastMode && io.request.fire

@@ -577,6 +577,46 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             dut.io.completion.valid.expect(false)
             assert(storeGroups.size == beforeCanceledGroups)
             begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
+            // A collected Store and fast Load responses retain independent
+            // owners. A completion already exposed to a stalled ROB cannot
+            // be replaced when the older miss later finishes.
+            delay = 40
+            val overlapStart = completed.size
+            dut.io.completion.ready.poke(false)
+            begin(2, 2, 0x800d0000L, 16, 0, false, 3, rob = 26); tick()
+            begin(2, 1, 0x800e0000L, 8, 0, false, 0, store = true, rob = 27); tick()
+            waitUntil(dut.io.completion.valid.peek().litToBoolean)
+            for (_ <- 0 until 90) {
+                dut.io.completion.bits.robIdx.expect(27); tick()
+            }
+            dut.io.completion.ready.poke(true)
+            waitUntil(dut.io.idle.peek().litToBoolean)
+            assert(completed.drop(overlapStart).map(_._2) == Vector(27,26))
+
+            // SQ backpressure does not prevent a younger independent Load
+            // from using the same collector's existing response line FIFO.
+            delay = 9
+            dut.io.store.ready.poke(false)
+            begin(2, 1, 0x800f0000L, 8, 0, false, 0, store = true, rob = 28); tick()
+            waitUntil(dut.io.store.valid.peek().litToBoolean)
+            val overlappingStore = dut.io.store.bits.peek().litValue
+            begin(2, 2, 0x80100000L, 16, 0, false, 3, rob = 29); tick()
+            waitUntil(completed.last._2 == 29)
+            assert(dut.io.store.bits.peek().litValue == overlappingStore)
+            dut.io.store.ready.poke(true)
+            waitUntil(dut.io.idle.peek().litToBoolean)
+            assert(completed.last._2 == 28)
+
+            // An unaligned fast candidate must release a held Store before
+            // falling back to the legacy element collector. It cannot wait
+            // for its own fallback while blocking that Store's completion.
+            dut.io.store.ready.poke(false)
+            begin(2, 1, 0x80110000L, 8, 0, false, 0, store = true, rob = 30); tick()
+            waitUntil(dut.io.store.valid.peek().litToBoolean)
+            begin(2, 1, 0x80120004L, 8, 0, false, 3, rob = 31); tick()
+            dut.io.store.ready.poke(true)
+            waitUntil(dut.io.idle.peek().litToBoolean)
+            assert(completed.takeRight(2).map(_._2) == Vector(30,31))
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }
     }
