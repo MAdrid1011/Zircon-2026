@@ -231,6 +231,12 @@ class Commit(
         sq.io.vector.get.ordering.native := io.vector.get.ordering.native
         sq.io.vector.get.ordering.line := io.vector.get.ordering.line
         wide.io.loadLine := io.vector.get.ordering.line
+        wide.io.loadTail := io.vector.get.ordering.tail
+        for(port <- 0 until 2) {
+            wide.io.scalarLoadLine(port) := PeScratchpadBridge.cachedTaskLine(sb.io.query(port).request.bits.wordAddress)
+            wide.io.scalarLoadTail(port) := PriorityEncoder(sb.io.query(port).request.bits.sqTailOH)
+            sb.io.scalarVectorClear.get(port) := wide.io.scalarLoadClear(port)
+        }
         io.vector.get.ordering.clear := sq.io.vector.get.ordering.clear &&
             Mux(io.vector.get.ordering.native,sb.io.scalarEmpty && wide.io.loadClear,sb.io.empty)
         val wideActive = wide.io.active

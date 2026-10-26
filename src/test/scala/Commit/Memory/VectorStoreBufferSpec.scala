@@ -21,6 +21,10 @@ class VectorStorePipelineHarness extends Module {
     vector.io.commit := io.commit
     vector.io.flush := false.B
     vector.io.loadLine := 0.U
+    vector.io.loadTail := 12.U
+    vector.io.scalarLoadTail.foreach(_ := 12.U)
+    vector.io.scalarLoadLine.foreach(_ := 0.U)
+    scalar.io.scalarVectorClear.get := vector.io.scalarLoadClear
     vector.io.drain <> scalar.io.vector.get
     port.io.reserveAtomic := false.B
     port.io.atomicRequest.valid := false.B
@@ -47,6 +51,9 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
             dut.io.loadLine.poke(0)
+            dut.io.loadTail.poke(12)
+            dut.io.scalarLoadTail.foreach(_.poke(12))
+            dut.io.scalarLoadLine.foreach(_.poke(0))
             dut.io.collect.valid.poke(false)
             dut.io.commit.foreach { port => port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -110,6 +117,9 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
             dut.io.loadLine.poke(0)
+            dut.io.loadTail.poke(12)
+            dut.io.scalarLoadTail.foreach(_.poke(12))
+            dut.io.scalarLoadLine.foreach(_.poke(0))
             dut.io.collect.valid.poke(false)
             dut.io.commit.foreach { port => port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -186,6 +196,9 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
             dut.io.loadLine.poke(0)
+            dut.io.loadTail.poke(12)
+            dut.io.scalarLoadTail.foreach(_.poke(12))
+            dut.io.scalarLoadLine.foreach(_.poke(0))
             dut.io.collect.valid.poke(false)
             for (port <- dut.io.commit) { port.valid.poke(false); port.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -275,6 +288,9 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)
             dut.io.loadLine.poke(0)
+            dut.io.loadTail.poke(12)
+            dut.io.scalarLoadTail.foreach(_.poke(12))
+            dut.io.scalarLoadLine.foreach(_.poke(0))
             dut.io.collect.valid.poke(false)
             dut.io.commit.foreach { event => event.valid.poke(false); event.bits.poke(0) }
             dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
@@ -340,9 +356,19 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
                 dut.io.loadClear.expect(false)
             }
             dut.io.loadLine.poke(0xb0040000L >> 6); dut.io.loadClear.expect(true)
+            dut.io.scalarLoadLine(0).poke(0xb0040000L >> 6)
+            dut.io.scalarLoadClear(0).expect(true)
+            dut.io.scalarLoadLine(1).poke((0xb0000000L+96L) >> 6)
+            dut.io.scalarLoadClear(1).expect(false)
+            // An older Load can precede a matching younger speculative Store.
+            dut.io.scalarLoadTail(1).poke(1); dut.io.scalarLoadClear(1).expect(true)
+            dut.io.scalarLoadTail(1).poke(2); dut.io.scalarLoadClear(1).expect(false)
+            dut.io.scalarLoadTail(1).poke(12)
             dut.io.collect.bits.sqIdx.poke(6); dut.io.collect.valid.poke(true)
             dut.io.collect.ready.expect(false); dut.clock.step(3); dut.io.collect.valid.poke(false)
             retire(1,2,3); retire(4,5)
+            dut.io.scalarLoadTail(1).poke(1); dut.io.scalarLoadClear(1).expect(false)
+            dut.io.scalarLoadTail(1).poke(12)
             drain(1)
             dut.io.loadLine.poke((0xb0000000L + 96L) >> 6); dut.io.loadClear.expect(true)
             send(6); retire(6)
@@ -369,7 +395,11 @@ class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             dut.io.collect.bits.sqIdx.poke(21); dut.io.collect.bits.robIdx.poke(21)
             dut.io.collect.bits.address.poke(0x80001000L)
             dut.io.collect.valid.poke(true); dut.clock.step(); dut.io.collect.valid.poke(false)
+            dut.io.loadTail.poke(22)
             dut.io.loadLine.poke(0xb0040000L >> 6); dut.io.loadClear.expect(false)
+            dut.io.loadTail.poke(20); dut.io.loadClear.expect(true)
+            dut.io.loadTail.poke(0); dut.io.loadClear.expect(false)
+            dut.io.loadTail.poke(22)
             dut.io.flush.poke(true); dut.clock.step(); dut.io.flush.poke(false)
             dut.io.loadClear.expect(true)
         }

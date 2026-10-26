@@ -20,7 +20,11 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         val empty = Output(Bool())
         val active = Output(Bool())
         val loadLine = Input(UInt(26.W))
+        val loadTail = Input(UInt(p.sqWidth.W))
         val loadClear = Output(Bool())
+        val scalarLoadLine = Input(Vec(2,UInt(26.W)))
+        val scalarLoadTail = Input(Vec(2,UInt(p.sqWidth.W)))
+        val scalarLoadClear = Output(Vec(2,Bool()))
         val observation = if (observe) Some(Output(new VectorStoreTrace)) else None
     })
     val payload = Reg(Vec(8, new VectorStoreTask(p)))
@@ -74,16 +78,30 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         ((!valid && pendingCount === 0.U) || !filled && io.collect.bits.sqIdx === identity || canQueue)
     val queueCollect = io.collect.fire && canQueue
     val primaryCollect = io.collect.fire && !canQueue
-    def conflicts(slot: Int): Bool = payload(slot).mask.orR &&
+    def conflicts(slot: Int,line: UInt): Bool = payload(slot).mask.orR &&
         (!PeScratchpadBridge.matches(payload(slot).address.pad(34)) ||
-            payload(slot).address(31,6) === io.loadLine ||
-            contiguousMasks(slot)(127,64).orR && nextLineAddress(slot) === io.loadLine)
+            payload(slot).address(31,6) === line ||
+            contiguousMasks(slot)(127,64).orR && nextLineAddress(slot) === line)
     // Compare only the existing eight payload addresses. Scattered, partial
     // collection and non-native Stores stay conservative; ordinary native
     // Loads need neither forwarding data nor a second memory port.
-    val primaryConflict = VecInit((0 until 8).map(i => i.U < count && conflicts(i))).asUInt.orR
-    val pendingConflict = VecInit((0 until 4).map(i => pendingValid(i) && conflicts(i+4))).asUInt.orR
-    io.loadClear := (!valid || filled && !scattered && !primaryConflict) && !pendingConflict
+    def older(sqIdx: UInt,tail: UInt,retired: Bool): Bool = {
+        val entries = ZirconConfig.CommitParams().sqEntries
+        val distance = Mux(tail>=sqIdx,tail- sqIdx,(tail +& (2*entries).U)-sqIdx)
+        retired || distance=/=0.U && distance<=entries.U
+    }
+    def clearFor(line: UInt,tail: UInt): Bool = {
+        val primaryConflict = VecInit((0 until 8).map(i => i.U < count && conflicts(i,line))).asUInt.orR
+        val pendingConflict = VecInit((0 until 4).map(i => pendingValid(i) &&
+            older(payload(i+4).sqIdx,tail,pendingCommitted(i) || pendingCommitHit(i)) && conflicts(i+4,line))).asUInt.orR
+        // Younger speculative Stores cannot block an older Load: their ROB
+        // retirement may itself depend on that Load completing. Retired tokens
+        // remain older even when their SQ ring identities have been recycled.
+        (!valid || !older(identity,tail,committed || commitHit) ||
+            filled && !scattered && !primaryConflict) && !pendingConflict
+    }
+    io.loadClear := clearFor(io.loadLine,io.loadTail)
+    for(port <- 0 until 2) { io.scalarLoadClear(port) := clearFor(io.scalarLoadLine(port),io.scalarLoadTail(port)) }
     io.drain.start.ready := valid && committed && filled && state === idle ||
         finishNow && pendingCount =/= 0.U && pendingValid(pendingHead) &&
             (pendingCommitted(pendingHead) || pendingCommitHit(pendingHead))

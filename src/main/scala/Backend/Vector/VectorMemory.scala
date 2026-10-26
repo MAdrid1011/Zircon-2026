@@ -554,17 +554,21 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         !fallbackRequest && !fastFallbackStarted) && !fastDrain && !incomingFast
     legacyIn.valid := !io.flush && (fallbackRequest || io.in.valid && directLegacy)
     legacyIn.bits := Mux(fallbackRequest, fastInstruction(fastHead), io.in.bits)
-    val fastRoom = !fastValid(fastTail) && !fastScalarPending
+    val actualFastWrite = streamWriteValid && fastWriteValid && !io.flush
+    val headWritten = fastWritten(fastHead) | Mux(actualFastWrite && fastWriteContext===fastHead,
+        UIntToOH(fastWriteGroup,8),0.U)
+    val fastScalarCapture = fastScalarPending && !legacyScalarRequest && io.readAvailable && !io.flush
+    val fastFinished = fastOwned && fastBaseReady(fastHead) && fastAligned(fastHead) &&
+        headWritten === fastExpected(fastHead)
+    val selectFastCompletion = fastMode && fastFinished && !legacyCompletionHeld
+    val fastRelease = selectFastCompletion && io.completion.ready && !io.flush
+    val fastRoom = (!fastValid(fastTail) || fastRelease && fastHead===fastTail) &&
+        (!fastScalarPending || fastScalarCapture)
     io.in.ready := !io.flush && !fastDrain && Mux(incomingFast,
         (state === idle || store && state =/= operands && state =/= strideOperand &&
             state =/= complete) && !fastFallbackStarted && !fallbackRequest && fastRoom,
         directLegacy && legacyIn.ready)
     val fastAdmit = io.in.fire && incomingFast
-    val fastScalarCapture = fastScalarPending && !legacyScalarRequest && io.readAvailable && !io.flush
-    val fastFinished = fastOwned && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        fastWritten(fastHead) === fastExpected(fastHead)
-    val selectFastCompletion = fastMode && fastFinished && !legacyCompletionHeld
-    val fastRelease = selectFastCompletion && io.completion.ready && !io.flush
     val fallbackRelease = fastFallbackStarted && io.completion.fire
     io.idle := state === idle && !fastOwned && !fastDrain
 
@@ -631,7 +635,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val finishFastLine = drainFastLine && (fastHigh || !queuedPair)
     val releaseTicket = Mux(retryFast, responseOH, 0.U) |
         Mux(finishFastLine, UIntToOH(streamLines.io.deq.bits.ticket, 4), 0.U)
-    val actualFastWrite = streamWriteValid && fastWriteValid && !io.flush
 
     when(fastMode || fastDrain) {
         streamLines.io.enq.valid := replyFast && !io.response.bits.retry
@@ -732,7 +735,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             fastCursor(i) := 0.U
             fastRetry(i) := 0.U
             fastWritten(i) := 0.U
-            assert(!fastValid(i), "Instruction context cannot be reused before completion acceptance")
+            assert(!fastValid(i) || fastRelease && fastHead===i.U, "Instruction context is reused only on accepted completion")
         }
     }
     when(fastMode) {

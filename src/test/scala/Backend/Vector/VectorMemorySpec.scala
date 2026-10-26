@@ -199,7 +199,8 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 waitUntil(dut.io.completion.valid.peek().litToBoolean)
                 dut.io.completion.bits.robIdx.expect(7)
                 val before = writes
-                tick(); tick(); assert(writes == before)
+                val finalWrite = if(dut.io.writeback.valid.peek().litToBoolean) 1 else 0
+                tick(); tick(); assert(writes == before+finalWrite)
                 dut.io.completion.ready.poke(true); tick()
             }
             // Full continuous groups stream through the original DCache port.

@@ -16,6 +16,11 @@ class PeScratchpadPort extends Bundle {
 }
 object PeScratchpadBridge {
     def matches(address: UInt): Bool = address(33,20)==="hb00".U
+    // Nonzero cache colors select immutable operands of the current task.
+    // Color zero may address a pinned worker program/private allocation and
+    // therefore retains conservative cross-domain ordering.
+    def cachedTaskWord(word: UInt): Bool = word(31,26)===8.U && word(25,18).orR
+    def cachedTaskLine(word: UInt): UInt = Cat("hb00".U(12.W),word(17,4))
 }
 
 /** Cache-line requests share a 256-bit SRAM port. One 32-byte register holds

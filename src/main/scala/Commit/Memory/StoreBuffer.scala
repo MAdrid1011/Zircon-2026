@@ -19,6 +19,7 @@ class StoreBufferIO(cp: CommitParams, cache: DCacheParams) extends Bundle {
     val responseError = Valid(UInt(4.W))
     val empty = Output(Bool())
     val scalarEmpty = Output(Bool())
+    val scalarVectorClear = if(cp.vectorEnabled) Some(Input(Vec(2,Bool()))) else None
     val vector = if (cp.vectorEnabled) Some(new VectorStoreDrain) else None
 }
 
@@ -159,9 +160,10 @@ class StoreBuffer(
         io.query(port).response.bits.data := bytes.asUInt
         io.query(port).response.bits.mask := resultMask
         io.query(port).response.bits.blocked := (if (cp.vectorEnabled)
-            RegNext(VecInit(storage.zipWithIndex.map { case (entry, index) =>
+            RegNext(Mux(PeScratchpadBridge.cachedTaskWord(query.bits.wordAddress),
+                !io.scalarVectorClear.get(port),VecInit(storage.zipWithIndex.map { case (entry, index) =>
                 valid(index) && entry.vector
-            }).asUInt.orR, false.B) else false.B)
+            }).asUInt.orR), false.B) else false.B)
     }
 
     assert(count <= entries.U)
