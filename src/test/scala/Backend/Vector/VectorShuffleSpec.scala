@@ -132,3 +132,61 @@ class VectorShuffleSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 }
+
+class VectorMaskTailSpec extends AnyFreeSpec with ChiselSim {
+    "short predicates fill mask tails without traversing inactive bits" in {
+        simulate(new VectorSerialHarness) { dut =>
+            VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)
+            dut.io.in.valid.poke(false); dut.io.address.poke(40)
+            dut.io.scalarData.poke(0); dut.io.roundingMode.poke(0)
+            dut.io.readAvailable.poke(true); dut.io.completion.ready.poke(false)
+            dut.io.flush.poke(false)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            val wordMask = (BigInt(1) << 32) - 1
+            val old = BigInt("35a7f009" * 8, 16)
+            val predicate = BigInt("a5" * 32, 16)
+            def initialize(address: Int, data: BigInt): Unit = {
+                dut.io.initialize.valid.poke(true); dut.io.initialize.address.poke(address)
+                for (lane <- 0 until 8) {
+                    dut.io.initialize.data(lane).poke((data >> (lane * 32)) & wordMask)
+                    dut.io.initialize.bytes(lane).poke(15)
+                }
+                dut.clock.step(); dut.io.initialize.valid.poke(false)
+            }
+            initialize(0, predicate)
+            initialize(4, BigInt("01020304" * 8, 16))
+            initialize(12, BigInt("01020304" * 8, 16))
+            for (sew <- 0 to 2; vl <- Seq(0, 1, 5, 8); noOp <- Seq(false, true); policy <- 0 to 3) {
+                initialize(24, old)
+                val in = dut.io.in.bits
+                VectorTestUtils.clear(in)
+                in.scalar.inst.poke((BigInt(0x18) << 26) | (4 << 20) | (8 << 15) | (16 << 7) | 0x57)
+                in.vector.state.vtype.poke((sew << 3) | (policy << 6))
+                in.vector.state.vl.poke(vl)
+                val start = if (noOp) vl + 1 else 0
+                in.vector.state.vstart.poke(start); in.vector.mask.poke(0)
+                for (group <- 0 until 8) {
+                    in.vector.source(0)(group).poke(4 + group)
+                    in.vector.source(1)(group).poke(12 + group)
+                    in.vector.source(2)(group).poke(24 + group)
+                    in.vector.destination.physical(group).poke(40 + group)
+                }
+                dut.io.in.valid.poke(true); dut.io.legal.expect(true); dut.io.in.ready.expect(true)
+                dut.clock.step(); dut.io.in.valid.poke(false)
+                var cycles = 0
+                while (!dut.io.completion.valid.peek().litToBoolean && cycles < 100) {
+                    dut.clock.step(); cycles += 1
+                }
+                assert(cycles <= 4 * vl + 8, s"mask tail was traversed: VL=$vl cycles=$cycles")
+                val expected = (0 until 256).foldLeft(old) { (result, bit) =>
+                    val value = if (start >= vl || bit < start) old.testBit(bit)
+                        else if (bit >= vl || predicate.testBit(bit) || (policy & 2) != 0) true
+                        else old.testBit(bit)
+                    if (value) result.setBit(bit) else result.clearBit(bit)
+                }
+                for (lane <- 0 until 8) dut.io.data(lane).expect((expected >> (lane * 32)) & wordMask)
+                dut.io.completion.ready.poke(true); dut.clock.step(); dut.io.completion.ready.poke(false)
+            }
+        }
+    }
+}

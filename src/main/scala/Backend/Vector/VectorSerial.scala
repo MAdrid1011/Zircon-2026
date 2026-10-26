@@ -103,8 +103,10 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
     val widthMask = Mux(sew === 0.U, 255.U(32.W), Mux(sew === 1.U, 65535.U(32.W), "hffffffff".U))
     val count = Mux(reduction, metadata.groups.sourceCount(0), metadata.destination.count)
     val traversalWidth = Mux(reduction, sew, destinationWidth)
-    val maximum = Mux(maskDestination || scalarDestination, 256.U(9.W),
-        (count << Mux(traversalWidth === 0.U, 5.U, Mux(traversalWidth === 1.U, 4.U, 3.U)))(8, 0))
+    // Mask tails are filled once at initialization. Visiting every unused bit
+    // would otherwise turn a short predicate into a 256-element operation.
+    val maximum = Mux(maskDestination, state.vl(8, 0), Mux(scalarDestination, 256.U(9.W),
+        (count << Mux(traversalWidth === 0.U, 5.U, Mux(traversalWidth === 1.U, 4.U, 3.U)))(8, 0)))
     val maximumExponent = 5.S(5.W) - sew.zext.pad(5) + state.vtype(2, 0).asSInt.pad(5)
     val vlmax = (1.U(9.W) << maximumExponent.asUInt)(8, 0)
     // VLMAX is zero or a power of two, including unsupported vtype encodings.
@@ -392,8 +394,10 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
             } }
             is(initialize) { when(io.readAvailable) {
                 val old = Mux(metadata.groups.sourceCount(2).orR, io.read(2).data.asUInt, Fill(256, 1.U(1.W)))
-                val initial = Mux(reduction && state.vstart < state.vl && state.vtype(6),
-                    old | ~(destinationMask.pad(256)), old)
+                val maskTail = (Fill(256, 1.U(1.W)) << state.vl(8, 0))(255, 0)
+                val initial = Mux(maskDestination && state.vstart < state.vl, old | maskTail,
+                    Mux(reduction && state.vstart < state.vl && state.vtype(6),
+                        old | ~(destinationMask.pad(256)), old))
                 val seed = extendWidth(io.read(1).data(0), funct(0) && !control.floating, destinationWidth)
                 // A nonempty reduction copies its scalar seed even when every
                 // source element is masked. No active update will write it later.
@@ -442,6 +446,8 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
                 when(registerShuffle) {
                     output := shuffled.asUInt
                     element := maximum
+                    nextPhase := writeback
+                }.elsewhen(maskDestination && state.vl === 0.U) {
                     nextPhase := writeback
                 }.otherwise { enterRead(readElement) }
             } }
