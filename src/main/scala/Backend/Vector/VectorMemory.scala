@@ -25,6 +25,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         val flush = Input(Bool())
         val idle = Output(Bool())
     })
+    val legacyIn = Wire(Decoupled(new VectorInstruction(p)))
     val idle :: operands :: strideOperand :: collect :: groupAddress :: gather :: indexOperand :: indexAddress :: checkAddress :: storeAddress :: request :: response :: merge :: writeback :: complete :: streamLoad :: streamDrain :: Nil = Enum(17)
     val state = RegInit(idle)
     val nextState = WireDefault(state)
@@ -72,6 +73,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val streamLines = Module(new Queue(new Bundle {
         val line = UInt(512.W)
         val group = UInt(3.W)
+        val context = Bool()
+        val ticket = UInt(2.W)
     }, 4, flow = true, hasFlush = true))
     streamLines.io.flush.get := io.flush
     val streamCredits = RegInit(0.U(3.W))
@@ -79,6 +82,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     streamLines.io.enq.valid := state === streamLoad && io.response.valid && !io.response.bits.retry && !io.flush
     streamLines.io.enq.bits.line := io.response.bits.line
     streamLines.io.enq.bits.group := io.response.bits.slot(2, 0)
+    streamLines.io.enq.bits.context := false.B
+    streamLines.io.enq.bits.ticket := 0.U
     streamLines.io.deq.ready := false.B
     val metadata = instruction.vector
     val store = metadata.control.execution === VectorExecution.Store.U
@@ -121,7 +126,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val elementBytes = (1.U(3.W) << eew)(2, 0)
     val nextPosition = position +& elementBytes
     val lastElement = nextPosition === 32.U
-    io.in.ready := state === idle && !io.flush
+    legacyIn.ready := state === idle && !io.flush
     io.idle := state === idle
     io.scalarReadRequest := RegNext(nextState === operands || nextState === strideOperand, false.B)
     // Scalar base/stride reads do not occupy the vector RF. Complete unmasked
@@ -135,7 +140,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // Resolve next-cycle RF ownership at the preceding edge. The full-group
     // predicate may depend on scalar data, but never enters the RF read mux.
     val nextReadRequest = nextState === operands &&
-        Mux(io.in.fire, io.in.bits.vector.groups.mask, metadata.groups.mask) ||
+        Mux(legacyIn.fire, legacyIn.bits.vector.groups.mask, metadata.groups.mask) ||
         nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
         nextState === indexOperand
     io.readRequest := RegNext(nextReadRequest && !io.flush, false.B)
@@ -226,14 +231,14 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             nextState := Mux(io.cachePending, streamDrain, idle)
         }.otherwise { nextState := idle }
     }.otherwise {
-        when(io.in.fire) {
-            instruction := io.in.bits
-            val firstSource = Mux(io.in.bits.vector.groups.mask,
-                io.in.bits.vector.mask, io.in.bits.vector.source(0)(0))
+        when(legacyIn.fire) {
+            instruction := legacyIn.bits
+            val firstSource = Mux(legacyIn.bits.vector.groups.mask,
+                legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
             sourceReadAddress := firstSource
             sourceReadSelection := UIntToOH(firstSource, 64)
-            oldReadAddress := io.in.bits.vector.source(2)(0)
-            oldReadSelection := UIntToOH(io.in.bits.vector.source(2)(0), 64)
+            oldReadAddress := legacyIn.bits.vector.source(2)(0)
+            oldReadSelection := UIntToOH(legacyIn.bits.vector.source(2)(0), 64)
             nextState := operands
             group := 0.U
             groupOH := 1.U
@@ -437,14 +442,240 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         assert(io.response.bits.wide && io.response.bits.exception === 0.U)
     }
     when(state === response && discard && !io.cachePending) { nextState := idle }
-    when(io.in.fire) {
-        assert(io.in.bits.vector.control.execution === VectorExecution.Load.U ||
-            io.in.bits.vector.control.execution === VectorExecution.Store.U)
-        val incoming = io.in.bits.vector
+    when(legacyIn.fire) {
+        assert(legacyIn.bits.vector.control.execution === VectorExecution.Load.U ||
+            legacyIn.bits.vector.control.execution === VectorExecution.Store.U)
+        val incoming = legacyIn.bits.vector
         assert(Mux(incoming.control.execution === VectorExecution.Store.U,
             incoming.groups.sourceCount(0), incoming.destination.count) =/= 0.U)
     }
     when(state =/= idle) { assert(groupOH === UIntToOH(group, 8)) }
     assert(streamCredits <= 4.U)
     when(streamReturned) { assert(streamCredits =/= 0.U) }
+    // Two architectural Load owners share the original response data FIFO.
+    val fastValid = RegInit(VecInit.fill(2)(false.B))
+    val fastInstruction = Reg(Vec(2, new VectorInstruction(p)))
+    val fastBase = Reg(Vec(2, UInt(32.W)))
+    val fastBaseReady = RegInit(VecInit.fill(2)(false.B))
+    val fastAligned = Reg(Vec(2, Bool()))
+    val fastCursor = Reg(Vec(2, UInt(4.W)))
+    val fastRetry = RegInit(VecInit.fill(2)(0.U(8.W)))
+    val fastWritten = RegInit(VecInit.fill(2)(0.U(8.W)))
+    val fastHead = RegInit(false.B)
+    val fastTail = RegInit(false.B)
+    val fastScalarPending = RegInit(false.B)
+    val fastScalarOwner = Reg(Bool())
+    val fastFallbackStarted = RegInit(false.B)
+    val fastDrain = RegInit(false.B)
+    val fastCount = VecInit(fastInstruction.map(_.vector.destination.count))
+    val fastExpected = VecInit(fastCount.map(n => ((1.U(9.W) << n) - 1.U)(7, 0)))
+    val fastOwned = fastValid.asUInt.orR
+    val fastMode = fastOwned && !fastFallbackStarted && !fastDrain
+
+    val ticketValid = RegInit(0.U(4.W))
+    val ticketFlight = RegInit(0.U(4.W))
+    val ticketContext = Reg(Vec(4, Bool()))
+    val ticketGroup = Reg(Vec(4, UInt(3.W)))
+    val ticketPair = Reg(Vec(4, Bool()))
+    val fastHeld = RegInit(false.B)
+    val fastHeldAddress = Reg(UInt(32.W))
+    val fastHeldContext = Reg(Bool())
+    val fastHeldGroup = Reg(UInt(3.W))
+    val fastHeldTicket = Reg(UInt(2.W))
+    val fastHeldPair = Reg(Bool())
+    val fastHeldRetry = Reg(Bool())
+    val fastHigh = RegInit(false.B)
+    val fastWriteValid = RegInit(false.B)
+    val fastWriteContext = Reg(Bool())
+    val fastWriteGroup = Reg(UInt(3.W))
+    fastWriteValid := false.B
+
+    val incoming = io.in.bits.vector
+    val incomingWhole = io.in.bits.scalar.inst(27, 26) === 0.U &&
+        io.in.bits.scalar.inst(24, 20) === 8.U
+    val incomingFast = incoming.control.execution === VectorExecution.Load.U &&
+        incomingWhole && !incoming.groups.mask && incoming.state.vstart === 0.U
+    val fallbackRequest = fastOwned && fastBaseReady(fastHead) &&
+        !fastAligned(fastHead) && !fastFallbackStarted && !fastDrain && state === idle
+    val directLegacy = !fastOwned && !fastDrain && !incomingFast
+    legacyIn.valid := !io.flush && (fallbackRequest || io.in.valid && directLegacy)
+    legacyIn.bits := Mux(fallbackRequest, fastInstruction(fastHead), io.in.bits)
+    val fastRoom = !fastValid(fastTail) && !fastScalarPending
+    io.in.ready := !io.flush && !fastDrain && Mux(incomingFast,
+        state === idle && !fastFallbackStarted && !fallbackRequest && fastRoom,
+        !fastOwned && legacyIn.ready)
+    val fastAdmit = io.in.fire && incomingFast
+    val fastScalarCapture = fastScalarPending && io.readAvailable && !io.flush
+    val fastFinished = fastOwned && fastBaseReady(fastHead) && fastAligned(fastHead) &&
+        fastWritten(fastHead) === fastExpected(fastHead)
+    val fastRelease = fastMode && fastFinished && io.completion.ready && !io.flush
+    val fallbackRelease = fastFallbackStarted && io.completion.fire
+    io.idle := state === idle && !fastOwned && !fastDrain
+
+    when(fastMode || fastDrain) {
+        io.readRequest := false.B
+        io.scalarReadRequest := fastScalarPending && !fastDrain && !io.flush
+        io.scalarAddress := fastInstruction(fastScalarOwner).scalar.prs(0)
+        io.request.valid := fastHeld && io.ordering.clear && !io.flush && !fastDrain
+        io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
+        io.request.bits.wide := true.B
+        io.request.bits.vaddr := fastHeldAddress
+        io.request.bits.paddr := fastHeldAddress
+        io.request.bits.slot := fastHeldTicket
+        io.request.bits.mtype := 2.U
+        io.ordering.tail := fastInstruction(Mux(fastHeld, fastHeldContext, fastHead)).scalar.sqTail
+        io.completion.valid := fastFinished && !io.flush && !fastDrain
+        io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
+        io.completion.bits.robIdx := fastInstruction(fastHead).scalar.robIdx
+    }
+    when(fastDrain) { io.writeback.valid := false.B }
+
+    val fastTodo = VecInit((0 until 2).map(i => fastValid(i) && fastBaseReady(i) && fastAligned(i) &&
+        (fastRetry(i).orR || fastCursor(i) < fastCount(i))))
+    val selectedContext = Mux(fastTodo(fastHead), fastHead, !fastHead)
+    val canPrepare = fastMode && fastBaseReady(fastHead) && fastAligned(fastHead) &&
+        fastTodo.asUInt.orR && !fastHeld && !ticketValid.andR && !io.flush
+    val selectedRetry = fastRetry(selectedContext).orR
+    val selectedGroup = Mux(selectedRetry, PriorityEncoder(fastRetry(selectedContext)),
+        fastCursor(selectedContext)(2, 0))
+    val selectedPair = !(fastBase(selectedContext)(5) ^ selectedGroup(0)) &&
+        selectedGroup +& 1.U < fastCount(selectedContext)
+    val issueFast = fastMode && io.request.fire
+    val issuedTicket = UIntToOH(fastHeldTicket, 4)
+    val responseTicket = io.response.bits.slot(1, 0)
+    val responseOH = UIntToOH(responseTicket, 4)
+    val replyFast = fastMode && io.response.valid && !io.flush
+    val retryFast = replyFast && io.response.bits.retry
+    val repliedContext = ticketContext(responseTicket)
+    val repliedGroup = ticketGroup(responseTicket)
+    val drainFastLine = fastMode && streamLines.io.deq.valid && !io.flush
+    val queuedContext = streamLines.io.deq.bits.context
+    val queuedGroup = streamLines.io.deq.bits.group
+    val queuedPair = !(fastBase(queuedContext)(5) ^ queuedGroup(0)) &&
+        queuedGroup +& 1.U < fastCount(queuedContext)
+    val finishFastLine = drainFastLine && (fastHigh || !queuedPair)
+    val releaseTicket = Mux(retryFast, responseOH, 0.U) |
+        Mux(finishFastLine, UIntToOH(streamLines.io.deq.bits.ticket, 4), 0.U)
+    val actualFastWrite = streamWriteValid && fastWriteValid && !io.flush
+
+    when(fastMode || fastDrain) {
+        streamLines.io.enq.valid := replyFast && !io.response.bits.retry
+        streamLines.io.enq.bits.line := io.response.bits.line
+        streamLines.io.enq.bits.group := repliedGroup
+        streamLines.io.enq.bits.context := repliedContext
+        streamLines.io.enq.bits.ticket := responseTicket
+        streamLines.io.deq.ready := finishFastLine
+    }
+    when(canPrepare) {
+        fastHeld := true.B
+        fastHeldContext := selectedContext
+        fastHeldGroup := selectedGroup
+        fastHeldTicket := PriorityEncoder(~ticketValid)
+        fastHeldPair := selectedPair
+        fastHeldRetry := selectedRetry
+        fastHeldAddress := Cat((fastBase(selectedContext) + Cat(selectedGroup, 0.U(5.W)))(31, 6), 0.U(6.W))
+    }
+    when(issueFast) {
+        fastHeld := false.B
+        ticketContext(fastHeldTicket) := fastHeldContext
+        ticketGroup(fastHeldTicket) := fastHeldGroup
+        ticketPair(fastHeldTicket) := fastHeldPair
+        assert(!ticketValid(fastHeldTicket), "Load ticket is free at real request admission")
+    }
+    when(replyFast) {
+        assert(io.response.bits.slot < 4.U && ticketFlight(responseTicket), "Response retains an in-flight ticket")
+        assert(io.response.bits.wide && io.response.bits.exception === 0.U)
+        assert(fastValid(repliedContext), "Response retains its architectural Load owner")
+        when(!io.response.bits.retry) {
+            assert(streamLines.io.enq.ready, "Reserved response ticket protects FIFO capacity")
+            assert(ticketPair(responseTicket) === (!(fastBase(repliedContext)(5) ^ repliedGroup(0)) &&
+                repliedGroup +& 1.U < fastCount(repliedContext)))
+        }
+    }
+    when(drainFastLine) {
+        assert(ticketValid(streamLines.io.deq.bits.ticket) && (!ticketFlight(streamLines.io.deq.bits.ticket) ||
+            replyFast && !io.response.bits.retry && responseTicket === streamLines.io.deq.bits.ticket))
+        streamWriteValid := true.B
+        fastWriteValid := true.B
+        fastWriteContext := queuedContext
+        fastWriteGroup := queuedGroup + fastHigh.asUInt
+        streamWrite.address := fastInstruction(queuedContext).vector.destination.physical(queuedGroup + fastHigh.asUInt)
+        streamWrite.data := Mux(fastHigh || fastBase(queuedContext)(5) ^ queuedGroup(0),
+            streamLines.io.deq.bits.line(511, 256), streamLines.io.deq.bits.line(255, 0))
+            .asTypeOf(Vec(8, UInt(32.W)))
+        streamWrite.bytes := VecInit.fill(8)(15.U(4.W))
+        streamWrite.ready := true.B
+        fastHigh := !finishFastLine
+    }
+    when(fastScalarCapture) { fastScalarPending := false.B }
+    when(fastAdmit) {
+        fastScalarPending := true.B
+        fastScalarOwner := fastTail
+        fastTail := !fastTail
+    }
+    when(fallbackRequest && legacyIn.fire) { fastFallbackStarted := true.B }
+    when(fastRelease || fallbackRelease) {
+        fastHead := !fastHead
+        fastFallbackStarted := false.B
+    }
+    for(i <- 0 until 2) {
+        val retrySet = Mux(retryFast && repliedContext === i.U,
+            UIntToOH(repliedGroup, 8), 0.U)
+        val retryClear = Mux(issueFast && fastHeldContext === i.U,
+            UIntToOH(fastHeldGroup, 8), 0.U)
+        fastRetry(i) := (fastRetry(i) | retrySet) & ~retryClear
+        when(issueFast && fastHeldContext === i.U && !fastHeldRetry) {
+            fastCursor(i) := fastHeldGroup +& Mux(fastHeldPair, 2.U, 1.U)
+        }
+        when(actualFastWrite && fastWriteContext === i.U) {
+            assert(fastValid(i) && !fastWritten(i)(fastWriteGroup), "PRF group writes once to its live owner")
+            fastWritten(i) := fastWritten(i) | UIntToOH(fastWriteGroup, 8)
+        }
+        when(fastScalarCapture && fastScalarOwner === i.U) {
+            fastBase(i) := io.scalarData
+            fastBaseReady(i) := true.B
+            fastAligned(i) := io.scalarData(4, 0) === 0.U
+        }
+        when((fastRelease || fallbackRelease) && fastHead === i.U) { fastValid(i) := false.B }
+        when(fastAdmit && fastTail === i.U) {
+            fastValid(i) := true.B
+            fastInstruction(i) := io.in.bits
+            fastBaseReady(i) := false.B
+            fastCursor(i) := 0.U
+            fastRetry(i) := 0.U
+            fastWritten(i) := 0.U
+            assert(!fastValid(i), "Instruction context cannot be reused before completion acceptance")
+        }
+    }
+    when(fastMode) {
+        ticketValid := (ticketValid | Mux(issueFast, issuedTicket, 0.U)) & ~releaseTicket
+        ticketFlight := (ticketFlight | Mux(issueFast, issuedTicket, 0.U)) &
+            ~Mux(replyFast, responseOH, 0.U)
+    }
+    when(fastDrain && !io.cachePending) { fastDrain := false.B }
+    when(io.flush) {
+        fastDrain := (fastMode || fastDrain) && io.cachePending
+        fastValid.foreach(_ := false.B)
+        fastBaseReady.foreach(_ := false.B)
+        fastRetry.foreach(_ := 0.U)
+        fastWritten.foreach(_ := 0.U)
+        fastHead := false.B
+        fastTail := false.B
+        fastScalarPending := false.B
+        fastFallbackStarted := false.B
+        fastHeld := false.B
+        fastHigh := false.B
+        fastWriteValid := false.B
+        ticketValid := 0.U
+        ticketFlight := 0.U
+    }
+    assert((ticketFlight & ~ticketValid) === 0.U)
+    when(fastRelease) {
+        assert(!fastScalarPending || fastScalarOwner =/= fastHead)
+        for(t <- 0 until 4) {
+            assert(!ticketValid(t) || ticketContext(t) =/= fastHead,
+                "Completion cannot abandon a response/line owner")
+        }
+        assert(!fastHeld || fastHeldContext =/= fastHead)
+    }
 }

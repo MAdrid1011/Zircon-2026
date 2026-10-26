@@ -141,10 +141,11 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             }
             def begin(eew: Int, count: Int, base: Long, vl: Int, start: Int,
                       masked: Boolean, policy: Int, store: Boolean = false, stride: Option[Int] = None,
-                      lumop: Int = 0, fields: Int = 1, indexWidth: Option[Int] = None): Unit = {
+                      lumop: Int = 0, fields: Int = 1, indexWidth: Option[Int] = None,
+                      rob: Int = 7, destination: Int = 32): Unit = {
                 val in = dut.io.in.bits
                 VectorTestUtils.clear(in)
-                in.scalar.robIdx.poke(7); in.scalar.sqIdx.poke(2); in.scalar.sqTail.poke(3)
+                in.scalar.robIdx.poke(rob); in.scalar.sqIdx.poke(2); in.scalar.sqTail.poke(3)
                 in.scalar.prs(1).poke(2)
                 in.scalar.inst.poke((if (masked) 0L else 1L << 25) |
                     ((Seq(0L, 5L, 6L)(indexWidth.getOrElse(eew))) << 12) |
@@ -160,7 +161,7 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                     (if (count / fields == 8) 3 else if (count / fields == 4) 2 else if (count / fields == 2) 1 else 0))
                 in.vector.state.vl.poke(vl); in.vector.state.vstart.poke(start)
                 for (group <- 0 until 8) {
-                    in.vector.destination.physical(group).poke(32 + group)
+                    in.vector.destination.physical(group).poke(destination + group)
                     in.vector.source(0)(group).poke(32 + group)
                     in.vector.source(1)(group).poke(48 + group)
                     in.vector.source(2)(group).poke(10 + group)
@@ -377,6 +378,64 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 dut.io.lower.req.ready.poke(true)
                 begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
             }
+            // Independent whole-register Loads must both finish their PRF
+            // writes while the older architectural completion is held. Cold
+            // lines exercise retry tickets; alternating half-line alignment
+            // exercises both single-group and paired-group responses.
+            for (count <- Seq(1, 2, 4, 8)) {
+                delay = 13
+                val firstBase = 0x80020000L + count * 0x2000L
+                val secondBase = firstBase + 0x1020L
+                val before = writes
+                dut.io.completion.ready.poke(false)
+                begin(2, count, firstBase, 1, 0, false, 0,
+                    lumop = 8, rob = 11, destination = 16)
+                // Capture the first scalar base before changing the shared
+                // harness input for the second architectural instruction.
+                tick()
+                begin(2, count, secondBase, 1, 0, false, 0,
+                    lumop = 8, rob = 12, destination = 32)
+                waitUntil(writes == before + 2 * count)
+                dut.io.completion.valid.expect(true)
+                dut.io.completion.bits.robIdx.expect(11)
+                dut.io.in.ready.expect(false)
+                dut.io.idle.expect(false)
+                for ((base, destination) <- Seq((firstBase, 16), (secondBase, 32));
+                     group <- 0 until count) {
+                    dut.io.address.poke(destination + group)
+                    val expected = (0 until 32).foldLeft(BigInt(0)) { (value, byte) =>
+                        value | (BigInt(byteAt(BigInt(base + group * 32 + byte))) << (8 * byte))
+                    }
+                    for (lane <- 0 until 8)
+                        dut.io.data(lane).expect((expected >> (32 * lane)) & 0xffffffffL)
+                }
+                tick(); tick()
+                assert(writes == before + 2 * count)
+                dut.io.completion.ready.poke(true); tick()
+                dut.io.completion.valid.expect(true)
+                dut.io.completion.bits.robIdx.expect(12)
+                dut.io.completion.ready.poke(false); tick(); tick()
+                dut.io.completion.bits.robIdx.expect(12)
+                dut.io.completion.ready.poke(true); tick()
+                dut.io.idle.expect(true)
+            }
+            // Recovery cancels both instruction contexts. Their already
+            // accepted cache traffic must drain without stale PRF writes or
+            // completion events before another instruction can be admitted.
+            delay = 40
+            val beforeOverlapRequests = requests
+            begin(2, 8, 0x80038000L, 1, 0, false, 0,
+                lumop = 8, rob = 13, destination = 16)
+            tick()
+            begin(2, 8, 0x80039020L, 1, 0, false, 0,
+                lumop = 8, rob = 14, destination = 32)
+            waitUntil(requests > beforeOverlapRequests && lowerResponse.nonEmpty)
+            val beforeOverlapWrites = writes
+            dut.io.flush.poke(true); tick(); dut.io.flush.poke(false)
+            waitUntil(dut.io.idle.peek().litToBoolean)
+            assert(writes == beforeOverlapWrites)
+            dut.io.completion.valid.expect(false)
+            begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }
     }
