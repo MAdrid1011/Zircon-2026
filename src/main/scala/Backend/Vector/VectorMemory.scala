@@ -54,6 +54,19 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val first = Reg(UInt(512.W))
     val second = RegInit(false.B)
     val discard = RegInit(false.B)
+    // A complete unit-stride Store can collect its first register alongside
+    // the scalar base. Reuse the ordinary SQ payload register; ordering and
+    // outward memory writes remain the responsibility of the existing SQ.
+    val fullStore = RegInit(false.B)
+    def fullWordStore(task: VectorInstruction): Bool = {
+        val whole = task.scalar.inst(27, 26) === 0.U && task.scalar.inst(24, 20) === 8.U
+        val words = task.scalar.inst(31, 26) === 0.U && task.scalar.inst(24, 20) === 0.U &&
+            task.vector.state.vtype(5, 3) === 2.U &&
+            task.vector.state.vl === (task.vector.groups.sourceCount(0).pad(32) << 3)
+        task.vector.control.execution === VectorExecution.Store.U &&
+            task.scalar.inst(14, 12) === 6.U && (whole || words) &&
+            !task.vector.groups.mask && task.vector.state.vstart === 0.U
+    }
     // Full, aligned register groups need no old-destination collection. The
     // original cache slot travels with each task through hits, misses and retries.
     // One architecture instruction retains ownership until every group returns.
@@ -126,7 +139,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val elementBytes = (1.U(3.W) << eew)(2, 0)
     val nextPosition = position +& elementBytes
     val lastElement = nextPosition === 32.U
-    legacyIn.ready := state === idle && !io.flush
+    val finalFullStore = state === writeback && fullStore && last
+    legacyIn.ready := (state === idle ||
+        finalFullStore && io.store.ready && io.completion.ready) && !io.flush
     io.idle := state === idle
     io.scalarReadRequest := RegNext(nextState === operands || nextState === strideOperand, false.B)
     // Scalar base/stride reads do not occupy the vector RF. Complete unmasked
@@ -140,7 +155,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // Resolve next-cycle RF ownership at the preceding edge. The full-group
     // predicate may depend on scalar data, but never enters the RF read mux.
     val nextReadRequest = nextState === operands &&
-        Mux(legacyIn.fire, legacyIn.bits.vector.groups.mask, metadata.groups.mask) ||
+        Mux(legacyIn.fire, legacyIn.bits.vector.groups.mask || fullWordStore(legacyIn.bits),
+            metadata.groups.mask || fullWordStore(instruction)) ||
         nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
         nextState === indexOperand
     io.readRequest := RegNext(nextReadRequest && !io.flush, false.B)
@@ -188,7 +204,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         io.writeback.valid := !io.flush
         io.writeback.bits := streamWrite
     }
-    io.completion.valid := state === complete && !io.flush
+    // Completion may accompany the last accepted SQ group. If ROB completion
+    // stalls, complete retains the tag without submitting the Store twice.
+    io.completion.valid := (state === complete || finalFullStore && io.store.ready) && !io.flush
     io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
     io.completion.bits.robIdx := instruction.scalar.robIdx
 
@@ -217,6 +235,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val streamReturned = state === streamLoad && io.response.valid
     val streamRetried = streamReturned && io.response.bits.retry
     when(io.flush) {
+        fullStore := false.B
         streamCredits := 0.U
         streamHigh := false.B
     }.otherwise {
@@ -231,20 +250,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             nextState := Mux(io.cachePending, streamDrain, idle)
         }.otherwise { nextState := idle }
     }.otherwise {
-        when(legacyIn.fire) {
-            instruction := legacyIn.bits
-            val firstSource = Mux(legacyIn.bits.vector.groups.mask,
-                legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
-            sourceReadAddress := firstSource
-            sourceReadSelection := UIntToOH(firstSource, 64)
-            oldReadAddress := legacyIn.bits.vector.source(2)(0)
-            oldReadSelection := UIntToOH(legacyIn.bits.vector.source(2)(0), 64)
-            nextState := operands
-            group := 0.U
-            groupOH := 1.U
-            discard := false.B
-            cachedValid := false.B
-        }
         switch(state) {
             is(operands) {
                 when(io.readAvailable) {
@@ -265,6 +270,15 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     sourceReadAddress := metadata.source(0)(0)
                     sourceReadSelection := UIntToOH(metadata.source(0)(0), 64)
                     nextState := Mux(strided, strideOperand, collect)
+                    when(fullWordStore(instruction) && io.scalarData(4, 0) === 0.U) {
+                        data := io.read(0).data.asUInt
+                        byteMask := Fill(32, 1.U(1.W))
+                        address := io.scalarData
+                        second := false.B
+                        position := 0.U
+                        fullStore := true.B
+                        nextState := writeback
+                    }
                 }
             }
             is(strideOperand) { when(io.readAvailable) {
@@ -368,7 +382,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     sourceReadSelection := UIntToOH(metadata.source(0)(following), 64)
                     oldReadAddress := metadata.source(2)(following)
                     oldReadSelection := UIntToOH(metadata.source(2)(following), 64)
-                    nextState := Mux(last, complete, collect)
+                    nextState := Mux(last,
+                        Mux(fullStore && io.completion.ready, idle, complete), collect)
                 }
             }
             is(complete) { when(io.completion.fire) { nextState := idle } }
@@ -419,6 +434,24 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     !streamRequestValid && !streamOutstanding.orR && streamCredits === 0.U) { nextState := complete }
             }
             is(streamDrain) { when(!io.cachePending) { nextState := idle } }
+        }
+        // New admission wins over the outgoing Store's group/state updates.
+        // The old SQ payload and ROB tag remain combinationally unchanged at
+        // this edge, while the next instruction starts operand collection.
+        when(legacyIn.fire) {
+            instruction := legacyIn.bits
+            val firstSource = Mux(legacyIn.bits.vector.groups.mask,
+                legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
+            sourceReadAddress := firstSource
+            sourceReadSelection := UIntToOH(firstSource, 64)
+            oldReadAddress := legacyIn.bits.vector.source(2)(0)
+            oldReadSelection := UIntToOH(legacyIn.bits.vector.source(2)(0), 64)
+            nextState := operands
+            group := 0.U
+            groupOH := 1.U
+            discard := false.B
+            cachedValid := false.B
+            fullStore := false.B
         }
     }
     // Even a flush-cycle response releases the old owner. Do not leave a

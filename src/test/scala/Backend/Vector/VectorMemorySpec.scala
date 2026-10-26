@@ -106,6 +106,8 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             var writes = 0
             var requestCycles = Vector.empty[Int]
             var writeCycles = Vector.empty[Int]
+            var completed = Vector.empty[(Int, Int)]
+            var storeGroups = Vector.empty[(Int, Int, Int, BigInt, BigInt, BigInt, Boolean)]
             def tick(): Unit = {
                 assert(!dut.io.scalarForwardQuery.peek().litToBoolean,
                     "wide loads must not enter the scalar SQ/SB forwarding network")
@@ -127,11 +129,16 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
                 }
                 if (dut.io.store.valid.peek().litToBoolean && dut.io.store.ready.peek().litToBoolean) {
                     val b = dut.io.store.bits
+                    storeGroups :+= ((cycle, b.robIdx.peek().litValue.toInt, b.index.peek().litValue.toInt,
+                        b.address.peek().litValue, b.data.peek().litValue, b.mask.peek().litValue,
+                        b.last.peek().litToBoolean))
                     if (b.addressOnly.peek().litToBoolean)
                         scatterAddresses += (b.index.peek().litValue.toInt, b.element.peek().litValue.toInt) -> b.address.peek().litValue
                     else stores :+= ((b.index.peek().litValue.toInt, b.address.peek().litValue,
                         b.data.peek().litValue, b.mask.peek().litValue, b.last.peek().litToBoolean))
                 }
+                if (dut.io.completion.valid.peek().litToBoolean && dut.io.completion.ready.peek().litToBoolean)
+                    completed :+= ((cycle, dut.io.completion.bits.robIdx.peek().litValue.toInt))
                 dut.clock.step(); cycle += 1
             }
             def waitUntil(condition: => Boolean, maximum: Int = 3000): Unit = {
@@ -504,6 +511,70 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             waitUntil(dut.io.idle.peek().litToBoolean)
             assert(writes == beforeShortWrites)
             dut.io.completion.valid.expect(false)
+            begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
+            // Complete contiguous Stores reuse the existing payload register.
+            // Consecutive instructions may hand it over on the same edge as
+            // the older instruction's last SQ group and ROB completion.
+            for (count <- Seq(1, 2, 4, 8)) {
+                val groupStart = storeGroups.size
+                val completionStart = completed.size
+                for (task <- 0 until 3) {
+                    begin(2, count, 0x800a0000L + task * 0x1000L, count * 8, 0, false, 0,
+                        store = true, rob = 20 + task)
+                    // Capture the base before changing this shared harness
+                    // input for the next instruction's admission.
+                    tick()
+                }
+                waitUntil(dut.io.idle.peek().litToBoolean)
+                val collected = storeGroups.drop(groupStart)
+                assert(collected.size == 3 * count)
+                assert(completed.drop(completionStart).map(_._2) == Vector(20, 21, 22))
+                for (task <- 0 until 3; group <- 0 until count) {
+                    val entry = collected(task * count + group)
+                    assert(entry._2 == 20 + task && entry._3 == group)
+                    assert(entry._4 == BigInt(0x800a0000L + task * 0x1000L + group * 32))
+                    assert(entry._6 == BigInt("ffffffff", 16))
+                    assert(entry._7 == (group == count - 1))
+                    dut.io.address.poke(32 + group)
+                    for (lane <- 0 until 8)
+                        assert(((entry._5 >> (lane * 32)) & 0xffffffffL) == dut.io.data(lane).peek().litValue)
+                }
+                assert(collected.sliding(2).forall(pair => pair.size < 2 || pair(1)._1 - pair(0)._1 == 2),
+                    s"Full Stores must sustain one group every two cycles: ${collected.map(_._1)}")
+            }
+            // SQ backpressure keeps the payload stable and cannot retire the
+            // instruction before its final group has been accepted.
+            dut.io.store.ready.poke(false)
+            begin(2, 1, 0x800b0020L, 8, 0, false, 0, store = true, rob = 23)
+            waitUntil(dut.io.store.valid.peek().litToBoolean)
+            val heldStore = dut.io.store.bits.peek().litValue
+            val beforeHeldGroups = storeGroups.size
+            for (_ <- 0 until 5) {
+                assert(dut.io.store.bits.peek().litValue == heldStore)
+                dut.io.completion.valid.expect(false)
+                tick()
+            }
+            dut.io.completion.ready.poke(false)
+            dut.io.store.ready.poke(true)
+            tick()
+            dut.io.store.valid.expect(false)
+            dut.io.completion.valid.expect(true)
+            dut.io.completion.bits.robIdx.expect(23)
+            tick(); tick()
+            assert(storeGroups.size == beforeHeldGroups + 1)
+            dut.io.completion.ready.poke(true); tick()
+            dut.io.idle.expect(true)
+            // Recovery after base/data collection discards the pending Store
+            // and its completion without leaking a write into the next task.
+            dut.io.store.ready.poke(false)
+            begin(2, 1, 0x800b1000L, 8, 0, false, 0, store = true, rob = 24)
+            waitUntil(dut.io.store.valid.peek().litToBoolean)
+            val beforeCanceledGroups = storeGroups.size
+            dut.io.flush.poke(true); tick(); dut.io.flush.poke(false)
+            dut.io.store.ready.poke(true)
+            dut.io.idle.expect(true)
+            dut.io.completion.valid.expect(false)
+            assert(storeGroups.size == beforeCanceledGroups)
             begin(2, 1, 0x80000400L, 8, 0, false, 3); finish()
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }
