@@ -57,6 +57,50 @@ class VectorComputeHarness extends Module {
 }
 
 class VectorComputeSpec extends AnyFreeSpec with ChiselSim {
+    "consecutive scalar vector operations capture their own asynchronous PRF value" in {
+        simulate(new VectorComputeHarness) { dut =>
+            VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)
+            dut.io.in.valid.poke(false); dut.io.address.poke(0); dut.io.scalarData.poke(0)
+            dut.io.registerReady.poke((BigInt(1) << 64) - 1)
+            dut.io.roundingMode.poke(0); dut.io.flush.poke(false); dut.io.completion.ready.poke(true)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            dut.io.initialize.valid.poke(true); dut.io.initialize.address.poke(4)
+            for (lane <- 0 until 8) {
+                dut.io.initialize.data(lane).poke(1); dut.io.initialize.bytes(lane).poke(15)
+            }
+            dut.clock.step(); dut.io.initialize.valid.poke(false)
+            var writes = 0
+            def step(): Unit = {
+                if (dut.io.writeback.valid.peek().litToBoolean) {
+                    val index = dut.io.writeback.bits.address.peek().litValue.toInt - 40
+                    assert(index >= 0 && index < 8)
+                    for (lane <- 0 until 8) dut.io.writeback.bits.data(lane).expect(101 + index)
+                    writes += 1
+                }
+                dut.clock.step()
+            }
+            for (index <- 0 until 8) {
+                val in = dut.io.in.bits
+                VectorTestUtils.clear(in)
+                in.scalar.inst.poke(BigInt("02404557",16))
+                in.scalar.prs(0).poke(5 + index); in.scalar.robIdx.poke(index)
+                in.vector.control.execution.poke(VectorExecution.ALU)
+                in.vector.control.operation.poke(EXEOp.ADD)
+                in.vector.control.scalar.poke(true); in.vector.control.writesVector.poke(true)
+                in.vector.groups.sourceCount(0).poke(1); in.vector.source(0)(0).poke(4)
+                in.vector.destination.count.poke(1); in.vector.destination.physical(0).poke(40 + index)
+                in.vector.state.vtype.poke(0xd0); in.vector.state.vl.poke(8)
+                dut.io.scalarData.poke(100 + index); dut.io.in.valid.poke(true)
+                dut.io.scalarAddress.expect(5 + index)
+                dut.io.in.ready.expect(true)
+                step()
+            }
+            dut.io.in.valid.poke(false)
+            for (_ <- 0 until 20) step()
+            assert(writes == 8)
+        }
+    }
+
     "redundant immediate configurations retire without publishing a stale decode state" in {
         simulate(new VectorComputeHarness) { dut =>
             VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)
