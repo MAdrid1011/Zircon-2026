@@ -287,7 +287,9 @@ class Backend(
         val scalarWakeAvailable = vectorScalarWake.get === 0.U || ls1.io.wk.wakeWB.prd === 0.U
         val scalarPortAvailable = !compute.io.completion.bits.scalar.valid ||
             (!ls1.io.rf.wr.valid && scalarWakeAvailable)
-        val completion = Module(new Arbiter(new VectorCompletion(p), 3))
+        // Rotate completion grants so an accepted memory operation can release
+        // its ROB identity while arithmetic completions continue to arrive.
+        val completion = Module(new RRArbiter(new VectorCompletion(p), 3))
         completion.io.in(0).valid := compute.io.completion.valid && scalarPortAvailable
         completion.io.in(0).bits := compute.io.completion.bits
         compute.io.completion.ready := completion.io.in(0).ready && scalarPortAvailable
