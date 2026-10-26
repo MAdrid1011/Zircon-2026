@@ -515,12 +515,13 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             // Complete contiguous Stores reuse the existing payload register.
             // Consecutive instructions may hand it over on the same edge as
             // the older instruction's last SQ group and ROB completion.
-            for (count <- Seq(1, 2, 4, 8)) {
+            for (whole <- Seq(false,true); count <- Seq(1, 2, 4, 8)) {
                 val groupStart = storeGroups.size
                 val completionStart = completed.size
                 for (task <- 0 until 3) {
-                    begin(2, count, 0x800a0000L + task * 0x1000L, count * 8, 0, false, 0,
-                        store = true, rob = 20 + task)
+                    begin(if(whole)0 else 2, count, 0x800a0000L + task * 0x1000L,
+                        if(whole)1 else count*8, 0, false, 0,
+                        store = true, lumop = if(whole)8 else 0, rob = 20 + task)
                     // Capture the base before changing this shared harness
                     // input for the next instruction's admission.
                     tick()

@@ -64,7 +64,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             task.vector.state.vtype(5, 3) === 2.U &&
             task.vector.state.vl === (task.vector.groups.sourceCount(0).pad(32) << 3)
         task.vector.control.execution === VectorExecution.Store.U &&
-            task.scalar.inst(14, 12) === 6.U && (whole || words) &&
+            (whole || task.scalar.inst(14, 12) === 6.U && words) &&
             !task.vector.groups.mask && task.vector.state.vstart === 0.U
     }
     // Full, aligned register groups need no old-destination collection. The
