@@ -49,8 +49,8 @@ class BackendIO(
   * Six fixed-slot issue queues, five execution pipes, shared PRFs, bypass and DCache.
   *
   * The ROB, SQ, SB and ReadyBoard remain outside this module. Load retry is closed
-  * locally: the corresponding IQ entry stays at its original age and is re-armed
-  * directly instead of being appended to the dispatch tail.
+  * locally: the corresponding IQ entry retains its age and is re-armed
+  * at that position for the next eligible issue.
   */
 class Backend(
     val p: BackendParams = BackendParams(),

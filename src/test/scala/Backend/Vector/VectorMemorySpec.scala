@@ -618,9 +618,9 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             waitUntil(dut.io.idle.peek().litToBoolean)
             assert(completed.last._2 == 28)
 
-            // An unaligned fast candidate must release a held Store before
-            // falling back to the legacy element collector. It cannot wait
-            // for its own fallback while blocking that Store's completion.
+            // An unaligned fast candidate releases the held Store before
+            // issuing through the element collector. Store completion then
+            // makes the required ordering and collection resources available.
             dut.io.store.ready.poke(false)
             begin(2, 1, 0x80110000L, 8, 0, false, 0, store = true, rob = 30); tick()
             waitUntil(dut.io.store.valid.peek().litToBoolean)
@@ -630,7 +630,7 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             assert(completed.takeRight(2).map(_._2) == Vector(30,31))
             // The outgoing SQ payload keeps its identity while the ordinary
             // instruction register reads the next word's scalar/vector sources.
-            // Different source registers expose overwrite or tag-handoff bugs.
+            // Distinct source registers check payload identity across the handoff.
             for(index <- 0 until 4) {
                 dut.io.initialize.valid.poke(true); dut.io.initialize.address.poke(32+index)
                 for(lane <- 0 until 8) {

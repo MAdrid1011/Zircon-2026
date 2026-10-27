@@ -568,7 +568,7 @@ class LoadPipeline(
             "Registered Load WB wakeup must match the response context")
     }
     // The speculative RF wake predicts a fixed response cycle. A miss or retry kills
-    // dependent consumers through the same token instead of extending this timing path.
+    // dependent consumers through the same token, preserving the RF wake timing.
     io.bypass.nextWb.valid := expectedValid(1) && !io.cmt.flush
     io.bypass.nextWb.bits := expectedPrd(1)
     // Load data does not exist in the nextWb announcement cycle.

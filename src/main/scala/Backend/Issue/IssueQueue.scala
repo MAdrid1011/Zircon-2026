@@ -81,7 +81,7 @@ class IssueQueueIO(p: BackendParams, q: IssueQueueParams, directWakeupCandidates
     val flush = Input(Bool())
     val freeCount = Output(UInt(log2Ceil(q.entries + 1).W))
     // Bit n means that at least n + 1 entries can be accepted. Dispatch uses
-    // this registered threshold view instead of decoding the binary count.
+    // this registered threshold view for dispatch admission.
     val freePrefix = Output(UInt(q.enqueueWidth.W))
     val occupancy = Output(UInt(log2Ceil(q.entries + 1).W))
     val replayOccupancy = Output(UInt(log2Ceil(math.max(q.replayEntries, 1) + 1).W))
@@ -142,7 +142,7 @@ class IssueQueue(
     val valid = RegInit(0.U(q.entries.W))
     // For each physical slot, record the live slots older than it. This carries
     // the same total order as an age-ordered slot list, but issue selection can
-    // test every physical candidate in parallel instead of selecting an age rank
+    // evaluate every physical candidate in parallel using its age relations
     // and then muxing that rank back into a physical slot.
     val olderSlots = RegInit(VecInit.fill(q.entries)(0.U(q.entries.W)))
     private val replayDepth = math.max(q.replayEntries, 1)

@@ -116,7 +116,7 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
     val destinationMask = Mux(destinationWidth === 0.U, 255.U(32.W),
         Mux(destinationWidth === 1.U, 65535.U(32.W), "hffffffff".U))
     val enabled = !metadata.groups.mask || mask(element(7, 0))
-    // Merge and carry consume v0 as data, rather than using it as a predicate.
+    // Merge and carry consume v0 through their data operand path.
     val maskIsData = op === VectorSerialOperation.Merge.U || op === VectorSerialOperation.Carry.U ||
         op === VectorSerialOperation.MaskCarry.U
     val body = element >= state.vstart && element < state.vl
@@ -425,7 +425,7 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
                     val indexOperand = Mux(control.immediate, inst(19, 15).pad(32),
                         Mux(control.scalar, scalar, Mux(gather16, indices16(i).pad(32), io.read(1).data(i))))
                     // Retain the carry on down-slides: a large unsigned XLEN
-                    // offset must yield zero, rather than wrap into lane zero.
+                    // offset selects a zero-valued source lane.
                     val distance = Mux(slideOne, 1.U(32.W), offset)
                     val index = Mux(gather, indexOperand.pad(33),
                         Mux(slideUp, position.pad(33) - distance.pad(33),

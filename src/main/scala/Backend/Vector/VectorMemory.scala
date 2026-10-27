@@ -58,11 +58,11 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // the scalar base. Reuse the ordinary SQ payload register; ordering and
     // outward memory writes remain the responsibility of the existing SQ.
     val fullStore = RegInit(false.B)
-    // Full two-register Stores reuse an otherwise idle RF read and the old
+    // Full two-register Stores reuse an available RF read and the
     // crossing-load register. Both groups are ready before memory IQ issue.
     val pairStore = RegInit(false.B)
     // One complete word can wait at SQ while the instruction register collects
-    // its successor. Data, address and byte enables reuse the legacy payload;
+    // its successor. Data, address and byte enables share the SQ payload;
     // only the outgoing instruction identity needs an independent register.
     val wordValid = RegInit(false.B)
     val wordSent = RegInit(false.B)
@@ -617,7 +617,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // The Store collector owns vector RF reads, while the fast Load engine
     // owns response slots and its independent address metadata. They can run
     // together after the scalar base has been captured, without a second
-    // payload buffer or RF port. Unsupported Loads retain the legacy fence.
+    // payload buffer or RF port. Other Loads use the element-ordering fence.
     val incomingStore = incoming.control.execution === VectorExecution.Store.U
     val directLegacy = (!fastOwned || incomingStore && !fastScalarPending &&
         !fallbackRequest && !fastFallbackStarted) && !fastDrain && !incomingFast
