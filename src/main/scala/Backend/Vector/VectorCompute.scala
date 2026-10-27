@@ -41,7 +41,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         val readAvailable = Input(Bool())
         val readRequest = Output(Bool())
         val idle = Output(Bool())
-        val activity = Output(UInt(6.W))
+        val activity = Output(UInt(7.W))
         val serialMultiply = if (shareSerialMultiply) Some(new MultiplyIO(1)) else None
         val serialActive = if (shareSerialMultiply) Some(Input(Bool())) else None
     })
@@ -131,7 +131,8 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         io.in.valid && (!busy || collect && last) && inputScalar && !io.scalarAvailable,
         busy,
         arithmetic.io.in.fire && collector.fma,
-        io.in.fire)).asUInt
+        io.in.fire,
+        arithmetic.io.in.fire)).asUInt
     val incoming = WireDefault(0.U.asTypeOf(new VectorComputeTask(p)))
     incoming.address := Mux1H(groupOH, instruction.vector.destination.physical)
     incoming.firstSubelement := subelement === 0.U

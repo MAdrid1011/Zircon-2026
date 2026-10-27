@@ -36,6 +36,10 @@ class BackendIO(
     val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new BackendPerformanceCounters)) else None
     val debug = if (observe) Some(Output(new BackendDebugIO)) else None
+    // Physical resource service events, independent of algorithm and VL.
+    // Pipelined resources count accepted service slots; nonpipelined divide
+    // and vector-serial resources count occupied cycles of their sole server.
+    val throughput = if (observe) Some(Output(UInt(11.W))) else None
     val vector = if (vectorEnabled) Some(new VectorBackendIO(p)) else None
     val vectorObservation = if (vectorEnabled && observe) Some(Output(Vec(64, UInt(256.W)))) else None
     val vectorPerformance = if (vectorEnabled && observe) Some(Output(Vec(8,UInt(64.W)))) else None
@@ -164,6 +168,16 @@ class Backend(
     val vectorCompute = if (vectorEnabled) Some(Module(new VectorCompute(p, shareSerialMultiply = true))) else None
     val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams))) else None
     val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p, externalMultiply = true))) else None
+    io.throughput.foreach { events =>
+        val vectorEvents = vectorCompute.map { compute =>
+            val memory=vectorMemory.get
+            VecInit(Seq(compute.io.activity(6),memory.io.writeback.valid,
+                memory.io.store.fire && !memory.io.store.bits.addressOnly,
+                vectorSerial.get.io.executionActive)).asUInt
+        }.getOrElse(0.U(4.W))
+        events := Cat(vectorEvents(3),mixArith.io.divideBusy,vectorEvents(2,0),
+            VecInit(queues.map(_.io.issue.fire)).asUInt)
+    }
     vectorCompute.foreach { compute =>
         val port = io.vector.get
         val iq = Module(new IssueQueue(p, IssueQueueParams(vectorParams.computeEntries, IssueQueueProfile.Vector,
@@ -275,7 +289,7 @@ class Backend(
         file.io.write(1).bytes := memory.io.writeback.bits.bytes
         io.vectorPerformance.foreach { counters =>
             val events = Cat(!compute.io.activity(3) && !iq.io.issue.valid,
-                !memory.io.idle,compute.io.activity)
+                !memory.io.idle,compute.io.activity(5,0))
             for (event <- 0 until 8) {
                 val count = RegInit(0.U(64.W))
                 when(events(event)) { count := count+1.U }

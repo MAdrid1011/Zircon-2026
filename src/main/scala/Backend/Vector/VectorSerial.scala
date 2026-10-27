@@ -20,6 +20,7 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
         val completion = Decoupled(new VectorCompletion(p))
         val flush = Input(Bool())
         val idle = Output(Bool())
+        val executionActive = Output(Bool())
         val multiply = if (externalMultiply) Some(Flipped(new MultiplyIO(1))) else None
     })
     val idle :: prepareRead :: operands :: initialize :: readElement :: gatherElement :: evaluate :: finishArithmetic :: issue :: awaitResult :: update :: writeback :: complete :: Nil = Enum(13)
@@ -133,6 +134,8 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
             state.vstart === 0.U && state.vl.orR && element =/= 0.U && state.vtype(6), ordinaryFill))
 
     io.idle := phase === idle
+    // Exclude RF collection and stalled completion from execution throughput.
+    io.executionActive := phase === issue || phase === awaitResult
     io.in.ready := io.idle && !io.flush
     io.readRequest := RegNext(nextPhase === operands || nextPhase === initialize ||
         nextPhase === readElement || nextPhase === gatherElement, false.B)
