@@ -427,14 +427,22 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
                     // Retain the carry on down-slides: a large unsigned XLEN
                     // offset selects a zero-valued source lane.
                     val distance = Mux(slideOne, 1.U(32.W), offset)
-                    val index = Mux(gather, indexOperand.pad(33),
-                        Mux(slideUp, position.pad(33) - distance.pad(33),
-                            position.pad(33) + distance.pad(33)))
-                    val sourceFits = index < vlmax
+                    // Slide indices depend only on already collected scalar
+                    // control. Decode the late gather operand independently.
+                    val slideIndex = Mux(slideUp,
+                        position.pad(33) - distance.pad(33),
+                        position.pad(33) + distance.pad(33))
+                    def fits(index: UInt): Bool = vlmax.orR &&
+                        !index(index.getWidth - 1, 9).orR &&
+                        !(index(8, 0) & ~gatherAllowedBits).orR
+                    val gatherSelect = UIntToOH(indexOperand(2, 0), 8) &
+                        Fill(8, gather && fits(indexOperand))
+                    val slideSelect = UIntToOH(slideIndex(2, 0), 8) &
+                        Fill(8, !gather && fits(slideIndex))
+                    val selected = Mux1H(gatherSelect | slideSelect, io.read(0).data)
                     val inserted = slideOne && !gather &&
                         Mux(slideUp, position === 0.U, position + 1.U === state.vl)
-                    val permutation = Mux(inserted, scalar,
-                        Mux(sourceFits, io.read(0).data(index(2, 0)), 0.U))
+                    val permutation = Mux(inserted, scalar, selected)
                     val mergeOperand = Mux(control.scalar, scalar,
                         Mux(control.immediate, immediate, io.read(1).data(i)))
                     val value = Mux(permute, permutation,

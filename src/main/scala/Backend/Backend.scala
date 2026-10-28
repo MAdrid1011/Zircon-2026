@@ -675,11 +675,13 @@ class Backend(
     io.commit.store.response <> sharedStore.io.committedResponse
     if (scratchpadEnabled) {
         val native = scratchpad.get.io
-        val select = sharedStore.io.cacheRequest.bits.wide &&
-            PeScratchpadBridge.matches(sharedStore.io.cacheRequest.bits.paddr)
+        val select = io.commit.nativeStoreSelected
+        assert(select === (sharedStore.io.cacheRequest.bits.wide &&
+            PeScratchpadBridge.matches(sharedStore.io.cacheRequest.bits.paddr)))
         native.store.req.valid := sharedStore.io.cacheRequest.valid && select
         native.store.req.bits := sharedStore.io.cacheRequest.bits
-        dcache.io.store.req.valid := sharedStore.io.cacheRequest.valid && !select
+        dcache.io.store.req.valid := io.commit.cachedStoreValid
+        assert(io.commit.cachedStoreValid === (sharedStore.io.cacheRequest.valid && !select))
         dcache.io.store.req.bits := sharedStore.io.cacheRequest.bits
         sharedStore.io.cacheRequest.ready := Mux(select,native.store.req.ready,dcache.io.store.req.ready)
         assert(!(native.store.rsp.valid && dcache.io.store.rsp.valid))

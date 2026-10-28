@@ -21,6 +21,8 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         val empty = Output(Bool())
         val active = Output(Bool())
         val cachePayloadSelected = Output(Bool())
+        val preparedRequestValid = Output(Bool())
+        val cachePayloadNative = Output(Bool())
         val loadLine = Input(UInt(26.W))
         val loadTail = Input(UInt(p.sqWidth.W))
         val loadClear = Output(Bool())
@@ -33,7 +35,11 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val nextLineAddress = Reg(Vec(8, UInt(26.W)))
     val adjacentPair = RegInit(VecInit.fill(8)(false.B))
     val contiguousMasks = Reg(Vec(8, UInt(128.W)))
-    val elementAddresses = Mem(256, UInt(32.W))
+    // Debug keeps the compact observable array; hardware prefetches through
+    // a replaceable SRAM leaf before the existing readElementAddress capture.
+    val elementAddresses = if (observe) Some(Mem(256, UInt(32.W))) else None
+    val elementAddressRam = if (!observe) Some(Module(new ZirconSram1W1R(256, 32))) else None
+    val elementAddressWrite = WireDefault(false.B)
     val scattered = Reg(Bool())
     val eew = Reg(UInt(2.W))
     val fieldRegisterShift = Reg(UInt(2.W))
@@ -143,7 +149,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         trace.lastField := lastField
         for (group <- 0 until 8) {
             trace.elementAddresses(group) := VecInit((0 until 32).map(index =>
-                elementAddresses(group * 32 + index))).asUInt
+                elementAddresses.get(group * 32 + index))).asUInt
         }
     }
     io.cache.response.ready := state === response
@@ -221,7 +227,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             assert(!committed)
         }
         when(io.collect.bits.addressOnly) {
-            elementAddresses(Cat(io.collect.bits.index, io.collect.bits.element)) := io.collect.bits.address
+            elementAddresses.foreach(memory =>
+                memory(Cat(io.collect.bits.index, io.collect.bits.element)) := io.collect.bits.address)
+            elementAddressWrite := true.B
             nextCollect := io.collect.bits.index
         }.otherwise {
             payload(io.collect.bits.index) := io.collect.bits
@@ -258,14 +266,41 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         second := false.B
         state := Mux(scattered, readElementAddress, prepare)
     }
-    when(state === readElementAddress) {
-        val selectedAddress = elementAddresses(Cat(group, position))
-        elementAddress := selectedAddress
-        // Prepare both line addresses at the existing element-read boundary.
-        // The second-fragment selector must not precede a cache-address adder.
-        nextElementLine := selectedAddress(31, 6) + 1.U
-        state := prepare
+    if (observe) {
+        when(state === readElementAddress) {
+            val selectedAddress = elementAddresses.get(Cat(group, position))
+            elementAddress := selectedAddress
+            nextElementLine := selectedAddress(31, 6) + 1.U
+        }
+    } else {
+        val ram = elementAddressRam.get.io
+        ram.clock := clock
+        ram.writeEnable := elementAddressWrite
+        ram.writeAddress := Cat(io.collect.bits.index, io.collect.bits.element)
+        ram.writeData := io.collect.bits.address
+        // The table has its own read port. Read the first element while idle
+        // after collection, and the successor while the current element drains.
+        // Only the original readElementAddress edge captures the result.
+        val lastPosition = position +& elementBytes === 32.U
+        val finalField = currentField === lastField
+        val nextGroup = Mux(!finalField, group + fieldStride,
+            Mux(lastPosition, withinField + 1.U, withinField))(2, 0)
+        val nextPosition = Mux(finalField,
+            Mux(lastPosition, 0.U, position + elementBytes), position)(4, 0)
+        ram.readEnable := valid && filled && scattered &&
+            (state === idle || state === prepare || state === response)
+        ram.readAddress := Mux(state === idle, 0.U(8.W), Cat(nextGroup, nextPosition))
+        when(state === readElementAddress) {
+            elementAddress := ram.readData
+            val line = ram.readData(31, 6)
+            nextElementLine := Cat((25 to 0 by -1).map { bit =>
+                if (bit == 0) !line(0) else line(bit) ^ line(bit - 1, 0).andR
+            })
+        }
+        // Address collection finishes before its token can begin draining.
+        assert(!(ram.readEnable && ram.writeEnable))
     }
+    when(state === readElementAddress) { state := prepare }
     io.cache.request.bits := 0.U.asTypeOf(new DStoreRequest)
     io.cache.request.bits.wide := true.B
     val contiguousLine = Mux(second, Mux1H(groupOH, nextLineAddress), item.address(31, 6))
@@ -290,6 +325,12 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val immediateStart = io.drain.start.fire &&
         PeScratchpadBridge.matches(startItem.address.pad(34)) && (immediateSingle || immediatePair)
     when(immediateStart) { io.cache.request.valid := true.B }
+    // Immediate handovers are native-only. Classify the ordinary payload before
+    // merging that late grant so it cannot select a DCache SRAM address.
+    io.preparedRequestValid := state === prepare && lineMask.orR
+    when(io.cache.request.valid && !io.preparedRequestValid) {
+        assert(PeScratchpadBridge.matches(io.cache.request.bits.paddr))
+    }
     // An immediate request exists only outside prepare. Select its payload
     // from the registered phase, keeping grant/retirement out of data muxes.
     when(state =/= prepare) {
@@ -299,6 +340,17 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         io.cache.request.bits.lineMask := Mux(immediatePair,Cat(startNext.mask,startItem.mask),
             Mux(startItem.address(5),Cat(startItem.mask,0.U(32.W)),Cat(0.U(32.W),startItem.mask)))
     }
+    // Native-window classification runs beside the successor-line address.
+    // Only the last line can leave a window, and its predecessor can enter it.
+    val elementWindow = elementAddress(31, 20)
+    val elementWindowCarry = second && elementAddress(19, 6).andR
+    val scatteredNative = (elementWindow === "hb00".U && !elementWindowCarry) ||
+        (elementWindow === "haff".U && elementWindowCarry)
+    val preparedNative = Mux(scattered, scatteredNative,
+        contiguousLine(25, 14) === "hb00".U)
+    io.cachePayloadNative := Mux(state === prepare, preparedNative,
+        PeScratchpadBridge.matches(startItem.address.pad(34)))
+    assert(io.cachePayloadNative === PeScratchpadBridge.matches(io.cache.request.bits.paddr))
     when(state === prepare && !lineMask.orR) { advance() }
     when(io.cache.request.fire) { state := response }
     when(io.cache.response.fire) {

@@ -13,6 +13,10 @@ class BackendCommitIO(bp: BackendParams, load: LoadPipelineParams) extends Bundl
     val ls0 = new LoadCompletionIO(load, withStore = false)
     val ls1 = new LoadCompletionIO(load, withStore = true)
     val store = Flipped(new StoreBufferCacheIO)
+    // Same-cycle cached subset of store.request.valid; the selected payload is
+    // shared. Native-only immediate vector grants are excluded at their source.
+    val cachedStoreValid = Input(Bool())
+    val nativeStoreSelected = Input(Bool())
     val atomic = new AtomicBackendIO(bp)
 }
 
@@ -243,6 +247,10 @@ class Commit(
         // SB owns selection and never launches a scalar request during a wide
         // drain. Wide cache responses remain local until the whole token ends.
         io.backend.store.request.valid := sb.io.store.request.valid || wide.io.cache.request.valid
+        io.backend.nativeStoreSelected := wide.io.cachePayloadSelected && wide.io.cachePayloadNative
+        io.backend.cachedStoreValid :=
+            (sb.io.store.request.valid || wide.io.preparedRequestValid) &&
+                !(wide.io.cachePayloadSelected && wide.io.cachePayloadNative)
         io.backend.store.request.bits := Mux(wide.io.cachePayloadSelected,
             wide.io.cache.request.bits, sb.io.store.request.bits)
         sb.io.store.request.ready := io.backend.store.request.ready
@@ -258,6 +266,8 @@ class Commit(
         when(sb.io.store.request.valid) { assert(!wideActive || wide.io.drain.done) }
     } else {
         io.backend.store <> sb.io.store
+        io.backend.cachedStoreValid := sb.io.store.request.valid
+        io.backend.nativeStoreSelected := false.B
     }
     /* Retirement stops at the first recovery event and delays its global redirect by one cycle. */
     val trainQueue = Module(new ClusterIndexFIFO(

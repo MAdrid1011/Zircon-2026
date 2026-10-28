@@ -146,3 +146,10 @@ Chisel 与 Verilator 仿真使用同周期的行为模型。Nangate45 纯逻辑�
 SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
 拆分到固定版本 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
 都是上升沿 clock-to-Q。Vivado 后端使用独立的 Verilog BRAM 模板。
+
+向量 Store 元素地址表使用独立的
+[ZirconSram1W1R](../src/main/scala/Utils/ZirconSram1W1R.scala) 叶模块，默认资源为
+[Xilinx 风格模板](../src/main/resources/memory/ZirconSram1W1R.sv)。它提供同钟的一个写口和一个
+同步读口：读使能在上升沿采样，停读时输出保持，数据无复位。同字读写的读结果未定义；
+当前调用端保证读写不重叠。工艺集成只替换该叶模块，保留端口、深宽与上述契约，
+无需让业务逻辑依赖工艺宏名。

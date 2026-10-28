@@ -209,8 +209,13 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.request.valid := state === request && io.ordering.clear && !io.flush
     io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
     io.request.bits.wide := true.B
-    io.request.bits.vaddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
-        Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
+    // The second fragment advances exactly one cache line. Form its carry
+    // prefixes in parallel, independently of the late fragment selector.
+    val requestLine = address(31, 6)
+    val successorLine = Cat((25 to 0 by -1).map { bit =>
+        if (bit == 0) !requestLine(0) else requestLine(bit) ^ requestLine(bit - 1, 0).andR
+    })
+    io.request.bits.vaddr := Cat(Mux(second, successorLine, requestLine), 0.U(6.W))
     io.request.bits.paddr := io.request.bits.vaddr
     io.requestNative := Mux(second, secondAddressNative, addressNative)
     io.request.bits.mtype := 2.U
@@ -706,17 +711,22 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val capturedReady = fastScalarCapture && capturedAligned
     val selectedContext = Mux(todoByAge.asUInt.orR,
         contextOrder(PriorityEncoder(todoByAge)),fastScalarOwner)
-    val selectedBase = Mux(capturedReady && selectedContext===fastScalarOwner,
-        io.scalarData,fastBase(selectedContext))
+    val selectedContextOH = UIntToOH(selectedContext, 4)
+    val prepareBases = (0 until 4).map(i =>
+        Mux(capturedReady && fastScalarOwner === i.U, io.scalarData, fastBase(i)))
+    val prepareRetryValid = prepareRetry.map(_.orR)
+    val prepareGroups = (0 until 4).map(i =>
+        Mux(prepareRetryValid(i), PriorityEncoder(prepareRetry(i)), prepareCursor(i)(2, 0)))
     val headReady = fastBaseReady(fastHead) && fastAligned(fastHead) ||
         capturedReady && fastScalarOwner===fastHead
     val canPrepare = fastMode && headReady &&
         (fastTodo.asUInt.orR || capturedReady) && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
-    val selectedRetry = prepareRetry(selectedContext).orR
-    val selectedGroup = Mux(selectedRetry, PriorityEncoder(prepareRetry(selectedContext)),
-        prepareCursor(selectedContext)(2, 0))
-    val selectedPair = !(selectedBase(5) ^ selectedGroup(0)) &&
-        selectedGroup +& 1.U < fastCount(selectedContext)
+    // Resolve each context's payload in parallel with oldest-ready selection.
+    val selectedRetry = Mux1H(selectedContextOH, prepareRetryValid)
+    val selectedGroup = Mux1H(selectedContextOH, prepareGroups)
+    val selectedPair = Mux1H(selectedContextOH, (0 until 4).map(i =>
+        !(prepareBases(i)(5) ^ prepareGroups(i)(0)) &&
+            prepareGroups(i) +& 1.U < fastCount(i)))
     val responseTicket = io.response.bits.slot(1, 0)
     val responseOH = UIntToOH(responseTicket, 4)
     val replyFast = fastMode && io.response.valid && !io.flush
@@ -740,8 +750,23 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         streamLines.io.enq.bits.ticket := responseTicket
         streamLines.io.deq.ready := finishFastLine
     }
-    val preparedAddress = Cat(BLevelPAdder32.sum(selectedBase,
-        Cat(selectedGroup, 0.U(5.W)).pad(32), 0.U(1.W))(31, 6), 0.U(6.W))
+    // A group adds at most seven 32-byte words. Compute the possible upper
+    // increment before its late carry; retain modulo-32-bit wrap and page carry.
+    val prepareLow = (0 until 4).map(i => prepareBases(i)(7, 5) +& prepareGroups(i))
+    val prepareAddresses = (0 until 4).map { i =>
+        val base = prepareBases(i)
+        val advanced = Cat((23 to 0 by -1).map { bit =>
+            if (bit == 0) !base(8) else base(bit + 8) ^ base(bit + 7, 8).andR
+        })
+        Cat(Mux(prepareLow(i)(3), advanced, base(31, 8)), prepareLow(i)(2, 1), 0.U(6.W))
+    }
+    val prepareNative = (0 until 4).map { i =>
+        val base = prepareBases(i)
+        val pageCarry = prepareLow(i)(3) && base(19, 8).andR
+        Mux(pageCarry, base(31, 20) === "haff".U, base(31, 20) === "hb00".U)
+    }
+    val preparedAddress = Mux1H(selectedContextOH, prepareAddresses)
+    val preparedNative = Mux1H(selectedContextOH, prepareNative)
     when(canPrepare) {
         fastHeld := true.B
         fastHeldContext := selectedContext
@@ -750,7 +775,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastHeldPair := selectedPair
         fastHeldRetry := selectedRetry
         fastHeldAddress := preparedAddress
-        fastHeldNative := PeScratchpadBridge.matches(preparedAddress.pad(34))
+        fastHeldNative := preparedNative
     }
     when(issueFast) {
         fastHeld := canPrepare
@@ -871,7 +896,14 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // Native SRAM has one physical address space. Its Load may pass complete
     // non-overlapping vector Stores; cached, scalar and unknown-address Stores
     // retain the conservative ordering path, including possible SRAM aliases.
-    io.ordering.native := PeScratchpadBridge.matches(io.request.bits.paddr)
+    // Routing was captured with the held request address. Reuse that identity
+    // for ordering instead of decoding the second-fragment increment again.
+    io.ordering.native := io.requestNative
+    val orderingRequestLive = !io.flush && Mux(fastMode, fastHeld,
+        state === request || state === streamLoad && streamRequestValid && streamCredits < 4.U)
+    when(orderingRequestLive) {
+        assert(io.requestNative === PeScratchpadBridge.matches(io.request.bits.paddr))
+    }
     io.ordering.line := io.request.bits.paddr(31, 6)
     when(io.request.valid) {
         assert(io.requestNative === PeScratchpadBridge.matches(io.request.bits.paddr),
