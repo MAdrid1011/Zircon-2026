@@ -6,7 +6,8 @@ import ZirconConfig.{BackendParams, DCacheParams, VectorParams}
   * Store collection finishes before ROB completion; ordered SQ drain owns every
   * outward write. A canceled Load keeps its accepted request until the response.
   */
-class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCacheParams = DCacheParams()) extends Module {
+class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCacheParams = DCacheParams(),
+    val compactSimulation: Boolean = false) extends Module {
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction(p)))
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
@@ -209,13 +210,18 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.request.valid := state === request && io.ordering.clear && !io.flush
     io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
     io.request.bits.wide := true.B
-    // The second fragment advances exactly one cache line. Form its carry
-    // prefixes in parallel, independently of the late fragment selector.
-    val requestLine = address(31, 6)
-    val successorLine = Cat((25 to 0 by -1).map { bit =>
-        if (bit == 0) !requestLine(0) else requestLine(bit) ^ requestLine(bit - 1, 0).andR
+    io.request.bits.vaddr := (if (compactSimulation) {
+        BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
+            Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
+    } else {
+        // The second fragment advances exactly one cache line. Form its carry
+        // prefixes in parallel, independently of the late fragment selector.
+        val requestLine = address(31, 6)
+        val successorLine = Cat((25 to 0 by -1).map { bit =>
+            if (bit == 0) !requestLine(0) else requestLine(bit) ^ requestLine(bit - 1, 0).andR
+        })
+        Cat(Mux(second, successorLine, requestLine), 0.U(6.W))
     })
-    io.request.bits.vaddr := Cat(Mux(second, successorLine, requestLine), 0.U(6.W))
     io.request.bits.paddr := io.request.bits.vaddr
     io.requestNative := Mux(second, secondAddressNative, addressNative)
     io.request.bits.mtype := 2.U
@@ -722,9 +728,16 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val canPrepare = fastMode && headReady &&
         (fastTodo.asUInt.orR || capturedReady) && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
     // Resolve each context's payload in parallel with oldest-ready selection.
-    val selectedRetry = Mux1H(selectedContextOH, prepareRetryValid)
-    val selectedGroup = Mux1H(selectedContextOH, prepareGroups)
-    val selectedPair = Mux1H(selectedContextOH, (0 until 4).map(i =>
+    val selectedRetry = if (compactSimulation) prepareRetry(selectedContext).orR
+        else Mux1H(selectedContextOH, prepareRetryValid)
+    val selectedGroup = if (compactSimulation)
+        Mux(selectedRetry, PriorityEncoder(prepareRetry(selectedContext)), prepareCursor(selectedContext)(2, 0))
+        else Mux1H(selectedContextOH, prepareGroups)
+    val selectedPair = if (compactSimulation) {
+        val base = Mux(capturedReady && selectedContext === fastScalarOwner,
+            io.scalarData, fastBase(selectedContext))
+        !(base(5) ^ selectedGroup(0)) && selectedGroup +& 1.U < fastCount(selectedContext)
+    } else Mux1H(selectedContextOH, (0 until 4).map(i =>
         !(prepareBases(i)(5) ^ prepareGroups(i)(0)) &&
             prepareGroups(i) +& 1.U < fastCount(i)))
     val responseTicket = io.response.bits.slot(1, 0)
@@ -765,8 +778,15 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         val pageCarry = prepareLow(i)(3) && base(19, 8).andR
         Mux(pageCarry, base(31, 20) === "haff".U, base(31, 20) === "hb00".U)
     }
-    val preparedAddress = Mux1H(selectedContextOH, prepareAddresses)
-    val preparedNative = Mux1H(selectedContextOH, prepareNative)
+    // Software simulation keeps one arithmetic cone; hardware resolves all
+    // contexts in parallel before the late selector. Both retain the same edge.
+    val preparedAddress = if (compactSimulation) {
+        val base = Mux(capturedReady && selectedContext === fastScalarOwner,
+            io.scalarData, fastBase(selectedContext))
+        Cat(BLevelPAdder32.sum(base, Cat(selectedGroup, 0.U(5.W)).pad(32), 0.U(1.W))(31, 6), 0.U(6.W))
+    } else Mux1H(selectedContextOH, prepareAddresses)
+    val preparedNative = if (compactSimulation) PeScratchpadBridge.matches(preparedAddress.pad(34))
+        else Mux1H(selectedContextOH, prepareNative)
     when(canPrepare) {
         fastHeld := true.B
         fastHeldContext := selectedContext

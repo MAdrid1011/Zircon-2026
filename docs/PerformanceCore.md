@@ -222,6 +222,11 @@ ZirconSim 按配置选择 Spike ISA，默认差分和动态进度显示。向量
 向量 CSR、浮点标志与存储结果。RTL、仿真、PGO 和软件输出按配置、VLEN、AXI 宽度及
 工具链版本隔离，避免系统核心与性能核心互用生成物。
 
+观测仿真使用紧凑的向量地址运算与索引选择，硬件生成保留并行地址候选与独热选择。
+`compactSimulation` 只选择等价的组合表达，不改变状态、请求边沿或执行拍数；Backend
+在启用观测时传入该选项。`VectorMemory`、`VectorSerial` 与 `VectorShuffle` 的同一组
+定向用例分别验证两种表达，仿真开销与应用周期另由整机回归比较。
+
 定向验证覆盖 VL、全部 LMUL 分组、重叠、mask/tail、跨行访问、存储顺序、反压、
 恢复与晚响应；浮点覆盖 NaN、无穷、subnormal、舍入和标志。
 RTL 单元测试位于 `src/test/scala/Backend/Vector`，裸机测试及生成器说明见

@@ -4,9 +4,9 @@ import org.scalatest.freespec.AnyFreeSpec
 import scala.util.Random
 
 /** Architectural lane oracle, independent of the iterative implementation. */
-class VectorShuffleSpec extends AnyFreeSpec with ChiselSim {
+abstract class VectorShuffleSpecBase(compactSimulation: Boolean) extends AnyFreeSpec with ChiselSim {
     "single-register SEW32 permutations preserve masks, tails, restart, stalls and flush" in {
-        simulate(new VectorSerialHarness) { dut =>
+        simulate(new VectorSerialHarness(compactSimulation)) { dut =>
             VectorTestUtils.clear(dut.io.in.bits)
             VectorTestUtils.clear(dut.io.initialize)
             dut.io.in.valid.poke(false)
@@ -190,3 +190,6 @@ class VectorMaskTailSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 }
+
+class VectorShuffleSpec extends VectorShuffleSpecBase(false)
+class VectorShuffleCompactSimulationSpec extends VectorShuffleSpecBase(true)

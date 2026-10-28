@@ -166,8 +166,8 @@ class Backend(
         }
     }
     val vectorCompute = if (vectorEnabled) Some(Module(new VectorCompute(p, shareSerialMultiply = true))) else None
-    val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams))) else None
-    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p, externalMultiply = true))) else None
+    val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams, compactSimulation = observe))) else None
+    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p, externalMultiply = true, compactSimulation = observe))) else None
     io.throughput.foreach { events =>
         val vectorEvents = vectorCompute.map { compute =>
             val memory=vectorMemory.get

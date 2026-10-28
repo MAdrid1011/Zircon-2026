@@ -4,7 +4,7 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig._
 
-class VectorMemoryHarness extends Module {
+class VectorMemoryHarness(compactSimulation: Boolean = false) extends Module {
     private val cache = DCacheParams(directPhysical = true)
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction))
@@ -27,7 +27,7 @@ class VectorMemoryHarness extends Module {
         val writeback = Output(Valid(new VectorTaskWriteback))
         val flush = Input(Bool())
     })
-    val memory = Module(new VectorMemory(cache = cache))
+    val memory = Module(new VectorMemory(cache = cache, compactSimulation = compactSimulation))
     val file = Module(new VectorRegisterFile)
     val dcache = Module(new DCache(p = cache))
     dcache.io.prefetch.foreach(_.foreach(_ := 0.U.asTypeOf(Valid(UInt(32.W)))))
@@ -74,9 +74,9 @@ class VectorMemoryHarness extends Module {
     io.data := observation.io.read(0).data
 }
 
-class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
+abstract class VectorMemorySpecBase(compactSimulation: Boolean) extends AnyFreeSpec with ChiselSim {
     "shared cache loads and Store collection handle EEW, LMUL, mask, crossings and cancellation" in {
-        simulate(new VectorMemoryHarness) { dut =>
+        simulate(new VectorMemoryHarness(compactSimulation)) { dut =>
             VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)
             VectorTestUtils.clear(dut.io.lower.rsp.bits)
             dut.io.in.valid.poke(false); dut.io.address.poke(0); dut.io.base.poke(0)
@@ -692,7 +692,7 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
         }
     }
     "native route metadata follows every line across window edges and address wrap" in {
-        simulate(new VectorMemory) { dut =>
+        simulate(new VectorMemory(compactSimulation = compactSimulation)) { dut =>
             VectorTestUtils.clear(dut.io.in.bits)
             VectorTestUtils.clear(dut.io.response.bits)
             dut.io.in.valid.poke(false); dut.io.response.valid.poke(false)
@@ -752,3 +752,6 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
     }
 
 }
+
+class VectorMemorySpec extends VectorMemorySpecBase(false)
+class VectorMemoryCompactSimulationSpec extends VectorMemorySpecBase(true)

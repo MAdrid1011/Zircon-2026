@@ -5,7 +5,7 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig._
 import scala.util.Random
 
-class VectorSerialHarness extends Module {
+class VectorSerialHarness(compactSimulation: Boolean = false) extends Module {
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction))
         val initialize = new VectorRegisterWrite(VectorParams())
@@ -19,7 +19,7 @@ class VectorSerialHarness extends Module {
         val legal = Output(Bool())
         val flush = Input(Bool())
     })
-    val serial = Module(new VectorSerial(externalMultiply = true))
+    val serial = Module(new VectorSerial(externalMultiply = true, compactSimulation = compactSimulation))
     val arithmetic = Module(new VectorArithmetic(shareSerialMultiply = true))
     arithmetic.io.serialMultiply.get <> serial.io.multiply.get
     arithmetic.io.serialActive.get := !serial.io.idle
@@ -61,9 +61,9 @@ class VectorSerialHarness extends Module {
     io.writes := serial.io.writeback.valid
 }
 
-class VectorSerialSpec extends AnyFreeSpec with ChiselSim {
+abstract class VectorSerialSpecBase(compactSimulation: Boolean) extends AnyFreeSpec with ChiselSim {
     "shared divide/conversion and packed masks preserve element semantics, hold and flush" in {
-        simulate(new VectorSerialHarness) { dut =>
+        simulate(new VectorSerialHarness(compactSimulation)) { dut =>
             VectorTestUtils.clear(dut.io.in.bits); VectorTestUtils.clear(dut.io.initialize)
             dut.io.in.valid.poke(false); dut.io.address.poke(0); dut.io.scalarData.poke(0)
             dut.io.roundingMode.poke(0); dut.io.readAvailable.poke(true)
@@ -533,3 +533,6 @@ class VectorSerialSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 }
+
+class VectorSerialSpec extends VectorSerialSpecBase(false)
+class VectorSerialCompactSimulationSpec extends VectorSerialSpecBase(true)
