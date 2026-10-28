@@ -6,6 +6,10 @@ import ZirconConfig.{CommitParams, DCacheParams}
 // The request carries the virtual address into S1; translated attributes are resolved before tag comparison.
 class DLoadRequest(val p: DCacheParams = DCacheParams()) extends Bundle {
     val wide = Bool()
+    // Optional half-line demand for wide reads: 0/3 permit the full line,
+    // 1 needs only its lower half, and 2 only its upper half. Caches may still
+    // return the full line; a narrow SRAM port can omit the unused beat.
+    val halfMask = UInt(2.W)
     val vaddr = UInt(32.W)
     val paddr = UInt(34.W)
     val slot = UInt(p.slotWidth.W)

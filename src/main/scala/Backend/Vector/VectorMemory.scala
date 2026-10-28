@@ -6,7 +6,8 @@ import ZirconConfig.{BackendParams, DCacheParams, VectorParams}
   * Store collection finishes before ROB completion; ordered SQ drain owns every
   * outward write. A canceled Load keeps its accepted request until the response.
   */
-class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCacheParams = DCacheParams()) extends Module {
+class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCacheParams = DCacheParams(),
+    val compactSimulation: Boolean = false) extends Module {
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction(p)))
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
@@ -16,6 +17,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         val readRequest = Output(Bool())
         val readAvailable = Input(Bool())
         val request = Decoupled(new DLoadRequest(cache))
+        val requestNative = Output(Bool())
         val response = Flipped(Valid(new DLoadResponse(cache)))
         val cachePending = Input(Bool())
         val ordering = new VectorLoadOrdering(p)
@@ -51,9 +53,42 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val data = Reg(UInt(256.W))
     val byteMask = Reg(UInt(32.W))
     val address = Reg(UInt(32.W))
+    val nextAddress = WireDefault(address)
+    address := nextAddress
+    // Decode both possible line pages alongside the address register. The
+    // second line crosses the native 1 MiB window only on this page carry.
+    val nextAddressNative = PeScratchpadBridge.matches(nextAddress.pad(34))
+    val addressNative = RegNext(nextAddressNative)
+    val secondAddressNative = RegNext(Mux(nextAddress(19, 6).andR,
+        nextAddress(31, 20) === "haff".U, nextAddressNative))
     val first = Reg(UInt(512.W))
     val second = RegInit(false.B)
     val discard = RegInit(false.B)
+    // A complete unit-stride Store can collect its first register alongside
+    // the scalar base. Reuse the ordinary SQ payload register; ordering and
+    // outward memory writes remain the responsibility of the existing SQ.
+    val fullStore = RegInit(false.B)
+    // Full two-register Stores reuse an available RF read and the
+    // crossing-load register. Both groups are ready before memory IQ issue.
+    val pairStore = RegInit(false.B)
+    // One complete word can wait at SQ while the instruction register collects
+    // its successor. Data, address and byte enables share the SQ payload;
+    // only the outgoing instruction identity needs an independent register.
+    val wordValid = RegInit(false.B)
+    val wordSent = RegInit(false.B)
+    val wordRob = Reg(UInt(p.robWidth.W))
+    val wordSq = Reg(UInt(p.sqWidth.W))
+    val wordEew = Reg(UInt(2.W))
+    val wordShift = Reg(UInt(2.W))
+    def fullWordStore(task: VectorInstruction): Bool = {
+        val whole = task.scalar.inst(27, 26) === 0.U && task.scalar.inst(24, 20) === 8.U
+        val words = task.scalar.inst(31, 26) === 0.U && task.scalar.inst(24, 20) === 0.U &&
+            task.vector.state.vtype(5, 3) === 2.U &&
+            task.vector.state.vl === (task.vector.groups.sourceCount(0).pad(32) << 3)
+        task.vector.control.execution === VectorExecution.Store.U &&
+            (whole || task.scalar.inst(14, 12) === 6.U && words) &&
+            !task.vector.groups.mask && task.vector.state.vstart === 0.U
+    }
     // Full, aligned register groups need no old-destination collection. The
     // original cache slot travels with each task through hits, misses and retries.
     // One architecture instruction retains ownership until every group returns.
@@ -73,7 +108,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val streamLines = Module(new Queue(new Bundle {
         val line = UInt(512.W)
         val group = UInt(3.W)
-        val context = Bool()
+        val context = UInt(2.W)
         val ticket = UInt(2.W)
     }, 4, flow = true, hasFlush = true))
     streamLines.io.flush.get := io.flush
@@ -82,7 +117,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     streamLines.io.enq.valid := state === streamLoad && io.response.valid && !io.response.bits.retry && !io.flush
     streamLines.io.enq.bits.line := io.response.bits.line
     streamLines.io.enq.bits.group := io.response.bits.slot(2, 0)
-    streamLines.io.enq.bits.context := false.B
+    streamLines.io.enq.bits.context := 0.U
     streamLines.io.enq.bits.ticket := 0.U
     streamLines.io.deq.ready := false.B
     val metadata = instruction.vector
@@ -126,9 +161,26 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val elementBytes = (1.U(3.W) << eew)(2, 0)
     val nextPosition = position +& elementBytes
     val lastElement = nextPosition === 32.U
-    legacyIn.ready := state === idle && !io.flush
+    val finalFullStore = state === writeback && fullStore && last
+    val wordOperand = state === operands && count===1.U && fullWordStore(instruction) && !io.scalarData(4,0).orR
+    val legacyCompletion = state === complete || finalFullStore && io.store.ready ||
+        wordValid && (wordSent || io.store.ready)
+    val legacyCompletionReady = WireDefault(io.completion.ready)
+    val legacyCompletionHeld = RegInit(false.B)
+    val wordDone = wordValid && (wordSent || io.store.ready) && legacyCompletionReady && !io.flush
+    val wordRoom = !wordValid || wordDone
+    val operandCapture = Wire(Bool())
+    val incomingWord = fullWordStore(legacyIn.bits) && legacyIn.bits.vector.groups.sourceCount(0)===1.U
+    legacyIn.ready := wordRoom && (state === idle ||
+        finalFullStore && io.store.ready && legacyCompletionReady ||
+        wordOperand && operandCapture && incomingWord) && !io.flush
     io.idle := state === idle
-    io.scalarReadRequest := RegNext(nextState === operands || nextState === strideOperand, false.B)
+    // A queued word owns the shared payload until SQ and ROB accept it. Do
+    // not keep the RF ports reserved while its successor waits for that slot:
+    // older arithmetic may need those ports before the queued Store retires.
+    val legacyScalarRequest = RegNext((nextState === operands || nextState === strideOperand) &&
+        wordRoom, false.B)
+    io.scalarReadRequest := legacyScalarRequest
     // Scalar base/stride reads do not occupy the vector RF. Complete unmasked
     // Loads also need neither mask nor old-destination data at collection.
     val operandVl = Mux(whole, ((count.pad(9) << 5) >> decodedEew)(8, 0),
@@ -140,10 +192,13 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // Resolve next-cycle RF ownership at the preceding edge. The full-group
     // predicate may depend on scalar data, but never enters the RF read mux.
     val nextReadRequest = nextState === operands &&
-        Mux(legacyIn.fire, legacyIn.bits.vector.groups.mask, metadata.groups.mask) ||
+        Mux(legacyIn.fire, legacyIn.bits.vector.groups.mask || fullWordStore(legacyIn.bits),
+            metadata.groups.mask || fullWordStore(instruction)) ||
         nextState === collect && Mux(state === operands, !operandFullGroupLoad, !fullGroupLoad) ||
         nextState === indexOperand
-    io.readRequest := RegNext(nextReadRequest && !io.flush, false.B)
+    io.readRequest := RegNext(nextReadRequest && wordRoom && !io.flush, false.B)
+    operandCapture := io.readAvailable && legacyScalarRequest && wordRoom &&
+        (!fullWordStore(instruction) || io.readRequest)
     io.scalarAddress := Mux(state === strideOperand, instruction.scalar.prs(1), instruction.scalar.prs(0))
     io.read(0).address := sourceReadAddress
     io.read(1).address := indexReadAddress
@@ -155,13 +210,25 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.request.valid := state === request && io.ordering.clear && !io.flush
     io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
     io.request.bits.wide := true.B
-    io.request.bits.vaddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
-        Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
+    io.request.bits.vaddr := (if (compactSimulation) {
+        BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
+            Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
+    } else {
+        // The second fragment advances exactly one cache line. Form its carry
+        // prefixes in parallel, independently of the late fragment selector.
+        val requestLine = address(31, 6)
+        val successorLine = Cat((25 to 0 by -1).map { bit =>
+            if (bit == 0) !requestLine(0) else requestLine(bit) ^ requestLine(bit - 1, 0).andR
+        })
+        Cat(Mux(second, successorLine, requestLine), 0.U(6.W))
+    })
     io.request.bits.paddr := io.request.bits.vaddr
+    io.requestNative := Mux(second, secondAddressNative, addressNative)
     io.request.bits.mtype := 2.U
     when(state === streamLoad) {
         io.request.valid := streamRequestValid && streamCredits < 4.U && io.ordering.clear && !io.flush
         io.request.bits.vaddr := Cat(streamRequestAddress(31, 6), 0.U(6.W))
+        io.requestNative := PeScratchpadBridge.matches(streamRequestAddress.pad(34))
         io.request.bits.paddr := io.request.bits.vaddr
         io.request.bits.slot := streamRequestGroup
     }
@@ -179,6 +246,19 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.store.bits.eew := eew
     io.store.bits.fieldRegisterShift := registerShift
     io.store.bits.lastField := Mux(whole, 0.U, instruction.scalar.inst(31, 29))
+    when(wordValid) {
+        io.store.valid := !wordSent && !io.flush
+        io.store.bits.sqIdx := wordSq
+        io.store.bits.robIdx := wordRob
+        io.store.bits.index := 0.U
+        io.store.bits.last := true.B
+        io.store.bits.scattered := false.B
+        io.store.bits.addressOnly := false.B
+        io.store.bits.element := 0.U
+        io.store.bits.eew := wordEew
+        io.store.bits.fieldRegisterShift := wordShift
+        io.store.bits.lastField := 0.U
+    }
     io.writeback.valid := state === writeback && !store && !io.flush
     io.writeback.bits.address := metadata.destination.physical(group)
     io.writeback.bits.data := data.asTypeOf(Vec(8, UInt(32.W)))
@@ -188,9 +268,13 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         io.writeback.valid := !io.flush
         io.writeback.bits := streamWrite
     }
-    io.completion.valid := state === complete && !io.flush
+    // Completion may accompany the last accepted SQ group. If ROB completion
+    // stalls, complete retains the tag without submitting the Store twice.
+    io.completion.valid := legacyCompletion && !io.flush
     io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
-    io.completion.bits.robIdx := instruction.scalar.robIdx
+    io.completion.bits.robIdx := Mux(wordValid,wordRob,instruction.scalar.robIdx)
+    when(wordValid && io.store.fire) { wordSent := true.B }
+    when(wordDone) { wordValid := false.B; wordSent := false.B }
 
     val old = io.read(2).data.asUInt
     val oldBytes = old.asTypeOf(Vec(32, UInt(8.W)))
@@ -217,6 +301,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val streamReturned = state === streamLoad && io.response.valid
     val streamRetried = streamReturned && io.response.bits.retry
     when(io.flush) {
+        wordValid := false.B
+        wordSent := false.B
+        fullStore := false.B
         streamCredits := 0.U
         streamHigh := false.B
     }.otherwise {
@@ -231,23 +318,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             nextState := Mux(io.cachePending, streamDrain, idle)
         }.otherwise { nextState := idle }
     }.otherwise {
-        when(legacyIn.fire) {
-            instruction := legacyIn.bits
-            val firstSource = Mux(legacyIn.bits.vector.groups.mask,
-                legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
-            sourceReadAddress := firstSource
-            sourceReadSelection := UIntToOH(firstSource, 64)
-            oldReadAddress := legacyIn.bits.vector.source(2)(0)
-            oldReadSelection := UIntToOH(legacyIn.bits.vector.source(2)(0), 64)
-            nextState := operands
-            group := 0.U
-            groupOH := 1.U
-            discard := false.B
-            cachedValid := false.B
-        }
         switch(state) {
             is(operands) {
-                when(io.readAvailable) {
+                when(operandCapture) {
                     indexWidth := decodedIndexWidth
                     indexed := instruction.scalar.inst(26)
                     elementAccess := strided || instruction.scalar.inst(26) ||
@@ -265,6 +338,30 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     sourceReadAddress := metadata.source(0)(0)
                     sourceReadSelection := UIntToOH(metadata.source(0)(0), 64)
                     nextState := Mux(strided, strideOperand, collect)
+                    when(wordOperand) {
+                        data := io.read(0).data.asUInt
+                        byteMask := Fill(32,1.U(1.W))
+                        nextAddress := io.scalarData
+                        wordValid := true.B
+                        wordSent := false.B
+                        wordRob := instruction.scalar.robIdx
+                        wordSq := instruction.scalar.sqIdx
+                        wordEew := decodedEew
+                        wordShift := Mux(exponent>0.S,exponent.asUInt(1,0),0.U)
+                        nextState := idle
+                    }.elsewhen(fullWordStore(instruction) && io.scalarData(4, 0) === 0.U) {
+                        data := io.read(0).data.asUInt
+                        byteMask := Fill(32, 1.U(1.W))
+                        nextAddress := io.scalarData
+                        second := false.B
+                        position := 0.U
+                        fullStore := true.B
+                        when(count===2.U) {
+                            first := io.read(2).data.asUInt
+                            pairStore := true.B
+                        }
+                        nextState := writeback
+                    }
                 }
             }
             is(strideOperand) { when(io.readAvailable) {
@@ -276,7 +373,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 when(io.readAvailable) {
                     data := initialized.asUInt
                     byteMask := activeBytes.asUInt
-                    address := base + Cat(group, 0.U(5.W))
+                    nextAddress := base + Cat(group, 0.U(5.W))
                     second := false.B
                     position := 0.U
                     // collect already precedes groupAddress for every element
@@ -313,7 +410,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 nextState := gather
             }
             is(gather) {
-                address := elementAddress
+                nextAddress := elementAddress
                 when(!store && !byteMask(position)) {
                     position := nextPosition(4, 0)
                     elementAddress := BLevelPAdder32.sum(elementAddress, step, 0.U)
@@ -336,7 +433,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 val fieldOffset = (field << eew).pad(32)
                 val sum = base ^ indexOffset ^ fieldOffset
                 val carry = (((base & indexOffset) | ((base ^ indexOffset) & fieldOffset)) << 1)(31, 0)
-                when(indexed) { address := BLevelPAdder32.sum(sum, carry, 0.U) }
+                when(indexed) { nextAddress := BLevelPAdder32.sum(sum, carry, 0.U) }
                 nextState := checkAddress
             }
             is(checkAddress) {
@@ -368,10 +465,16 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     sourceReadSelection := UIntToOH(metadata.source(0)(following), 64)
                     oldReadAddress := metadata.source(2)(following)
                     oldReadSelection := UIntToOH(metadata.source(2)(following), 64)
-                    nextState := Mux(last, complete, collect)
+                    nextState := Mux(last,
+                        Mux(fullStore && legacyCompletionReady, idle, complete), collect)
+                    when(pairStore && !last) {
+                        data := first(255,0)
+                        nextAddress := base+32.U
+                        nextState := writeback
+                    }
                 }
             }
-            is(complete) { when(io.completion.fire) { nextState := idle } }
+            is(complete) { when(legacyCompletionReady) { nextState := idle } }
             is(streamLoad) {
                 val issued = Mux(io.request.fire, UIntToOH(streamRequestGroup, 8), 0.U)
                 val returned = Mux(io.response.valid, UIntToOH(io.response.bits.slot(2, 0), 8), 0.U)
@@ -420,6 +523,27 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             }
             is(streamDrain) { when(!io.cachePending) { nextState := idle } }
         }
+        // New admission wins over the outgoing Store's group/state updates.
+        // The old SQ payload and ROB tag remain combinationally unchanged at
+        // this edge, while the next instruction starts operand collection.
+        when(legacyIn.fire) {
+            instruction := legacyIn.bits
+            val firstSource = Mux(legacyIn.bits.vector.groups.mask,
+                legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
+            sourceReadAddress := firstSource
+            sourceReadSelection := UIntToOH(firstSource, 64)
+            val pair = fullWordStore(legacyIn.bits) && legacyIn.bits.vector.groups.sourceCount(0)===2.U
+            val additional = Mux(pair,legacyIn.bits.vector.source(0)(1),legacyIn.bits.vector.source(2)(0))
+            oldReadAddress := additional
+            oldReadSelection := UIntToOH(additional,64)
+            nextState := operands
+            group := 0.U
+            groupOH := 1.U
+            discard := false.B
+            cachedValid := false.B
+            fullStore := false.B
+            pairStore := false.B
+        }
     }
     // Even a flush-cycle response releases the old owner. Do not leave a
     // discarded miss waiting for a second response after its slot is reused.
@@ -443,6 +567,10 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }
     when(state === response && discard && !io.cachePending) { nextState := idle }
     when(legacyIn.fire) {
+        when(state===operands) {
+            assert(wordOperand && operandCapture,
+                "Store turnover requires actual scalar/vector operand capture")
+        }
         assert(legacyIn.bits.vector.control.execution === VectorExecution.Load.U ||
             legacyIn.bits.vector.control.execution === VectorExecution.Store.U)
         val incoming = legacyIn.bits.vector
@@ -452,19 +580,20 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     when(state =/= idle) { assert(groupOH === UIntToOH(group, 8)) }
     assert(streamCredits <= 4.U)
     when(streamReturned) { assert(streamCredits =/= 0.U) }
-    // Two architectural Load owners share the original response data FIFO.
-    val fastValid = RegInit(VecInit.fill(2)(false.B))
-    val fastInstruction = Reg(Vec(2, new VectorInstruction(p)))
-    val fastBase = Reg(Vec(2, UInt(32.W)))
-    val fastBaseReady = RegInit(VecInit.fill(2)(false.B))
-    val fastAligned = Reg(Vec(2, Bool()))
-    val fastCursor = Reg(Vec(2, UInt(4.W)))
-    val fastRetry = RegInit(VecInit.fill(2)(0.U(8.W)))
-    val fastWritten = RegInit(VecInit.fill(2)(0.U(8.W)))
-    val fastHead = RegInit(false.B)
-    val fastTail = RegInit(false.B)
+    // Four architectural Load owners share the four-entry data FIFO.
+    // Only instruction metadata grows; line storage and response credits are unchanged.
+    val fastValid = RegInit(VecInit.fill(4)(false.B))
+    val fastInstruction = Reg(Vec(4, new VectorInstruction(p)))
+    val fastBase = Reg(Vec(4, UInt(32.W)))
+    val fastBaseReady = RegInit(VecInit.fill(4)(false.B))
+    val fastAligned = Reg(Vec(4, Bool()))
+    val fastCursor = Reg(Vec(4, UInt(4.W)))
+    val fastRetry = RegInit(VecInit.fill(4)(0.U(8.W)))
+    val fastWritten = RegInit(VecInit.fill(4)(0.U(8.W)))
+    val fastHead = RegInit(0.U(2.W))
+    val fastTail = RegInit(0.U(2.W))
     val fastScalarPending = RegInit(false.B)
-    val fastScalarOwner = Reg(Bool())
+    val fastScalarOwner = Reg(UInt(2.W))
     val fastFallbackStarted = RegInit(false.B)
     val fastDrain = RegInit(false.B)
     val fastCount = VecInit(fastInstruction.map(_.vector.destination.count))
@@ -474,74 +603,143 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
 
     val ticketValid = RegInit(0.U(4.W))
     val ticketFlight = RegInit(0.U(4.W))
-    val ticketContext = Reg(Vec(4, Bool()))
+    val ticketContext = Reg(Vec(4, UInt(2.W)))
     val ticketGroup = Reg(Vec(4, UInt(3.W)))
     val ticketPair = Reg(Vec(4, Bool()))
     val fastHeld = RegInit(false.B)
     val fastHeldAddress = Reg(UInt(32.W))
-    val fastHeldContext = Reg(Bool())
+    val fastHeldNative = Reg(Bool())
+    val fastHeldContext = Reg(UInt(2.W))
     val fastHeldGroup = Reg(UInt(3.W))
     val fastHeldTicket = Reg(UInt(2.W))
     val fastHeldPair = Reg(Bool())
     val fastHeldRetry = Reg(Bool())
     val fastHigh = RegInit(false.B)
     val fastWriteValid = RegInit(false.B)
-    val fastWriteContext = Reg(Bool())
+    val fastWriteContext = Reg(UInt(2.W))
     val fastWriteGroup = Reg(UInt(3.W))
     fastWriteValid := false.B
 
     val incoming = io.in.bits.vector
     val incomingWhole = io.in.bits.scalar.inst(27, 26) === 0.U &&
         io.in.bits.scalar.inst(24, 20) === 8.U
+    def unitWordLoad(task: VectorInstruction): Bool =
+        task.scalar.inst(31, 26) === 0.U && task.scalar.inst(24, 20) === 0.U &&
+            task.scalar.inst(14, 12) === 6.U &&
+            task.vector.state.vtype(5, 3) === 2.U
+    def shortWordLoad(task: VectorInstruction): Bool =
+        unitWordLoad(task) && task.vector.destination.count === 1.U &&
+            task.vector.state.vl.orR && task.vector.state.vl <= 4.U && task.vector.state.vtype(6)
+    val incomingFullWords = unitWordLoad(io.in.bits) &&
+        incoming.state.vl === (incoming.destination.count.pad(32) << 3)
     val incomingFast = incoming.control.execution === VectorExecution.Load.U &&
-        incomingWhole && !incoming.groups.mask && incoming.state.vstart === 0.U
-    val fallbackRequest = fastOwned && fastBaseReady(fastHead) &&
+        (incomingWhole || incomingFullWords || shortWordLoad(io.in.bits)) &&
+        !incoming.groups.mask && incoming.state.vstart === 0.U
+    val fallbackRequest = !wordValid && fastOwned && fastBaseReady(fastHead) &&
         !fastAligned(fastHead) && !fastFallbackStarted && !fastDrain && state === idle
-    val directLegacy = !fastOwned && !fastDrain && !incomingFast
+    // The Store collector owns vector RF reads, while the fast Load engine
+    // owns response slots and its independent address metadata. They can run
+    // together after the scalar base has been captured, without a second
+    // payload buffer or RF port. Other Loads use the element-ordering fence.
+    val incomingStore = incoming.control.execution === VectorExecution.Store.U
+    val directLegacy = (!fastOwned || incomingStore && !fastScalarPending &&
+        !fallbackRequest && !fastFallbackStarted) && !fastDrain && !incomingFast
     legacyIn.valid := !io.flush && (fallbackRequest || io.in.valid && directLegacy)
     legacyIn.bits := Mux(fallbackRequest, fastInstruction(fastHead), io.in.bits)
-    val fastRoom = !fastValid(fastTail) && !fastScalarPending
-    io.in.ready := !io.flush && !fastDrain && Mux(incomingFast,
-        state === idle && !fastFallbackStarted && !fallbackRequest && fastRoom,
-        !fastOwned && legacyIn.ready)
-    val fastAdmit = io.in.fire && incomingFast
-    val fastScalarCapture = fastScalarPending && io.readAvailable && !io.flush
+    val actualFastWrite = streamWriteValid && fastWriteValid && !io.flush
+    val headWritten = fastWritten(fastHead) | Mux(actualFastWrite && fastWriteContext===fastHead,
+        UIntToOH(fastWriteGroup,8),0.U)
+    val fastScalarCapture = fastScalarPending && !legacyScalarRequest && io.readAvailable && !io.flush
     val fastFinished = fastOwned && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        fastWritten(fastHead) === fastExpected(fastHead)
-    val fastRelease = fastMode && fastFinished && io.completion.ready && !io.flush
+        headWritten === fastExpected(fastHead)
+    val selectFastCompletion = fastMode && fastFinished && !legacyCompletionHeld
+    val fastRelease = selectFastCompletion && io.completion.ready && !io.flush
+    val fastRoom = (!fastValid(fastTail) || fastRelease && fastHead===fastTail) &&
+        (!fastScalarPending || fastScalarCapture)
+    io.in.ready := !io.flush && !fastDrain && Mux(incomingFast,
+        (state === idle || store && state =/= operands && state =/= strideOperand &&
+            state =/= complete) && !fastFallbackStarted && !fallbackRequest && fastRoom,
+        directLegacy && legacyIn.ready)
+    val fastAdmit = io.in.fire && incomingFast
     val fallbackRelease = fastFallbackStarted && io.completion.fire
-    io.idle := state === idle && !fastOwned && !fastDrain
+    io.idle := state === idle && !fastOwned && !fastDrain && !wordValid
 
     when(fastMode || fastDrain) {
-        io.readRequest := false.B
-        io.scalarReadRequest := fastScalarPending && !fastDrain && !io.flush
-        io.scalarAddress := fastInstruction(fastScalarOwner).scalar.prs(0)
+        io.scalarReadRequest := legacyScalarRequest || fastScalarPending && !fastDrain && !io.flush
+        when(!legacyScalarRequest) { io.scalarAddress := fastInstruction(fastScalarOwner).scalar.prs(0) }
         io.request.valid := fastHeld && io.ordering.clear && !io.flush && !fastDrain
         io.request.bits := 0.U.asTypeOf(new DLoadRequest(cache))
         io.request.bits.wide := true.B
         io.request.bits.vaddr := fastHeldAddress
         io.request.bits.paddr := fastHeldAddress
+        io.requestNative := fastHeldNative
         io.request.bits.slot := fastHeldTicket
         io.request.bits.mtype := 2.U
+        io.request.bits.halfMask := Mux(fastHeldPair, 0.U,
+            Mux(fastBase(fastHeldContext)(5) ^ fastHeldGroup(0), 2.U, 1.U))
         io.ordering.tail := fastInstruction(Mux(fastHeld, fastHeldContext, fastHead)).scalar.sqTail
-        io.completion.valid := fastFinished && !io.flush && !fastDrain
-        io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
-        io.completion.bits.robIdx := fastInstruction(fastHead).scalar.robIdx
+        legacyCompletionReady := io.completion.ready && !selectFastCompletion && !fastDrain
+        when(selectFastCompletion) {
+            io.completion.valid := !io.flush && !fastDrain
+            io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
+            io.completion.bits.robIdx := fastInstruction(fastHead).scalar.robIdx
+        }
     }
+    when(io.flush || legacyCompletion && legacyCompletionReady) { legacyCompletionHeld := false.B }
+        .elsewhen(legacyCompletion && !selectFastCompletion && !io.completion.ready) {
+            legacyCompletionHeld := true.B
+        }
     when(fastDrain) { io.writeback.valid := false.B }
 
-    val fastTodo = VecInit((0 until 2).map(i => fastValid(i) && fastBaseReady(i) && fastAligned(i) &&
-        (fastRetry(i).orR || fastCursor(i) < fastCount(i))))
-    val selectedContext = Mux(fastTodo(fastHead), fastHead, !fastHead)
-    val canPrepare = fastMode && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        fastTodo.asUInt.orR && !fastHeld && !ticketValid.andR && !io.flush
-    val selectedRetry = fastRetry(selectedContext).orR
-    val selectedGroup = Mux(selectedRetry, PriorityEncoder(fastRetry(selectedContext)),
-        fastCursor(selectedContext)(2, 0))
-    val selectedPair = !(fastBase(selectedContext)(5) ^ selectedGroup(0)) &&
-        selectedGroup +& 1.U < fastCount(selectedContext)
     val issueFast = fastMode && io.request.fire
     val issuedTicket = UIntToOH(fastHeldTicket, 4)
+    // Prepare behind an accepted request, keeping its old payload stable until
+    // fire. Admission must see the advanced cursor and reserve a different
+    // ticket; otherwise the same group or response owner would be reused.
+    // Payload preparation assumes an occupied request will be accepted.
+    // The actual fire still gates every replacement of that held payload.
+    val prepareIssue = fastHeld
+    val prepareCursor = VecInit((0 until 4).map(i =>
+        Mux(prepareIssue && fastHeldContext === i.U && !fastHeldRetry,
+            fastHeldGroup +& Mux(fastHeldPair, 2.U, 1.U), fastCursor(i))))
+    val prepareRetry = VecInit((0 until 4).map(i => fastRetry(i) &
+        ~Mux(prepareIssue && fastHeldContext === i.U, UIntToOH(fastHeldGroup, 8), 0.U)))
+    val freeTickets = ~(ticketValid | Mux(prepareIssue, issuedTicket, 0.U))
+    val fastTodo = VecInit((0 until 4).map(i => fastValid(i) && fastBaseReady(i) && fastAligned(i) &&
+        (prepareRetry(i).orR || prepareCursor(i) < fastCount(i))))
+    val contextOrder = VecInit((0 until 4).map(i => (fastHead + i.U)(1, 0)))
+    val todoByAge = VecInit(contextOrder.map(index => fastTodo(index)))
+    // Capture the first aligned address into the ordinary request register at
+    // the scalar-operand edge. Existing prepared work keeps priority; a newly
+    // captured context need not wait another cycle merely to reread that base.
+    val capturedAligned = Mux(shortWordLoad(fastInstruction(fastScalarOwner)),
+        !io.scalarData(3,0).orR,!io.scalarData(4,0).orR)
+    val capturedReady = fastScalarCapture && capturedAligned
+    val selectedContext = Mux(todoByAge.asUInt.orR,
+        contextOrder(PriorityEncoder(todoByAge)),fastScalarOwner)
+    val selectedContextOH = UIntToOH(selectedContext, 4)
+    val prepareBases = (0 until 4).map(i =>
+        Mux(capturedReady && fastScalarOwner === i.U, io.scalarData, fastBase(i)))
+    val prepareRetryValid = prepareRetry.map(_.orR)
+    val prepareGroups = (0 until 4).map(i =>
+        Mux(prepareRetryValid(i), PriorityEncoder(prepareRetry(i)), prepareCursor(i)(2, 0)))
+    val headReady = fastBaseReady(fastHead) && fastAligned(fastHead) ||
+        capturedReady && fastScalarOwner===fastHead
+    val canPrepare = fastMode && headReady &&
+        (fastTodo.asUInt.orR || capturedReady) && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
+    // Resolve each context's payload in parallel with oldest-ready selection.
+    val selectedRetry = if (compactSimulation) prepareRetry(selectedContext).orR
+        else Mux1H(selectedContextOH, prepareRetryValid)
+    val selectedGroup = if (compactSimulation)
+        Mux(selectedRetry, PriorityEncoder(prepareRetry(selectedContext)), prepareCursor(selectedContext)(2, 0))
+        else Mux1H(selectedContextOH, prepareGroups)
+    val selectedPair = if (compactSimulation) {
+        val base = Mux(capturedReady && selectedContext === fastScalarOwner,
+            io.scalarData, fastBase(selectedContext))
+        !(base(5) ^ selectedGroup(0)) && selectedGroup +& 1.U < fastCount(selectedContext)
+    } else Mux1H(selectedContextOH, (0 until 4).map(i =>
+        !(prepareBases(i)(5) ^ prepareGroups(i)(0)) &&
+            prepareGroups(i) +& 1.U < fastCount(i)))
     val responseTicket = io.response.bits.slot(1, 0)
     val responseOH = UIntToOH(responseTicket, 4)
     val replyFast = fastMode && io.response.valid && !io.flush
@@ -556,7 +754,6 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val finishFastLine = drainFastLine && (fastHigh || !queuedPair)
     val releaseTicket = Mux(retryFast, responseOH, 0.U) |
         Mux(finishFastLine, UIntToOH(streamLines.io.deq.bits.ticket, 4), 0.U)
-    val actualFastWrite = streamWriteValid && fastWriteValid && !io.flush
 
     when(fastMode || fastDrain) {
         streamLines.io.enq.valid := replyFast && !io.response.bits.retry
@@ -566,17 +763,42 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         streamLines.io.enq.bits.ticket := responseTicket
         streamLines.io.deq.ready := finishFastLine
     }
+    // A group adds at most seven 32-byte words. Compute the possible upper
+    // increment before its late carry; retain modulo-32-bit wrap and page carry.
+    val prepareLow = (0 until 4).map(i => prepareBases(i)(7, 5) +& prepareGroups(i))
+    val prepareAddresses = (0 until 4).map { i =>
+        val base = prepareBases(i)
+        val advanced = Cat((23 to 0 by -1).map { bit =>
+            if (bit == 0) !base(8) else base(bit + 8) ^ base(bit + 7, 8).andR
+        })
+        Cat(Mux(prepareLow(i)(3), advanced, base(31, 8)), prepareLow(i)(2, 1), 0.U(6.W))
+    }
+    val prepareNative = (0 until 4).map { i =>
+        val base = prepareBases(i)
+        val pageCarry = prepareLow(i)(3) && base(19, 8).andR
+        Mux(pageCarry, base(31, 20) === "haff".U, base(31, 20) === "hb00".U)
+    }
+    // Software simulation keeps one arithmetic cone; hardware resolves all
+    // contexts in parallel before the late selector. Both retain the same edge.
+    val preparedAddress = if (compactSimulation) {
+        val base = Mux(capturedReady && selectedContext === fastScalarOwner,
+            io.scalarData, fastBase(selectedContext))
+        Cat(BLevelPAdder32.sum(base, Cat(selectedGroup, 0.U(5.W)).pad(32), 0.U(1.W))(31, 6), 0.U(6.W))
+    } else Mux1H(selectedContextOH, prepareAddresses)
+    val preparedNative = if (compactSimulation) PeScratchpadBridge.matches(preparedAddress.pad(34))
+        else Mux1H(selectedContextOH, prepareNative)
     when(canPrepare) {
         fastHeld := true.B
         fastHeldContext := selectedContext
         fastHeldGroup := selectedGroup
-        fastHeldTicket := PriorityEncoder(~ticketValid)
+        fastHeldTicket := PriorityEncoder(freeTickets)
         fastHeldPair := selectedPair
         fastHeldRetry := selectedRetry
-        fastHeldAddress := Cat((fastBase(selectedContext) + Cat(selectedGroup, 0.U(5.W)))(31, 6), 0.U(6.W))
+        fastHeldAddress := preparedAddress
+        fastHeldNative := preparedNative
     }
     when(issueFast) {
-        fastHeld := false.B
+        fastHeld := canPrepare
         ticketContext(fastHeldTicket) := fastHeldContext
         ticketGroup(fastHeldTicket) := fastHeldGroup
         ticketPair(fastHeldTicket) := fastHeldPair
@@ -600,8 +822,20 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastWriteContext := queuedContext
         fastWriteGroup := queuedGroup + fastHigh.asUInt
         streamWrite.address := fastInstruction(queuedContext).vector.destination.physical(queuedGroup + fastHigh.asUInt)
-        streamWrite.data := Mux(fastHigh || fastBase(queuedContext)(5) ^ queuedGroup(0),
+        val line = streamLines.io.deq.bits.line
+        val ordinary = Mux(fastHigh || fastBase(queuedContext)(5) ^ queuedGroup(0),
             streamLines.io.deq.bits.line(511, 256), streamLines.io.deq.bits.line(255, 0))
+        // An unmasked short SEW32 load with tail-agnostic policy needs no old
+        // destination read. Select one aligned 16-byte quarter of the existing
+        // response line and fill inactive lanes; tickets, ownership and the
+        // response FIFO are exactly the same as for a whole-register load.
+        val quarter = MuxLookup(fastBase(queuedContext)(5, 4), line(127, 0))(Seq(
+            1.U -> line(255, 128), 2.U -> line(383, 256), 3.U -> line(511, 384)))
+            .asTypeOf(Vec(4, UInt(32.W)))
+        val short = VecInit((0 until 8).map(lane =>
+            if (lane < 4) Mux(lane.U < fastInstruction(queuedContext).vector.state.vl,
+                quarter(lane), "hffffffff".U) else "hffffffff".U(32.W)))
+        streamWrite.data := Mux(shortWordLoad(fastInstruction(queuedContext)), short.asUInt, ordinary)
             .asTypeOf(Vec(8, UInt(32.W)))
         streamWrite.bytes := VecInit.fill(8)(15.U(4.W))
         streamWrite.ready := true.B
@@ -611,14 +845,14 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     when(fastAdmit) {
         fastScalarPending := true.B
         fastScalarOwner := fastTail
-        fastTail := !fastTail
+        fastTail := fastTail + 1.U
     }
     when(fallbackRequest && legacyIn.fire) { fastFallbackStarted := true.B }
     when(fastRelease || fallbackRelease) {
-        fastHead := !fastHead
+        fastHead := fastHead + 1.U
         fastFallbackStarted := false.B
     }
-    for(i <- 0 until 2) {
+    for(i <- 0 until 4) {
         val retrySet = Mux(retryFast && repliedContext === i.U,
             UIntToOH(repliedGroup, 8), 0.U)
         val retryClear = Mux(issueFast && fastHeldContext === i.U,
@@ -634,7 +868,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         when(fastScalarCapture && fastScalarOwner === i.U) {
             fastBase(i) := io.scalarData
             fastBaseReady(i) := true.B
-            fastAligned(i) := io.scalarData(4, 0) === 0.U
+            fastAligned(i) := Mux(shortWordLoad(fastInstruction(i)),
+                io.scalarData(3, 0) === 0.U, io.scalarData(4, 0) === 0.U)
         }
         when((fastRelease || fallbackRelease) && fastHead === i.U) { fastValid(i) := false.B }
         when(fastAdmit && fastTail === i.U) {
@@ -644,7 +879,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             fastCursor(i) := 0.U
             fastRetry(i) := 0.U
             fastWritten(i) := 0.U
-            assert(!fastValid(i), "Instruction context cannot be reused before completion acceptance")
+            assert(!fastValid(i) || fastRelease && fastHead===i.U, "Instruction context is reused only on accepted completion")
         }
     }
     when(fastMode) {
@@ -659,8 +894,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastBaseReady.foreach(_ := false.B)
         fastRetry.foreach(_ := 0.U)
         fastWritten.foreach(_ := 0.U)
-        fastHead := false.B
-        fastTail := false.B
+        fastHead := 0.U
+        fastTail := 0.U
         fastScalarPending := false.B
         fastFallbackStarted := false.B
         fastHeld := false.B
@@ -678,4 +913,21 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         }
         assert(!fastHeld || fastHeldContext =/= fastHead)
     }
+    // Native SRAM has one physical address space. Its Load may pass complete
+    // non-overlapping vector Stores; cached, scalar and unknown-address Stores
+    // retain the conservative ordering path, including possible SRAM aliases.
+    // Routing was captured with the held request address. Reuse that identity
+    // for ordering instead of decoding the second-fragment increment again.
+    io.ordering.native := io.requestNative
+    val orderingRequestLive = !io.flush && Mux(fastMode, fastHeld,
+        state === request || state === streamLoad && streamRequestValid && streamCredits < 4.U)
+    when(orderingRequestLive) {
+        assert(io.requestNative === PeScratchpadBridge.matches(io.request.bits.paddr))
+    }
+    io.ordering.line := io.request.bits.paddr(31, 6)
+    when(io.request.valid) {
+        assert(io.requestNative === PeScratchpadBridge.matches(io.request.bits.paddr),
+            "Vector request routing must match its held physical address")
+    }
+
 }

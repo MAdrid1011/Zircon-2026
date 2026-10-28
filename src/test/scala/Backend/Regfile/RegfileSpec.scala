@@ -136,7 +136,7 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
 
     "selected read ports may bypass a canceled write without changing storage" in {
         val p = RegfileParams(numEntries = 8, numReadPorts = 3, numWritePorts = 2, holdReads = true)
-        simulate(new Regfile(p, readBypassOverridePort = Some(0), overrideReadPorts = Set(0, 2))) { dut =>
+        simulate(new Regfile(p, readBypassOverridePorts = Seq(1, 0), overrideReadPorts = Set(0, 2))) { dut =>
             dut.io.readHold.get.foreach(_.poke(false))
             dut.io.read.foreach(_.addr.poke(3))
             dut.io.write.foreach { port =>
@@ -144,21 +144,21 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
                 port.data.poke(0)
                 port.we.poke(false)
             }
-            dut.io.readBypassOverride.get.poke(false)
-            dut.io.readBypassOverrideAddr.get.poke(3)
+            dut.io.readBypassOverride.get.foreach(_.poke(false))
+            dut.io.readBypassOverrideAddr.get.foreach(_.poke(3))
             dut.reset.poke(true)
             dut.clock.step()
             dut.reset.poke(false)
 
             dut.io.write(0).addr.poke(4)
             dut.io.write(0).data.poke(0x12345678L)
-            dut.io.readBypassOverride.get.poke(true)
+            dut.io.readBypassOverride.get(1).poke(true)
             dut.io.read(0).data.expect(0x12345678L)
             dut.io.read(1).data.expect(0)
             dut.io.read(2).data.expect(0x12345678L)
             dut.clock.step()
 
-            dut.io.readBypassOverride.get.poke(false)
+            dut.io.readBypassOverride.get(1).poke(false)
             dut.io.read.foreach(_.data.expect(0))
             dut.io.write(0).addr.poke(3)
             dut.io.write(0).we.poke(true)
@@ -167,6 +167,27 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
             dut.io.read(2).data.expect(0)
             dut.clock.step()
             dut.io.write(0).we.poke(false)
+            dut.io.read.foreach(_.data.expect(0x12345678L))
+
+            // The second override has its own identity and never writes storage.
+            dut.io.write(1).addr.poke(4)
+            dut.io.write(1).data.poke(0x89abcdefL)
+            dut.io.readBypassOverrideAddr.get(0).poke(5)
+            dut.io.readBypassOverride.get(0).poke(true)
+            dut.io.read(0).addr.poke(5)
+            dut.io.read(1).addr.poke(5)
+            dut.io.read(0).data.expect(0x89abcdefL)
+            dut.io.read(1).data.expect(0)
+            dut.io.read(2).data.expect(0x12345678L)
+            dut.clock.step()
+            dut.io.readHold.get(0).poke(true)
+            dut.io.readBypassOverride.get(0).poke(false)
+            dut.io.write(1).data.poke(0)
+            dut.io.read(0).data.expect(0x89abcdefL)
+            dut.clock.step()
+            dut.io.readHold.get(0).poke(false)
+            dut.io.read(0).data.expect(0)
+            dut.io.read.foreach(_.addr.poke(3))
             dut.io.read.foreach(_.data.expect(0x12345678L))
         }
     }
@@ -203,6 +224,45 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
             dut.io.write(1).we.poke(false)
             memoryBypass.we.poke(false)
             dut.io.read.foreach(_.data.expect(0xabcdef01L))
+        }
+    }
+
+    "dedicated vector memory reads retain load bypass and ignore unrelated scalar completions" in {
+        val p = RegfileParams(numReadPorts = 11, numWritePorts = 5, holdReads = true)
+        simulate(new Regfile(p, readBypassOverridePorts = Seq(2, 3),
+            overrideReadPorts = Set(6, 7, 10), selectiveReadBypassPort = Some(4),
+            selectiveReadPorts = Set(6, 7, 8, 10))) { dut =>
+            dut.io.read.foreach(_.addr.poke(3))
+            dut.io.readHold.get.foreach(_.poke(false))
+            dut.io.write.foreach { write =>
+                write.we.poke(false); write.addr.poke(3); write.data.poke(0)
+            }
+            dut.io.readBypassOverride.get.foreach(_.poke(false))
+            dut.io.readBypassOverrideAddr.get.foreach(_.poke(3))
+            val load = dut.io.selectiveReadBypass.get
+            load.we.poke(false); load.addr.poke(3); load.data.poke(0)
+            dut.reset.poke(true); dut.clock.step(); dut.reset.poke(false)
+
+            // All five producers can supply a just-ready base before its write edge.
+            for (port <- 0 until 5) {
+                val value = 0x12340000L + port
+                dut.io.write(port).we.poke(true); dut.io.write(port).data.poke(value)
+                if (port == 2 || port == 3) dut.io.readBypassOverride.get(port - 2).poke(true)
+                if (port == 4) { load.we.poke(true); load.data.poke(value) }
+                dut.io.read(9).data.expect(value); dut.io.read(10).data.expect(value)
+                dut.clock.step()
+                dut.io.write(port).we.poke(false)
+                dut.io.readBypassOverride.get.foreach(_.poke(false)); load.we.poke(false)
+                dut.io.read(10).data.expect(value)
+            }
+            // A vector-to-scalar completion writes another physical destination;
+            // memory keeps its stored base, while the compute port sees that WB.
+            dut.io.write(4).addr.poke(4); dut.io.write(4).data.poke(0xabcdef01L)
+            dut.io.write(4).we.poke(true); dut.io.read(9).addr.poke(4)
+            dut.io.read(9).data.expect(0xabcdef01L)
+            dut.io.read(10).data.expect(0x12340004L)
+            dut.clock.step(); dut.io.write(4).we.poke(false)
+            dut.io.read(10).addr.poke(4); dut.io.read(10).data.expect(0xabcdef01L)
         }
     }
 

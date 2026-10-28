@@ -90,6 +90,8 @@ class VectorStoreTask(p: BackendParams = BackendParams()) extends Bundle {
 
 class VectorLoadOrdering(p: BackendParams = BackendParams()) extends Bundle {
     val tail = Output(UInt(p.sqWidth.W))
+    val native = Output(Bool())
+    val line = Output(UInt(26.W))
     val clear = Input(Bool())
 }
 
@@ -108,6 +110,15 @@ class VectorCoreDebug extends Bundle {
     val store = new VectorStoreTrace
 }
 
+class VectorStoreRetireTrace extends Bundle {
+    val firstGroup = UInt(3.W)
+    val count = UInt(4.W)
+    val scattered = Bool()
+    val eew = UInt(2.W)
+    val fieldRegisterShift = UInt(2.W)
+    val lastField = UInt(3.W)
+}
+
 class VectorStoreTrace extends Bundle {
     val count = UInt(4.W)
     val addresses = UInt(256.W)
@@ -118,4 +129,5 @@ class VectorStoreTrace extends Bundle {
     val fieldRegisterShift = UInt(2.W)
     val lastField = UInt(3.W)
     val elementAddresses = Vec(8, UInt(1024.W))
+    val retire = Vec(3, new VectorStoreRetireTrace)
 }

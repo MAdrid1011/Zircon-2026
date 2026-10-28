@@ -10,7 +10,7 @@ L2 Cache，以及连接外部 AXI4 主接口的 `L2AXI4Bridge`。L1 与 L2 使�
 | `performance` | 2 KiB | 16 KiB | 32 KiB | 256 bit |
 
 两种配置使用相同 Cache 模块与 64 B Line。性能配置扩展 DCache 的宽数据请求和响应，
-使向量 Load/Store 复用已有 RAM 端口与 miss 单元；标量访问仍保持原来的字节语义。
+使向量 Load/Store 复用已有 RAM 端口与 miss 单元；标量访问按字节寻址。
 
 ## L1 Cache
 
@@ -30,6 +30,9 @@ Store Address 同时发生 TLB miss，共享的缺页请求通道先服务 Load�
 DCache 采用 write-back、write-allocate。Store hit 在 L1 更新并置脏；Store miss 先取得整行
 再合并字节 mask。DCache 使用单项 miss 单元，支持无冲突命中的 hit-under-miss；同一资源冲突
 的 Load 返回 retry，由原发射队列表项重发。
+
+性能配置的普通 Store 直接以普通通路的接收条件生成 RAM 查询使能；可合并 Store
+仍使用写合并队列的接收条件。普通查询不经过该队列的地址连续性比较，握手与查询周期相同。
 
 性能配置在命中时每拍可处理一个 256 bit 向量访问。对齐、未屏蔽的完整寄存器组按 64 B
 Line 发起请求，返回行通过四项响应缓冲分两拍写入相邻的 256 bit 寄存器；每个在途请求
@@ -70,7 +73,8 @@ L2 主要保存 L1 替换出的 victim。L1 与 L2 同时 miss 时，外部填�
 Victim 安装优先选择可用的 invalid way，因此 I/D 两侧均可使用 set 中的空闲容量。set 已满时，
 指令请求在指令占用达到 `maxInstructionWays` 后优先替换指令 line，数据请求优先替换数据 line；
 候选集合使用 tree-PLRU 选择。这一规则是替换偏置，不对 way 进行静态划分。维护引擎还会排除
-当前请求命中的 way，以及另一通道尚未消费的同 set 命中 way。
+当前请求命中的 way，以及另一通道尚未消费的同 set 命中 way。后者包括已经在 S3 等待的
+命中，也包括本拍从 S2 进入 S3、需要等待维护引擎的命中，避免其捕获的 way 在下一拍被覆盖。
 
 I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、uncached 访问和安装操作共享
 一个维护引擎及外部存储接口。L2 没有多项 MSHR；同一时刻只允许一个下级事务在途。
@@ -143,3 +147,10 @@ Chisel 与 Verilator 仿真使用同周期的行为模型。Nangate45 纯逻辑�
 SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
 拆分到固定版本 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
 都是上升沿 clock-to-Q。Vivado 后端使用独立的 Verilog BRAM 模板。
+
+向量 Store 元素地址表使用独立的
+[ZirconSram1W1R](../src/main/scala/Utils/ZirconSram1W1R.scala) 叶模块，默认资源为
+[Xilinx 风格模板](../src/main/resources/memory/ZirconSram1W1R.sv)。它提供同钟的一个写口和一个
+同步读口：读使能在上升沿采样，停读时输出保持，数据无复位。同字读写的读结果未定义；
+当前调用端保证读写不重叠。工艺集成只替换该叶模块，保留端口、深宽与上述契约，
+无需让业务逻辑依赖工艺宏名。

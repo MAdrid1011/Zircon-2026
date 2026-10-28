@@ -4,8 +4,9 @@ import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig._
 
 class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
-    "grouped arithmetic can issue its ready first group while later groups wait" in {
-        simulate(new IssueQueue(q = IssueQueueParams(4, IssueQueueProfile.Vector,
+    for (entries <- Seq(4, 8)) {
+    s"grouped arithmetic issues its ready first group ($entries entries)" in {
+        simulate(new IssueQueue(q = IssueQueueParams(entries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = 2))) { dut =>
             VectorTestUtils.clear(dut.io.enq); VectorTestUtils.clear(dut.io.wakeup)
             VectorTestUtils.clear(dut.io.speculation); VectorTestUtils.clear(dut.io.vector.get.enqueue)
@@ -26,8 +27,8 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    "ordered memory issue keeps a younger ready Load behind an operand-blocked Store" in {
-        simulate(new IssueQueue(q = IssueQueueParams(4, IssueQueueProfile.Vector,
+    s"ordered memory issue keeps Loads behind an operand-blocked Store ($entries entries)" in {
+        simulate(new IssueQueue(q = IssueQueueParams(entries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = 2), orderedIssue = true)) { dut =>
             VectorTestUtils.clear(dut.io.enq); VectorTestUtils.clear(dut.io.wakeup)
             VectorTestUtils.clear(dut.io.speculation); VectorTestUtils.clear(dut.io.vector.get.enqueue)
@@ -48,14 +49,17 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.enq.valid.poke(0)
             dut.io.issue.valid.expect(false); dut.clock.step(3); dut.io.issue.valid.expect(false)
             dut.io.vector.get.wakeup(0).valid.poke(true); dut.io.vector.get.wakeup(0).bits.poke(40)
-            dut.clock.step(); dut.io.vector.get.wakeup(0).valid.poke(false)
+            // Collection occurs after the producer's write edge. The Store
+            // can reserve its task in that same wakeup cycle; the younger
+            // Load still follows it in order.
             dut.io.issue.valid.expect(true); dut.io.issue.bits.robIdx.expect(3)
-            dut.clock.step(); dut.io.issue.bits.robIdx.expect(4)
+            dut.clock.step(); dut.io.vector.get.wakeup(0).valid.poke(false)
+            dut.io.issue.bits.robIdx.expect(4)
             dut.clock.step(); dut.io.occupancy.expect(0)
         }
     }
-    "shared IQ selects oldest ready groups, including v0, and holds metadata under stalls" in {
-        simulate(new IssueQueue(q = IssueQueueParams(4, IssueQueueProfile.Vector,
+    s"shared IQ keeps oldest-ready groups and held metadata ($entries entries)" in {
+        simulate(new IssueQueue(q = IssueQueueParams(entries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = 2))) { dut =>
             VectorTestUtils.clear(dut.io.enq)
             VectorTestUtils.clear(dut.io.wakeup)
@@ -109,7 +113,7 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.issue.valid.expect(true)
             dut.io.flush.poke(true); dut.io.issue.valid.expect(false)
             dut.clock.step(); dut.io.flush.poke(false)
-            dut.io.occupancy.expect(0); dut.io.freeCount.expect(4)
+            dut.io.occupancy.expect(0); dut.io.freeCount.expect(entries)
             enqueue(4, 50, false)
             dut.io.issue.valid.expect(false) // Reused slot cannot inherit old readiness.
             dut.io.vector.get.wakeup(0).valid.poke(true)
@@ -117,5 +121,6 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step(); VectorTestUtils.clear(dut.io.vector.get.wakeup)
             dut.io.issue.valid.expect(true); dut.io.issue.bits.robIdx.expect(4)
         }
+    }
     }
 }

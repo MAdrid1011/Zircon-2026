@@ -2,11 +2,13 @@ import chisel3._
 import chisel3.util._
 import ZirconConfig.{BackendParams, DivideOp, FpMiscOp, MultiplyOp, VectorParams}
 
-/** Multi-cycle operations collect one element through the same three vector
-  * read ports. Divide/sqrt and conversion reuse the scalar arithmetic modules;
-  * the instruction retains its PRF/ROB ownership until all elements complete.
+/** Multi-cycle operations collect operands through the same three vector read
+  * ports. Single-register SEW32 permutations reuse that complete register read;
+  * other operations traverse elements. Divide/sqrt and conversion reuse scalar
+  * arithmetic modules. PRF/ROB ownership lasts until the instruction completes.
   */
-class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply: Boolean = false) extends Module {
+class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply: Boolean = false,
+    val compactSimulation: Boolean = false) extends Module {
     val io = IO(new Bundle {
         val in = Flipped(Decoupled(new VectorInstruction(p)))
         val read = Flipped(Vec(3, new VectorRegisterRead(VectorParams())))
@@ -19,6 +21,7 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
         val completion = Decoupled(new VectorCompletion(p))
         val flush = Input(Bool())
         val idle = Output(Bool())
+        val executionActive = Output(Bool())
         val multiply = if (externalMultiply) Some(Flipped(new MultiplyIO(1))) else None
     })
     val idle :: prepareRead :: operands :: initialize :: readElement :: gatherElement :: evaluate :: finishArithmetic :: issue :: awaitResult :: update :: writeback :: complete :: Nil = Enum(13)
@@ -102,8 +105,10 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
     val widthMask = Mux(sew === 0.U, 255.U(32.W), Mux(sew === 1.U, 65535.U(32.W), "hffffffff".U))
     val count = Mux(reduction, metadata.groups.sourceCount(0), metadata.destination.count)
     val traversalWidth = Mux(reduction, sew, destinationWidth)
-    val maximum = Mux(maskDestination || scalarDestination, 256.U(9.W),
-        (count << Mux(traversalWidth === 0.U, 5.U, Mux(traversalWidth === 1.U, 4.U, 3.U)))(8, 0))
+    // Mask tails are filled once at initialization. Visiting every unused bit
+    // would otherwise turn a short predicate into a 256-element operation.
+    val maximum = Mux(maskDestination, state.vl(8, 0), Mux(scalarDestination, 256.U(9.W),
+        (count << Mux(traversalWidth === 0.U, 5.U, Mux(traversalWidth === 1.U, 4.U, 3.U)))(8, 0)))
     val maximumExponent = 5.S(5.W) - sew.zext.pad(5) + state.vtype(2, 0).asSInt.pad(5)
     val vlmax = (1.U(9.W) << maximumExponent.asUInt)(8, 0)
     // VLMAX is zero or a power of two, including unsupported vtype encodings.
@@ -112,7 +117,7 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
     val destinationMask = Mux(destinationWidth === 0.U, 255.U(32.W),
         Mux(destinationWidth === 1.U, 65535.U(32.W), "hffffffff".U))
     val enabled = !metadata.groups.mask || mask(element(7, 0))
-    // Merge and carry consume v0 as data, rather than using it as a predicate.
+    // Merge and carry consume v0 through their data operand path.
     val maskIsData = op === VectorSerialOperation.Merge.U || op === VectorSerialOperation.Carry.U ||
         op === VectorSerialOperation.MaskCarry.U
     val body = element >= state.vstart && element < state.vl
@@ -130,6 +135,8 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
             state.vstart === 0.U && state.vl.orR && element =/= 0.U && state.vtype(6), ordinaryFill))
 
     io.idle := phase === idle
+    // Exclude RF collection and stalled completion from execution throughput.
+    io.executionActive := phase === issue || phase === awaitResult
     io.in.ready := io.idle && !io.flush
     io.readRequest := RegNext(nextPhase === operands || nextPhase === initialize ||
         nextPhase === readElement || nextPhase === gatherElement, false.B)
@@ -391,15 +398,77 @@ class VectorSerial(val p: BackendParams = BackendParams(), val externalMultiply:
             } }
             is(initialize) { when(io.readAvailable) {
                 val old = Mux(metadata.groups.sourceCount(2).orR, io.read(2).data.asUInt, Fill(256, 1.U(1.W)))
-                val initial = Mux(reduction && state.vstart < state.vl && state.vtype(6),
-                    old | ~(destinationMask.pad(256)), old)
+                val maskTail = (Fill(256, 1.U(1.W)) << state.vl(8, 0))(255, 0)
+                val initial = Mux(maskDestination && state.vstart < state.vl, old | maskTail,
+                    Mux(reduction && state.vstart < state.vl && state.vtype(6),
+                        old | ~(destinationMask.pad(256)), old))
                 val seed = extendWidth(io.read(1).data(0), funct(0) && !control.floating, destinationWidth)
                 // A nonempty reduction copies its scalar seed even when every
                 // source element is masked. No active update will write it later.
                 output := Mux(reduction && state.vstart < state.vl,
                     (initial & ~destinationMask.pad(256)) | (seed & destinationMask).pad(256), initial)
                 accumulator := seed
-                enterRead(readElement)
+                // All operands of an M1 (or fractional LMUL) SEW32 shuffle are
+                // already present on the existing read ports. Re-reading the
+                // same registers for each element only serializes a lane mux.
+                // Keep larger groups and narrower elements on the iterative
+                // path; neither register-file ports nor payload buffers grow.
+                val registerShuffle = sew === 2.U && metadata.destination.count === 1.U &&
+                    metadata.groups.sourceCount(0) <= 1.U && metadata.groups.sourceCount(1) <= 1.U &&
+                    (permute || op === VectorSerialOperation.Merge.U)
+                val oldWords = old.asTypeOf(Vec(8, UInt(32.W)))
+                val indices16 = io.read(1).data.asUInt.asTypeOf(Vec(16, UInt(16.W)))
+                val shuffled = Wire(Vec(8, UInt(32.W)))
+                for (i <- 0 until 8) {
+                    val position = i.U(9.W)
+                    val inBody = position >= state.vstart && position < state.vl
+                    val laneEnabled = !metadata.groups.mask || mask(i)
+                    val indexOperand = Mux(control.immediate, inst(19, 15).pad(32),
+                        Mux(control.scalar, scalar, Mux(gather16, indices16(i).pad(32), io.read(1).data(i))))
+                    // Retain the carry on down-slides: a large unsigned XLEN
+                    // offset selects a zero-valued source lane.
+                    val distance = Mux(slideOne, 1.U(32.W), offset)
+                    val inserted = slideOne && !gather &&
+                        Mux(slideUp, position === 0.U, position + 1.U === state.vl)
+                    val permutation = if (compactSimulation) {
+                        val index = Mux(gather, indexOperand.pad(33),
+                            Mux(slideUp, position.pad(33) - distance.pad(33),
+                                position.pad(33) + distance.pad(33)))
+                        Mux(inserted, scalar, Mux(index < vlmax, io.read(0).data(index(2, 0)), 0.U))
+                    } else {
+                        // Slide indices depend only on already collected scalar
+                        // control. Decode the late gather operand independently.
+                        val slideIndex = Mux(slideUp,
+                            position.pad(33) - distance.pad(33),
+                            position.pad(33) + distance.pad(33))
+                        def fits(index: UInt): Bool = vlmax.orR &&
+                            !index(index.getWidth - 1, 9).orR &&
+                            !(index(8, 0) & ~gatherAllowedBits).orR
+                        val gatherSelect = UIntToOH(indexOperand(2, 0), 8) &
+                            Fill(8, gather && fits(indexOperand))
+                        val slideSelect = UIntToOH(slideIndex(2, 0), 8) &
+                            Fill(8, !gather && fits(slideIndex))
+                        val selected = Mux1H(gatherSelect | slideSelect, io.read(0).data)
+                        Mux(inserted, scalar, selected)
+                    }
+                    val mergeOperand = Mux(control.scalar, scalar,
+                        Mux(control.immediate, immediate, io.read(1).data(i)))
+                    val value = Mux(permute, permutation,
+                        Mux(mask(i), mergeOperand, io.read(0).data(i)))
+                    val writes = inBody && (laneEnabled || maskIsData) &&
+                        (!slideUp || slideOne || position >= offset)
+                    val agnostic = state.vstart < state.vl && position >= state.vstart &&
+                        (position >= state.vl && state.vtype(6) ||
+                            inBody && !laneEnabled && !maskIsData && state.vtype(7))
+                    shuffled(i) := Mux(writes, value, Mux(agnostic, "hffffffff".U, oldWords(i)))
+                }
+                when(registerShuffle) {
+                    output := shuffled.asUInt
+                    element := maximum
+                    nextPhase := writeback
+                }.elsewhen(maskDestination && state.vl === 0.U) {
+                    nextPhase := writeback
+                }.otherwise { enterRead(readElement) }
             } }
             is(readElement) { when(io.readAvailable) {
                 a := Mux(maskSource, (io.read(0).data.asUInt >> element(7, 0))(0).asUInt,

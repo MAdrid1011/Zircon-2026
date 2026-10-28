@@ -289,7 +289,11 @@ class DCache(
     )
     val storeResponseFire = io.store.rsp.fire
 
-    val storeDirectLookup = io.store.req.fire && !postedStoreRequest && !missUnit.io.busy
+    // A normal Store cannot use the posted queue's address-dependent ready.
+    // Resolve its accepted event before the interface ready mux.
+    val storeDirectLookup = (if (p.directPhysical)
+        io.store.req.valid && !postedStoreRequest && normalStoreReady
+        else io.store.req.fire && !postedStoreRequest) && !missUnit.io.busy
     val storeLookupIssue = storeDirectLookup || (storeState === storeBuffered && !missUnit.io.busy)
     // A blocked committed Store cannot select RAM B while a Load uses that port.
     val storeDirectAddress = io.store.req.valid && !postedStoreRequest &&

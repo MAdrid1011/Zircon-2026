@@ -81,7 +81,7 @@ class IssueQueueIO(p: BackendParams, q: IssueQueueParams, directWakeupCandidates
     val flush = Input(Bool())
     val freeCount = Output(UInt(log2Ceil(q.entries + 1).W))
     // Bit n means that at least n + 1 entries can be accepted. Dispatch uses
-    // this registered threshold view instead of decoding the binary count.
+    // this registered threshold view for dispatch admission.
     val freePrefix = Output(UInt(q.enqueueWidth.W))
     val occupancy = Output(UInt(log2Ceil(q.entries + 1).W))
     val replayOccupancy = Output(UInt(log2Ceil(math.max(q.replayEntries, 1) + 1).W))
@@ -142,7 +142,7 @@ class IssueQueue(
     val valid = RegInit(0.U(q.entries.W))
     // For each physical slot, record the live slots older than it. This carries
     // the same total order as an age-ordered slot list, but issue selection can
-    // test every physical candidate in parallel instead of selecting an age rank
+    // evaluate every physical candidate in parallel using its age relations
     // and then muxing that rank back into a physical slot.
     val olderSlots = RegInit(VecInit.fill(q.entries)(0.U(q.entries.W)))
     private val replayDepth = math.max(q.replayEntries, 1)
@@ -356,8 +356,8 @@ class IssueQueue(
     }
 
     // A replayed producer may publish a new speculative wakeup for a source that
-    // was ready from an older attempt. Preserve the old selection depth, but do
-    // not let that stale ready bit issue while updateReady installs the new token.
+    // was ready from an older attempt. Block that stale ready bit from issuing
+    // while updateReady installs the new token.
     private def vectorTags(metadata: VectorInstructionMetadata): Seq[UInt] =
         metadata.source.toSeq.flatMap(_.toSeq) :+ metadata.mask
     private def vectorUsed(metadata: VectorInstructionMetadata): Seq[Bool] =
@@ -457,8 +457,13 @@ class IssueQueue(
             case _ => true.B
         }
         val losesReadiness = if (waitsForSpeculationResolution) losesReadyOnWakeup(item) else false.B
+        // Vector issue registers its operand tags before the execution unit
+        // reads the PRF. A writeback at this edge is visible at that next
+        // collection cycle, so readiness may include the existing wakeup
+        // comparisons without adding a wide PRF bypass or another data port.
+        val resourceEntry = if (vectorEnabled) awakened(position) else entries(position)
         val issueReady = ageAllowed && notIssued && operandsReady(item) &&
-            !losesReadiness && resourceReady(entries(position))
+            !losesReadiness && resourceReady(resourceEntry)
         val issueEligible = live && issueReady
         candidates(position) := issueReady
         nonSpeculativeCandidates(position) := issueReady && !entries(position).speculative
@@ -565,7 +570,7 @@ class IssueQueue(
         output.specMask := Mux1H(selections, wakeups.map(_.specMask))
     }
 
-    // Wakeup work is distributed over the original dispatch candidates. The
+    // Wakeup work is distributed over the dispatch candidates. The
     // late capacity/route decision then selects an already-updated payload.
     val incomingCandidates = Wire(Vec(q.enqueueWidth, new IQEntry(p, vectorEnabled)))
     for (lane <- 0 until q.enqueueWidth) {

@@ -41,7 +41,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
         val readAvailable = Input(Bool())
         val readRequest = Output(Bool())
         val idle = Output(Bool())
-        val activity = Output(UInt(6.W))
+        val activity = Output(UInt(7.W))
         val serialMultiply = if (shareSerialMultiply) Some(new MultiplyIO(1)) else None
         val serialActive = if (shareSerialMultiply) Some(Input(Bool())) else None
     })
@@ -49,7 +49,6 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val busy = RegInit(false.B)
     val prepare = RegInit(0.U(2.W)) // 0=mask/rs1, 1=rs2, 2=collected task.
     val scalar = Reg(UInt(32.W))
-    val nextScalarAddress = RegInit(0.U(p.tagWidth.W))
     val registerVtype = Reg(UInt(32.W))
     val mask = Reg(UInt(256.W))
     val group = RegInit(0.U(3.W))
@@ -76,11 +75,12 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val lastGroup = isConfiguration || scalarMove || group +& 1.U === instruction.vector.destination.count
     val last = lastSubelement && lastGroup
 
-    // While collecting vector groups, the existing scalar port can prepare the
-    // next IQ instruction. Capture its value at acceptance, ahead of RF collect.
-    nextScalarAddress := io.in.bits.scalar.prs(0)
+    // The scalar PRF has asynchronous reads. Select the incoming tag while
+    // the current vector collector owns its registered operands, and capture
+    // that scalar only at instruction acceptance. Mask/VSET preparation keeps
+    // priority for the current instruction's additional scalar operand.
     io.scalarAddress := Mux(busy && prepare === 1.U, instruction.scalar.prs(1),
-        Mux(busy && prepare === 0.U, instruction.scalar.prs(0), nextScalarAddress))
+        Mux(busy && prepare === 0.U, instruction.scalar.prs(0), io.in.bits.scalar.prs(0)))
     for (port <- 0 until 3) {
         // The next group is known at the preceding collection edge. Keep its
         // tag mux off the asynchronous RF-to-operand collection path.
@@ -104,6 +104,7 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val configurationHeld = RegInit(false.B)
     val configurationResult = Reg(new VectorCompletion(p))
     val configurationState = Reg(new VectorCSRState)
+    val configurationUnchanged = Reg(Bool())
     val arithmetic = Module(new VectorArithmetic(p.robWidth, shareSerialMultiply))
     if (shareSerialMultiply) {
         arithmetic.io.serialMultiply.get <> io.serialMultiply.get
@@ -123,15 +124,15 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     val inputConfiguration = io.in.bits.vector.control.execution === VectorExecution.Configuration.U
     val inputScalar = io.in.bits.vector.control.scalar ||
         inputConfiguration && io.in.bits.scalar.inst(31, 30) =/= 3.U
-    val scalarTagReady = nextScalarAddress === io.in.bits.scalar.prs(0)
-    io.in.ready := (!busy || collect && last) && (!inputScalar || io.scalarAvailable && scalarTagReady)
+    io.in.ready := (!busy || collect && last) && (!inputScalar || io.scalarAvailable)
     io.activity := VecInit(Seq(
         busy && prepare===2.U && !groupReady,
         busy && prepare===2.U && groupReady && !io.readAvailable,
-        io.in.valid && (!busy || collect && last) && inputScalar && !(io.scalarAvailable && scalarTagReady),
+        io.in.valid && (!busy || collect && last) && inputScalar && !io.scalarAvailable,
         busy,
         arithmetic.io.in.fire && collector.fma,
-        io.in.fire)).asUInt
+        io.in.fire,
+        arithmetic.io.in.fire)).asUInt
     val incoming = WireDefault(0.U.asTypeOf(new VectorComputeTask(p)))
     incoming.address := Mux1H(groupOH, instruction.vector.destination.physical)
     incoming.firstSubelement := subelement === 0.U
@@ -245,7 +246,10 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     io.completion.bits.retirement.fflags := combinedFlags
     io.completion.bits.retirement.saturated := false.B
     when(selectConfiguration) { io.completion.bits := configurationResult }
-    io.configuration.valid := io.completion.fire && selectConfiguration
+    // Redundant immediate configurations may overlap younger decode. Their
+    // delayed completion must not overwrite a newer speculative configuration
+    // or release the fence belonging to that newer instruction.
+    io.configuration.valid := io.completion.fire && selectConfiguration && !configurationUnchanged
     io.configuration.bits := configurationState
     io.writeback.valid := arithmetic.io.out.fire && output.writesVector && !io.flush
     io.writeback.bits.address := output.address
@@ -271,12 +275,13 @@ class VectorCompute(val p: BackendParams = BackendParams(), val shareSerialMulti
     }.otherwise {
         when(io.completion.fire) { configurationHeld := false.B }
             .elsewhen(selectConfiguration) { configurationHeld := true.B }
-        when(io.configuration.valid) { configurationValid := false.B }
+        when(io.completion.fire && selectConfiguration) { configurationValid := false.B }
         when(collectorReady) { collectorValid := collect && !isConfiguration }
         when(collect) {
             when(isConfiguration) {
                 configurationValid := true.B
                 configurationState := incoming.state
+                configurationUnchanged := VectorConfiguration.unchangedImmediate(inst,state)
                 configurationResult.robIdx := instruction.scalar.robIdx
                 configurationResult.scalar := incoming.scalar
                 configurationResult.retirement.fmaElements := 0.U

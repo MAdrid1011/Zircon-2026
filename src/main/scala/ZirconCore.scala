@@ -240,6 +240,7 @@ class ZirconCore(
         io.debug.get.performance.lowerMemoryWrites := l2.io.performance.get.lowerMemoryWrites
         io.debug.get.performance.l2EngineBusyCycles := l2.io.performance.get.engineBusyCycles
         io.debug.get.backend := backend.io.debug.get
+        io.debug.get.throughput := backend.io.throughput.get
         io.debug.get.memoryIdle := commit.io.memoryIdle
         io.debug.get.l2Idle := l2.io.idle
     }
@@ -257,6 +258,7 @@ class ZirconRetireTrace extends Bundle {
 }
 
 class ZirconDebugIO(vectorEnabled: Boolean = false) extends Bundle {
+    val throughput = Output(UInt(11.W))
     val retire = Output(Vec(CommitParams().width, new ZirconRetireTrace))
     val robHeadValid = Output(Bool())
     val robHeadComplete = Output(Bool())

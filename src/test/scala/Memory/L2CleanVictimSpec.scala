@@ -1,9 +1,67 @@
 // SPDX-License-Identifier: MPL-2.0
+import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 import ZirconConfig.L2CacheParams
 
+class L2ConcurrentVictimHarness extends L2Cache(DualPortRamBackend.Registers, p = L2CacheParams(sets = 16)) {
+    val incomingHitDuringVictimLookup = IO(Output(Bool()))
+    incomingHitDuringVictimLookup := engineState === engineVictimLookup && !engineSourceI &&
+        iS2Advance && !iFast && iHit.orR &&
+        iS2.paddr(p.offsetBits + p.indexBits - 1, p.offsetBits) ===
+            engineVictimAddress(p.offsetBits + p.indexBits - 1, p.offsetBits)
+}
+
 class L2CleanVictimSpec extends AnyFreeSpec with ChiselSim {
+    "a same-edge opposite-channel slow hit protects a newly installed dirty victim" in {
+        simulate(new L2ConcurrentVictimHarness) { dut =>
+            val d = new L2CacheDriver(dut)
+            import d._
+            tick()
+            val target = 0x50000L
+            val stride = dut.p.sets * dut.p.lineBytes
+            // All four ways are data-owned; the first inserted line is PLRU.
+            for (address <- (0 until 4).map(i => target + i * stride) :+ (target + 64)) {
+                dut.io.dcache.req.bits.victimOnly.poke(true)
+                dcache(0, Some((address, line(address), false)))
+                dut.io.dcache.req.bits.victimOnly.poke(false)
+            }
+            val dirtyVictim = target + 4 * stride
+            val dirtyData = replaceWord(line(dirtyVictim), 0, BigInt("c18ab590", 16))
+            val demand = 0x91080L
+            lowerLatency = 24
+            dut.io.dcache.rsp.ready.poke(false)
+            dut.io.dcache.req.valid.poke(true)
+            dut.io.dcache.req.bits.paddr.poke(demand)
+            dut.io.dcache.req.bits.victimValid.poke(true)
+            dut.io.dcache.req.bits.victimLine.poke(dirtyVictim >> dut.p.offsetBits)
+            dut.io.dcache.req.bits.victimData.poke(dirtyData)
+            dut.io.dcache.req.bits.victimDirty.poke(true)
+            assert(dut.io.dcache.req.ready.peek().litToBoolean)
+            tick()
+            dut.io.dcache.req.valid.poke(false)
+            // Occupy the clean-victim buffer while the D engine waits below L2.
+            assert(icache(target + 64, Some((0x720c0L, line(0x720c0L))))._1 == line(target + 64))
+            while (!lowerResponseDue) tick()
+            var covered = false
+            beforeStep = () => {
+                covered ||= dut.incomingHitDuringVictimLookup.peek().litToBoolean
+            }
+            // S1 captures with the lower response, so S2 enters S3 precisely
+            // when D chooses a replacement for the dirty victim.
+            val (instructionData, instructionError) = icache(target, Some((0x73100L, line(0x73100L))))
+            assert(covered, "The regression must exercise the same-edge ownership transfer")
+            assert(!instructionError && instructionData == line(target))
+            dut.io.dcache.rsp.valid.expect(true)
+            dut.io.dcache.rsp.bits.data.expect(line(demand))
+            dut.io.dcache.rsp.ready.poke(true)
+            tick()
+            drain()
+            val (data, error) = dcache(dirtyVictim)
+            assert(!error && data == dirtyData, "The opposite-channel consume discarded the dirty victim")
+        }
+    }
+
     "clean data victims return demand responses before insertion and retain data-way allocation" in {
         val params = L2CacheParams(sets = 16)
         simulate(new L2Cache(DualPortRamBackend.Registers, p = params)) { dut =>

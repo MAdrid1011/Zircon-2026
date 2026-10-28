@@ -36,6 +36,10 @@ class BackendIO(
     val maintenance = Flipped(new CacheMaintenanceIO)
     val performance = if (observe) Some(Output(new BackendPerformanceCounters)) else None
     val debug = if (observe) Some(Output(new BackendDebugIO)) else None
+    // Physical resource service events, independent of algorithm and VL.
+    // Pipelined resources count accepted service slots; nonpipelined divide
+    // and vector-serial resources count occupied cycles of their sole server.
+    val throughput = if (observe) Some(Output(UInt(11.W))) else None
     val vector = if (vectorEnabled) Some(new VectorBackendIO(p)) else None
     val vectorObservation = if (vectorEnabled && observe) Some(Output(Vec(64, UInt(256.W)))) else None
     val vectorPerformance = if (vectorEnabled && observe) Some(Output(Vec(8,UInt(64.W)))) else None
@@ -45,8 +49,8 @@ class BackendIO(
   * Six fixed-slot issue queues, five execution pipes, shared PRFs, bypass and DCache.
   *
   * The ROB, SQ, SB and ReadyBoard remain outside this module. Load retry is closed
-  * locally: the corresponding IQ entry stays at its original age and is re-armed
-  * directly instead of being appended to the dispatch tail.
+  * locally: the corresponding IQ entry retains its age and is re-armed
+  * at that position for the next eligible issue.
   */
 class Backend(
     val p: BackendParams = BackendParams(),
@@ -124,7 +128,7 @@ class Backend(
     /* Central PRFs provide stable held reads while a downstream execution stage is stalled. */
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
-        numReadPorts = if (vectorEnabled) 10 else 9,
+        numReadPorts = if (vectorEnabled) 11 else 9,
         numWritePorts = 5,
         holdReads = true,
     )
@@ -138,10 +142,10 @@ class Backend(
     val intRf = Module(new Regfile(
         intRfParams,
         directWritePort = Some(2),
-        readBypassOverridePort = Some(2),
-        overrideReadPorts = Set(6, 7),
+        readBypassOverridePorts = Seq(2, 3),
+        overrideReadPorts = if (vectorEnabled) Set(6, 7, 10) else Set(6, 7),
         selectiveReadBypassPort = Some(4),
-        selectiveReadPorts = Set(6, 7, 8),
+        selectiveReadPorts = if (vectorEnabled) Set(6, 7, 8, 10) else Set(6, 7, 8),
     ))
     val fpRf = Module(new Regfile(fpRfParams, directWritePort = Some(0)))
     val bypass = Module(new Bypass(BypassParams.twoArithBackend(p)))
@@ -162,8 +166,18 @@ class Backend(
         }
     }
     val vectorCompute = if (vectorEnabled) Some(Module(new VectorCompute(p, shareSerialMultiply = true))) else None
-    val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams))) else None
-    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p, externalMultiply = true))) else None
+    val vectorMemory = if (vectorEnabled) Some(Module(new VectorMemory(p, dcacheParams, compactSimulation = observe))) else None
+    val vectorSerial = if (vectorEnabled) Some(Module(new VectorSerial(p, externalMultiply = true, compactSimulation = observe))) else None
+    io.throughput.foreach { events =>
+        val vectorEvents = vectorCompute.map { compute =>
+            val memory=vectorMemory.get
+            VecInit(Seq(compute.io.activity(6),memory.io.writeback.valid,
+                memory.io.store.fire && !memory.io.store.bits.addressOnly,
+                vectorSerial.get.io.executionActive)).asUInt
+        }.getOrElse(0.U(4.W))
+        events := Cat(vectorEvents(3),mixArith.io.divideBusy,vectorEvents(2,0),
+            VecInit(queues.map(_.io.issue.fire)).asUInt)
+    }
     vectorCompute.foreach { compute =>
         val port = io.vector.get
         val iq = Module(new IssueQueue(p, IssueQueueParams(vectorParams.computeEntries, IssueQueueProfile.Vector,
@@ -275,7 +289,7 @@ class Backend(
         file.io.write(1).bytes := memory.io.writeback.bits.bytes
         io.vectorPerformance.foreach { counters =>
             val events = Cat(!compute.io.activity(3) && !iq.io.issue.valid,
-                !memory.io.idle,compute.io.activity)
+                !memory.io.idle,compute.io.activity(5,0))
             for (event <- 0 until 8) {
                 val count = RegInit(0.U(64.W))
                 when(events(event)) { count := count+1.U }
@@ -311,7 +325,18 @@ class Backend(
             (compute.io.scalarAddress(p.tagWidth - 1) || !memory.io.scalarReadRequest)
         compute.io.scalarData := Mux(compute.io.scalarAddress(p.tagWidth - 1),
             fpRf.io.read(4).data, intRf.io.read(9).data)
-        memory.io.scalarData := intRf.io.read(9).data
+        // Keep the memory base read independent of incoming compute-IQ tags.
+        // This selects the same PRF state and WB values without another RF copy.
+        intRf.io.read(10).addr := memory.io.scalarAddress(p.physWidth - 1, 0)
+        memory.io.scalarData := intRf.io.read(10).data
+        // Vector-to-scalar destinations wake after their PRF write, so a
+        // memory consumer cannot need that producer's same-cycle WB mux.
+        when(memory.io.scalarReadRequest && !io.commit.flush) {
+            assert(!vectorScalarWrite.valid ||
+                vectorScalarWrite.bits.destination =/= memory.io.scalarAddress,
+                "Memory scalar reads must follow vector scalar writeback")
+            assert(intRf.io.read(10).data === intRf.io.read(9).data)
+        }
         serial.io.scalarData := Mux(serial.io.scalarAddress(p.tagWidth - 1),
             fpRf.io.read(4).data, intRf.io.read(9).data)
     }
@@ -428,7 +453,7 @@ class Backend(
         ls0.io.rf.rd.hold,
         ls1.io.rf.rd.hold,
         ls1.io.rf.std.get.hold,
-    ) ++ (if (vectorEnabled) Seq(false.B) else Seq.empty))
+    ) ++ (if (vectorEnabled) Seq(false.B, false.B) else Seq.empty))
 
     for (source <- 0 until 3) {
         fpRf.io.read(source).addr := mixArith.io.rf.fpRead(source).addr
@@ -449,8 +474,8 @@ class Backend(
         intWrite(port, pipe.io.rf.write.valid, pipe.io.rf.write.bits.prd, pipe.io.rf.write.bits.data)
     }
     intWrite(2, mixArith.io.rf.intWrite.valid, mixArith.io.rf.intWrite.bits.addr, mixArith.io.rf.intWrite.bits.data)
-    intRf.io.readBypassOverride.get := mixArith.io.rf.intReadBypassValid
-    intRf.io.readBypassOverrideAddr.get := mixArith.io.rf.intReadBypassAddr
+    intRf.io.readBypassOverride.get(0) := mixArith.io.rf.intReadBypassValid
+    intRf.io.readBypassOverrideAddr.get(0) := mixArith.io.rf.intReadBypassAddr
     when(!io.commit.flush) {
         assert(mixArith.io.rf.intReadBypassValid === mixArith.io.rf.intWrite.valid)
         when(mixArith.io.rf.intReadBypassValid) {
@@ -465,6 +490,20 @@ class Backend(
         ls0.io.rf.wr.bits.prd(p.physWidth - 1, 0),
         ls0.io.rf.wr.bits.data,
     )
+    // The WB tag is registered alongside the response. A flush cancels every
+    // new memory request and clears its held-read state, so only the actual
+    // PRF write needs flush suppression; the AGU's read bypass can use WB Q.
+    val load0BypassTag = ls0.io.wk.wakeWB.prd
+    val load0ReadBypass = ls0.io.cache.rsp.valid && load0BypassTag =/= 0.U &&
+        !load0BypassTag(p.tagWidth - 1)
+    intRf.io.readBypassOverride.get(1) := load0ReadBypass
+    intRf.io.readBypassOverrideAddr.get(1) := load0BypassTag(p.physWidth - 1, 0)
+    when(!io.commit.flush) {
+        assert(load0ReadBypass === intRf.io.write(3).we)
+        when(load0ReadBypass) {
+            assert(load0BypassTag === ls0.io.rf.wr.bits.prd)
+        }
+    }
     // AtomicUnit captures the result-write decision alongside its response.
     val atomicIntWrite = atomic.writeResult
     val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)
@@ -539,7 +578,7 @@ class Backend(
     val scalarLoadRequest = Wire(new DLoadRequest(dcacheParams))
     scalarLoadRequest := ls1.io.cache.req.bits
     val nativeVector = vectorMemory.map(m =>
-        scratchpadEnabled.B && PeScratchpadBridge.matches(m.io.request.bits.paddr)).getOrElse(false.B)
+        scratchpadEnabled.B && m.io.requestNative).getOrElse(false.B)
     val vectorRequest = vectorMemory.map(_.io.request.valid).getOrElse(false.B) && !nativeVector
     val preferVector = if (vectorEnabled) Some(RegInit(false.B)) else None
     val loadSelectionLocked = if (vectorEnabled) Some(RegInit(false.B)) else None
@@ -636,11 +675,13 @@ class Backend(
     io.commit.store.response <> sharedStore.io.committedResponse
     if (scratchpadEnabled) {
         val native = scratchpad.get.io
-        val select = sharedStore.io.cacheRequest.bits.wide &&
-            PeScratchpadBridge.matches(sharedStore.io.cacheRequest.bits.paddr)
+        val select = io.commit.nativeStoreSelected
+        assert(select === (sharedStore.io.cacheRequest.bits.wide &&
+            PeScratchpadBridge.matches(sharedStore.io.cacheRequest.bits.paddr)))
         native.store.req.valid := sharedStore.io.cacheRequest.valid && select
         native.store.req.bits := sharedStore.io.cacheRequest.bits
-        dcache.io.store.req.valid := sharedStore.io.cacheRequest.valid && !select
+        dcache.io.store.req.valid := io.commit.cachedStoreValid
+        assert(io.commit.cachedStoreValid === (sharedStore.io.cacheRequest.valid && !select))
         dcache.io.store.req.bits := sharedStore.io.cacheRequest.bits
         sharedStore.io.cacheRequest.ready := Mux(select,native.store.req.ready,dcache.io.store.req.ready)
         assert(!(native.store.rsp.valid && dcache.io.store.rsp.valid))

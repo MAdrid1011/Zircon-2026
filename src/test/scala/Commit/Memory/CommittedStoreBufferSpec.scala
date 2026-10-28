@@ -15,6 +15,14 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
             val query = dut.io.query(0).request
             query.valid.poke(true); query.bits.wordAddress.poke(0x1000 >> 2); query.bits.mask.poke(15)
             dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(true)
+            query.bits.wordAddress.poke(0x80101000L >> 2)
+            dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(true)
+            dut.io.scalarVectorClear.get(0).poke(true)
+            dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(false)
+            query.bits.wordAddress.poke(0x80001000L >> 2)
+            dut.clock.step(); dut.io.query(0).response.bits.blocked.expect(true)
+            query.bits.wordAddress.poke(0x1000 >> 2)
+            dut.io.scalarVectorClear.get(0).poke(false)
             dut.io.store.request.ready.poke(true); dut.clock.step()
             dut.io.store.response.valid.poke(true); vector.start.ready.poke(true)
             vector.start.valid.expect(true); dut.io.store.request.valid.expect(false)
@@ -32,6 +40,7 @@ class CommittedStoreBufferSpec extends AnyFreeSpec with ChiselSim {
     }
     private def initialize(dut: StoreBuffer): Unit = {
         dut.io.enqueue.valid.poke(false)
+        dut.io.scalarVectorClear.foreach(_.foreach(_.poke(false)))
         dut.io.enqueue.bits.vector.poke(false)
         dut.io.store.request.ready.poke(false)
         dut.io.store.response.valid.poke(false)

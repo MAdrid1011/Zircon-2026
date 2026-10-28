@@ -13,6 +13,10 @@ class BackendCommitIO(bp: BackendParams, load: LoadPipelineParams) extends Bundl
     val ls0 = new LoadCompletionIO(load, withStore = false)
     val ls1 = new LoadCompletionIO(load, withStore = true)
     val store = Flipped(new StoreBufferCacheIO)
+    // Same-cycle cached subset of store.request.valid; the selected payload is
+    // shared. Native-only immediate vector grants are excluded at their source.
+    val cachedStoreValid = Input(Bool())
+    val nativeStoreSelected = Input(Bool())
     val atomic = new AtomicBackendIO(bp)
 }
 
@@ -228,12 +232,26 @@ class Commit(
         sq.io.vector.get.store.valid := wide.io.collect.fire && !wide.io.collect.bits.addressOnly
         sq.io.vector.get.store.bits := wide.io.collect.bits
         sq.io.vector.get.ordering.tail := io.vector.get.ordering.tail
-        io.vector.get.ordering.clear := sq.io.vector.get.ordering.clear && sb.io.empty
+        sq.io.vector.get.ordering.native := io.vector.get.ordering.native
+        sq.io.vector.get.ordering.line := io.vector.get.ordering.line
+        wide.io.loadLine := io.vector.get.ordering.line
+        wide.io.loadTail := io.vector.get.ordering.tail
+        for(port <- 0 until 2) {
+            wide.io.scalarLoadLine(port) := PeScratchpadBridge.cachedTaskLine(sb.io.query(port).request.bits.wordAddress)
+            wide.io.scalarLoadTail(port) := PriorityEncoder(sb.io.query(port).request.bits.sqTailOH)
+            sb.io.scalarVectorClear.get(port) := wide.io.scalarLoadClear(port)
+        }
+        io.vector.get.ordering.clear := sq.io.vector.get.ordering.clear &&
+            Mux(io.vector.get.ordering.native,sb.io.scalarEmpty && wide.io.loadClear,sb.io.empty)
         val wideActive = wide.io.active
         // SB owns selection and never launches a scalar request during a wide
         // drain. Wide cache responses remain local until the whole token ends.
         io.backend.store.request.valid := sb.io.store.request.valid || wide.io.cache.request.valid
-        io.backend.store.request.bits := Mux(wideActive,
+        io.backend.nativeStoreSelected := wide.io.cachePayloadSelected && wide.io.cachePayloadNative
+        io.backend.cachedStoreValid :=
+            (sb.io.store.request.valid || wide.io.preparedRequestValid) &&
+                !(wide.io.cachePayloadSelected && wide.io.cachePayloadNative)
+        io.backend.store.request.bits := Mux(wide.io.cachePayloadSelected,
             wide.io.cache.request.bits, sb.io.store.request.bits)
         sb.io.store.request.ready := io.backend.store.request.ready
         wide.io.cache.request.ready := io.backend.store.request.ready
@@ -243,9 +261,13 @@ class Commit(
         sb.io.store.response.bits := io.backend.store.response.bits
         io.backend.store.response.ready := wide.io.cache.response.ready || sb.io.store.response.ready
         assert(!(sb.io.store.request.valid && wide.io.cache.request.valid))
-        when(sb.io.store.request.valid) { assert(!wideActive) }
+        when(wide.io.cache.request.valid) { assert(wide.io.cachePayloadSelected) }
+        when(sb.io.store.request.valid) { assert(!wide.io.cachePayloadSelected) }
+        when(sb.io.store.request.valid) { assert(!wideActive || wide.io.drain.done) }
     } else {
         io.backend.store <> sb.io.store
+        io.backend.cachedStoreValid := sb.io.store.request.valid
+        io.backend.nativeStoreSelected := false.B
     }
     /* Retirement stops at the first recovery event and delays its global redirect by one cycle. */
     val trainQueue = Module(new ClusterIndexFIFO(

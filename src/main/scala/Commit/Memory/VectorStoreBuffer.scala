@@ -3,11 +3,12 @@ import chisel3.util._
 import ZirconConfig.BackendParams
 
 class VectorStoreDrain extends Bundle {
+    // Payload kind is available before admission; only start.fire grants drain.
     val start = Decoupled(Bool())
     val done = Input(Bool())
 }
 
-/** Wide payload side buffer. The original SQ/SB token owns program order;
+/** Wide payload side buffer. The SQ/SB token owns program order;
   * this buffer survives retirement and is released only after its last write.
   */
 class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean = false) extends Module {
@@ -19,13 +20,26 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         val flush = Input(Bool())
         val empty = Output(Bool())
         val active = Output(Bool())
+        val cachePayloadSelected = Output(Bool())
+        val preparedRequestValid = Output(Bool())
+        val cachePayloadNative = Output(Bool())
+        val loadLine = Input(UInt(26.W))
+        val loadTail = Input(UInt(p.sqWidth.W))
+        val loadClear = Output(Bool())
+        val scalarLoadLine = Input(Vec(2,UInt(26.W)))
+        val scalarLoadTail = Input(Vec(2,UInt(p.sqWidth.W)))
+        val scalarLoadClear = Output(Vec(2,Bool()))
         val observation = if (observe) Some(Output(new VectorStoreTrace)) else None
     })
     val payload = Reg(Vec(8, new VectorStoreTask(p)))
     val nextLineAddress = Reg(Vec(8, UInt(26.W)))
     val adjacentPair = RegInit(VecInit.fill(8)(false.B))
     val contiguousMasks = Reg(Vec(8, UInt(128.W)))
-    val elementAddresses = Mem(256, UInt(32.W))
+    // Debug keeps the compact observable array; hardware prefetches through
+    // a replaceable SRAM leaf before the existing readElementAddress capture.
+    val elementAddresses = if (observe) Some(Mem(256, UInt(32.W))) else None
+    val elementAddressRam = if (!observe) Some(Module(new ZirconSram1W1R(256, 32))) else None
+    val elementAddressWrite = WireDefault(false.B)
     val scattered = Reg(Bool())
     val eew = Reg(UInt(2.W))
     val fieldRegisterShift = Reg(UInt(2.W))
@@ -45,12 +59,85 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val idle :: readElementAddress :: prepare :: response :: done :: Nil = Enum(5)
     val state = RegInit(idle)
     val active = RegInit(false.B)
+    val finishNow = WireDefault(false.B)
     val commitHit = io.commit.map(event => event.valid && event.bits === identity).reduce(_ || _)
-    io.collect.ready := !io.flush && (!valid || !filled && io.collect.bits.sqIdx === identity)
-    io.drain.start.ready := valid && committed && filled && state === idle
-    io.drain.done := state === done
-    io.empty := !valid
+    // When the active instruction uses at most four groups, its unused upper
+    // payload registers queue single- or two-group Stores. No data storage
+    // is added. Vector memory issues in program order; SQ/SB still determines
+    // retirement and grants each queued instruction its own outward drain.
+    val pendingValid = RegInit(VecInit.fill(4)(false.B))
+    val pendingCommitted = RegInit(VecInit.fill(4)(false.B))
+    val pendingFilled = RegInit(VecInit.fill(4)(false.B))
+    val pendingTwo = RegInit(false.B)
+    val queueWritePending = RegInit(false.B)
+    val queueWriteSlot = Reg(UInt(2.W))
+    val queueWriteIdentity = Reg(UInt(p.sqWidth.W))
+    val pendingHead = RegInit(0.U(2.W))
+    val pendingTail = RegInit(0.U(2.W))
+    val pendingCount = RegInit(0.U(3.W))
+    val pendingCommitHit = VecInit((0 until 4).map(i => io.commit.map(event =>
+        event.valid && event.bits === payload(i + 4).sqIdx).reduce(_ || _)))
+    val retained = VecInit((0 until 4).map(i => pendingValid(i) &&
+        (pendingCommitted(i) || pendingCommitHit(i))))
+    val promote = (!valid || state === done || finishNow) && pendingCount =/= 0.U &&
+        pendingFilled(pendingHead) && (!io.flush || retained(pendingHead))
+    val incomingSingle = io.collect.bits.index === 0.U && io.collect.bits.last &&
+        !io.collect.bits.scattered && !io.collect.bits.addressOnly
+    val incomingTwo = io.collect.bits.index===0.U && !io.collect.bits.last &&
+        !io.collect.bits.scattered && !io.collect.bits.addressOnly &&
+        io.collect.bits.fieldRegisterShift===1.U && io.collect.bits.lastField===0.U
+    val queueFollow = queueWritePending && io.collect.bits.sqIdx===queueWriteIdentity &&
+        io.collect.bits.index===1.U && io.collect.bits.last && !io.collect.bits.addressOnly
+    val queueRoom = pendingCount < Mux(incomingTwo,2.U,4.U) || promote
+    val sameLayout = pendingCount===0.U || pendingTwo===incomingTwo
+    val queueStart = valid && filled && count<=4.U && (incomingSingle || incomingTwo) &&
+        !queueWritePending && sameLayout && queueRoom && io.collect.bits.sqIdx=/=identity &&
+        (!(state===done || finishNow) || pendingCount=/=0.U)
+    val canQueue = queueStart || queueFollow
+    io.collect.ready := !io.flush &&
+        ((!valid && pendingCount === 0.U) || !filled && io.collect.bits.sqIdx === identity || canQueue)
+    val queueCollect = io.collect.fire && canQueue
+    val queueBegin = queueCollect && !queueFollow
+    val primaryCollect = io.collect.fire && !canQueue
+    val pendingStep = Mux(pendingTwo,2.U(2.W),1.U(2.W))
+    def conflicts(slot: Int,line: UInt): Bool = payload(slot).mask.orR &&
+        (!PeScratchpadBridge.matches(payload(slot).address.pad(34)) ||
+            payload(slot).address(31,6) === line ||
+            contiguousMasks(slot)(127,64).orR && nextLineAddress(slot) === line)
+    // Compare only the existing eight payload addresses. Scattered, partial
+    // collection and non-native Stores stay conservative; ordinary native
+    // Loads need neither forwarding data nor a second memory port.
+    def older(sqIdx: UInt,tail: UInt,retired: Bool): Bool = {
+        val entries = ZirconConfig.CommitParams().sqEntries
+        val distance = Mux(tail>=sqIdx,tail- sqIdx,(tail +& (2*entries).U)-sqIdx)
+        retired || distance=/=0.U && distance<=entries.U
+    }
+    def clearFor(line: UInt,tail: UInt): Bool = {
+        val primaryConflict = VecInit((0 until 8).map(i => i.U < count && conflicts(i,line))).asUInt.orR
+        val pendingConflict = VecInit((0 until 4).map(i => {
+            val owner = Mux(pendingTwo,(i & 2).U(2.W),i.U(2.W))
+            pendingValid(owner) &&
+                older(payload(Cat(1.U(1.W),owner)).sqIdx,tail,
+                    pendingCommitted(owner) || pendingCommitHit(owner)) &&
+                (!pendingFilled(owner) || conflicts(i+4,line))
+        })).asUInt.orR
+        // Younger speculative Stores cannot block an older Load: their ROB
+        // retirement may itself depend on that Load completing. Retired tokens
+        // remain older even when their SQ ring identities have been recycled.
+        (!valid || !older(identity,tail,committed || commitHit) ||
+            filled && !scattered && !primaryConflict) && !pendingConflict
+    }
+    io.loadClear := clearFor(io.loadLine,io.loadTail)
+    for(port <- 0 until 2) { io.scalarLoadClear(port) := clearFor(io.scalarLoadLine(port),io.scalarLoadTail(port)) }
+    io.drain.start.ready := valid && committed && filled && state === idle ||
+        finishNow && pendingCount =/= 0.U && pendingValid(pendingHead) && pendingFilled(pendingHead) &&
+            (pendingCommitted(pendingHead) || pendingCommitHit(pendingHead))
+    io.drain.done := state === done || finishNow
+    io.empty := !valid && pendingCount===0.U
     io.active := active
+    // In prepare the active token owns the payload. Otherwise only a new
+    // vector candidate can offer a wide request, including response handover.
+    io.cachePayloadSelected := state === prepare || io.drain.start.bits
     io.observation.foreach { trace =>
         trace.count := count
         trace.addresses := VecInit(payload.map(_.address)).asUInt
@@ -62,7 +149,24 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         trace.lastField := lastField
         for (group <- 0 until 8) {
             trace.elementAddresses(group) := VecInit((0 until 32).map(index =>
-                elementAddresses(group * 32 + index))).asUInt
+                elementAddresses.get(group * 32 + index))).asUInt
+        }
+        // Retirement can name queued Stores while an older token still drains.
+        // Export their existing rows separately for each retirement lane.
+        for ((event, lane) <- io.commit.zipWithIndex) {
+            val primary = valid && event.bits === identity
+            val queued = VecInit((0 until 4).map(i =>
+                pendingValid(i) && event.bits === payload(i + 4).sqIdx))
+            val first = Mux(primary, 0.U(3.W), Cat(1.U(1.W), PriorityEncoder(queued)))
+            val owner = primary || queued.asUInt.orR
+            val result = trace.retire(lane)
+            result.firstGroup := first
+            result.count := Mux(event.valid && owner, Mux(primary, count, Mux(pendingTwo, 2.U, 1.U)), 0.U)
+            result.scattered := primary && scattered
+            result.eew := Mux(primary, eew, payload(first).eew)
+            result.fieldRegisterShift := Mux(primary, fieldRegisterShift, payload(first).fieldRegisterShift)
+            result.lastField := Mux(primary, lastField, payload(first).lastField)
+            when(event.valid) { assert(PopCount(queued) +& primary <= 1.U) }
         }
     }
     io.cache.response.ready := state === response
@@ -83,6 +187,10 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val lineMask = Mux(pair,Cat(nextItem.mask,item.mask),Mux(second, shiftedMask(127, 64), shiftedMask(63, 0)))
     val hasSecond = shiftedMask(127, 64).orR && !second
     val last = group +& step === count
+    // The final accepted cache acknowledgement is already the architectural
+    // drain boundary. Return its SB token at that edge, allowing a queued
+    // instruction to acquire the drain without done/idle/start bubbles.
+    finishNow := state === response && !scattered && !hasSecond && last && io.cache.response.fire
     val fieldStride = (1.U(4.W) << fieldRegisterShift)(3, 0)
     val withinField = group & Cat(fieldRegisterShift === 3.U,
         fieldRegisterShift >= 2.U, fieldRegisterShift >= 1.U)
@@ -120,7 +228,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             }
         }
     }
-    when(io.collect.fire) {
+    when(primaryCollect) {
         when(!valid) {
             assert(io.collect.bits.index === 0.U)
             identity := io.collect.bits.sqIdx
@@ -136,7 +244,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             assert(!committed)
         }
         when(io.collect.bits.addressOnly) {
-            elementAddresses(Cat(io.collect.bits.index, io.collect.bits.element)) := io.collect.bits.address
+            elementAddresses.foreach(memory =>
+                memory(Cat(io.collect.bits.index, io.collect.bits.element)) := io.collect.bits.address)
+            elementAddressWrite := true.B
             nextCollect := io.collect.bits.index
         }.otherwise {
             payload(io.collect.bits.index) := io.collect.bits
@@ -173,14 +283,41 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         second := false.B
         state := Mux(scattered, readElementAddress, prepare)
     }
-    when(state === readElementAddress) {
-        val selectedAddress = elementAddresses(Cat(group, position))
-        elementAddress := selectedAddress
-        // Prepare both line addresses at the existing element-read boundary.
-        // The second-fragment selector must not precede a cache-address adder.
-        nextElementLine := selectedAddress(31, 6) + 1.U
-        state := prepare
+    if (observe) {
+        when(state === readElementAddress) {
+            val selectedAddress = elementAddresses.get(Cat(group, position))
+            elementAddress := selectedAddress
+            nextElementLine := selectedAddress(31, 6) + 1.U
+        }
+    } else {
+        val ram = elementAddressRam.get.io
+        ram.clock := clock
+        ram.writeEnable := elementAddressWrite
+        ram.writeAddress := Cat(io.collect.bits.index, io.collect.bits.element)
+        ram.writeData := io.collect.bits.address
+        // The table has its own read port. Read the first element while idle
+        // after collection, and the successor while the current element drains.
+        // The readElementAddress edge captures the result.
+        val lastPosition = position +& elementBytes === 32.U
+        val finalField = currentField === lastField
+        val nextGroup = Mux(!finalField, group + fieldStride,
+            Mux(lastPosition, withinField + 1.U, withinField))(2, 0)
+        val nextPosition = Mux(finalField,
+            Mux(lastPosition, 0.U, position + elementBytes), position)(4, 0)
+        ram.readEnable := valid && filled && scattered &&
+            (state === idle || state === prepare || state === response)
+        ram.readAddress := Mux(state === idle, 0.U(8.W), Cat(nextGroup, nextPosition))
+        when(state === readElementAddress) {
+            elementAddress := ram.readData
+            val line = ram.readData(31, 6)
+            nextElementLine := Cat((25 to 0 by -1).map { bit =>
+                if (bit == 0) !line(0) else line(bit) ^ line(bit - 1, 0).andR
+            })
+        }
+        // Address collection finishes before its token can begin draining.
+        assert(!(ram.readEnable && ram.writeEnable))
     }
+    when(state === readElementAddress) { state := prepare }
     io.cache.request.bits := 0.U.asTypeOf(new DStoreRequest)
     io.cache.request.bits.wide := true.B
     val contiguousLine = Mux(second, Mux1H(groupOH, nextLineAddress), item.address(31, 6))
@@ -191,17 +328,125 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     io.cache.request.bits.lineMask := lineMask
     io.cache.request.bits.size := 2.U
     io.cache.request.valid := state === prepare && lineMask.orR
+    // A native, aligned register word needs only a half-line selection. Start
+    // it on the SB grant edge, including a queued successor of the returning
+    // token. The existing payload remains stable if the cache applies pressure;
+    // no additional line buffer or speculative outward write is introduced.
+    val startItem = Mux(state === response,payload(Cat(1.U(1.W),pendingHead)),payload(0))
+    val startSingle = Mux(state === response,!pendingTwo,count===1.U && !scattered)
+    val startNext = Mux(state === response,payload(Cat(1.U(1.W),(pendingHead+1.U)(1,0))),payload(1))
+    val startPair = Mux(state === response,pendingTwo,count===2.U && !scattered && adjacentPair(0))
+    val immediatePair = startPair && !startItem.address(5,0).orR &&
+        startItem.mask.andR && startNext.mask.andR
+    val immediateSingle = startSingle && !startItem.address(4,0).orR && startItem.mask.andR
+    val immediateStart = io.drain.start.fire &&
+        PeScratchpadBridge.matches(startItem.address.pad(34)) && (immediateSingle || immediatePair)
+    when(immediateStart) { io.cache.request.valid := true.B }
+    // Immediate handovers are native-only. Classify the ordinary payload before
+    // merging that late grant so it cannot select a DCache SRAM address.
+    io.preparedRequestValid := state === prepare && lineMask.orR
+    when(io.cache.request.valid && !io.preparedRequestValid) {
+        assert(PeScratchpadBridge.matches(io.cache.request.bits.paddr))
+    }
+    // An immediate request exists only outside prepare. Select its payload
+    // from the registered phase, keeping grant/retirement out of data muxes.
+    when(state =/= prepare) {
+        io.cache.request.bits.paddr := Cat(startItem.address(31,6),0.U(6.W)).pad(34)
+        io.cache.request.bits.line := Mux(immediatePair,Cat(startNext.data,startItem.data),
+            Mux(startItem.address(5),Cat(startItem.data,0.U(256.W)),Cat(0.U(256.W),startItem.data)))
+        io.cache.request.bits.lineMask := Mux(immediatePair,Cat(startNext.mask,startItem.mask),
+            Mux(startItem.address(5),Cat(startItem.mask,0.U(32.W)),Cat(0.U(32.W),startItem.mask)))
+    }
+    // Native-window classification runs beside the successor-line address.
+    // Only the last line can leave a window, and its predecessor can enter it.
+    val elementWindow = elementAddress(31, 20)
+    val elementWindowCarry = second && elementAddress(19, 6).andR
+    val scatteredNative = (elementWindow === "hb00".U && !elementWindowCarry) ||
+        (elementWindow === "haff".U && elementWindowCarry)
+    val preparedNative = Mux(scattered, scatteredNative,
+        contiguousLine(25, 14) === "hb00".U)
+    io.cachePayloadNative := Mux(state === prepare, preparedNative,
+        PeScratchpadBridge.matches(startItem.address.pad(34)))
+    assert(io.cachePayloadNative === PeScratchpadBridge.matches(io.cache.request.bits.paddr))
     when(state === prepare && !lineMask.orR) { advance() }
     when(io.cache.request.fire) { state := response }
     when(io.cache.response.fire) {
         assert(io.cache.response.bits.exception === 0.U)
         advance()
     }
-    when(state === done) {
+    when(state === done || finishNow) {
         valid := false.B
         committed := false.B
         filled := false.B
         state := idle
+        active := false.B
+    }
+    when(promote) {
+        val slot = Cat(1.U(1.W), pendingHead)
+        payload(0) := payload(slot)
+        contiguousMasks(0) := contiguousMasks(slot)
+        nextLineAddress(0) := nextLineAddress(slot)
+        when(pendingTwo) {
+            val nextSlot=Cat(1.U(1.W),(pendingHead+1.U)(1,0))
+            payload(1) := payload(nextSlot)
+            contiguousMasks(1) := contiguousMasks(nextSlot)
+            nextLineAddress(1) := nextLineAddress(nextSlot)
+            adjacentPair(0) := !payload(slot).address(5,0).orR &&
+                payload(nextSlot).address===Cat(payload(slot).address(31,6),32.U(6.W))
+        }.otherwise { adjacentPair(0) := false.B }
+        identity := payload(slot).sqIdx
+        count := Mux(pendingTwo,2.U,1.U)
+        nextCollect := Mux(pendingTwo,2.U,1.U)
+        valid := true.B
+        committed := pendingCommitted(pendingHead) || pendingCommitHit(pendingHead)
+        filled := true.B
+        scattered := false.B
+        eew := payload(slot).eew
+        fieldRegisterShift := payload(slot).fieldRegisterShift
+        lastField := payload(slot).lastField
+        pendingHead := pendingHead + pendingStep
+        when(finishNow && io.drain.start.fire) {
+            state := prepare
+            active := true.B
+            group := 0.U
+            groupOH := 1.U
+            position := 0.U
+            second := false.B
+        }
+    }
+    for (i <- 0 until 4) {
+        when(pendingValid(i) && pendingCommitHit(i)) { pendingCommitted(i) := true.B }
+        when(promote && pendingHead === i.U) { pendingValid(i) := false.B }
+    }
+    when(queueCollect) {
+        // Each pending instruction owns one or two of the four upper rows.
+        // The second group completes that reservation before promotion; no
+        // additional payload RAM, SQ token or speculative cache write exists.
+        val firstSlot=Mux(pendingCount===0.U && incomingTwo,
+            Cat(pendingTail(1),0.U(1.W)),pendingTail)
+        val row=Mux(queueFollow,queueWriteSlot,firstSlot)
+        val slot=Cat(1.U(1.W),row)
+        payload(slot) := io.collect.bits
+        contiguousMasks(slot) :=
+            (io.collect.bits.mask.pad(128) << io.collect.bits.address(5, 0))(127, 0)
+        nextLineAddress(slot) := BLevelPAdder32.sum(
+            Cat(io.collect.bits.address(31,6),0.U(6.W)),64.U(32.W),0.U)(31,6)
+        when(queueBegin) {
+            pendingValid(row) := true.B
+            pendingFilled(row) := incomingSingle
+            pendingCommitted(row) := false.B
+            pendingTail := row+Mux(incomingTwo,2.U,1.U)
+            when(pendingCount===0.U) { pendingHead := row; pendingTwo := incomingTwo }
+            queueWritePending := incomingTwo
+            queueWriteSlot := row+1.U
+            queueWriteIdentity := io.collect.bits.sqIdx
+        }.otherwise {
+            pendingFilled((row-1.U)(1,0)) := true.B
+            queueWritePending := false.B
+        }
+    }
+    when(queueBegin =/= promote) {
+        pendingCount := Mux(queueBegin,pendingCount+1.U,pendingCount-1.U)
     }
     // Retired stores retain ownership across recovery, including a retirement
     // on the recovery edge. No cache request exists before SB accepts the token.
@@ -210,6 +455,31 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         valid := false.B
         filled := false.B
     }
+    when(io.flush) {
+        // Retirement is an in-order prefix. Recovery discards only the
+        // speculative suffix, including a queued Store collected before its
+        // retirement; same-edge retirements retain their data and identity.
+        val kept = PopCount(retained)
+        pendingCount := kept - promote.asUInt
+        pendingTail := pendingHead + Mux(pendingTwo,kept<<1,kept)
+        queueWritePending := false.B
+        for (i <- 0 until 4) {
+            pendingValid(i) := retained(i) && !(promote && pendingHead === i.U)
+        }
+    }
+    when(immediateStart) {
+        // This assignment follows promotion and the old acknowledgement's
+        // state updates. A blocked request resumes through the ordinary path.
+        state := Mux(io.cache.request.fire,response,prepare)
+        active := true.B
+        group := 0.U
+        groupOH := 1.U
+        position := 0.U
+        second := false.B
+    }
+    assert(pendingCount === PopCount(pendingValid))
+    when(pendingCount =/= 0.U) { assert(!valid || filled && count<=4.U) }
+    when(queueWritePending) { assert(pendingTwo && pendingCount=/=0.U) }
     when(state =/= idle) {
         assert(valid && committed && filled)
         assert(groupOH === UIntToOH(group, 8))

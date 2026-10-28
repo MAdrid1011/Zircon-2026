@@ -16,6 +16,11 @@ class PeScratchpadPort extends Bundle {
 }
 object PeScratchpadBridge {
     def matches(address: UInt): Bool = address(33,20)==="hb00".U
+    // Nonzero cache colors select immutable operands of the current task.
+    // Color zero may address a pinned worker program/private allocation and
+    // therefore retains conservative cross-domain ordering.
+    def cachedTaskWord(word: UInt): Bool = word(31,26)===8.U && word(25,18).orR
+    def cachedTaskLine(word: UInt): UInt = Cat("hb00".U(12.W),word(17,4))
 }
 
 /** Cache-line requests share a 256-bit SRAM port. One 32-byte register holds
@@ -39,8 +44,25 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     val half = Reg(UInt(256.W))
     val highMask = Reg(UInt(32.W))
     val firstReturned = RegInit(false.B)
+    val single = RegInit(false.B)
+    val empty = RegInit(false.B)
     val errors = RegInit(0.U(2.W))
-    val lastReply = state===replies && firstReturned && io.memory.response.valid
+    // Two reply descriptors overlap full-line and single-half reads. Full
+    // lines reuse the existing half register for assembly; payload storage
+    // and the SRAM port do not grow. Accepted addresses survive recovery.
+    val readPending = RegInit(false.B)
+    val readUpper = Reg(Bool())
+    val readFull = Reg(Bool())
+    val issueHigh = RegInit(false.B)
+    val returnHigh = RegInit(false.B)
+    val readReplies = Module(new Queue(new Bundle {
+        val slot = UInt(p.slotWidth.W)
+        val upper = Bool()
+        val full = Bool()
+    }, 2, pipe = true))
+    val readActive = readPending || readReplies.io.deq.valid
+    val incomingStream = io.load.request.bits.wide
+    val lastReply = state===replies && (empty || (single || firstReturned) && io.memory.response.valid)
     io.load.response.valid := lastReply && !write
     io.load.response.bits := 0.U.asTypeOf(new DLoadResponse(p))
     io.load.response.bits.wide := true.B
@@ -49,30 +71,43 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
     io.load.response.bits.uncache := true.B
     io.load.response.bits.exception := Mux((errors|io.memory.response.bits.error).orR,5.U,0.U)
     io.store.rsp.valid := lastReply && write
-    io.store.rsp.bits.exception := Mux((errors|io.memory.response.bits.error).orR,7.U,0.U)
+    io.store.rsp.bits.exception := Mux(!empty && (errors|io.memory.response.bits.error).orR,7.U,0.U)
     io.memory.response.ready := !lastReply || !write || io.store.rsp.ready
     val finishing = lastReply && io.memory.response.ready
-    val available = state===idle || finishing
+    val available = (state===idle || finishing) && !readActive
     val selectStore = io.store.req.valid
-    val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid)
-    io.memory.request.valid := state===low || state===high || available && firstValid
+    val lowActive = io.store.req.bits.lineMask(31,0).orR
+    val highActive = io.store.req.bits.lineMask(63,32).orR
+    val storeEmpty = selectStore && !lowActive && !highActive
+    val storeSingle = selectStore && !(lowActive && highActive)
+    val upperOnly = selectStore && !lowActive && highActive
+    val firstValid = Mux(selectStore,io.store.req.valid,io.load.request.valid && !incomingStream)
+    io.memory.request.valid := state===low || state===high || available && firstValid && !storeEmpty
     val incomingAddress = Mux(selectStore,io.store.req.bits.paddr,io.load.request.bits.paddr)
-    io.memory.request.bits.address := Mux(available,incomingAddress,
+    // A masked Store still has one logical completion. Its live half alone
+    // owns an SRAM request/reply; an all-masked Store completes without I/O.
+    // Loads retain the full-line contract and always drain both replies.
+    val firstAddress = incomingAddress | Mux(upperOnly,32.U,0.U)
+    io.memory.request.bits.address := Mux(available,firstAddress,
         address + Mux(state===high,32.U,0.U)).pad(36)
     io.memory.request.bits.write := Mux(available,selectStore,write)
     io.memory.request.bits.data := Mux(available,
-        Mux(selectStore,io.store.req.bits.line(255,0),0.U),Mux(write,half,0.U))
+        Mux(selectStore,Mux(upperOnly,io.store.req.bits.line(511,256),io.store.req.bits.line(255,0)),0.U),Mux(write,half,0.U))
     io.memory.request.bits.strobe := Mux(available,
-        Mux(selectStore,io.store.req.bits.lineMask(31,0),0.U),Mux(write,highMask,0.U))
-    io.store.req.ready := available && io.memory.request.ready
+        Mux(selectStore,Mux(upperOnly,io.store.req.bits.lineMask(63,32),io.store.req.bits.lineMask(31,0)),0.U),Mux(write,highMask,0.U))
+    io.store.req.ready := available && (storeEmpty || io.memory.request.ready)
     // Reads acquire their address even when SRAM is stalled. This retains an
     // accepted speculative request until both replies drain across recovery.
-    io.load.request.ready := available && !selectStore
-    val startLoad = io.load.request.fire
+    io.load.request.ready := available && !selectStore && !incomingStream
+    val startLoad = io.load.request.fire && !incomingStream
     val startStore = io.store.req.fire
-    when(io.memory.response.fire) {
+    when(io.memory.response.fire && !readReplies.io.deq.valid) {
         assert(state===high || state===replies)
-        when(!firstReturned) {
+        when(single) {
+            assert(state===replies)
+            state := idle
+            firstReturned := false.B
+        }.elsewhen(!firstReturned) {
             firstReturned := true.B
             errors := io.memory.response.bits.error
             when(!write) { half := io.memory.response.bits.data }
@@ -82,22 +117,104 @@ class PeScratchpadBridge(p: DCacheParams = DCacheParams(8,directPhysical=true)) 
             firstReturned := false.B
         }
     }
-    when(state===low && io.memory.request.fire) { state := high }
+    when(empty && state===replies && io.store.rsp.fire) { state := idle }
+    when(state===low && io.memory.request.fire) { state := Mux(single,replies,high) }
     when(state===high && io.memory.request.fire) { state := replies }
     when(startLoad || startStore) {
         assert(!incomingAddress(5,0).orR && PeScratchpadBridge.matches(incomingAddress))
         when(startStore) { assert(io.store.req.bits.wide) }
-        state := Mux(io.memory.request.fire,high,low)
+        state := Mux(storeEmpty,replies,Mux(io.memory.request.fire,Mux(storeSingle,replies,high),low))
         address := incomingAddress
         write := selectStore
         slot := io.load.request.bits.slot
         errors := 0.U
         firstReturned := false.B
+        single := storeSingle
+        empty := storeEmpty
         when(startStore) {
             half := io.store.req.bits.line(511,256)
             highMask := io.store.req.bits.lineMask(63,32)
         }
     }
-    io.idle := state===idle
-    io.loadPending := state=/=idle && !write
+    val readIssue = readPending && io.memory.request.ready
+    val finalIssue = readIssue && (!readFull || issueHigh)
+    val readResponse = readReplies.io.deq.valid && io.memory.response.valid &&
+        (!readReplies.io.deq.bits.full || returnHigh)
+    // After a full line's first request, its queued descriptor already owns
+    // the second half; do not reserve a second descriptor for that same line.
+    val reserved = readReplies.io.count +& (readPending && !issueHigh).asUInt
+    val readRoom = reserved < 2.U || readResponse
+    when(incomingStream) {
+        io.load.request.ready := (state===idle || finishing) && !selectStore &&
+            (!readPending || finalIssue) && readRoom
+    }
+    // With no retained address ahead of it, the accepted first half can use
+    // SRAM immediately. A stalled SRAM request is captured in the same old
+    // address/slot registers, retaining its payload after upstream recovery.
+    val streamStart = io.load.request.fire && incomingStream
+    val streamDirect = streamStart && !readPending
+    val directFull = io.load.request.bits.halfMask===0.U || io.load.request.bits.halfMask===3.U
+    val directUpper = io.load.request.bits.halfMask===2.U
+    val directIssue = streamDirect && io.memory.request.ready
+    when(streamDirect) {
+        io.memory.request.valid := true.B
+        io.memory.request.bits.address := (io.load.request.bits.paddr |
+            Mux(directUpper,32.U,0.U)).pad(36)
+        io.memory.request.bits.write := false.B
+        io.memory.request.bits.data := 0.U
+        io.memory.request.bits.strobe := 0.U
+    }
+    when(readPending) {
+        io.memory.request.valid := true.B
+        io.memory.request.bits.address := (address | Mux(readUpper || issueHigh,32.U,0.U)).pad(36)
+        io.memory.request.bits.write := false.B
+        io.memory.request.bits.data := 0.U
+        io.memory.request.bits.strobe := 0.U
+    }
+    readReplies.io.enq.valid := readIssue && !issueHigh || directIssue
+    readReplies.io.enq.bits.slot := Mux(streamDirect,io.load.request.bits.slot,slot)
+    readReplies.io.enq.bits.upper := Mux(streamDirect,directUpper,readUpper)
+    readReplies.io.enq.bits.full := Mux(streamDirect,directFull,readFull)
+    readReplies.io.deq.ready := readResponse
+    when(readReplies.io.deq.valid) {
+        io.memory.response.ready := true.B
+        io.load.response.valid := readResponse
+        io.load.response.bits.slot := readReplies.io.deq.bits.slot
+        io.load.response.bits.line := Mux(readReplies.io.deq.bits.full,
+            Cat(io.memory.response.bits.data,half),Mux(readReplies.io.deq.bits.upper,
+                Cat(io.memory.response.bits.data,0.U(256.W)),
+                Cat(0.U(256.W),io.memory.response.bits.data)))
+        val accumulated = Mux(readReplies.io.deq.bits.full && returnHigh,errors,0.U) |
+            io.memory.response.bits.error
+        io.load.response.bits.exception := Mux(accumulated.orR,5.U,0.U)
+        when(io.memory.response.valid) {
+            when(readReplies.io.deq.bits.full && !returnHigh) {
+                half := io.memory.response.bits.data
+                errors := io.memory.response.bits.error
+                returnHigh := true.B
+            }.otherwise { returnHigh := false.B }
+        }
+    }
+    when(readIssue) {
+        when(!issueHigh) {
+            assert(readReplies.io.enq.ready, "Every issued line reserves one reply descriptor")
+        }
+        when(readFull && !issueHigh) { issueHigh := true.B }
+            .otherwise { readPending := false.B; issueHigh := false.B }
+    }
+    when(streamStart) {
+        assert(!io.load.request.bits.paddr(5,0).orR && PeScratchpadBridge.matches(io.load.request.bits.paddr))
+        address := io.load.request.bits.paddr
+        slot := io.load.request.bits.slot
+        readUpper := directUpper
+        readFull := directFull
+        issueHigh := directIssue && directFull
+        readPending := !directIssue || directFull
+    }
+    // Auxiliary replies use the same ordered port and never coexist with an
+    // older assembled line or Store response.
+    when(readReplies.io.deq.valid) { assert(state===idle) }
+    assert(reserved <= 2.U)
+    io.idle := state===idle && !readActive
+    io.loadPending := (state=/=idle && !write) || readActive
 }

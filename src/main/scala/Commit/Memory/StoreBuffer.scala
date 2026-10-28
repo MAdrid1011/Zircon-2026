@@ -18,6 +18,8 @@ class StoreBufferIO(cp: CommitParams, cache: DCacheParams) extends Bundle {
     val query = Vec(2, new StoreBufferQueryIO(cache))
     val responseError = Valid(UInt(4.W))
     val empty = Output(Bool())
+    val scalarEmpty = Output(Bool())
+    val scalarVectorClear = if(cp.vectorEnabled) Some(Input(Vec(2,Bool()))) else None
     val vector = if (cp.vectorEnabled) Some(new VectorStoreDrain) else None
 }
 
@@ -68,12 +70,19 @@ class StoreBuffer(
     val replaceOutstanding = responseFire && count > 1.U
     io.enqueue.ready := count < entries.U || responseFire
     val offer = (headOH & valid.asUInt).orR && !outstanding || replaceOutstanding
-    val request = Mux(replaceOutstanding, queue.io.deq(1).bits, queue.io.deq(0).bits)
+    // An offered request is the successor while the current Store is still
+    // outstanding. Select its payload from Q so response acceptance only
+    // controls admission, without feeding back through address and PMA decode.
+    val request = Mux(outstanding, queue.io.deq(1).bits, queue.io.deq(0).bits)
+    when(offer) {
+        assert(outstanding === replaceOutstanding,
+            "An offered Store uses the successor exactly when replacing an outstanding Store")
+    }
     val vectorRequest = if (cp.vectorEnabled) request.vector else false.B
     io.store.request.valid := offer && !vectorRequest
     io.vector.foreach { port =>
         port.start.valid := offer && vectorRequest
-        port.start.bits := true.B
+        port.start.bits := vectorRequest
     }
     io.store.request.bits.paddr := request.paddr
     io.store.request.bits.wide := false.B
@@ -105,6 +114,8 @@ class StoreBuffer(
         count := Mux(io.enqueue.fire, count + 1.U, count - 1.U)
     }
     io.empty := count === 0.U
+    io.scalarEmpty := (if (cp.vectorEnabled) !VecInit((0 until entries).map(i =>
+        valid(i) && !storage(i).vector)).asUInt.orR else io.empty)
     io.responseError.valid := io.store.response.fire && io.store.response.bits.exception.orR
     io.responseError.bits := io.store.response.bits.exception
 
@@ -156,9 +167,10 @@ class StoreBuffer(
         io.query(port).response.bits.data := bytes.asUInt
         io.query(port).response.bits.mask := resultMask
         io.query(port).response.bits.blocked := (if (cp.vectorEnabled)
-            RegNext(VecInit(storage.zipWithIndex.map { case (entry, index) =>
+            RegNext(Mux(PeScratchpadBridge.cachedTaskWord(query.bits.wordAddress),
+                !io.scalarVectorClear.get(port),VecInit(storage.zipWithIndex.map { case (entry, index) =>
                 valid(index) && entry.vector
-            }).asUInt.orR, false.B) else false.B)
+            }).asUInt.orR), false.B) else false.B)
     }
 
     assert(count <= entries.U)

@@ -613,7 +613,18 @@ class L2Cache(
                 oppositeTargetWay,
                 0.U
             )
-            val protectedWays = protectedTargetWay | protectedOppositeWay
+            // A slow hit entering S3 on this edge already owns its captured way.
+            // Its waiting register is not visible until after victim selection.
+            val oppositeTargetEntering = Mux(engineSourceI, dS2Advance && !dFast, iS2Advance && !iFast)
+            val oppositeEnteringAddress = Mux(engineSourceI, dS2.paddr, iS2.paddr)
+            val oppositeEnteringWay = Mux(engineSourceI, dHit, iHit)
+            val protectedEnteringWay = Mux(
+                oppositeTargetEntering && index(engineVictimAddress) === index(oppositeEnteringAddress),
+                oppositeEnteringWay,
+                0.U
+            )
+            val protectedOppositeWays = protectedOppositeWay | protectedEnteringWay
+            val protectedWays = protectedTargetWay | protectedOppositeWays
             val allWays = ((BigInt(1) << p.ways) - 1).U(p.ways.W)
             val allowedWays = allWays & ~protectedWays
             val invalidWays = allowedWays & ~engineValidWays
@@ -656,9 +667,9 @@ class L2Cache(
                     "L2Cache: victim insertion selected the requested line"
                 )
             }
-            when(!engineLookupHit.orR && protectedOppositeWay.orR) {
+            when(!engineLookupHit.orR && protectedOppositeWays.orR) {
                 assert(
-                    !(replacementWay & protectedOppositeWay).orR,
+                    !(replacementWay & protectedOppositeWays).orR,
                     "L2Cache: victim insertion selected an in-flight opposite-channel hit"
                 )
             }

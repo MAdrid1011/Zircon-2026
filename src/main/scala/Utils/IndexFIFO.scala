@@ -172,8 +172,8 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
             val selectedHead = if (candidatePop == 0) head else FIFOUtil.rotate(head, 1)
             val candidateData = WireDefault(Mux1H(selectedHead, q))
             // Payload prewrite arrives independently of the occupancy push, so
-            // the registered head window keeps its old latency without putting
-            // the late push predicate back onto every payload bit.
+            // the registered head window forwards that payload independently
+            // of the late push predicate.
             val writeHead = pushWrite && (tail & selectedHead).orR && payloadWriteAllowed
             when(writeHead) {
                 if (hasEnqueue) candidateData.asInstanceOf[{ def enqueue(data: T): Unit }].enqueue(io.enq.bits)

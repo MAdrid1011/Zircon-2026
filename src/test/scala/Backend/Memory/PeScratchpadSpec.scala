@@ -11,9 +11,11 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
         val bytes=mutable.Map.empty[Long,Int]
         val fault=mutable.Set.empty[Long]
         val requests=mutable.ArrayBuffer.empty[(Long,Boolean,BigInt,BigInt)]
+        val requestCycles=mutable.ArrayBuffer.empty[Int]
         val loads=mutable.ArrayBuffer.empty[(Int,BigInt,Int)]
         val stores=mutable.ArrayBuffer.empty[Int]
         var cycles=0
+        var latency=1
         var ready: Int=>Boolean = _=>true
         var held: Option[(Long,Boolean,BigInt,BigInt)]=None
         VectorTestUtils.clear(dut.io.load.request.bits);dut.io.load.request.valid.poke(false)
@@ -45,11 +47,12 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             if(reply.nonEmpty && dut.io.memory.response.ready.peek().litToBoolean) pending.dequeue()
             if(valid && ready(cycles)) {
                 requests+=signature
+                requestCycles+=cycles
                 val (address,write,data,mask)=signature
                 val error=if(fault(address)) 2 else 0
                 if(write && error==0) for(i<-0 until 32 if mask.testBit(i))
                     bytes(address+i)=((data>>(i*8))&255).toInt
-                pending.enqueue(Reply(cycles+1,if(write) BigInt(0) else read(address,32),error))
+                pending.enqueue(Reply(cycles+latency,if(write) BigInt(0) else read(address,32),error))
             }
             val loadFire=dut.io.load.request.valid.peek().litToBoolean && dut.io.load.request.ready.peek().litToBoolean
             val storeFire=dut.io.store.req.valid.peek().litToBoolean && dut.io.store.req.ready.peek().litToBoolean
@@ -61,10 +64,11 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             while((!dut.io.idle.peek().litToBoolean || pending.nonEmpty) && guard<1000) {tick();guard+=1}
             assert(guard<1000)
         }
-        def load(address: Long,slot: Int): Unit = {
+        def load(address: Long,slot: Int,halfMask: Int=0): Unit = {
             VectorTestUtils.clear(dut.io.load.request.bits)
             dut.io.load.request.bits.paddr.poke(address);dut.io.load.request.bits.vaddr.poke(address)
             dut.io.load.request.bits.wide.poke(true);dut.io.load.request.bits.slot.poke(slot)
+            dut.io.load.request.bits.halfMask.poke(halfMask)
             dut.io.load.request.bits.mtype.poke(2);dut.io.load.request.valid.poke(true)
             var guard=0
             var accepted=false
@@ -135,6 +139,57 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "masked Stores issue only live halves and keep one backpressured completion" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            ready=c=>c%5!=1 && c%5!=2
+            val masks=Seq(BigInt("ffffffff",16),BigInt("ffffffff00000000",16),
+                BigInt(0),BigInt(1),BigInt(1)<<63,BigInt("ff000000000000ff",16))
+            for((mask,index)<-masks.zipWithIndex) {
+                val address=0xb0005000L+index*64L
+                val data=(0 until 64).foldLeft(BigInt(0))((v,i)=>v|(BigInt((i*17+index)&255)<<(8*i)))
+                val expected=(0 until 64).foldLeft(read(address,64)) { (v,i)=>
+                    if(mask.testBit(i)) (v & ~(BigInt(255)<<(8*i))) | (data & (BigInt(255)<<(8*i))) else v
+                }
+                val before=requests.size
+                dut.io.store.rsp.ready.poke(false)
+                store(address,data,mask)
+                for(_<-0 until 12)tick()
+                dut.io.store.rsp.valid.expect(true)
+                dut.io.store.rsp.bits.exception.expect(0)
+                assert(stores.size==index && read(address,64)==expected)
+                val offsets=Seq(0,32).filter(offset=>((mask>>offset)&BigInt("ffffffff",16))!=0)
+                assert(requests.drop(before).map(_._1).toVector==offsets.map(address+_).toVector)
+                dut.io.store.rsp.ready.poke(true);drain()
+                assert(stores.size==index+1 && stores.last==0)
+                load(address,index%8);drain()
+                assert(loads.last==((index%8,expected,0)))
+            }
+        }
+    }
+
+    "inactive Store halves do not raise SRAM errors and single replies hand off to Loads" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            for(upper<-Seq(false,true)) {
+                val address=if(upper)0xb0006080L else 0xb0006000L
+                val active=address+(if(upper)32 else 0)
+                val inactive=address+(if(upper)0 else 32)
+                val mask=BigInt("ffffffff",16)<<(if(upper)32 else 0)
+                fault+=inactive
+                val before=requests.size
+                store(address,BigInt("12345678"*16,16),mask)
+                load(address,4);drain()
+                assert(stores.last==0)
+                assert(requests.drop(before).map(_._1).toVector==Vector(active,address,address+32))
+                assert(loads.last._3==5)
+                fault-=inactive;fault+=active
+                store(address,BigInt(0),mask);drain();assert(stores.last==7)
+                fault-=active
+            }
+        }
+    }
+
     "a completing Store can hand the SRAM port to a waiting Load" in {
         simulate(new PeScratchpadBridge) { dut =>
             val d=new Driver(dut);import d._
@@ -144,6 +199,83 @@ class PeScratchpadSpec extends AnyFreeSpec with ChiselSim {
             load(address,4);drain()
             assert(stores.toVector==Vector(0) && loads.toVector==Vector((4,data,0)))
             assert(requests.map(_._2).toVector==Vector(true,true,false,false))
+        }
+    }
+
+    "single-half read streams retain ordered owners through stalls and share the Store port" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            latency=3
+            ready=c=>c%7!=2 && c%7!=3
+            val expected=(0 until 32).map { index =>
+                val address=0xb0010000L+index*64L
+                val upper=index%2==1
+                val active=address+(if(upper)32 else 0)
+                fault+=address+(if(upper)0 else 32)
+                val line=read(active,32)<<(if(upper)256 else 0)
+                load(address,index%8,if(upper)2 else 1)
+                (index%8,line,0)
+            }
+            drain()
+            assert(loads.toVector==expected.toVector)
+            assert(requests.size==32 && requests.forall(!_._2))
+            assert(requests.map(_._1).toVector==(0 until 32).map(i=>0xb0010000L+i*64L+(i%2)*32).toVector)
+            // Drain the read descriptors before accepting a Store, and keep
+            // each active-half error attached to its original Load slot.
+            val address=0xb0020000L
+            fault+=address+32
+            load(address,6,2)
+            store(address+64,BigInt("89abcdef"*16,16),BigInt("f"*16,16))
+            load(address+64,7)
+            drain()
+            assert(loads.takeRight(2).map(_._3).toVector==Vector(5,0))
+            assert(stores.toVector==Vector(0))
+            assert(loads.last._2==BigInt("89abcdef"*16,16))
+        }
+    }
+
+    "full-line reads sustain consecutive SRAM requests using the existing half register" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            val expected=(0 until 16).map { index =>
+                val address=0xb0030000L+index*64L
+                val value=read(address,64)
+                load(address,index%8)
+                if(index==0)assert(requestCycles.head==0,
+                    "The first ready SRAM request accompanies Load admission")
+                (index%8,value,0)
+            }
+            drain()
+            assert(loads.toVector==expected.toVector)
+            assert(requests.size==32)
+            assert(requestCycles.sliding(2).forall(pair=>pair.size<2 || pair(1)==pair(0)+1),
+                s"Ready SRAM requests must have no inter-line bubble: $requestCycles")
+        }
+    }
+
+    "mixed half/full read streams keep each slot, error and line assembly through backpressure" in {
+        simulate(new PeScratchpadBridge) { dut =>
+            val d=new Driver(dut);import d._
+            latency=4
+            ready=c=>c%9!=2 && c%9!=3
+            val expected=(0 until 32).map { index =>
+                val address=0xb0040000L+index*64L
+                val mask=index%4
+                val full=mask==0 || mask==3
+                var error=0
+                if(!full)fault+=address+(if(mask==1)32 else 0)
+                else if(index%8==0 || index%8==3) {
+                    fault+=address+(if(mask==0)32 else 0)
+                    error=5
+                }
+                val value=if(full)read(address,64) else if(mask==1)read(address,32) else read(address+32,32)<<256
+                load(address,index%8,mask)
+                (index%8,value,error)
+            }
+            drain()
+            assert(loads.toVector==expected.toVector)
+            assert(requests.size==48 && requests.forall(!_._2))
+            assert(stores.isEmpty)
         }
     }
 }
