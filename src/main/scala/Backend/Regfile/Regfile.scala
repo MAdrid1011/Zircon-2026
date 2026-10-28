@@ -23,14 +23,16 @@ class RegfileDirectWriteIO(p: RegfileParams) extends Bundle {
 class RegfileIO(
     p: RegfileParams,
     directWritePort: Option[Int],
-    readBypassOverridePort: Option[Int],
+    readBypassOverridePorts: Seq[Int],
     selectiveReadBypassPort: Option[Int],
 ) extends Bundle {
     val read = Vec(p.numReadPorts, new RegfileReadIO(p))
     val write = Vec(p.numWritePorts, new RegfileWriteIO(p))
     val directWrite = directWritePort.map(_ => new RegfileDirectWriteIO(p))
-    val readBypassOverride = readBypassOverridePort.map(_ => Input(Bool()))
-    val readBypassOverrideAddr = readBypassOverridePort.map(_ => Input(UInt(p.addrWidth.W)))
+    val readBypassOverride = if (readBypassOverridePorts.nonEmpty)
+        Some(Input(Vec(readBypassOverridePorts.size, Bool()))) else None
+    val readBypassOverrideAddr = if (readBypassOverridePorts.nonEmpty)
+        Some(Input(Vec(readBypassOverridePorts.size, UInt(p.addrWidth.W)))) else None
     val selectiveReadBypass = selectiveReadBypassPort.map(_ => Input(new RegfileWriteIO(p)))
     val readHold = if (p.holdReads) Some(Input(Vec(p.numReadPorts, Bool()))) else None
     val observation = if (p.observe) Some(Output(Vec(p.numEntries, UInt(p.dataWidth.W)))) else None
@@ -43,19 +45,20 @@ class RegfileIO(
 class Regfile(
     val p: RegfileParams = RegfileParams(),
     directWritePort: Option[Int] = None,
-    readBypassOverridePort: Option[Int] = None,
+    readBypassOverridePorts: Seq[Int] = Seq.empty,
     overrideReadPorts: Set[Int] = Set.empty,
     selectiveReadBypassPort: Option[Int] = None,
     selectiveReadPorts: Set[Int] = Set.empty,
 ) extends Module {
     directWritePort.foreach(port => require(port >= 0 && port < p.numWritePorts))
-    readBypassOverridePort.foreach(port => require(port >= 0 && port < p.numWritePorts))
+    readBypassOverridePorts.foreach(port => require(port >= 0 && port < p.numWritePorts))
+    require(readBypassOverridePorts.distinct.size == readBypassOverridePorts.size)
     selectiveReadBypassPort.foreach(port => require(port >= 0 && port < p.numWritePorts))
     require(overrideReadPorts.forall(port => port >= 0 && port < p.numReadPorts))
     require(selectiveReadPorts.forall(port => port >= 0 && port < p.numReadPorts))
-    require(overrideReadPorts.isEmpty || readBypassOverridePort.nonEmpty)
+    require(overrideReadPorts.isEmpty || readBypassOverridePorts.nonEmpty)
     require(selectiveReadPorts.isEmpty || selectiveReadBypassPort.nonEmpty)
-    val io = IO(new RegfileIO(p, directWritePort, readBypassOverridePort, selectiveReadBypassPort))
+    val io = IO(new RegfileIO(p, directWritePort, readBypassOverridePorts, selectiveReadBypassPort))
     // Keep the architectural p0 read constant; its unobservable storage row is removed by synthesis.
     private val firstWritable = if (p.hasZeroReg) 1 else 0
     // Uninitialized byte-masked RF storage has asynchronous reads and two
@@ -157,8 +160,9 @@ class Regfile(
             if (selectiveReadBypassPort.contains(port) && selectiveReadPorts.contains(index)) {
                 val selected = io.selectiveReadBypass.get
                 selected.we && selected.addr === r.addr
-            } else if (readBypassOverridePort.contains(port) && overrideReadPorts.contains(index)) {
-                io.readBypassOverride.get && io.readBypassOverrideAddr.get === r.addr
+            } else if (readBypassOverridePorts.contains(port) && overrideReadPorts.contains(index)) {
+                val overrideIndex = readBypassOverridePorts.indexOf(port)
+                io.readBypassOverride.get(overrideIndex) && io.readBypassOverrideAddr.get(overrideIndex) === r.addr
             } else if (p.readBypass) {
                 w.we && w.addr === r.addr
             } else {

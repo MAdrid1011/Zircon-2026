@@ -47,7 +47,10 @@ class LoadPipelineSystem(
         val idle = Output(Bool())
     })
     val pipe = Module(if (withStore) new LoadStorePipeline(p) else new LoadPipeline(p))
-    val intRf = Module(new Regfile(intParams))
+    val intRf = Module(new Regfile(intParams,
+        readBypassOverridePorts = if (withStore) Seq.empty else Seq(0),
+        overrideReadPorts = if (withStore) Set.empty else Set(0),
+    ))
     val fpRf = Module(new Regfile(fpParams))
     val cache = Module(new DCache(backend, DCacheParams(p.entries)))
     pipe.io.blockIssue := false.B
@@ -78,6 +81,14 @@ class LoadPipelineSystem(
         rf.io.write(0).addr := pipe.io.rf.wr.bits.prd(p.physWidth - 1, 0)
         rf.io.write(0).data := pipe.io.rf.wr.bits.data
         rf.io.write(0).we := pipe.io.rf.wr.valid && pipe.io.rf.wr.bits.prd(p.physWidth) === fp.B
+    }
+    if (!withStore) {
+        val tag = pipe.io.wk.wakeWB.prd
+        intRf.io.readBypassOverride.get(0) := pipe.io.cache.rsp.valid && tag =/= 0.U && !tag(p.physWidth)
+        intRf.io.readBypassOverrideAddr.get(0) := tag(p.physWidth - 1, 0)
+        when(!io.cmt.flush) {
+            assert(intRf.io.readBypassOverride.get(0) === intRf.io.write(0).we)
+        }
     }
     pipe.connectCache(cache.io)
     cache.io.load(1 - pipe.cacheLane) <> io.other

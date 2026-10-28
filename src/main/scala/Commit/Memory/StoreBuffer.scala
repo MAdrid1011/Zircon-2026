@@ -70,7 +70,14 @@ class StoreBuffer(
     val replaceOutstanding = responseFire && count > 1.U
     io.enqueue.ready := count < entries.U || responseFire
     val offer = (headOH & valid.asUInt).orR && !outstanding || replaceOutstanding
-    val request = Mux(replaceOutstanding, queue.io.deq(1).bits, queue.io.deq(0).bits)
+    // An offered request is the successor while the current Store is still
+    // outstanding. Select its payload from Q so response acceptance only
+    // controls admission, without feeding back through address and PMA decode.
+    val request = Mux(outstanding, queue.io.deq(1).bits, queue.io.deq(0).bits)
+    when(offer) {
+        assert(outstanding === replaceOutstanding,
+            "An offered Store uses the successor exactly when replacing an outstanding Store")
+    }
     val vectorRequest = if (cp.vectorEnabled) request.vector else false.B
     io.store.request.valid := offer && !vectorRequest
     io.vector.foreach { port =>

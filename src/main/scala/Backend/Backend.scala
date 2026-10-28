@@ -142,7 +142,7 @@ class Backend(
     val intRf = Module(new Regfile(
         intRfParams,
         directWritePort = Some(2),
-        readBypassOverridePort = Some(2),
+        readBypassOverridePorts = Seq(2, 3),
         overrideReadPorts = Set(6, 7),
         selectiveReadBypassPort = Some(4),
         selectiveReadPorts = Set(6, 7, 8),
@@ -463,8 +463,8 @@ class Backend(
         intWrite(port, pipe.io.rf.write.valid, pipe.io.rf.write.bits.prd, pipe.io.rf.write.bits.data)
     }
     intWrite(2, mixArith.io.rf.intWrite.valid, mixArith.io.rf.intWrite.bits.addr, mixArith.io.rf.intWrite.bits.data)
-    intRf.io.readBypassOverride.get := mixArith.io.rf.intReadBypassValid
-    intRf.io.readBypassOverrideAddr.get := mixArith.io.rf.intReadBypassAddr
+    intRf.io.readBypassOverride.get(0) := mixArith.io.rf.intReadBypassValid
+    intRf.io.readBypassOverrideAddr.get(0) := mixArith.io.rf.intReadBypassAddr
     when(!io.commit.flush) {
         assert(mixArith.io.rf.intReadBypassValid === mixArith.io.rf.intWrite.valid)
         when(mixArith.io.rf.intReadBypassValid) {
@@ -479,6 +479,20 @@ class Backend(
         ls0.io.rf.wr.bits.prd(p.physWidth - 1, 0),
         ls0.io.rf.wr.bits.data,
     )
+    // The WB tag is registered alongside the response. A flush cancels every
+    // new memory request and clears its held-read state, so only the actual
+    // PRF write needs flush suppression; the AGU's read bypass can use WB Q.
+    val load0BypassTag = ls0.io.wk.wakeWB.prd
+    val load0ReadBypass = ls0.io.cache.rsp.valid && load0BypassTag =/= 0.U &&
+        !load0BypassTag(p.tagWidth - 1)
+    intRf.io.readBypassOverride.get(1) := load0ReadBypass
+    intRf.io.readBypassOverrideAddr.get(1) := load0BypassTag(p.physWidth - 1, 0)
+    when(!io.commit.flush) {
+        assert(load0ReadBypass === intRf.io.write(3).we)
+        when(load0ReadBypass) {
+            assert(load0BypassTag === ls0.io.rf.wr.bits.prd)
+        }
+    }
     // AtomicUnit captures the result-write decision alongside its response.
     val atomicIntWrite = atomic.writeResult
     val ls1IntWrite = ls1.io.rf.wr.valid && !ls1.io.rf.wr.bits.prd(p.tagWidth - 1)

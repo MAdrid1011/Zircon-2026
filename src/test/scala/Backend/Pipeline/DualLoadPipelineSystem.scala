@@ -34,7 +34,9 @@ class DualLoadPipelineSystem(backend: DualPortRamBackend) extends Module {
     })
     val ls0 = Module(new LoadPipeline(p))
     val ls1 = Module(new LoadStorePipeline(p))
-    val intRf = Module(new Regfile(intParams))
+    val intRf = Module(new Regfile(intParams,
+        readBypassOverridePorts = Seq(0), overrideReadPorts = Set(0, 1),
+    ))
     val fpRf = Module(new Regfile(fpParams))
     val cache = Module(new DCache(backend, DCacheParams(p.entries)))
     for ((pipe, port) <- Seq(ls0 -> io.ls0, ls1 -> io.ls1)) {
@@ -62,6 +64,13 @@ class DualLoadPipelineSystem(backend: DualPortRamBackend) extends Module {
     intRf.io.readHold.get :=
         VecInit(Seq(ls0.io.rf.rd.hold, ls1.io.rf.rd.hold, ls1.io.rf.std.get.hold) ++ Seq.fill(7)(false.B))
     fpRf.io.readHold.get := VecInit(Seq(ls1.io.rf.std.get.hold, false.B, false.B))
+    val load0BypassTag = ls0.io.wk.wakeWB.prd
+    intRf.io.readBypassOverride.get(0) := ls0.io.cache.rsp.valid && load0BypassTag =/= 0.U &&
+        !load0BypassTag(p.physWidth)
+    intRf.io.readBypassOverrideAddr.get(0) := load0BypassTag(p.physWidth - 1, 0)
+    when(!io.flush) {
+        assert(intRf.io.readBypassOverride.get(0) === intRf.io.write(0).we)
+    }
     intRf.io.read.drop(3).zip(io.intRead).foreach { case (a, b) => a <> b }
     fpRf.io.read.drop(1).zip(io.fpRead).foreach { case (a, b) => a <> b }
     intRf.io.write.drop(2).zip(io.intWrite).foreach { case (a, b) => a <> b }
