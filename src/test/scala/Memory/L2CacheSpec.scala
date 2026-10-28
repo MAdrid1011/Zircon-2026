@@ -11,6 +11,8 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
     var cycle = 0
     var reads = 0
     var writes = 0
+    var lowerLatency = 3
+    var beforeStep: () => Unit = () => ()
     var lastDcacheDirty = false
     private var pending: Option[Pending] = None
     var heldMemoryRequest: Option[Seq[BigInt]] = None
@@ -119,7 +121,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
                     reads += 1
                 }
                 val returned = if (write) BigInt(0) else if (uncache) bytes(address, 4) else line(address)
-                pending = Some(Pending(returned, error, cycle + 3))
+                pending = Some(Pending(returned, error, cycle + lowerLatency))
                 heldMemoryRequest = None
             } else {
                 heldMemoryRequest = Some(signature)
@@ -128,6 +130,7 @@ class L2CacheDriver(dut: L2Cache) extends chisel3.simulator.PeekPokeAPI {
             assert(heldMemoryRequest.isEmpty, s"memory request valid was withdrawn at cycle $cycle")
         }
         val responseAccepted = returning.nonEmpty && dut.io.memory.rsp.ready.peek().litToBoolean
+        beforeStep()
         dut.clock.step()
         if (responseAccepted) pending = None
         cycle += 1

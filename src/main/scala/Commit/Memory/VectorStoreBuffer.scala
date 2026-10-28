@@ -151,6 +151,23 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             trace.elementAddresses(group) := VecInit((0 until 32).map(index =>
                 elementAddresses.get(group * 32 + index))).asUInt
         }
+        // Retirement can name queued Stores while an older token still drains.
+        // Export their existing rows separately for each retirement lane.
+        for ((event, lane) <- io.commit.zipWithIndex) {
+            val primary = valid && event.bits === identity
+            val queued = VecInit((0 until 4).map(i =>
+                pendingValid(i) && event.bits === payload(i + 4).sqIdx))
+            val first = Mux(primary, 0.U(3.W), Cat(1.U(1.W), PriorityEncoder(queued)))
+            val owner = primary || queued.asUInt.orR
+            val result = trace.retire(lane)
+            result.firstGroup := first
+            result.count := Mux(event.valid && owner, Mux(primary, count, Mux(pendingTwo, 2.U, 1.U)), 0.U)
+            result.scattered := primary && scattered
+            result.eew := Mux(primary, eew, payload(first).eew)
+            result.fieldRegisterShift := Mux(primary, fieldRegisterShift, payload(first).fieldRegisterShift)
+            result.lastField := Mux(primary, lastField, payload(first).lastField)
+            when(event.valid) { assert(PopCount(queued) +& primary <= 1.U) }
+        }
     }
     io.cache.response.ready := state === response
     val item = Mux1H(groupOH, payload)

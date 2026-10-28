@@ -47,6 +47,60 @@ class VectorStorePipelineHarness extends Module {
 }
 
 class VectorStoreBufferSpec extends AnyFreeSpec with ChiselSim {
+    "retirement traces identify queued payloads on all three lanes while the primary Store stalls" in {
+        simulate(new VectorStoreBuffer(observe = true)) { dut =>
+            def collect(identity: Int, index: Int, groups: Int, eew: Int): Unit = {
+                val task = dut.io.collect.bits
+                VectorTestUtils.clear(task)
+                task.sqIdx.poke(identity); task.index.poke(index); task.last.poke(index == groups - 1)
+                task.eew.poke(eew); task.fieldRegisterShift.poke(if (groups == 2) 1 else 0)
+                task.address.poke(0x80001000L + identity * 128 + index * 32)
+                task.mask.poke(BigInt("ffffffff", 16))
+                task.data.poke(BigInt(identity * 16 + index) * ((BigInt(1) << 256) - 1) / 255)
+                dut.io.collect.valid.poke(true); dut.io.collect.ready.expect(true); dut.clock.step()
+                dut.io.collect.valid.poke(false)
+            }
+            dut.io.loadLine.poke(0); dut.io.loadTail.poke(12)
+            dut.io.scalarLoadTail.foreach(_.poke(12)); dut.io.scalarLoadLine.foreach(_.poke(0))
+            dut.io.collect.valid.poke(false); VectorTestUtils.clear(dut.io.collect.bits)
+            dut.io.commit.foreach { event => event.valid.poke(false); event.bits.poke(0) }
+            dut.io.drain.start.valid.poke(false); dut.io.drain.start.bits.poke(true)
+            dut.io.cache.request.ready.poke(false); dut.io.cache.response.valid.poke(false)
+            dut.io.cache.response.bits.exception.poke(0); dut.io.flush.poke(false)
+            for (groups <- Seq(1, 2)) {
+                dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+                collect(2, 0, 1, 2)
+                for (identity <- Seq(3, 4); group <- 0 until groups)
+                    collect(identity, group, groups, if (identity == 3) 0 else 2)
+                // A blocked drain leaves the older payload in row zero while
+                // the younger instructions can retire together behind it.
+                dut.clock.step(4)
+                for (lane <- 0 until 3) {
+                    dut.io.commit(lane).valid.poke(true); dut.io.commit(lane).bits.poke(lane + 2)
+                }
+                val trace = dut.io.observation.get
+                for (lane <- 0 until 3) {
+                    val offset = if (lane == 0) 0 else 4 + (lane - 1) * groups
+                    val count = if (lane == 0) 1 else groups
+                    trace.retire(lane).firstGroup.expect(offset)
+                    trace.retire(lane).count.expect(count)
+                    trace.retire(lane).scattered.expect(false)
+                    trace.retire(lane).eew.expect(if (lane == 1) 0 else 2)
+                    trace.retire(lane).fieldRegisterShift.expect(if (count == 2) 1 else 0)
+                    for (group <- 0 until count) {
+                        val row = offset + group
+                        val address = (trace.addresses.peek().litValue >> (row * 32)) & 0xffffffffL
+                        val data = (trace.data.peek().litValue >> (row * 256)) & ((BigInt(1) << 256) - 1)
+                        assert(address == 0x80001000L + (lane + 2) * 128 + group * 32)
+                        assert(data == BigInt((lane + 2) * 16 + group) * ((BigInt(1) << 256) - 1) / 255)
+                    }
+                }
+                dut.clock.step()
+                dut.io.commit.foreach(_.valid.poke(false))
+            }
+        }
+    }
+
     "scattered descriptors share wide storage and drain masked elements only after commit" in {
         simulate(new VectorStoreBuffer) { dut =>
             VectorTestUtils.clear(dut.io.collect.bits)

@@ -73,7 +73,8 @@ L2 主要保存 L1 替换出的 victim。L1 与 L2 同时 miss 时，外部填�
 Victim 安装优先选择可用的 invalid way，因此 I/D 两侧均可使用 set 中的空闲容量。set 已满时，
 指令请求在指令占用达到 `maxInstructionWays` 后优先替换指令 line，数据请求优先替换数据 line；
 候选集合使用 tree-PLRU 选择。这一规则是替换偏置，不对 way 进行静态划分。维护引擎还会排除
-当前请求命中的 way，以及另一通道尚未消费的同 set 命中 way。
+当前请求命中的 way，以及另一通道尚未消费的同 set 命中 way。后者包括已经在 S3 等待的
+命中，也包括本拍从 S2 进入 S3、需要等待维护引擎的命中，避免其捕获的 way 在下一拍被覆盖。
 
 I/D 普通命中可以并行返回。Miss、victim 查询、dirty writeback、uncached 访问和安装操作共享
 一个维护引擎及外部存储接口。L2 没有多项 MSHR；同一时刻只允许一个下级事务在途。
