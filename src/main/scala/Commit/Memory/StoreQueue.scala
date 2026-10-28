@@ -469,7 +469,7 @@ class StoreQueue(
             val taskRead = cp.vectorEnabled.B && PeScratchpadBridge.cachedTaskWord(query.bits.wordAddress)
             // Complete vector addresses also live in the shared wide buffer,
             // which checks native aliasing for both speculative and committed
-            // payloads. Unknown Stores retain the original SQ fence.
+            // payloads. Unknown Stores require the SQ fence.
             active(index) && Mux(storage(index).vector,
                 !taskRead || !storage(index).addressValid,!queryAddressValid(index))
         }).asUInt.orR

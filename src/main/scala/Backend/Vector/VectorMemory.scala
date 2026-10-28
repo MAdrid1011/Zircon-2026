@@ -580,7 +580,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     when(state =/= idle) { assert(groupOH === UIntToOH(group, 8)) }
     assert(streamCredits <= 4.U)
     when(streamReturned) { assert(streamCredits =/= 0.U) }
-    // Four architectural Load owners share the original four-entry data FIFO.
+    // Four architectural Load owners share the four-entry data FIFO.
     // Only instruction metadata grows; line storage and response credits are unchanged.
     val fastValid = RegInit(VecInit.fill(4)(false.B))
     val fastInstruction = Reg(Vec(4, new VectorInstruction(p)))

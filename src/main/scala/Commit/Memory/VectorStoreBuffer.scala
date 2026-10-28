@@ -8,7 +8,7 @@ class VectorStoreDrain extends Bundle {
     val done = Input(Bool())
 }
 
-/** Wide payload side buffer. The original SQ/SB token owns program order;
+/** Wide payload side buffer. The SQ/SB token owns program order;
   * this buffer survives retirement and is released only after its last write.
   */
 class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean = false) extends Module {
@@ -297,7 +297,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         ram.writeData := io.collect.bits.address
         // The table has its own read port. Read the first element while idle
         // after collection, and the successor while the current element drains.
-        // Only the original readElementAddress edge captures the result.
+        // The readElementAddress edge captures the result.
         val lastPosition = position +& elementBytes === 32.U
         val finalField = currentField === lastField
         val nextGroup = Mux(!finalField, group + fieldStride,

@@ -62,9 +62,8 @@ class Regfile(
     // Keep the architectural p0 read constant; its unobservable storage row is removed by synthesis.
     private val firstWritable = if (p.hasZeroReg) 1 else 0
     // Uninitialized byte-masked RF storage has asynchronous reads and two
-    // independent write ports. Describe the storage directly instead of
-    // expanding a write-enable mux for every row and byte. Hardware banked
-    // reads use explicit row/bank masks; observed simulation keeps the array.
+    // independent write ports. A Mem provides compact simulation storage;
+    // hardware banked reads use explicit row/bank masks.
     private val byteMemory = if (p.byteWrite && !p.initialize && !p.hasZeroReg && !p.oneHotRead &&
         (p.readBankEntries == 0 || p.observe))
         Some(Mem(p.numEntries, Vec(p.dataWidth / 8, UInt(8.W)))) else None

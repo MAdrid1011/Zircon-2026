@@ -356,8 +356,8 @@ class IssueQueue(
     }
 
     // A replayed producer may publish a new speculative wakeup for a source that
-    // was ready from an older attempt. Preserve the old selection depth, but do
-    // not let that stale ready bit issue while updateReady installs the new token.
+    // was ready from an older attempt. Block that stale ready bit from issuing
+    // while updateReady installs the new token.
     private def vectorTags(metadata: VectorInstructionMetadata): Seq[UInt] =
         metadata.source.toSeq.flatMap(_.toSeq) :+ metadata.mask
     private def vectorUsed(metadata: VectorInstructionMetadata): Seq[Bool] =
@@ -570,7 +570,7 @@ class IssueQueue(
         output.specMask := Mux1H(selections, wakeups.map(_.specMask))
     }
 
-    // Wakeup work is distributed over the original dispatch candidates. The
+    // Wakeup work is distributed over the dispatch candidates. The
     // late capacity/route decision then selects an already-updated payload.
     val incomingCandidates = Wire(Vec(q.enqueueWidth, new IQEntry(p, vectorEnabled)))
     for (lane <- 0 until q.enqueueWidth) {

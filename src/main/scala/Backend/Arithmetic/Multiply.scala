@@ -498,10 +498,6 @@ class MulBooth2Wallce(val tagWidth: Int = 32, val splitFpFinish: Boolean = false
     val other = Mux(add, small.sig, Mux(fma, c.sig, 0.U))
     // Plain integer and FP multiplies have no aligned addend. Keeping their
     // shift at zero removes unused FP exponent alignment from the EX1 data cone.
-    // Keep the no-addend integer/FP-multiply case off the exponent-alignment
-    // arithmetic. The old form fed a wide zero-select Mux through shiftControl,
-    // allowing operand exponent and bypass data to reach the R1 shift register
-    // even though that result is unused for these operations.
     val addDistance = largeExp - smallExp
     // c + 153 - a - b fits in signed 11 bits. Compress its four operands before
     // the only carry-propagating sum, instead of serializing three additions.
