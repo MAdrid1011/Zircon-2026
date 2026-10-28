@@ -128,7 +128,7 @@ class Backend(
     /* Central PRFs provide stable held reads while a downstream execution stage is stalled. */
     val intRfParams = RegfileParams(
         numEntries = p.numIntPhys,
-        numReadPorts = if (vectorEnabled) 10 else 9,
+        numReadPorts = if (vectorEnabled) 11 else 9,
         numWritePorts = 5,
         holdReads = true,
     )
@@ -143,9 +143,9 @@ class Backend(
         intRfParams,
         directWritePort = Some(2),
         readBypassOverridePorts = Seq(2, 3),
-        overrideReadPorts = Set(6, 7),
+        overrideReadPorts = if (vectorEnabled) Set(6, 7, 10) else Set(6, 7),
         selectiveReadBypassPort = Some(4),
-        selectiveReadPorts = Set(6, 7, 8),
+        selectiveReadPorts = if (vectorEnabled) Set(6, 7, 8, 10) else Set(6, 7, 8),
     ))
     val fpRf = Module(new Regfile(fpRfParams, directWritePort = Some(0)))
     val bypass = Module(new Bypass(BypassParams.twoArithBackend(p)))
@@ -325,7 +325,18 @@ class Backend(
             (compute.io.scalarAddress(p.tagWidth - 1) || !memory.io.scalarReadRequest)
         compute.io.scalarData := Mux(compute.io.scalarAddress(p.tagWidth - 1),
             fpRf.io.read(4).data, intRf.io.read(9).data)
-        memory.io.scalarData := intRf.io.read(9).data
+        // Keep the memory base read independent of incoming compute-IQ tags.
+        // This selects the same PRF state and WB values without another RF copy.
+        intRf.io.read(10).addr := memory.io.scalarAddress(p.physWidth - 1, 0)
+        memory.io.scalarData := intRf.io.read(10).data
+        // Vector-to-scalar destinations wake after their PRF write, so a
+        // memory consumer cannot need that producer's same-cycle WB mux.
+        when(memory.io.scalarReadRequest && !io.commit.flush) {
+            assert(!vectorScalarWrite.valid ||
+                vectorScalarWrite.bits.destination =/= memory.io.scalarAddress,
+                "Memory scalar reads must follow vector scalar writeback")
+            assert(intRf.io.read(10).data === intRf.io.read(9).data)
+        }
         serial.io.scalarData := Mux(serial.io.scalarAddress(p.tagWidth - 1),
             fpRf.io.read(4).data, intRf.io.read(9).data)
     }
@@ -442,7 +453,7 @@ class Backend(
         ls0.io.rf.rd.hold,
         ls1.io.rf.rd.hold,
         ls1.io.rf.std.get.hold,
-    ) ++ (if (vectorEnabled) Seq(false.B) else Seq.empty))
+    ) ++ (if (vectorEnabled) Seq(false.B, false.B) else Seq.empty))
 
     for (source <- 0 until 3) {
         fpRf.io.read(source).addr := mixArith.io.rf.fpRead(source).addr
@@ -567,7 +578,7 @@ class Backend(
     val scalarLoadRequest = Wire(new DLoadRequest(dcacheParams))
     scalarLoadRequest := ls1.io.cache.req.bits
     val nativeVector = vectorMemory.map(m =>
-        scratchpadEnabled.B && PeScratchpadBridge.matches(m.io.request.bits.paddr)).getOrElse(false.B)
+        scratchpadEnabled.B && m.io.requestNative).getOrElse(false.B)
     val vectorRequest = vectorMemory.map(_.io.request.valid).getOrElse(false.B) && !nativeVector
     val preferVector = if (vectorEnabled) Some(RegInit(false.B)) else None
     val loadSelectionLocked = if (vectorEnabled) Some(RegInit(false.B)) else None

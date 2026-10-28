@@ -227,6 +227,45 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
+    "dedicated vector memory reads retain load bypass and ignore unrelated scalar completions" in {
+        val p = RegfileParams(numReadPorts = 11, numWritePorts = 5, holdReads = true)
+        simulate(new Regfile(p, readBypassOverridePorts = Seq(2, 3),
+            overrideReadPorts = Set(6, 7, 10), selectiveReadBypassPort = Some(4),
+            selectiveReadPorts = Set(6, 7, 8, 10))) { dut =>
+            dut.io.read.foreach(_.addr.poke(3))
+            dut.io.readHold.get.foreach(_.poke(false))
+            dut.io.write.foreach { write =>
+                write.we.poke(false); write.addr.poke(3); write.data.poke(0)
+            }
+            dut.io.readBypassOverride.get.foreach(_.poke(false))
+            dut.io.readBypassOverrideAddr.get.foreach(_.poke(3))
+            val load = dut.io.selectiveReadBypass.get
+            load.we.poke(false); load.addr.poke(3); load.data.poke(0)
+            dut.reset.poke(true); dut.clock.step(); dut.reset.poke(false)
+
+            // All five producers can supply a just-ready base before its write edge.
+            for (port <- 0 until 5) {
+                val value = 0x12340000L + port
+                dut.io.write(port).we.poke(true); dut.io.write(port).data.poke(value)
+                if (port == 2 || port == 3) dut.io.readBypassOverride.get(port - 2).poke(true)
+                if (port == 4) { load.we.poke(true); load.data.poke(value) }
+                dut.io.read(9).data.expect(value); dut.io.read(10).data.expect(value)
+                dut.clock.step()
+                dut.io.write(port).we.poke(false)
+                dut.io.readBypassOverride.get.foreach(_.poke(false)); load.we.poke(false)
+                dut.io.read(10).data.expect(value)
+            }
+            // A vector-to-scalar completion writes another physical destination;
+            // memory keeps its stored base, while the compute port sees that WB.
+            dut.io.write(4).addr.poke(4); dut.io.write(4).data.poke(0xabcdef01L)
+            dut.io.write(4).we.poke(true); dut.io.read(9).addr.poke(4)
+            dut.io.read(9).data.expect(0xabcdef01L)
+            dut.io.read(10).data.expect(0x12340004L)
+            dut.clock.step(); dut.io.write(4).we.poke(false)
+            dut.io.read(10).addr.poke(4); dut.io.read(10).data.expect(0xabcdef01L)
+        }
+    }
+
     "direct write and ordinary ports update distinct rows together" in {
         val p = RegfileParams(numEntries = 8, numReadPorts = 3, numWritePorts = 3)
         simulate(new Regfile(p, directWritePort = Some(1))) { dut =>

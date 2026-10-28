@@ -16,6 +16,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         val readRequest = Output(Bool())
         val readAvailable = Input(Bool())
         val request = Decoupled(new DLoadRequest(cache))
+        val requestNative = Output(Bool())
         val response = Flipped(Valid(new DLoadResponse(cache)))
         val cachePending = Input(Bool())
         val ordering = new VectorLoadOrdering(p)
@@ -51,6 +52,14 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val data = Reg(UInt(256.W))
     val byteMask = Reg(UInt(32.W))
     val address = Reg(UInt(32.W))
+    val nextAddress = WireDefault(address)
+    address := nextAddress
+    // Decode both possible line pages alongside the address register. The
+    // second line crosses the native 1 MiB window only on this page carry.
+    val nextAddressNative = PeScratchpadBridge.matches(nextAddress.pad(34))
+    val addressNative = RegNext(nextAddressNative)
+    val secondAddressNative = RegNext(Mux(nextAddress(19, 6).andR,
+        nextAddress(31, 20) === "haff".U, nextAddressNative))
     val first = Reg(UInt(512.W))
     val second = RegInit(false.B)
     val discard = RegInit(false.B)
@@ -203,10 +212,12 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.request.bits.vaddr := BLevelPAdder32.sum(Cat(address(31, 6), 0.U(6.W)),
         Cat(0.U(25.W), second, 0.U(6.W)), 0.U(1.W))
     io.request.bits.paddr := io.request.bits.vaddr
+    io.requestNative := Mux(second, secondAddressNative, addressNative)
     io.request.bits.mtype := 2.U
     when(state === streamLoad) {
         io.request.valid := streamRequestValid && streamCredits < 4.U && io.ordering.clear && !io.flush
         io.request.bits.vaddr := Cat(streamRequestAddress(31, 6), 0.U(6.W))
+        io.requestNative := PeScratchpadBridge.matches(streamRequestAddress.pad(34))
         io.request.bits.paddr := io.request.bits.vaddr
         io.request.bits.slot := streamRequestGroup
     }
@@ -319,7 +330,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     when(wordOperand) {
                         data := io.read(0).data.asUInt
                         byteMask := Fill(32,1.U(1.W))
-                        address := io.scalarData
+                        nextAddress := io.scalarData
                         wordValid := true.B
                         wordSent := false.B
                         wordRob := instruction.scalar.robIdx
@@ -330,7 +341,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     }.elsewhen(fullWordStore(instruction) && io.scalarData(4, 0) === 0.U) {
                         data := io.read(0).data.asUInt
                         byteMask := Fill(32, 1.U(1.W))
-                        address := io.scalarData
+                        nextAddress := io.scalarData
                         second := false.B
                         position := 0.U
                         fullStore := true.B
@@ -351,7 +362,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 when(io.readAvailable) {
                     data := initialized.asUInt
                     byteMask := activeBytes.asUInt
-                    address := base + Cat(group, 0.U(5.W))
+                    nextAddress := base + Cat(group, 0.U(5.W))
                     second := false.B
                     position := 0.U
                     // collect already precedes groupAddress for every element
@@ -388,7 +399,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 nextState := gather
             }
             is(gather) {
-                address := elementAddress
+                nextAddress := elementAddress
                 when(!store && !byteMask(position)) {
                     position := nextPosition(4, 0)
                     elementAddress := BLevelPAdder32.sum(elementAddress, step, 0.U)
@@ -411,7 +422,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 val fieldOffset = (field << eew).pad(32)
                 val sum = base ^ indexOffset ^ fieldOffset
                 val carry = (((base & indexOffset) | ((base ^ indexOffset) & fieldOffset)) << 1)(31, 0)
-                when(indexed) { address := BLevelPAdder32.sum(sum, carry, 0.U) }
+                when(indexed) { nextAddress := BLevelPAdder32.sum(sum, carry, 0.U) }
                 nextState := checkAddress
             }
             is(checkAddress) {
@@ -447,7 +458,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                         Mux(fullStore && legacyCompletionReady, idle, complete), collect)
                     when(pairStore && !last) {
                         data := first(255,0)
-                        address := base+32.U
+                        nextAddress := base+32.U
                         nextState := writeback
                     }
                 }
@@ -586,6 +597,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val ticketPair = Reg(Vec(4, Bool()))
     val fastHeld = RegInit(false.B)
     val fastHeldAddress = Reg(UInt(32.W))
+    val fastHeldNative = Reg(Bool())
     val fastHeldContext = Reg(UInt(2.W))
     val fastHeldGroup = Reg(UInt(3.W))
     val fastHeldTicket = Reg(UInt(2.W))
@@ -649,6 +661,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         io.request.bits.wide := true.B
         io.request.bits.vaddr := fastHeldAddress
         io.request.bits.paddr := fastHeldAddress
+        io.requestNative := fastHeldNative
         io.request.bits.slot := fastHeldTicket
         io.request.bits.mtype := 2.U
         io.request.bits.halfMask := Mux(fastHeldPair, 0.U,
@@ -727,6 +740,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         streamLines.io.enq.bits.ticket := responseTicket
         streamLines.io.deq.ready := finishFastLine
     }
+    val preparedAddress = Cat(BLevelPAdder32.sum(selectedBase,
+        Cat(selectedGroup, 0.U(5.W)).pad(32), 0.U(1.W))(31, 6), 0.U(6.W))
     when(canPrepare) {
         fastHeld := true.B
         fastHeldContext := selectedContext
@@ -734,7 +749,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastHeldTicket := PriorityEncoder(freeTickets)
         fastHeldPair := selectedPair
         fastHeldRetry := selectedRetry
-        fastHeldAddress := Cat((selectedBase + Cat(selectedGroup, 0.U(5.W)))(31, 6), 0.U(6.W))
+        fastHeldAddress := preparedAddress
+        fastHeldNative := PeScratchpadBridge.matches(preparedAddress.pad(34))
     }
     when(issueFast) {
         fastHeld := canPrepare
@@ -857,4 +873,9 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // retain the conservative ordering path, including possible SRAM aliases.
     io.ordering.native := PeScratchpadBridge.matches(io.request.bits.paddr)
     io.ordering.line := io.request.bits.paddr(31, 6)
+    when(io.request.valid) {
+        assert(io.requestNative === PeScratchpadBridge.matches(io.request.bits.paddr),
+            "Vector request routing must match its held physical address")
+    }
+
 }

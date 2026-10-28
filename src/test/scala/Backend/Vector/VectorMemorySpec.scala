@@ -691,4 +691,64 @@ class VectorMemorySpec extends AnyFreeSpec with ChiselSim {
             info(s"Verified vector memory over $cycle cycles, $requests cache requests, $writes PRF writes")
         }
     }
+    "native route metadata follows every line across window edges and address wrap" in {
+        simulate(new VectorMemory) { dut =>
+            VectorTestUtils.clear(dut.io.in.bits)
+            VectorTestUtils.clear(dut.io.response.bits)
+            dut.io.in.valid.poke(false); dut.io.response.valid.poke(false)
+            dut.io.read.foreach(_.data.foreach(_.poke(0)))
+            dut.io.scalarData.poke(0); dut.io.readAvailable.poke(true)
+            dut.io.ordering.clear.poke(true); dut.io.store.ready.poke(true)
+            dut.io.request.ready.poke(false); dut.io.completion.ready.poke(true)
+            dut.io.cachePending.poke(false); dut.io.flush.poke(false)
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            val replies = scala.collection.mutable.Queue.empty[(Int, Int)]
+            var cycle = 0
+            var completed = 0
+            var routes = Vector.empty[(BigInt, Boolean)]
+            def tick(): Unit = {
+                dut.io.request.ready.poke(cycle % 3 != 1)
+                val response = replies.headOption.filter(_._1 <= cycle)
+                dut.io.response.valid.poke(response.nonEmpty)
+                dut.io.response.bits.wide.poke(true)
+                dut.io.response.bits.slot.poke(response.map(_._2).getOrElse(0))
+                dut.io.cachePending.poke(replies.nonEmpty)
+                if (response.nonEmpty) replies.dequeue()
+                if (dut.io.request.valid.peek().litToBoolean) {
+                    val address = dut.io.request.bits.paddr.peek().litValue
+                    val native = dut.io.requestNative.peek().litToBoolean
+                    assert(native == ((address >> 20) == 0xb00))
+                    if (dut.io.request.ready.peek().litToBoolean) {
+                        routes :+= address -> native
+                        replies.enqueue((cycle + 2, dut.io.request.bits.slot.peek().litValue.toInt))
+                    }
+                }
+                if (dut.io.completion.valid.peek().litToBoolean) completed += 1
+                dut.clock.step(); cycle += 1
+            }
+            for ((base, task) <- Seq(0xafffffc0L, 0xaffffff0L, 0xb00fffc0L,
+                0xb00ffff0L, 0xffffffc0L, 0xfffffff0L).zipWithIndex) {
+                VectorTestUtils.clear(dut.io.in.bits)
+                val in = dut.io.in.bits
+                in.scalar.robIdx.poke(task); in.scalar.prs(0).poke(1)
+                in.scalar.inst.poke((1L << 25) | (6L << 12) | 7)
+                in.vector.control.execution.poke(VectorExecution.Load)
+                in.vector.destination.count.poke(4); in.vector.groups.sourceCount(2).poke(4)
+                in.vector.state.vtype.poke((2 << 3) | 2); in.vector.state.vl.poke(32)
+                for (group <- 0 until 8) in.vector.destination.physical(group).poke(32 + group)
+                dut.io.scalarData.poke(base); dut.io.in.valid.poke(true)
+                var guard = 0
+                while (!dut.io.in.ready.peek().litToBoolean && guard < 500) { tick(); guard += 1 }
+                assert(guard < 500); tick(); dut.io.in.valid.poke(false)
+                while ((completed <= task || !dut.io.idle.peek().litToBoolean) && guard < 500) {
+                    tick(); guard += 1
+                }
+                assert(guard < 500, s"Boundary Load stalled at ${base.toHexString}")
+            }
+            assert(routes.exists(_._2) && routes.exists(!_._2))
+            assert(routes.exists(_._1 == 0), "Address increment must wrap modulo 2^32")
+            info(s"Checked ${routes.size} routed requests over $cycle cycles")
+        }
+    }
+
 }
