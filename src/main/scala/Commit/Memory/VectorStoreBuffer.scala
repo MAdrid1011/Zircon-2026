@@ -3,6 +3,7 @@ import chisel3.util._
 import ZirconConfig.BackendParams
 
 class VectorStoreDrain extends Bundle {
+    // Payload kind is available before admission; only start.fire grants drain.
     val start = Decoupled(Bool())
     val done = Input(Bool())
 }
@@ -19,6 +20,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         val flush = Input(Bool())
         val empty = Output(Bool())
         val active = Output(Bool())
+        val cachePayloadSelected = Output(Bool())
         val loadLine = Input(UInt(26.W))
         val loadTail = Input(UInt(p.sqWidth.W))
         val loadClear = Output(Bool())
@@ -127,6 +129,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     io.drain.done := state === done || finishNow
     io.empty := !valid && pendingCount===0.U
     io.active := active
+    // In prepare the active token owns the payload. Otherwise only a new
+    // vector candidate can offer a wide request, including response handover.
+    io.cachePayloadSelected := state === prepare || io.drain.start.bits
     io.observation.foreach { trace =>
         trace.count := count
         trace.addresses := VecInit(payload.map(_.address)).asUInt
@@ -275,17 +280,19 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     // it on the SB grant edge, including a queued successor of the returning
     // token. The existing payload remains stable if the cache applies pressure;
     // no additional line buffer or speculative outward write is introduced.
-    val startItem = Mux(finishNow,payload(Cat(1.U(1.W),pendingHead)),payload(0))
-    val startSingle = Mux(finishNow,!pendingTwo,count===1.U && !scattered)
-    val startNext = Mux(finishNow,payload(Cat(1.U(1.W),(pendingHead+1.U)(1,0))),payload(1))
-    val startPair = Mux(finishNow,pendingTwo,count===2.U && !scattered && adjacentPair(0))
+    val startItem = Mux(state === response,payload(Cat(1.U(1.W),pendingHead)),payload(0))
+    val startSingle = Mux(state === response,!pendingTwo,count===1.U && !scattered)
+    val startNext = Mux(state === response,payload(Cat(1.U(1.W),(pendingHead+1.U)(1,0))),payload(1))
+    val startPair = Mux(state === response,pendingTwo,count===2.U && !scattered && adjacentPair(0))
     val immediatePair = startPair && !startItem.address(5,0).orR &&
         startItem.mask.andR && startNext.mask.andR
     val immediateSingle = startSingle && !startItem.address(4,0).orR && startItem.mask.andR
     val immediateStart = io.drain.start.fire &&
         PeScratchpadBridge.matches(startItem.address.pad(34)) && (immediateSingle || immediatePair)
-    when(immediateStart) {
-        io.cache.request.valid := true.B
+    when(immediateStart) { io.cache.request.valid := true.B }
+    // An immediate request exists only outside prepare. Select its payload
+    // from the registered phase, keeping grant/retirement out of data muxes.
+    when(state =/= prepare) {
         io.cache.request.bits.paddr := Cat(startItem.address(31,6),0.U(6.W)).pad(34)
         io.cache.request.bits.line := Mux(immediatePair,Cat(startNext.data,startItem.data),
             Mux(startItem.address(5),Cat(startItem.data,0.U(256.W)),Cat(0.U(256.W),startItem.data)))

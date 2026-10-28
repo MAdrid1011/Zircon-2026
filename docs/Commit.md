@@ -34,6 +34,10 @@ Store Buffer，而是在 ROB 头等待更早的已提交 Store 排空，再授�
 Store Buffer 通过寄存的在途状态选择当前项或后继项的请求载荷。响应握手只控制
 请求有效和出队更新；有效请求断言所选后继项恰好对应当前请求完成后的替换项。
 
+向量排空接口的 `start.bits` 提前携带候选项类别，只有 `start.fire` 授权排空。
+宽 Store 的准备阶段由当前 token 持有 Cache 载荷，其他阶段按候选类别选择标量或向量
+载荷；响应交接使用寄存的阶段选择后继数据，实际请求有效和状态更新仍等待握手。
+
 PMA 可合并写窗口中的 Store 仍按程序顺序从 Store Buffer 进入 DCache。DCache 接收后即可释放
 对应 Store Buffer 表项，并在内部完成 burst 聚合与下级响应；后续强顺序 Store 会等待该 burst
 结束。`FENCE` 的存储系统排空条件同时覆盖写合并队列。

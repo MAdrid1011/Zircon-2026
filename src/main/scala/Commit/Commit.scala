@@ -243,7 +243,7 @@ class Commit(
         // SB owns selection and never launches a scalar request during a wide
         // drain. Wide cache responses remain local until the whole token ends.
         io.backend.store.request.valid := sb.io.store.request.valid || wide.io.cache.request.valid
-        io.backend.store.request.bits := Mux(wide.io.cache.request.valid,
+        io.backend.store.request.bits := Mux(wide.io.cachePayloadSelected,
             wide.io.cache.request.bits, sb.io.store.request.bits)
         sb.io.store.request.ready := io.backend.store.request.ready
         wide.io.cache.request.ready := io.backend.store.request.ready
@@ -253,6 +253,8 @@ class Commit(
         sb.io.store.response.bits := io.backend.store.response.bits
         io.backend.store.response.ready := wide.io.cache.response.ready || sb.io.store.response.ready
         assert(!(sb.io.store.request.valid && wide.io.cache.request.valid))
+        when(wide.io.cache.request.valid) { assert(wide.io.cachePayloadSelected) }
+        when(sb.io.store.request.valid) { assert(!wide.io.cachePayloadSelected) }
         when(sb.io.store.request.valid) { assert(!wideActive || wide.io.drain.done) }
     } else {
         io.backend.store <> sb.io.store

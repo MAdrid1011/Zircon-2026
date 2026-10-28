@@ -82,7 +82,7 @@ class StoreBuffer(
     io.store.request.valid := offer && !vectorRequest
     io.vector.foreach { port =>
         port.start.valid := offer && vectorRequest
-        port.start.bits := true.B
+        port.start.bits := vectorRequest
     }
     io.store.request.bits.paddr := request.paddr
     io.store.request.bits.wide := false.B

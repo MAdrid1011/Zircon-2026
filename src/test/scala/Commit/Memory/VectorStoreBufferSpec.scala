@@ -31,7 +31,7 @@ class VectorStorePipelineHarness extends Module {
     port.io.atomicRequest.bits := 0.U.asTypeOf(new DStoreRequest)
     port.io.atomicResponse.ready := true.B
     port.io.committedRequest.valid := scalar.io.store.request.valid || vector.io.cache.request.valid
-    port.io.committedRequest.bits := Mux(vector.io.cache.request.valid,
+    port.io.committedRequest.bits := Mux(vector.io.cachePayloadSelected,
         vector.io.cache.request.bits,scalar.io.store.request.bits)
     scalar.io.store.request.ready := port.io.committedRequest.ready
     vector.io.cache.request.ready := port.io.committedRequest.ready

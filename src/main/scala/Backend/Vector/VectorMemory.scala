@@ -672,12 +672,15 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     // Prepare behind an accepted request, keeping its old payload stable until
     // fire. Admission must see the advanced cursor and reserve a different
     // ticket; otherwise the same group or response owner would be reused.
+    // Payload preparation assumes an occupied request will be accepted.
+    // The actual fire still gates every replacement of that held payload.
+    val prepareIssue = fastHeld
     val prepareCursor = VecInit((0 until 4).map(i =>
-        Mux(issueFast && fastHeldContext === i.U && !fastHeldRetry,
+        Mux(prepareIssue && fastHeldContext === i.U && !fastHeldRetry,
             fastHeldGroup +& Mux(fastHeldPair, 2.U, 1.U), fastCursor(i))))
     val prepareRetry = VecInit((0 until 4).map(i => fastRetry(i) &
-        ~Mux(issueFast && fastHeldContext === i.U, UIntToOH(fastHeldGroup, 8), 0.U)))
-    val freeTickets = ~(ticketValid | Mux(issueFast, issuedTicket, 0.U))
+        ~Mux(prepareIssue && fastHeldContext === i.U, UIntToOH(fastHeldGroup, 8), 0.U)))
+    val freeTickets = ~(ticketValid | Mux(prepareIssue, issuedTicket, 0.U))
     val fastTodo = VecInit((0 until 4).map(i => fastValid(i) && fastBaseReady(i) && fastAligned(i) &&
         (prepareRetry(i).orR || prepareCursor(i) < fastCount(i))))
     val contextOrder = VecInit((0 until 4).map(i => (fastHead + i.U)(1, 0)))
