@@ -46,6 +46,7 @@ class CommitIO(
 
     /* This aggregate includes cache/L2 state and is therefore computed by the shell. */
     val memoryIdle = Input(Bool())
+    val fault = Output(Bool())
 
     /* Commit starts cache maintenance required by FENCE.I and SFENCE.VMA. */
     val maintenance = new CacheMaintenanceIO
@@ -209,7 +210,7 @@ class Commit(
         vector.completion.ready := !delayedBackendRecovery
         val result = vector.completion.bits
         rob.io.completion(7) := completion(vector.completion.fire, vector.completion.fire,
-            result.robIdx, result.scalar.bits.data, 0.U.asTypeOf(new BackendException))
+            result.robIdx, result.scalar.bits.data, result.exception)
     }
 
     /* SQ collects speculative stores; SB drains committed stores and supplies byte-wise forwarding. */
@@ -397,11 +398,11 @@ class Commit(
         val sretIllegal = entry.isSystem && entry.systemOp === SystemOp.SRET.U &&
             !(privilege === 3.U || (privilege === 1.U && !csr.io.state.mstatus(22)))
         val systemException = if (privileged) ecall || ebreak || mretIllegal || sretIllegal else false.B
-        val exceptionValid = if (privileged) entry.exception.valid else false.B
+        val exceptionValid = entry.exception.valid
         val atomic = if (privileged) entry.isAtomic else false.B
         val systemRecovery = if (privileged) commitSystem else entry.isSystem &&
             (entry.systemOp === SystemOp.FENCE.U || entry.systemOp === SystemOp.FENCE_I.U)
-        recoveryCandidate(lane) := exceptionValid || entry.mispredicted || systemRecovery ||
+        recoveryCandidate(lane) := (if (privileged) exceptionValid else false.B) || entry.mispredicted || systemRecovery ||
             entry.writesExecutionState || atomic || systemException
         val needsFeedback = entry.packetEnd || recoveryCandidate(lane)
         val completed = rob.io.head(lane).valid && entry.complete &&
@@ -411,8 +412,14 @@ class Commit(
         packetEnd(lane) := completed && entry.packetEnd
         recovery(lane) := continue && recover
         retire(lane) := continue && completed && !exceptionValid && !systemException
-        continue = continue && completed && !recover && !entry.isSystem && !atomic
+        continue = continue && completed && !recover && !exceptionValid && !entry.isSystem && !atomic
     }
+    // Performance tasks have no privileged handler. Only the oldest live
+    // exception may fail the task; younger speculative responses remain inert.
+    val taskHeadFault = if (privileged) false.B else rob.io.head(0).valid &&
+        rob.io.head(0).bits.complete && rob.io.head(0).bits.exception.valid && !delayedRecovery
+    io.fault := taskHeadFault || (if (privileged) false.B else
+        io.backend.store.response.fire && io.backend.store.response.bits.exception.orR)
     val takeInterrupt = Wire(Bool())
     val retireFire = VecInit(retire.map(_ && !delayedRecovery && !takeInterrupt))
     rob.io.pop := retireFire.asUInt
@@ -885,10 +892,15 @@ class Commit(
     io.debug.robHeadValid := rob.io.head(0).valid
     io.debug.robHeadComplete := rob.io.head(0).bits.complete
     io.debug.robHeadPc := robHeadPc(0)
-    io.debug.trap.valid := acceptedTrap.valid
+    io.debug.trap.valid := acceptedTrap.valid || taskHeadFault
     io.debug.trap.bits.epc := Cat(acceptedTrap.bits.pcWord, 0.U(2.W))
     io.debug.trap.bits.cause := acceptedTrap.bits.cause
     io.debug.trap.bits.tval := acceptedTrap.bits.tval
+    when(taskHeadFault) {
+        io.debug.trap.bits.epc := robHeadPc(0)
+        io.debug.trap.bits.cause := rob.io.head(0).bits.exception.cause
+        io.debug.trap.bits.tval := rob.io.head(0).bits.exception.tval
+    }
     io.debug.trap.bits.targetPrivilege := Mux(acceptedTrap.bits.supervisor, 1.U, 3.U)
     io.debug.performance.branch := branchCount
     io.debug.performance.branchFail := branchFailCount

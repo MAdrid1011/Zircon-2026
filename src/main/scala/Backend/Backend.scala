@@ -228,7 +228,11 @@ class Backend(
             mixArith.io.rf.fpWrite.valid -> Cat(1.U(1.W), mixArith.io.rf.fpWrite.bits.addr),
             ls0.io.rf.wr.valid -> ls0.io.rf.wr.bits.prd,
             ls1.io.rf.wr.valid -> ls1.io.rf.wr.bits.prd,
-            vectorScalarWrite.valid -> vectorScalarWrite.bits.destination,
+            // Keep local readiness continuous until the shared LS1 wakeup
+            // reaches ReadyBoard. A PRF-write pulse alone misses consumers
+            // dispatched while that global wakeup is waiting for its slot.
+            true.B -> Mux(vectorScalarWrite.valid,
+                vectorScalarWrite.bits.destination, vectorScalarWake.get),
             false.B -> 0.U(p.tagWidth.W),
         )
         iq.io.wakeup := RegNext(VecInit(scalarWrites.map { case (valid, tag) =>

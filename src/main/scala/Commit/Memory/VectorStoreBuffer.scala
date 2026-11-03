@@ -371,7 +371,7 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     when(state === prepare && !lineMask.orR) { advance() }
     when(io.cache.request.fire) { state := response }
     when(io.cache.response.fire) {
-        assert(io.cache.response.bits.exception === 0.U)
+        // Commit reports failed committed writes through the task fault port.
         advance()
     }
     when(state === done || finishNow) {

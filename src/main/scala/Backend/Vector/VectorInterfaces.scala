@@ -42,6 +42,7 @@ class VectorCompletion(p: BackendParams = BackendParams()) extends Bundle {
     val robIdx = UInt(p.robWidth.W)
     val scalar = Valid(new VectorScalarWrite(p))
     val retirement = new VectorCSRRetirement
+    val exception = new BackendException
 }
 
 class VectorTaskWriteback extends Bundle {
