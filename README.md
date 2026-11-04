@@ -18,23 +18,14 @@ Zircon-2026 是一个面向密集控制流程序、使用 Chisel 编写的 32 �
 流水线，以及两条访存流水线。存储系统由独立 L1 ICache/DCache、Sv32 ITLB/DTLB、硬件页表
 遍历器和一颗偏 victim 组织的共享 L2 Cache 构成。
 
-项目同时面向两类实现环境：Vivado 路径使用可推断双口 BRAM，ASIC 静态分析在 Nangate45 下
-将 SRAM 绑定到 BSG Fakeram 时序模型；[TSMC28](docs/TSMC28Timing.md) 使用外部
-标准单元库并保留 SRAM 黑盒边界。整核仿真由 Verilator 驱动，并在提交点与 Spike 逐条差分。
-
-本项目延续早期的 [Zircon](https://github.com/MAdrid1011/Zircon) 与
-[Zircon-2024](https://github.com/MAdrid1011/Zircon-2024) 处理器工作，在取指预测、乱序执行和
-存储层次上形成当前实现。两个早期仓库保留各自的设计和实验资料，可用于了解这一研究方向的背景。
+整核仿真由 Verilator 驱动，在提交点与 Spike 逐条差分。
 
 同一仓库提供两种静态配置：`system` 面向控制程序与 Linux，`performance` 面向裸机整数与
 FP32 数组计算。性能配置支持 Zve32f、VLEN=256 和八个 32 bit lane，沿用标量乱序流水线、
 重命名、队列和算术模块，并增加独立向量后端与 256 bit AXI。
 
-> [!NOTE]
-> 系统配置已在 Spike 逐提交差分下启动 Linux 6.1.44，进入交互式 BusyBox shell，并完成命令
-> 输入、文件系统挂载和定时器路径验证。Nangate45 BSG 纯逻辑时序分析测得最长数据到达时间
-> 为 1.473745 ns；SIMD8 性能配置为 1.474711 ns。两种配置均在 1.5 ns 周期下完成时序闭合，
-> 对应逻辑频率约 667 MHz。
+系统配置支持 Linux 6.1.44 与交互式 BusyBox，启动和终端使用方法见
+[Linux 运行](docs/Linux-Bringup.md)。
 
 ## 架构概览
 
@@ -233,33 +224,6 @@ sbt "runMain Elaborate generated"
 sbt "runMain Elaborate --simulation generated"
 ```
 
-Vivado 2025 核心工程面向 SCARF Stage-B 的 `xcvu13p-fhgb2104-2-i`。裸核使用
-Xilinx BRAM，工程中的 XDC 将核心时钟约束为 100 MHz。
-生成并运行工程：
-
-```sh
-python3 scripts/eda/prepare_vivado_rtl.py
-vivado -mode batch -source eda/vivado/create_project.tcl -nolog -nojournal
-```
-
-上板工程由 SCARF 的 PCIe/DDR4 wrapper 和板级 XDC 提供外设及管脚连接；这里的
-`ZirconCore` 工程用于独立的核心实现评估。
-工程定义与 100 MHz 时钟约束保存在 [`eda/vivado/`](eda/vivado/README.md)，生成的
-RTL、工程和报告位于忽略的 `build/eda/vivado-vu13p/` 下。使用 `-tclargs --create-only`
-可只创建工程。Nangate45 的 BSG Fakeram RTL 与结果独立位于 `build/eda/nangate45/`。
-
-使用 BSG Fakeram 配置生成 Nangate45 纯逻辑时序结果：
-
-```sh
-python3 scripts/eda/synthesize_core.py --logic-only --target-ns 1.0 --sta-target-ns 1.5
-```
-
-脚本会生成外部宏版 RTL，再运行 Yosys 标准单元映射。该配置将 Cache、BTB 和 Predictor
-阵列全部映射到固定版本的 `fakeram45` 估算模型，并将 L2 配置为 16 sets；其中项目需要的
-`1RW+1R` 端口使用匹配深度 BSG 模型派生的 logic-only 双读口时序抽象。普通 RTL 与仿真生成
-仍使用默认的 32-set L2。去掉 `--logic-only` 后，流程还会执行 placement-based RC 估算和
-标准 OpenROAD Resizer 修复。
-
 ## 测试入口
 
 RTL 模块测试由 sbt 组织，测试代码位于 `src/test/scala/`：
@@ -297,7 +261,6 @@ Zircon-2026/
 │   └── Config/           # 参数与跨模块接口
 ├── src/test/scala/       # 当前模块与子系统验证
 ├── docs/                 # 当前架构文档
-├── eda/                  # Nangate45 参考库与 RAM 模型
 ├── RV-Software/          # 裸机程序与基准测试子模块
 └── ZirconSim/            # Verilator + Spike 仿真子模块
 ```
@@ -306,5 +269,4 @@ Zircon-2026/
 
 ## 开源许可
 
-Zircon-2026 使用 [Mozilla Public License 2.0](LICENSE)。`RV-Software`、`ZirconSim` 和
-`eda/` 中的第三方数据分别保留其上游许可证。
+Zircon-2026 使用 [Mozilla Public License 2.0](LICENSE)。`RV-Software` 和 `ZirconSim` 分别保留其上游许可证。

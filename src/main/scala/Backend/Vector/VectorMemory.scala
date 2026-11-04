@@ -64,6 +64,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val first = Reg(UInt(512.W))
     val second = RegInit(false.B)
     val discard = RegInit(false.B)
+    val loadException = RegInit(0.U.asTypeOf(new BackendException))
     // A complete unit-stride Store can collect its first register alongside
     // the scalar base. Reuse the ordinary SQ payload register; ordering and
     // outward memory writes remain the responsibility of the existing SQ.
@@ -114,7 +115,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     streamLines.io.flush.get := io.flush
     val streamCredits = RegInit(0.U(3.W))
     val streamHigh = RegInit(false.B)
-    streamLines.io.enq.valid := state === streamLoad && io.response.valid && !io.response.bits.retry && !io.flush
+    streamLines.io.enq.valid := state === streamLoad && io.response.valid &&
+        !io.response.bits.retry && !io.response.bits.exception.orR && !io.flush
     streamLines.io.enq.bits.line := io.response.bits.line
     streamLines.io.enq.bits.group := io.response.bits.slot(2, 0)
     streamLines.io.enq.bits.context := 0.U
@@ -154,10 +156,20 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         Mux(indexWidth === 1.U, registerElement(6, 4), registerElement(5, 3)))
     val indexReadAddress = RegInit(0.U(6.W))
     val indexReadSelection = RegInit(1.U(64.W))
+    // Source mappings remain owned by this instruction until completion.
+    // Reuse one collected RF group across its indexed elements and fields.
+    val indexGroupValid = RegInit(false.B)
+    val indexGroupNumber = Reg(UInt(3.W))
+    val indexGroupData = Reg(Vec(8, UInt(32.W)))
     val indexLane = Mux(indexWidth === 0.U, registerElement(4, 2),
         Mux(indexWidth === 1.U, registerElement(3, 1), registerElement(2, 0)))
     val indexShift = Mux(indexWidth === 0.U, Cat(registerElement(1, 0), 0.U(3.W)),
         Mux(indexWidth === 1.U, Cat(registerElement(0), 0.U(4.W)), 0.U(5.W)))
+    def indexValue(words: Vec[UInt]): UInt = {
+        val value = (words(indexLane) >> indexShift)(31, 0)
+        Mux(indexWidth === 0.U, value & 255.U,
+            Mux(indexWidth === 1.U, value & 65535.U, value))
+    }
     val elementBytes = (1.U(3.W) << eew)(2, 0)
     val nextPosition = position +& elementBytes
     val lastElement = nextPosition === 32.U
@@ -273,6 +285,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     io.completion.valid := legacyCompletion && !io.flush
     io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
     io.completion.bits.robIdx := Mux(wordValid,wordRob,instruction.scalar.robIdx)
+    when(!wordValid) { io.completion.bits.exception := loadException }
     when(wordValid && io.store.fire) { wordSent := true.B }
     when(wordDone) { wordValid := false.B; wordSent := false.B }
 
@@ -300,6 +313,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     streamWriteValid := false.B
     val streamReturned = state === streamLoad && io.response.valid
     val streamRetried = streamReturned && io.response.bits.retry
+    val streamFault = streamReturned && !io.response.bits.retry && io.response.bits.exception.orR
     when(io.flush) {
         wordValid := false.B
         wordSent := false.B
@@ -308,11 +322,13 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         streamHigh := false.B
     }.otherwise {
         when(state === streamLoad) {
-            streamCredits := streamCredits + io.request.fire.asUInt - streamRetried.asUInt - streamLines.io.deq.fire.asUInt
+            streamCredits := streamCredits + io.request.fire.asUInt -
+                (streamRetried || streamFault).asUInt - streamLines.io.deq.fire.asUInt
         }
     }
     when(io.flush) {
         streamRequestValid := false.B
+        indexGroupValid := false.B
         when(state === response) { discard := true.B }
         .elsewhen(state === streamLoad || state === streamDrain) {
             nextState := Mux(io.cachePending, streamDrain, idle)
@@ -416,17 +432,27 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                     elementAddress := BLevelPAdder32.sum(elementAddress, step, 0.U)
                     nextState := Mux(lastElement, writeback, gather)
                 }.elsewhen(indexed) {
-                    indexReadAddress := metadata.source(1)(indexGroup)
-                    indexReadSelection := UIntToOH(metadata.source(1)(indexGroup), 64)
-                    nextState := indexOperand
+                    when(indexGroupValid && indexGroupNumber === indexGroup) {
+                        val offset = indexValue(indexGroupData)
+                        val fieldOffset = (field << eew).pad(32)
+                        val sum = base ^ offset ^ fieldOffset
+                        val carry = (((base & offset) | ((base ^ offset) & fieldOffset)) << 1)(31, 0)
+                        nextAddress := BLevelPAdder32.sum(sum, carry, 0.U)
+                        nextState := checkAddress
+                    }.otherwise {
+                        indexReadAddress := metadata.source(1)(indexGroup)
+                        indexReadSelection := UIntToOH(metadata.source(1)(indexGroup), 64)
+                        nextState := indexOperand
+                    }
                 }.elsewhen(store) { nextState := storeAddress }
                 .elsewhen(cachedValid && cachedAddress === elementAddress(31, 6)) { nextState := merge }
                 .otherwise { nextState := request }
             }
             is(indexOperand) { when(io.readAvailable) {
-                val value = (io.read(1).data(indexLane) >> indexShift)(31, 0)
-                indexOffset := Mux(indexWidth === 0.U, value & 255.U,
-                    Mux(indexWidth === 1.U, value & 65535.U, value))
+                indexOffset := indexValue(io.read(1).data)
+                indexGroupData := io.read(1).data
+                indexGroupNumber := indexGroup
+                indexGroupValid := true.B
                 nextState := indexAddress
             } }
             is(indexAddress) {
@@ -501,9 +527,15 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
                 }
                 when(io.response.valid) {
                     val slot = io.response.bits.slot(2, 0)
-                    assert(io.response.bits.wide && io.response.bits.exception === 0.U)
+                    assert(io.response.bits.wide)
+                    assert(!(io.response.bits.retry && io.response.bits.exception.orR))
                     assert(streamOutstanding(slot), "Wide Load response retains its group owner")
-                    when(!io.response.bits.retry) { assert(streamLines.io.enq.ready) }
+                    when(!io.response.bits.retry && !io.response.bits.exception.orR) { assert(streamLines.io.enq.ready) }
+                    when(streamFault && !loadException.valid) {
+                        loadException.valid := true.B
+                        loadException.cause := io.response.bits.exception
+                        loadException.tval := base + Cat(slot, 0.U(5.W))
+                    }
                 }
                 when(streamLines.io.deq.valid) {
                     val firstGroup = streamLines.io.deq.bits.group
@@ -527,6 +559,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         // The old SQ payload and ROB tag remain combinationally unchanged at
         // this edge, while the next instruction starts operand collection.
         when(legacyIn.fire) {
+            indexGroupValid := false.B
             instruction := legacyIn.bits
             val firstSource = Mux(legacyIn.bits.vector.groups.mask,
                 legacyIn.bits.vector.mask, legacyIn.bits.vector.source(0)(0))
@@ -540,17 +573,25 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             group := 0.U
             groupOH := 1.U
             discard := false.B
+            loadException := 0.U.asTypeOf(new BackendException)
             cachedValid := false.B
             fullStore := false.B
             pairStore := false.B
         }
     }
+    when(state === indexOperand) { assert(indexed) }
+    when(RegNext(io.flush, false.B)) { assert(!indexGroupValid) }
     // Even a flush-cycle response releases the old owner. Do not leave a
     // discarded miss waiting for a second response after its slot is reused.
     when(state === response && io.response.valid) {
         when(discard || io.flush) { nextState := idle }
         .elsewhen(io.response.bits.retry) { nextState := request }
-        .elsewhen(elementAccess) {
+        .elsewhen(io.response.bits.exception.orR) {
+            loadException.valid := true.B
+            loadException.cause := io.response.bits.exception
+            loadException.tval := address
+            nextState := complete
+        }.elsewhen(elementAccess) {
             cachedLine := io.response.bits.line
             cachedAddress := address(31, 6)
             cachedValid := true.B
@@ -563,7 +604,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             data := VecInit((0 until 32).map(byte => Mux(byteMask(byte), loaded(byte), heldBytes(byte)))).asUInt
             nextState := writeback
         }
-        assert(io.response.bits.wide && io.response.bits.exception === 0.U)
+        assert(io.response.bits.wide)
+        assert(!(io.response.bits.retry && io.response.bits.exception.orR))
     }
     when(state === response && discard && !io.cachePending) { nextState := idle }
     when(legacyIn.fire) {
@@ -590,6 +632,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val fastCursor = Reg(Vec(4, UInt(4.W)))
     val fastRetry = RegInit(VecInit.fill(4)(0.U(8.W)))
     val fastWritten = RegInit(VecInit.fill(4)(0.U(8.W)))
+    val fastFailed = RegInit(VecInit.fill(4)(0.U(8.W)))
+    val fastException = RegInit(VecInit.fill(4)(0.U.asTypeOf(new BackendException)))
     val fastHead = RegInit(0.U(2.W))
     val fastTail = RegInit(0.U(2.W))
     val fastScalarPending = RegInit(false.B)
@@ -651,7 +695,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         UIntToOH(fastWriteGroup,8),0.U)
     val fastScalarCapture = fastScalarPending && !legacyScalarRequest && io.readAvailable && !io.flush
     val fastFinished = fastOwned && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        headWritten === fastExpected(fastHead)
+        (headWritten | fastFailed(fastHead)) === fastExpected(fastHead)
     val selectFastCompletion = fastMode && fastFinished && !legacyCompletionHeld
     val fastRelease = selectFastCompletion && io.completion.ready && !io.flush
     val fastRoom = (!fastValid(fastTail) || fastRelease && fastHead===fastTail) &&
@@ -683,6 +727,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             io.completion.valid := !io.flush && !fastDrain
             io.completion.bits := 0.U.asTypeOf(new VectorCompletion(p))
             io.completion.bits.robIdx := fastInstruction(fastHead).scalar.robIdx
+            io.completion.bits.exception := fastException(fastHead)
         }
     }
     when(io.flush || legacyCompletion && legacyCompletionReady) { legacyCompletionHeld := false.B }
@@ -744,6 +789,7 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val responseOH = UIntToOH(responseTicket, 4)
     val replyFast = fastMode && io.response.valid && !io.flush
     val retryFast = replyFast && io.response.bits.retry
+    val faultFast = replyFast && !io.response.bits.retry && io.response.bits.exception.orR
     val repliedContext = ticketContext(responseTicket)
     val repliedGroup = ticketGroup(responseTicket)
     val drainFastLine = fastMode && streamLines.io.deq.valid && !io.flush
@@ -752,11 +798,11 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     val queuedPair = !(fastBase(queuedContext)(5) ^ queuedGroup(0)) &&
         queuedGroup +& 1.U < fastCount(queuedContext)
     val finishFastLine = drainFastLine && (fastHigh || !queuedPair)
-    val releaseTicket = Mux(retryFast, responseOH, 0.U) |
+    val releaseTicket = Mux(retryFast || faultFast, responseOH, 0.U) |
         Mux(finishFastLine, UIntToOH(streamLines.io.deq.bits.ticket, 4), 0.U)
 
     when(fastMode || fastDrain) {
-        streamLines.io.enq.valid := replyFast && !io.response.bits.retry
+        streamLines.io.enq.valid := replyFast && !io.response.bits.retry && !io.response.bits.exception.orR
         streamLines.io.enq.bits.line := io.response.bits.line
         streamLines.io.enq.bits.group := repliedGroup
         streamLines.io.enq.bits.context := repliedContext
@@ -806,9 +852,10 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }
     when(replyFast) {
         assert(io.response.bits.slot < 4.U && ticketFlight(responseTicket), "Response retains an in-flight ticket")
-        assert(io.response.bits.wide && io.response.bits.exception === 0.U)
+        assert(io.response.bits.wide)
+        assert(!(io.response.bits.retry && io.response.bits.exception.orR))
         assert(fastValid(repliedContext), "Response retains its architectural Load owner")
-        when(!io.response.bits.retry) {
+        when(!io.response.bits.retry && !io.response.bits.exception.orR) {
             assert(streamLines.io.enq.ready, "Reserved response ticket protects FIFO capacity")
             assert(ticketPair(responseTicket) === (!(fastBase(repliedContext)(5) ^ repliedGroup(0)) &&
                 repliedGroup +& 1.U < fastCount(repliedContext)))
@@ -865,6 +912,16 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             assert(fastValid(i) && !fastWritten(i)(fastWriteGroup), "PRF group writes once to its live owner")
             fastWritten(i) := fastWritten(i) | UIntToOH(fastWriteGroup, 8)
         }
+        when(faultFast && repliedContext === i.U) {
+            val failed = UIntToOH(repliedGroup, 8)
+            fastFailed(i) := fastFailed(i) | failed |
+                Mux(ticketPair(responseTicket), (failed << 1)(7, 0), 0.U)
+            when(!fastException(i).valid) {
+                fastException(i).valid := true.B
+                fastException(i).cause := io.response.bits.exception
+                fastException(i).tval := fastBase(i) + Cat(repliedGroup, 0.U(5.W))
+            }
+        }
         when(fastScalarCapture && fastScalarOwner === i.U) {
             fastBase(i) := io.scalarData
             fastBaseReady(i) := true.B
@@ -879,6 +936,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
             fastCursor(i) := 0.U
             fastRetry(i) := 0.U
             fastWritten(i) := 0.U
+            fastFailed(i) := 0.U
+            fastException(i) := 0.U.asTypeOf(new BackendException)
             assert(!fastValid(i) || fastRelease && fastHead===i.U, "Instruction context is reused only on accepted completion")
         }
     }
@@ -894,6 +953,8 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
         fastBaseReady.foreach(_ := false.B)
         fastRetry.foreach(_ := 0.U)
         fastWritten.foreach(_ := 0.U)
+        fastFailed.foreach(_ := 0.U)
+        fastException.foreach(_ := 0.U.asTypeOf(new BackendException))
         fastHead := 0.U
         fastTail := 0.U
         fastScalarPending := false.B

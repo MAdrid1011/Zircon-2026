@@ -12,6 +12,7 @@ class ZirconInterrupts extends Bundle {
 class ZirconCoreIO(simulationDebug: Boolean, profile: CoreProfile = CoreProfile.System,
     scratchpadEnabled: Boolean = false) extends Bundle {
     val axi = new AXI4MasterIO(profile.axiDataBits)
+    val fault = Output(Bool())
     val scratchpad = if (scratchpadEnabled) Some(new PeScratchpadPort) else None
     val interrupts = if (profile.privileged) Some(Input(new ZirconInterrupts)) else None
     val debug = if (simulationDebug) Some(new ZirconDebugIO(profile.vlen != 0)) else None
@@ -59,6 +60,7 @@ class ZirconCore(
     middleend.io.commit <> commit.io.middleend
     backend.io.commit <> commit.io.backend
     io.scratchpad.foreach(_ <> backend.io.scratchpad.get)
+    io.fault := commit.io.fault
     if (vectorEnabled) {
         backend.io.vector.get.enqueue := middleend.io.vector.get.enqueue
         backend.io.vector.get.allocate := middleend.io.vector.get.allocate

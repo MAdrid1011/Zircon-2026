@@ -38,3 +38,9 @@ AGENTS.md
 # Local analysis outputs.
 artifacts/
 scripts/analyze_l2_line_lifetimes.py
+
+# Local implementation files.
+/eda/
+/scripts/eda/
+/docs/Nangate45Timing.md
+/docs/TSMC28Timing.md
