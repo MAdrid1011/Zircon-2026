@@ -125,8 +125,7 @@ RF 需求在前一拍寄存，仲裁控制从寄存器 Q 端开始。
 后续元素命中该组时，从保存数据提取8/16/32-bit索引并形成寄存地址，省去两拍
 重复RF收集和offset准备；跨组仍实际申请RF。mask、vstart、字段偏移、逐元素
 访存顺序与原line合并路径保持。新指令准入和flush清有效位，已接受的Load仍须
-等待原响应排空，不跨指令共享索引。命中组合路径包含lane选择及32-bit地址加法；
-其频率和面积代价仍需综合验证。
+等待原响应排空，不跨指令共享索引。命中路径通过 lane 选择与 32-bit 地址加法生成访问地址。
 
 未初始化、无零寄存器且使用二进制读地址的字节掩码 PRF 在观测仿真中以异步 `Mem`
 保存数据；硬件按配置启用分 bank 的独热行选择，保持相同的异步读和逐字节写语义。
@@ -242,11 +241,6 @@ RTL 单元测试位于 `src/test/scala/Backend/Vector`，裸机测试及生成�
 系统核心的架构测试与 Linux 使用独立入口，见[架构测试](../RV-Software/arch-test/README.md)
 和 [Linux 启动](Linux-Bringup.md)；性能核心使用非特权裸机运行时。
 
-EDA 按配置生成独立 RTL：Nangate45 使用 BSG Fakeram 进行 1.5 ns 的纯逻辑时序分析，
-Vivado 2025.2 使用 VU13P、Xilinx BRAM、100 MHz 时钟与默认综合实现策略，DSP 上限为零。
-配置、工程建立方法和时序评估说明分别见
-[Nangate45 逻辑时序评估](Nangate45Timing.md)与 [Vivado VU13P 工程](../eda/vivado/README.md)。
-
 向量重命名实现见 [VectorRename](../src/main/scala/Middleend/Rename/VectorRename.scala)，
 寄存器堆与八路算术实现见 [VectorRegisterFile](../src/main/scala/Backend/Vector/VectorRegisterFile.scala)
 和 [VectorArithmetic](../src/main/scala/Backend/Vector/VectorArithmetic.scala)。
@@ -261,5 +255,4 @@ PRF，其他成功组可写入推测物理寄存器。真实异常到达 ROB 首
 及后续退休，并由独立于 debug 的 Core `fault` 报告；已提交标量/向量 Store
 响应错误也由此端口报告。外部任务控制器将故障保持到任务复位。性能核不
 提供特权处理程序或向量部分异常 vstart 重启；故障地址是对应逻辑访问起点，
-缓存行响应不区分失败半行。不得把未经指令归属处理的投机 SRAM 读错误直接
-当成任务故障。System 配置继续使用既有特权异常处理。
+缓存行响应不区分失败半行。System 配置继续使用既有特权异常处理。

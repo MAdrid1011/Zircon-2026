@@ -1,14 +1,14 @@
 # Zircon-2026 文档
 
 本目录描述当前 RTL 的架构、模块边界、关键状态、流水线数据流和可复现验证。配置数值以
-`src/main/scala/Config` 的默认参数为准；Nangate45 专用配置会在对应文档中明确标出差异。
+`src/main/scala/Config` 的默认参数为准。
 
 ## 推荐阅读顺序
 
 1. 从仓库 [README](../README.md#架构概览) 了解整核目标、默认配置和主数据流。
 2. 阅读 [处理器顶层](Core.md)，再按数据流进入前端、中端、后端和提交模块。
 3. 阅读 [存储系统](Memory.md) 了解 Cache、地址翻译、PMA、非缓存写合并和 RAM 后端。
-4. 使用 Linux、TACLeBench 与 EDA 文档复现系统启动、控制负载和静态时序评估。
+4. 使用 Linux 与 TACLeBench 文档运行系统启动和控制负载。
 
 ## 模块设计
 
@@ -24,8 +24,6 @@
 
 - [Linux 启动与复现](Linux-Bringup.md)：软件镜像、PGO 仿真、Spike 差分、检查点与交互终端
 - [TACLeBench](../RV-Software/taclebench/README.md)：54 个嵌入式基准与 lift 控制负载
-- [Nangate45 逻辑时序评估](Nangate45Timing.md)：BSG SRAM 配置、logic-only STA、约束与脚本接口
-- [TSMC28 实现与验证](TSMC28Timing.md)：目标工艺角、标准单元映射、边界等价与 SRAM/物理实现要求
 
 文档中的类名、接口名和流水级名称与源码保持一致，便于从设计说明直接定位实现。仓库 README
 提供项目入口和常用任务，本目录说明模块职责与验证方法。
