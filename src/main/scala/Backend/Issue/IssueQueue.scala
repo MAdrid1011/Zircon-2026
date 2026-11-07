@@ -321,7 +321,15 @@ class IssueQueue(
     private def resourceReady(entry: IQEntry): Bool = q.profile match {
         case IssueQueueProfile.Vector =>
             Mux(entry.vectorGrouped.get,
-                entry.vectorReady.get(0) && entry.vectorReady.get(8) && entry.vectorReady.get(16) && entry.vectorReady.get(24),
+                // A grouped instruction is collected one physical register at
+                // a time. Require every requested source group before issuing
+                // it into the single collector; otherwise a younger grouped
+                // consumer can occupy the collector while an older producer
+                // for a later group is still waiting in this queue.
+                // Keep the all-group check as one masked reduction. This
+                // preserves the source-count semantics while avoiding a
+                // separate predicate chain for every physical group.
+                ((~vectorUsedMask(entry.vector.get) | entry.vectorReady.get).andR),
                 entry.vectorReady.get.andR)
         case IssueQueueProfile.MixArith =>
             !entry.isSystem || entry.csrAuthorized
@@ -363,6 +371,8 @@ class IssueQueue(
     private def vectorUsed(metadata: VectorInstructionMetadata): Seq[Bool] =
         (0 until 3).flatMap(source => (0 until 8).map(index =>
             index.U < metadata.groups.sourceCount(source))) :+ metadata.groups.mask
+    private def vectorUsedMask(metadata: VectorInstructionMetadata): UInt =
+        VecInit(vectorUsed(metadata)).asUInt
     private def initialVectorReady(metadata: VectorInstructionMetadata): UInt =
         VecInit(vectorTags(metadata).zip(vectorUsed(metadata)).map { case (tag, used) =>
             !used || io.vector.get.ready(tag)

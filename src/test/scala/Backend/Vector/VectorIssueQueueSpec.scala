@@ -5,7 +5,7 @@ import ZirconConfig._
 
 class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     for (entries <- Seq(4, 8)) {
-    s"grouped arithmetic issues its ready first group ($entries entries)" in {
+    s"grouped arithmetic waits for every source group ($entries entries)" in {
         simulate(new IssueQueue(q = IssueQueueParams(entries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = 2))) { dut =>
             VectorTestUtils.clear(dut.io.enq); VectorTestUtils.clear(dut.io.wakeup)
@@ -21,6 +21,9 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.vector.get.enqueue.source(0)(0).poke(40)
             dut.io.vector.get.enqueue.source(0)(1).poke(41)
             dut.clock.step(); dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(false)
+            dut.io.vector.get.wakeup(0).valid.poke(true)
+            dut.io.vector.get.wakeup(0).bits.poke(41)
             dut.io.issue.valid.expect(true)
             dut.clock.step(); dut.io.issue.ready.poke(true); dut.clock.step()
             dut.io.occupancy.expect(0)
