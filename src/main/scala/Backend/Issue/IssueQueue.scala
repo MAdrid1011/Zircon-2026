@@ -318,10 +318,14 @@ class IssueQueue(
             item.sourceValid(source) && (wakeRemaining || !wake && !failed && remaining)
         })
 
-    private def resourceReady(entry: IQEntry): Bool = q.profile match {
+    private def resourceReady(entry: IQEntry, oldest: Bool = false.B): Bool = q.profile match {
         case IssueQueueProfile.Vector =>
             Mux(entry.vectorGrouped.get,
-                entry.vectorReady.get(0) && entry.vectorReady.get(8) && entry.vectorReady.get(16) && entry.vectorReady.get(24),
+                // The oldest queued instruction has no producer left in this
+                // queue. It may wait for later groups inside the collector;
+                // younger instructions require every source group up front.
+                entry.vectorReady.get.andR || oldest &&
+                    VecInit(Seq(0, 8, 16, 24).map(entry.vectorReady.get(_))).asUInt.andR,
                 entry.vectorReady.get.andR)
         case IssueQueueProfile.MixArith =>
             !entry.isSystem || entry.csrAuthorized
@@ -462,15 +466,16 @@ class IssueQueue(
         // collection cycle, so readiness may include the existing wakeup
         // comparisons without adding a wide PRF bypass or another data port.
         val resourceEntry = if (vectorEnabled) awakened(position) else entries(position)
+        val oldest = !olderSlots(position).orR
         val issueReady = ageAllowed && notIssued && operandsReady(item) &&
-            !losesReadiness && resourceReady(resourceEntry)
+            !losesReadiness && resourceReady(resourceEntry, oldest)
         val issueEligible = live && issueReady
         candidates(position) := issueReady
         nonSpeculativeCandidates(position) := issueReady && !entries(position).speculative
         replayBlocked(position) := issueEligible && entries(position).speculative && !replayCapacityAvailable
         operandBlocked(position) := live && ageAllowed && notIssued && !operandsReady(item)
         resourceBlocked(position) := live && ageAllowed && notIssued && operandsReady(item) &&
-            !resourceReady(entries(position))
+            !resourceReady(entries(position), oldest)
     }
     io.replayBlocked := replayBlocked.asUInt.orR
     io.operandBlocked := operandBlocked.asUInt.orR || VecInit((0 until replayDepth).map { position =>

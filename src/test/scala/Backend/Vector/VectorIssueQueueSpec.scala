@@ -5,14 +5,15 @@ import ZirconConfig._
 
 class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     for (entries <- Seq(4, 8)) {
-    s"grouped arithmetic issues its ready first group ($entries entries)" in {
+    s"oldest grouped arithmetic starts with ready first groups and mask ($entries entries)" in {
         simulate(new IssueQueue(q = IssueQueueParams(entries, IssueQueueProfile.Vector,
             enqueueWidth = 1, wakeupPorts = 2))) { dut =>
             VectorTestUtils.clear(dut.io.enq); VectorTestUtils.clear(dut.io.wakeup)
             VectorTestUtils.clear(dut.io.speculation); VectorTestUtils.clear(dut.io.vector.get.enqueue)
             VectorTestUtils.clear(dut.io.vector.get.wakeup)
             dut.io.issue.ready.poke(false); dut.io.flush.poke(false)
-            dut.io.vector.get.ready.poke((BigInt(1) << 64) - 1 - (BigInt(1) << 41))
+            val all = (BigInt(1) << 64) - 1
+            dut.io.vector.get.ready.poke(all & ~(BigInt(1) << 40) & ~(BigInt(1) << 41) & ~(BigInt(1) << 50))
             dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
             dut.io.enq.valid.poke(1); dut.io.enq.selection(0).poke(1)
             dut.io.enq.candidates(0).fu.poke(DecodeUnit.Vector)
@@ -20,10 +21,74 @@ class VectorIssueQueueSpec extends AnyFreeSpec with ChiselSim {
             dut.io.vector.get.enqueue.groups.sourceCount(0).poke(2)
             dut.io.vector.get.enqueue.source(0)(0).poke(40)
             dut.io.vector.get.enqueue.source(0)(1).poke(41)
+            dut.io.vector.get.enqueue.groups.mask.poke(true)
+            dut.io.vector.get.enqueue.mask.poke(50)
             dut.clock.step(); dut.io.enq.valid.poke(0)
+            dut.io.issue.valid.expect(false)
+            dut.io.vector.get.wakeup(0).valid.poke(true)
+            dut.io.vector.get.wakeup(0).bits.poke(40)
+            dut.io.issue.valid.expect(false)
+            dut.clock.step()
+            dut.io.vector.get.wakeup(0).bits.poke(50)
+            // Tag 41 remains unavailable; the oldest consumer can wait for it
+            // after collecting its ready first group.
             dut.io.issue.valid.expect(true)
             dut.clock.step(); dut.io.issue.ready.poke(true); dut.clock.step()
             dut.io.occupancy.expect(0)
+        }
+    }
+
+    s"younger grouped consumers cannot occupy their queued producer's collector ($entries entries)" in {
+        simulate(new IssueQueue(q = IssueQueueParams(entries, IssueQueueProfile.Vector,
+            enqueueWidth = 1, wakeupPorts = 2))) { dut =>
+            VectorTestUtils.clear(dut.io.enq); VectorTestUtils.clear(dut.io.wakeup)
+            VectorTestUtils.clear(dut.io.speculation); VectorTestUtils.clear(dut.io.vector.get.enqueue)
+            VectorTestUtils.clear(dut.io.vector.get.wakeup)
+            dut.io.issue.ready.poke(true); dut.io.flush.poke(false)
+            val all = (BigInt(1) << 64) - 1
+            dut.io.vector.get.ready.poke(all & ~(BigInt(1) << 41) & ~(BigInt(1) << 50))
+            dut.reset.poke(true); dut.clock.step(2); dut.reset.poke(false)
+            def enqueue(rob: Int, source: Int, grouped: Boolean): Unit = {
+                BackendPackageTestUtils.clear(dut.io.enq.candidates(0))
+                VectorTestUtils.clear(dut.io.vector.get.enqueue)
+                dut.io.enq.valid.poke(1); dut.io.enq.selection(0).poke(1)
+                dut.io.enq.candidates(0).fu.poke(DecodeUnit.Vector)
+                dut.io.enq.candidates(0).robIdx.poke(rob)
+                val metadata = dut.io.vector.get.enqueue
+                metadata.control.execution.poke(VectorExecution.Multiply)
+                metadata.groups.sourceCount(0).poke(if (grouped) 2 else 1)
+                metadata.source(0)(0).poke(source)
+                if (grouped) metadata.source(0)(1).poke(41)
+                metadata.destination.count.poke(1)
+                metadata.destination.physical(0).poke(if (rob == 1) 41 else 51)
+                dut.clock.step(); dut.io.enq.valid.poke(0)
+            }
+            enqueue(1, 50, false)
+            enqueue(2, 40, true)
+            dut.io.issue.valid.expect(false); dut.clock.step(3)
+            dut.io.issue.valid.expect(false)
+            dut.io.vector.get.wakeup(0).valid.poke(true)
+            dut.io.vector.get.wakeup(0).bits.poke(50)
+            dut.io.issue.valid.expect(true); dut.io.issue.bits.robIdx.expect(1)
+            dut.clock.step(); VectorTestUtils.clear(dut.io.vector.get.wakeup)
+            dut.io.issue.valid.expect(true); dut.io.issue.bits.robIdx.expect(2)
+            // The producer has left the queue; its late group need not have
+            // written back before the consumer reserves the collector.
+            dut.io.issue.ready.poke(false); dut.clock.step(2)
+            dut.io.issue.bits.robIdx.expect(2)
+            dut.io.flush.poke(true); dut.io.issue.valid.expect(false)
+            dut.clock.step(); dut.io.flush.poke(false)
+            dut.io.occupancy.expect(0)
+            enqueue(3, 50, false)
+            enqueue(4, 40, true)
+            dut.io.issue.valid.expect(false)
+            dut.io.vector.get.wakeup(0).valid.poke(true)
+            dut.io.vector.get.wakeup(0).bits.poke(41)
+            // A younger instruction may bypass an unrelated blocked older
+            // instruction once all its own groups are ready.
+            dut.io.issue.valid.expect(true); dut.io.issue.bits.robIdx.expect(4)
+            dut.io.issue.ready.poke(true); dut.clock.step()
+            dut.io.occupancy.expect(1)
         }
     }
 
