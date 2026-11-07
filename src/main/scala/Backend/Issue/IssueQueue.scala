@@ -318,18 +318,14 @@ class IssueQueue(
             item.sourceValid(source) && (wakeRemaining || !wake && !failed && remaining)
         })
 
-    private def resourceReady(entry: IQEntry): Bool = q.profile match {
+    private def resourceReady(entry: IQEntry, oldest: Bool = false.B): Bool = q.profile match {
         case IssueQueueProfile.Vector =>
             Mux(entry.vectorGrouped.get,
-                // A grouped instruction is collected one physical register at
-                // a time. Require every requested source group before issuing
-                // it into the single collector; otherwise a younger grouped
-                // consumer can occupy the collector while an older producer
-                // for a later group is still waiting in this queue.
-                // Keep the all-group check as one masked reduction. This
-                // preserves the source-count semantics while avoiding a
-                // separate predicate chain for every physical group.
-                ((~vectorUsedMask(entry.vector.get) | entry.vectorReady.get).andR),
+                // The oldest queued instruction has no producer left in this
+                // queue. It may wait for later groups inside the collector;
+                // younger instructions require every source group up front.
+                entry.vectorReady.get.andR || oldest &&
+                    VecInit(Seq(0, 8, 16, 24).map(entry.vectorReady.get(_))).asUInt.andR,
                 entry.vectorReady.get.andR)
         case IssueQueueProfile.MixArith =>
             !entry.isSystem || entry.csrAuthorized
@@ -371,8 +367,6 @@ class IssueQueue(
     private def vectorUsed(metadata: VectorInstructionMetadata): Seq[Bool] =
         (0 until 3).flatMap(source => (0 until 8).map(index =>
             index.U < metadata.groups.sourceCount(source))) :+ metadata.groups.mask
-    private def vectorUsedMask(metadata: VectorInstructionMetadata): UInt =
-        VecInit(vectorUsed(metadata)).asUInt
     private def initialVectorReady(metadata: VectorInstructionMetadata): UInt =
         VecInit(vectorTags(metadata).zip(vectorUsed(metadata)).map { case (tag, used) =>
             !used || io.vector.get.ready(tag)
@@ -472,15 +466,16 @@ class IssueQueue(
         // collection cycle, so readiness may include the existing wakeup
         // comparisons without adding a wide PRF bypass or another data port.
         val resourceEntry = if (vectorEnabled) awakened(position) else entries(position)
+        val oldest = !olderSlots(position).orR
         val issueReady = ageAllowed && notIssued && operandsReady(item) &&
-            !losesReadiness && resourceReady(resourceEntry)
+            !losesReadiness && resourceReady(resourceEntry, oldest)
         val issueEligible = live && issueReady
         candidates(position) := issueReady
         nonSpeculativeCandidates(position) := issueReady && !entries(position).speculative
         replayBlocked(position) := issueEligible && entries(position).speculative && !replayCapacityAvailable
         operandBlocked(position) := live && ageAllowed && notIssued && !operandsReady(item)
         resourceBlocked(position) := live && ageAllowed && notIssued && operandsReady(item) &&
-            !resourceReady(entries(position))
+            !resourceReady(entries(position), oldest)
     }
     io.replayBlocked := replayBlocked.asUInt.orR
     io.operandBlocked := operandBlocked.asUInt.orR || VecInit((0 until replayDepth).map { position =>
