@@ -30,9 +30,9 @@ class DualPortMaskedRamIO(depth: Int, lanes: Int, laneBits: Int) extends Bundle 
     val doutb = Output(UInt((lanes * laneBits).W))
 }
 
-/** All backends preserve the registered-address contract and live held outputs.
+/** One selected port supports masked writes; the other port is read-only.
+  * All backends preserve the registered-address contract and live held outputs.
   * Reads of uninitialized register storage are unspecified. Consumers use separate valid bits.
-  * Overlapping writes to the same lane are forbidden; legal accesses have exactly two ports.
   */
 class DualPortMaskedRam(
     depth: Int,
@@ -42,7 +42,13 @@ class DualPortMaskedRam(
     readWritePort: Int = 0
 ) extends RawModule {
     require(depth >= 2 && isPow2(depth) && lanes > 0 && laneBits > 0)
+    require(readWritePort == 0 || readWritePort == 1)
     val io = IO(new DualPortMaskedRamIO(depth, lanes, laneBits))
+
+    val writeMask = Seq(io.wea, io.web)
+    withClockAndReset(io.clka, false.B) {
+        assert(!writeMask(1 - readWritePort).orR, "RAM read-only port cannot write")
+    }
 
     val effectiveBackend = if (backend == DualPortRamBackend.Vivado &&
         !sys.env.get("ZIRCON_USE_EXTERNAL_VIVADO_RAM").contains("true")) {
@@ -54,7 +60,6 @@ class DualPortMaskedRam(
     effectiveBackend match {
         case DualPortRamBackend.BSG =>
             require(lanes == 1 && laneBits <= 25 || lanes % 4 == 0 && laneBits == 8)
-            require(readWritePort == 0 || readWritePort == 1)
             val address = Seq(io.addra, io.addrb)
             val enable = Seq(io.ena, io.enb)
             val mask = Seq(io.wea, io.web)
@@ -83,9 +88,6 @@ class DualPortMaskedRam(
             val outputB = Cat(ram.reverse.map(r => if (readWritePort == 1) r.dout0 else r.dout1))
             io.douta := outputA(logicalWidth - 1, 0)
             io.doutb := outputB(logicalWidth - 1, 0)
-            withClockAndReset(io.clka, false.B) {
-                assert(!enable(1 - readWritePort) || !mask(1 - readWritePort).orR, "BSG SRAM: write on read-only port")
-            }
         case DualPortRamBackend.Vivado if lanes == 1 =>
             val ram = Module(new XilinxTrueDualPortReadFirst1ClockRam(laneBits, depth))
             ram.io.addra := io.addra
@@ -113,23 +115,7 @@ class DualPortMaskedRam(
             io.douta := ram.io.douta
             io.doutb := ram.io.doutb
         case DualPortRamBackend.Registers =>
-            withClockAndReset(io.clka, false.B) {
-                val memory = Mem(depth, Vec(lanes, UInt(laneBits.W)))
-                val addressA = RegEnable(io.addra, io.ena)
-                val addressB = RegEnable(io.addrb, io.enb)
-                // Preserve the registered address and live held output. A masked
-                // memory write updates only addressed lanes, without a next-state
-                // mux for every storage bit in the behavioral RAM.
-                when(io.ena) {
-                    memory.write(io.addra, io.dina.asTypeOf(Vec(lanes, UInt(laneBits.W))), io.wea.asBools)
-                }
-                when(io.enb) {
-                    memory.write(io.addrb, io.dinb.asTypeOf(Vec(lanes, UInt(laneBits.W))), io.web.asBools)
-                }
-                assert(!(io.ena && io.enb && io.addra === io.addrb && (io.wea & io.web).orR),
-                    "RAM ports must not write the same lane at the same address")
-                io.douta := memory(addressA).asUInt
-                io.doutb := memory(addressB).asUInt
-            }
+            val ram = Module(new ZirconSram1RW1R(depth, lanes, laneBits, readWritePort))
+            ram.io <> io
     }
 }
