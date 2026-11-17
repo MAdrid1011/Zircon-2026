@@ -3,7 +3,7 @@ import chisel3.util._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
-class DualPortStorageHarness(depth: Int, lanes: Int, bits: Int) extends Module {
+class DualPortStorageHarness(depth: Int, lanes: Int, bits: Int, writePort: Int) extends Module {
     val io = IO(new Bundle {
         val address = Input(Vec(2, UInt(log2Ceil(depth).W)))
         val enable = Input(Vec(2, Bool()))
@@ -11,7 +11,8 @@ class DualPortStorageHarness(depth: Int, lanes: Int, bits: Int) extends Module {
         val mask = Input(Vec(2, UInt(lanes.W)))
         val dataOut = Output(Vec(2, UInt((lanes * bits).W)))
     })
-    val ram = Module(new DualPortMaskedRam(depth, lanes, bits, DualPortRamBackend.Registers))
+    val ram = Module(new DualPortMaskedRam(depth, lanes, bits,
+        DualPortRamBackend.Registers, writePort))
     ram.io.clka := clock
     ram.io.addra := io.address(0)
     ram.io.addrb := io.address(1)
@@ -62,9 +63,9 @@ class MaskedStorageSpec extends AnyFreeSpec with ChiselSim {
         }
     }
 
-    for ((depth, lanes, bits) <- Seq((8, 4, 8), (16, 8, 9))) {
-        s"dual-port storage preserves lane masks and live held outputs ($depth/$lanes/$bits)" in {
-            simulate(new DualPortStorageHarness(depth, lanes, bits)) { d =>
+    for ((depth, lanes, bits) <- Seq((8, 4, 8), (16, 8, 9)); writePort <- 0 until 2) {
+        s"1RW1R storage preserves lane masks and live held outputs ($depth/$lanes/$bits, port $writePort)" in {
+            simulate(new DualPortStorageHarness(depth, lanes, bits, writePort)) { d =>
                 val random = new scala.util.Random(20261026 + lanes)
                 val stored = Array.fill(depth)(BigInt(0))
                 val laneMask = (BigInt(1) << bits) - 1
@@ -77,18 +78,16 @@ class MaskedStorageSpec extends AnyFreeSpec with ChiselSim {
                     d.io.mask(port).poke(0)
                 }
                 for (address <- 0 until depth) {
-                    d.io.address(0).poke(address)
-                    d.io.mask(0).poke(allLanes)
+                    d.io.address(writePort).poke(address)
+                    d.io.mask(writePort).poke(allLanes)
                     d.clock.step()
-                    held(0) = address
+                    held(writePort) = address
                 }
                 for (cycle <- 0 until 400) {
                     val address = Seq(random.nextInt(depth), random.nextInt(depth))
                     val enabled = Seq.fill(2)(random.nextInt(4) != 0)
-                    val firstMask = random.nextInt(1 << lanes)
-                    val secondMask = random.nextInt(1 << lanes) &
-                        (if (address(0) == address(1)) allLanes ^ firstMask else allLanes)
-                    val masks = Seq(firstMask, secondMask)
+                    val selectedMask = random.nextInt(1 << lanes)
+                    val masks = Seq.tabulate(2)(port => if (port == writePort) selectedMask else 0)
                     val data = Seq.fill(2)(BigInt(lanes * bits, random))
                     for (port <- 0 until 2) {
                         d.io.enable(port).poke(enabled(port))
