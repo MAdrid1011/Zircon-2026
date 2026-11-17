@@ -110,25 +110,55 @@ class PredictorTableRam(
 
         case DualPortRamBackend.Registers =>
             def buildCopy(readEnable: Bool, readAddress: UInt): UInt = {
-                val memory = Reg(Vec(depth, UInt(width.W)))
-                val registeredAddress = RegEnable(readAddress, readEnable)
-                when(io.updateWriteEnable) {
-                    memory(io.updateWriteAddress) := io.updateWriteData
-                }
-                memory(registeredAddress)
+                val ram = Module(new ZirconSram1W1R(depth, width))
+                ram.io.clock := clock
+                ram.io.writeEnable := io.updateWriteEnable
+                ram.io.writeAddress := io.updateWriteAddress
+                ram.io.writeData := io.updateWriteData
+                ram.io.readEnable := readEnable
+                ram.io.readAddress := readAddress
+                ram.io.readData
             }
             rawPredictData := buildCopy(io.predictEnable, io.predictAddress)
             rawUpdateData := buildCopy(io.updateReadEnable, io.updateReadAddress)
     }
 
-    // Cross-port collision behavior differs by macro. Update reads require the
-    // ordered value for read-modify-write; predictions may use the old state.
-    def forward(readEnable: Bool, readAddress: UInt, raw: UInt): UInt = {
+    // Preserve the logical register backend's write-through behavior while the
+    // physical SRAM output is holding the most recently enabled read address.
+    def writeThrough(readEnable: Bool, readAddress: UInt, raw: UInt): UInt = {
+        val heldAddress = RegEnable(readAddress, readEnable)
+        val heldValid = RegInit(false.B)
+        val forwarded = RegInit(false.B)
+        val forwardedData = Reg(UInt(width.W))
+        val readCollision = readEnable && io.updateWriteEnable &&
+            readAddress === io.updateWriteAddress
+        val heldCollision = !readEnable && heldValid && io.updateWriteEnable &&
+            heldAddress === io.updateWriteAddress
+        when(readEnable) {
+            heldValid := true.B
+            forwarded := readCollision
+            when(readCollision) {
+                forwardedData := io.updateWriteData
+            }
+        }.elsewhen(heldCollision) {
+            forwarded := true.B
+            forwardedData := io.updateWriteData
+        }
+        Mux(forwarded, forwardedData, raw)
+    }
+
+    def collisionForward(readEnable: Bool, readAddress: UInt, raw: UInt): UInt = {
         val collision = readEnable && io.updateWriteEnable && readAddress === io.updateWriteAddress
         val valid = RegNext(collision, false.B)
         val data = RegEnable(io.updateWriteData, collision)
         Mux(valid, data, raw)
     }
-    io.predictData := rawPredictData
-    io.updateReadData := forward(io.updateReadEnable, io.updateReadAddress, rawUpdateData)
+
+    if (effectiveBackend == DualPortRamBackend.Registers) {
+        io.predictData := writeThrough(io.predictEnable, io.predictAddress, rawPredictData)
+        io.updateReadData := writeThrough(io.updateReadEnable, io.updateReadAddress, rawUpdateData)
+    } else {
+        io.predictData := rawPredictData
+        io.updateReadData := collisionForward(io.updateReadEnable, io.updateReadAddress, rawUpdateData)
+    }
 }

@@ -19,7 +19,7 @@ class SinglePortMaskedRam(depth: Int, lanes: Int, laneBits: Int) extends RawModu
     override def desiredName = s"SinglePortMaskedRam_${depth}_${lanes}_${laneBits}"
     val io = FlatIO(new SinglePortMaskedRamIO(addressBits, dataBits, lanes))
 
-    // Each slot has its own write enable. ASIC flows replace this wrapper with masked SRAM macros.
+    // Each slot has its own write enable. ASIC flows replace only the stable SRAM leaf.
     if (sys.env.get("ZIRCON_USE_EXTERNAL_VIVADO_RAM").contains("true")) {
         val data = Wire(Vec(lanes, UInt(laneBits.W)))
         for (i <- 0 until lanes) {
@@ -34,18 +34,43 @@ class SinglePortMaskedRam(depth: Int, lanes: Int, laneBits: Int) extends RawModu
         io.dataOut := data.asUInt
     } else {
         withClockAndReset(io.clock, false.B) {
-            val memory = Reg(Vec(depth, Vec(lanes, UInt(laneBits.W))))
-            val address = RegEnable(io.address, io.enable)
-            for (lane <- 0 until lanes) {
-                when(io.enable && io.write && io.mask(lane)) {
-                    if (depth == 1) {
-                        memory(0)(lane) := io.dataIn((lane + 1) * laneBits - 1, lane * laneBits)
-                    } else {
-                        memory(io.address)(lane) := io.dataIn((lane + 1) * laneBits - 1, lane * laneBits)
+            if (depth == 1) {
+                val data = Reg(Vec(lanes, UInt(laneBits.W)))
+                for (lane <- 0 until lanes) {
+                    when(io.enable && io.write && io.mask(lane)) {
+                        data(lane) := io.dataIn((lane + 1) * laneBits - 1, lane * laneBits)
                     }
                 }
+                io.dataOut := data.asUInt
+            } else {
+                val raw = Wire(Vec(lanes, UInt(laneBits.W)))
+                for (lane <- 0 until lanes) {
+                    val ram = Module(new ZirconSram1W1R(depth, laneBits))
+                    ram.io.clock := io.clock
+                    ram.io.writeEnable := io.enable && io.write && io.mask(lane)
+                    ram.io.writeAddress := io.address
+                    ram.io.writeData := io.dataIn((lane + 1) * laneBits - 1, lane * laneBits)
+                    ram.io.readEnable := io.enable
+                    ram.io.readAddress := io.address
+                    raw(lane) := ram.io.readData
+                }
+                val forwarding = RegInit(false.B)
+                val forwardingMask = Reg(UInt(lanes.W))
+                val forwardingData = Reg(UInt(dataBits.W))
+                when(io.enable) {
+                    forwarding := io.write
+                    when(io.write) {
+                        forwardingMask := io.mask
+                        forwardingData := io.dataIn
+                    }
+                }
+                val expandedMask = Cat(forwardingMask.asBools.reverse.map(Fill(laneBits, _)))
+                io.dataOut := Mux(
+                    forwarding,
+                    (raw.asUInt & ~expandedMask) | (forwardingData & expandedMask),
+                    raw.asUInt,
+                )
             }
-            io.dataOut := (if (depth == 1) memory(0) else memory(address)).asUInt
         }
     }
 }
