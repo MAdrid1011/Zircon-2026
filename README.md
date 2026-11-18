@@ -141,7 +141,7 @@ flowchart LR
 多拍通路。三槽 Rename–Dispatch 寄存器整组进出，每组最多包含一条向量指令。
 设计、指令组织与使用方法见 [SIMD8 性能核心](docs/PerformanceCore.md)。
 
-裸机程序包含三种版本的整数/浮点矩阵乘、FIR 和 FP32 FFT，以及 SGEMM、SAXPY 与寄存器
+裸机程序包含三种实现的整数/浮点矩阵乘、FIR 和 FP32 FFT，以及 SGEMM、SAXPY 与寄存器
 吞吐测量。官方 FP32 负载使用 EEMBC CoreMark-PRO 的线性代数与 Livermore kernels，
 保留上游算法、数据集和校验。入口分别为 [SIMD 程序](RV-Software/simd/README.md) 和
 [CoreMark-PRO](RV-Software/coremark-pro/README.md)。

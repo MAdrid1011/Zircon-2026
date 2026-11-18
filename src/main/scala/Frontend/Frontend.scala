@@ -50,8 +50,6 @@ class Frontend(
     /* Previous Fetch Stage */
     val instPkgPF = WireDefault(0.U.asTypeOf(new FrontendPackage(p)))
     val instPkgIF1 = Reg(new FrontendPackage(p))
-    val fastBtbIndexOHIF1 = Reg(UInt(p.fastBtbSets.W))
-    val fastBtbTagIF1 = Reg(UInt((32 - p.blockBits - log2Ceil(p.fastBtbSets)).W))
     val mainBtbIndexIF1 = Reg(UInt(log2Ceil(p.btbSets).W))
     val directionPcHashesIF1 = Reg(new MorslPcHashes(p))
     val validIF1 = RegInit(false.B)
@@ -64,11 +62,6 @@ class Frontend(
     when(if1Fire || flushYounger) { validIF1 := false.B }
     when(ic.io.pp.request.fire) {
         instPkgIF1 := instPkgPF
-        fastBtbIndexOHIF1 := UIntToOH(
-            npc.io.request.bits.pc(p.blockBits + log2Ceil(p.fastBtbSets) - 1, p.blockBits),
-            p.fastBtbSets,
-        )
-        fastBtbTagIF1 := npc.io.request.bits.pc(31, p.blockBits + log2Ceil(p.fastBtbSets))
         mainBtbIndexIF1 := npc.io.request.bits.pc(p.blockBits + log2Ceil(p.btbSets) - 1, p.blockBits)
         directionPcHashesIF1 := MorslPcHashes.fromPcWord(npc.io.request.bits.pc(31, 2), p)
         validIF1 := true.B
@@ -76,8 +69,6 @@ class Frontend(
 
     /* Fetch Stage 1 */
     pr.io.fc.instPkg := instPkgIF1
-    pr.io.fc.fastBtbIndexOH := fastBtbIndexOHIF1
-    pr.io.fc.fastBtbTag := fastBtbTagIF1
     pr.io.fc.mainBtbIndex := mainBtbIndexIF1
     pr.io.fc.directionPcHashes := directionPcHashesIF1
     pr.io.fc.prefetch.valid := ic.io.pp.request.fire

@@ -13,7 +13,6 @@ class DCacheExecuteStage(p: DCacheParams) extends DLoadRequest(p) {
     val words = Vec(l1Way, UInt(32.W))
     val lines = Vec(l1Way, UInt(l1LineBits.W))
     val byteEnable = UInt(4.W)
-    val setOH = UInt(l1IndexNum.W)
     val victimWay = UInt(l1Way.W)
     val victimValid = Bool()
     val victimTag = UInt((34 - l1Index - l1Offset).W)
@@ -124,10 +123,15 @@ class DCache(
     // Load 0 owns RAM A. Load 1 shares RAM B with committed stores. Refill uses
     // Tag A and Data B and is a registered scheduling state.
     val tagTab = VecInit.fill(l1Way)(
-        Module(new DualPortMaskedRam(l1IndexNum, 1, 34 - l1Index - l1Offset, ramBackend)).io
+        Module(new DualPortMaskedRam(
+            l1IndexNum, 1, 34 - l1Index - l1Offset, ramBackend,
+            writeCycleReadUnused = true)).io
     )
     val dataTab = VecInit.fill(l1Way)(
-        Module(new DualPortMaskedRam(l1IndexNum, l1Line, 8, ramBackend, readWritePort = 1)).io
+        Module(new StripedDualPortMaskedRam(
+            l1IndexNum, l1Line, 8, stripes = l1LineBits / 64,
+            backend = ramBackend, readWritePort = 1,
+            writeCycleReadUnused = true)).io
     )
     val validTab = VecInit.fill(l1Way)(
         Module(new AsyncRegRam(Bool(), l1IndexNum, 1, 3, Some(false.B))).io
@@ -454,7 +458,7 @@ class DCache(
     val staleLookup = VecInit((0 until 2).map { lane =>
         val changedWays = VecInit((0 until l1Way).map { way =>
             execute(lane).generation(way) =/=
-                Mux1H(execute(lane).setOH.asBools, cacheGeneration.map(_(way)))
+                cacheGeneration(index(execute(lane).paddr))(way)
         }).asUInt
         val relevantWays = Mux(execute(lane).hit.orR, execute(lane).hit, Fill(l1Way, 1.U))
         forwardComplete(lane) && execute(lane).exception === 0.U && !execute(lane).uncache &&
@@ -866,7 +870,6 @@ class DCache(
                 execute(lane).victimDirty := Mux1H(victimWayNow(lane), dirtyWaysNow(lane).asBools)
                 execute(lane).generation := cacheGeneration(index(resolvedLookup(lane).paddr))
                 execute(lane).byteEnable := accessMask(resolvedLookup(lane))
-                execute(lane).setOH := UIntToOH(index(resolvedLookup(lane).paddr), l1IndexNum)
                 val noForward = lookup(lane).prefetch || resolvedLookup(lane).translationMiss || resolvedLookup(lane).uncache ||
                     resolvedLookup(lane).exception =/= 0.U ||
                     misaligned(resolvedLookup(lane).paddr, resolvedLookup(lane).mtype(1, 0))
@@ -1039,6 +1042,11 @@ class DCache(
     val installFire = missUnit.io.install.fire
     val installAddressOwner = missUnit.io.install.valid && !storeArrayWrite
     val installAddress = Cat(missUnit.io.install.bits.line, 0.U(l1Offset.W))
+    val pendingInstallAddress = Cat(missUnit.io.prefetchLine, 0.U(l1Offset.W))
+    when(installFire || storeArrayWrite) {
+        assert(!arrayRead(0) && !arrayRead(1),
+            "DCache write cycles cannot launch an array read")
+    }
     val dataBLoadAddress = !(maintenanceRead || installAddressOwner ||
         storeLookupAddressOwner || storeArrayWrite)
     val dataBAddressSelect = Seq(
@@ -1077,18 +1085,27 @@ class DCache(
     for (way <- 0 until l1Way) {
         tagTab(way).clka := clock
         tagTab(way).addra := Mux(installAddressOwner, index(installAddress), index(arrayAddress(0)))
+        tagTab(way).writeAddress := index(installAddress)
         tagTab(way).ena := installFire || arrayRead(0)
         tagTab(way).wea := installFire && missUnit.io.install.bits.way(way)
+        tagTab(way).writeAllA := false.B
         tagTab(way).dina := tag(installAddress)
         tagTab(way).addrb := tagBAddress
         tagTab(way).enb := maintenanceRead || storeLookupIssue || arrayRead(1)
         tagTab(way).web := 0.U
+        tagTab(way).writeAllB := false.B
         tagTab(way).dinb := 0.U
 
         dataTab(way).clka := clock
         dataTab(way).addra := index(arrayAddress(0))
+        dataTab(way).writeAddress := Mux(
+            missUnit.io.busy,
+            index(pendingInstallAddress),
+            index(storeRequest.paddr),
+        )
         dataTab(way).ena := arrayRead(0)
         dataTab(way).wea := 0.U
+        dataTab(way).writeAllA := false.B
         dataTab(way).dina := 0.U
         dataTab(way).addrb := dataBAddress
         dataTab(way).enb := maintenanceRead || installFire || storeLookupIssue || storeArrayWrite || arrayRead(1)
@@ -1101,6 +1118,7 @@ class DCache(
                 0.U
             )
         )
+        dataTab(way).writeAllB := false.B
         dataTab(way).dinb := Mux(
             installFire,
             missUnit.io.install.bits.data,

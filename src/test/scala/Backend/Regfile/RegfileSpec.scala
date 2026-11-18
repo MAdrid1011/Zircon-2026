@@ -21,6 +21,8 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
     private val configurations = Seq(
         RegfileParams(),
         RegfileParams(numEntries = 64, dataWidth = 32, numReadPorts = 9, numWritePorts = 5),
+        RegfileParams(numEntries = 64, dataWidth = 32, numReadPorts = 9, numWritePorts = 5,
+            holdReads = true, readBankEntries = 8),
         RegfileParams(numEntries = 7, dataWidth = 16, numReadPorts = 3, numWritePorts = 2),
         RegfileParams(numEntries = 64, dataWidth = 64, numReadPorts = 4, numWritePorts = 3),
         RegfileParams(numEntries = 72, dataWidth = 32, numReadPorts = 9, numWritePorts = 6),
@@ -228,7 +230,8 @@ class RegfileSpec extends AnyFreeSpec with ChiselSim {
     }
 
     "dedicated vector memory reads retain load bypass and ignore unrelated scalar completions" in {
-        val p = RegfileParams(numReadPorts = 11, numWritePorts = 5, holdReads = true)
+        val p = RegfileParams(numEntries = 64, numReadPorts = 11, numWritePorts = 5,
+            holdReads = true, readBankEntries = 8)
         simulate(new Regfile(p, readBypassOverridePorts = Seq(2, 3),
             overrideReadPorts = Set(6, 7, 10), selectiveReadBypassPort = Some(4),
             selectiveReadPorts = Set(6, 7, 8, 10))) { dut =>

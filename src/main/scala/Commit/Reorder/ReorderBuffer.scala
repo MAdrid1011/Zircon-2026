@@ -117,6 +117,7 @@ class ReorderBuffer(
         exposeDeqIndex = true,
         separateEnqWrite = true,
         selectDeqAfterRegister = false,
+        balancedBankDeqRead = true,
     ))
     queue.io.enqWrite.get := io.enqueue.writeValid.asBools
 

@@ -171,17 +171,17 @@ class ZirconCore(
         if (vectorEnabled) {
             io.debug.get.vector.get.registers := backend.io.vectorObservation.get
             io.debug.get.vector.get.performance := backend.io.vectorPerformance.get
-            io.debug.get.vector.get.retire := commit.io.debug.vector.get
+            io.debug.get.vector.get.retire := commit.io.debug.get.vector.get
             io.debug.get.vector.get.state := commit.io.vector.get.state
-            io.debug.get.vector.get.store := commit.io.debug.vectorStore.get
+            io.debug.get.vector.get.store := commit.io.debug.get.vectorStore.get
         }
         for (lane <- 0 until CommitParams().width) {
-            io.debug.get.retire(lane) := commit.io.debug.retire(lane)
+            io.debug.get.retire(lane) := commit.io.debug.get.retire(lane)
         }
-        io.debug.get.robHeadValid := commit.io.debug.robHeadValid
-        io.debug.get.robHeadComplete := commit.io.debug.robHeadComplete
-        io.debug.get.robHeadPc := commit.io.debug.robHeadPc
-        io.debug.get.trap := commit.io.debug.trap
+        io.debug.get.robHeadValid := commit.io.debug.get.robHeadValid
+        io.debug.get.robHeadComplete := commit.io.debug.get.robHeadComplete
+        io.debug.get.robHeadPc := commit.io.debug.get.robHeadPc
+        io.debug.get.trap := commit.io.debug.get.trap
         io.debug.get.privilege := commit.io.csr.currentPrivilege
         io.debug.get.csr := commit.io.csr.state
         io.debug.get.performance.icacheVisit := frontend.io.observe.get.icache.visit
@@ -193,22 +193,22 @@ class ZirconCore(
         io.debug.get.performance.integerFreeListBlockedCycles := middleend.io.performance.get.integerFreeListBlockedCycles
         io.debug.get.performance.floatingFreeListBlockedCycles := middleend.io.performance.get.floatingFreeListBlockedCycles
         io.debug.get.performance.dispatchBlockedCycles := middleend.io.performance.get.dispatchBlockedCycles
-        io.debug.get.performance.branch := commit.io.debug.performance.branch
-        io.debug.get.performance.branchFail := commit.io.debug.performance.branchFail
-        io.debug.get.performance.directJump := commit.io.debug.performance.directJump
-        io.debug.get.performance.directJumpFail := commit.io.debug.performance.directJumpFail
-        io.debug.get.performance.call := commit.io.debug.performance.call
-        io.debug.get.performance.callFail := commit.io.debug.performance.callFail
-        io.debug.get.performance.ret := commit.io.debug.performance.ret
-        io.debug.get.performance.retFail := commit.io.debug.performance.retFail
-        io.debug.get.performance.indirect := commit.io.debug.performance.indirect
-        io.debug.get.performance.indirectFail := commit.io.debug.performance.indirectFail
+        io.debug.get.performance.branch := commit.io.debug.get.performance.branch
+        io.debug.get.performance.branchFail := commit.io.debug.get.performance.branchFail
+        io.debug.get.performance.directJump := commit.io.debug.get.performance.directJump
+        io.debug.get.performance.directJumpFail := commit.io.debug.get.performance.directJumpFail
+        io.debug.get.performance.call := commit.io.debug.get.performance.call
+        io.debug.get.performance.callFail := commit.io.debug.get.performance.callFail
+        io.debug.get.performance.ret := commit.io.debug.get.performance.ret
+        io.debug.get.performance.retFail := commit.io.debug.get.performance.retFail
+        io.debug.get.performance.indirect := commit.io.debug.get.performance.indirect
+        io.debug.get.performance.indirectFail := commit.io.debug.get.performance.indirectFail
         io.debug.get.performance.loopTraining := frontend.io.observe.get.loopTraining
         io.debug.get.performance.loopProvider := frontend.io.observe.get.loopProvider
         io.debug.get.performance.loopCorrect := frontend.io.observe.get.loopCorrect
-        io.debug.get.performance.robFullCycles := commit.io.debug.performance.robFullCycles
-        io.debug.get.performance.storeBufferFullCycles := commit.io.debug.performance.storeBufferFullCycles
-        io.debug.get.performance.storeBufferBusyCycles := commit.io.debug.performance.storeBufferBusyCycles
+        io.debug.get.performance.robFullCycles := commit.io.debug.get.performance.robFullCycles
+        io.debug.get.performance.storeBufferFullCycles := commit.io.debug.get.performance.storeBufferFullCycles
+        io.debug.get.performance.storeBufferBusyCycles := commit.io.debug.get.performance.storeBufferBusyCycles
         io.debug.get.performance.issueQueueFullCycles := backend.io.performance.get.issueQueueFullCycles
         io.debug.get.performance.pipelineIssueCycles := backend.io.performance.get.pipelineIssueCycles
         io.debug.get.performance.pipelineOperandWaitCycles := backend.io.performance.get.pipelineOperandWaitCycles

@@ -145,7 +145,7 @@ Cache RAM 通过统一封装选择寄存器、Vivado 双口 BRAM 或 ASIC `1RW+1
 
 Chisel 与 Verilator 仿真使用同周期的行为模型。Nangate45 纯逻辑综合把 Cache 和 Predictor
 SRAM 统一绑定到 BSG Fakeram：原生 `1RW` 数组直接
-拆分到固定版本 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
+拆分到对应深度的 BSG 宏，`1RW+1R` 接口使用由匹配深度 BSG 宏时序派生的双读口抽象。两个读口
 都是上升沿 clock-to-Q。Vivado 后端使用独立的 Verilog BRAM 模板。
 
 向量 Store 元素地址表使用独立的

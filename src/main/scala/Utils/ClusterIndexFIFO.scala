@@ -65,6 +65,7 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
     externallyGuardedCapacity: Boolean = false,
     partialFreeListDeq: Boolean = false,
     resetPayload: Boolean = true,
+    balancedBankDeqRead: Boolean = false,
 ) extends Module {
     require(num > 0 && ew > 0 && dw > 0, "ClusterIndexFIFO depth and transfer widths must be positive")
     require(rw >= 0 && ww >= 0, "ClusterIndexFIFO random port counts must be nonnegative")
@@ -89,6 +90,7 @@ class ClusterIndexFIFO[T <: Data: TypeTag: ClassTag](
             registeredDeq,
             externallyGuardedCapacity,
             resetPayload,
+            balancedBankDeqRead,
         )).io
     }
     private val enqBase = RegInit(1.U(n.W))

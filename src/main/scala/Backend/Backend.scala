@@ -131,6 +131,7 @@ class Backend(
         numReadPorts = if (vectorEnabled) 11 else 9,
         numWritePorts = 5,
         holdReads = true,
+        readBankEntries = 8,
     )
     val fpRfParams = RegfileParams(
         numEntries = p.numFpPhys,

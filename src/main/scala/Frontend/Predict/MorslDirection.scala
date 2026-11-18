@@ -411,18 +411,14 @@ class MorslDirection(
     val readTageIndices = VecInit((0 until p.tageCount).map(table =>
         io.trainRead.bits.meta.tageIndices(table)
     ))
-    val readTageIndexOH = VecInit((0 until p.tageCount).map(table =>
-        UIntToOH(readTageIndices(table), p.tageSets)
-    ))
     val trainTageIndices = RegEnable(
         VecInit((0 until p.tageCount).map(table => io.trainRead.bits.meta.tageIndices(table))),
         io.trainRead.valid,
     )
-    val trainTageIndexOH = RegEnable(readTageIndexOH, io.trainRead.valid)
     val readTageValidState = Wire(Vec(p.tageCount, Bool()))
     for (table <- 0 until p.tageCount) {
-        val currentValid = Mux1H(readTageIndexOH(table), tageValid(table))
-        val sameAsWrite = (readTageIndexOH(table) & trainTageIndexOH(table)).orR
+        val currentValid = tageValid(table)(readTageIndices(table))
+        val sameAsWrite = readTageIndices(table) === trainTageIndices(table)
         readTageValidState(table) := Mux(
             sameAsWrite && tageStateWrite(table) && tageStateAllocate(table),
             true.B,
@@ -593,12 +589,8 @@ class MorslDirection(
         tageTables(table).io.updateWriteEnable := write
         tageTables(table).io.updateWriteAddress := trainTageIndices(table)
         tageTables(table).io.updateWriteData := next.asUInt
-        for (entry <- 0 until p.tageSets) {
-            when(write && trainTageIndexOH(table)(entry)) {
-                when(allocate) {
-                    tageValid(table)(entry) := true.B
-                }
-            }
+        when(write && allocate) {
+            tageValid(table)(trainTageIndices(table)) := true.B
         }
     }
 

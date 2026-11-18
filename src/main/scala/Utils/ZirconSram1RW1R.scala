@@ -2,12 +2,21 @@ import chisel3._
 import chisel3.util._
 
 /** Stable one-read/write plus one-read SRAM leaf for portable cache RTL. */
-class ZirconSram1RW1R(depth: Int, lanes: Int, laneBits: Int, writePort: Int)
+class ZirconSram1RW1R(
+    depth: Int,
+    lanes: Int,
+    laneBits: Int,
+    writePort: Int,
+    fullWriteOnly: Boolean,
+    writeCycleReadUnused: Boolean
+)
     extends ExtModule(Map(
         "DEPTH" -> depth,
         "LANES" -> lanes,
         "LANE_BITS" -> laneBits,
-        "WRITE_PORT" -> writePort
+        "WRITE_PORT" -> writePort,
+        "FULL_WRITE_ONLY" -> (if (fullWriteOnly) 1 else 0),
+        "WRITE_CYCLE_READ_UNUSED" -> (if (writeCycleReadUnused) 1 else 0)
     )) {
     require(depth >= 2 && isPow2(depth) && lanes > 0 && laneBits > 0)
     require(writePort == 0 || writePort == 1)
