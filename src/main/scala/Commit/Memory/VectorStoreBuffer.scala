@@ -46,7 +46,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val lastField = Reg(UInt(3.W))
     val position = RegInit(0.U(5.W))
     val elementAddress = Reg(UInt(32.W))
-    val nextElementLine = Reg(UInt(26.W))
+    // The current cache-line address is selected at state-update boundaries.
+    // It also carries the scattered successor line, so no extra state is added.
+    val requestLine = Reg(UInt(26.W))
     val valid = RegInit(false.B)
     val committed = RegInit(false.B)
     val filled = RegInit(false.B)
@@ -60,6 +62,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val state = RegInit(idle)
     val active = RegInit(false.B)
     val finishNow = WireDefault(false.B)
+    // In prepare this bit qualifies the selected line; after request.fire it
+    // records whether the corresponding response completes the Store.
+    val requestValidOrResponseFinal = Reg(Bool())
     val commitHit = io.commit.map(event => event.valid && event.bits === identity).reduce(_ || _)
     // When the active instruction uses at most four groups, its unused upper
     // payload registers queue single- or two-group Stores. No data storage
@@ -79,8 +84,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         event.valid && event.bits === payload(i + 4).sqIdx).reduce(_ || _)))
     val retained = VecInit((0 until 4).map(i => pendingValid(i) &&
         (pendingCommitted(i) || pendingCommitHit(i))))
-    val promote = (!valid || state === done || finishNow) && pendingCount =/= 0.U &&
-        pendingFilled(pendingHead) && (!io.flush || retained(pendingHead))
+    val promotable = (!valid || state === done || finishNow) && pendingCount =/= 0.U &&
+        pendingFilled(pendingHead)
+    val promote = promotable && (!io.flush || retained(pendingHead))
     val incomingSingle = io.collect.bits.index === 0.U && io.collect.bits.last &&
         !io.collect.bits.scattered && !io.collect.bits.addressOnly
     val incomingTwo = io.collect.bits.index===0.U && !io.collect.bits.last &&
@@ -88,7 +94,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         io.collect.bits.fieldRegisterShift===1.U && io.collect.bits.lastField===0.U
     val queueFollow = queueWritePending && io.collect.bits.sqIdx===queueWriteIdentity &&
         io.collect.bits.index===1.U && io.collect.bits.last && !io.collect.bits.addressOnly
-    val queueRoom = pendingCount < Mux(incomingTwo,2.U,4.U) || promote
+    // Collection is disabled during recovery, so its capacity depends only on
+    // whether the head slot advances, not on the retirement retention check.
+    val queueRoom = pendingCount < Mux(incomingTwo,2.U,4.U) || promotable
     val sameLayout = pendingCount===0.U || pendingTwo===incomingTwo
     val queueStart = valid && filled && count<=4.U && (incomingSingle || incomingTwo) &&
         !queueWritePending && sameLayout && queueRoom && io.collect.bits.sqIdx=/=identity &&
@@ -190,14 +198,20 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     // The final accepted cache acknowledgement is already the architectural
     // drain boundary. Return its SB token at that edge, allowing a queued
     // instruction to acquire the drain without done/idle/start bubbles.
-    finishNow := state === response && !scattered && !hasSecond && last && io.cache.response.fire
+    finishNow := state === response && requestValidOrResponseFinal && io.cache.response.fire
     val fieldStride = (1.U(4.W) << fieldRegisterShift)(3, 0)
     val withinField = group & Cat(fieldRegisterShift === 3.U,
         fieldRegisterShift >= 2.U, fieldRegisterShift >= 1.U)
     val currentField = group >> fieldRegisterShift
+    def incrementLine(line: UInt): UInt = Cat((25 to 0 by -1).map { bit =>
+        if (bit == 0) !line(0) else line(bit) ^ line(bit - 1, 0).andR
+    })
     def advance(): Unit = {
         when(hasSecond) {
             second := true.B
+            requestLine := Mux(scattered, incrementLine(requestLine),
+                Mux1H(groupOH, nextLineAddress))
+            requestValidOrResponseFinal := true.B
             state := prepare
         }.otherwise {
             second := false.B
@@ -222,7 +236,19 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             }.otherwise {
                 position := 0.U
                 group := group + step
-                groupOH := Mux(pair,Cat(groupOH(5,0),groupOH(7,6)),Cat(groupOH(6,0),groupOH(7)))
+                val advancedGroupOH = Mux(pair,
+                    Cat(groupOH(5,0),groupOH(7,6)), Cat(groupOH(6,0),groupOH(7)))
+                val advancedItem = Mux1H(advancedGroupOH, payload)
+                val advancedNextItem = Mux1H(
+                    Cat(advancedGroupOH(6,0),advancedGroupOH(7)), payload)
+                val advancedPair = (advancedGroupOH & adjacentPair.asUInt).orR
+                val advancedMask = Mux1H(advancedGroupOH, contiguousMasks)
+                groupOH := advancedGroupOH
+                requestLine := Mux1H(advancedGroupOH,
+                    payload.map(_.address(31, 6)))
+                requestValidOrResponseFinal := Mux(advancedPair,
+                    advancedItem.mask.orR || advancedNextItem.mask.orR,
+                    advancedMask(63, 0).orR)
                 state := Mux(last, done, Mux(scattered, readElementAddress, prepare))
                 when(last) { active := false.B }
             }
@@ -279,6 +305,8 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         active := true.B
         group := 0.U
         groupOH := 1.U
+        requestLine := Mux(state === response,
+            payload(Cat(1.U(1.W), pendingHead)).address(31, 6), payload(0).address(31, 6))
         position := 0.U
         second := false.B
         state := Mux(scattered, readElementAddress, prepare)
@@ -287,7 +315,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         when(state === readElementAddress) {
             val selectedAddress = elementAddresses.get(Cat(group, position))
             elementAddress := selectedAddress
-            nextElementLine := selectedAddress(31, 6) + 1.U
+            requestLine := selectedAddress(31, 6)
+            requestValidOrResponseFinal :=
+                (narrowMask.pad(128) << selectedAddress(5, 0))(63, 0).orR
         }
     } else {
         val ram = elementAddressRam.get.io
@@ -309,10 +339,9 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         ram.readAddress := Mux(state === idle, 0.U(8.W), Cat(nextGroup, nextPosition))
         when(state === readElementAddress) {
             elementAddress := ram.readData
-            val line = ram.readData(31, 6)
-            nextElementLine := Cat((25 to 0 by -1).map { bit =>
-                if (bit == 0) !line(0) else line(bit) ^ line(bit - 1, 0).andR
-            })
+            requestLine := ram.readData(31, 6)
+            requestValidOrResponseFinal :=
+                (narrowMask.pad(128) << ram.readData(5, 0))(63, 0).orR
         }
         // Address collection finishes before its token can begin draining.
         assert(!(ram.readEnable && ram.writeEnable))
@@ -320,14 +349,11 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     when(state === readElementAddress) { state := prepare }
     io.cache.request.bits := 0.U.asTypeOf(new DStoreRequest)
     io.cache.request.bits.wide := true.B
-    val contiguousLine = Mux(second, Mux1H(groupOH, nextLineAddress), item.address(31, 6))
-    val scatteredAddress = Cat(Mux(second, nextElementLine, elementAddress(31, 6)), 0.U(6.W))
-    io.cache.request.bits.paddr := Mux(scattered, scatteredAddress,
-        Cat(contiguousLine, 0.U(6.W))).pad(34)
+    io.cache.request.bits.paddr := Cat(requestLine, 0.U(6.W)).pad(34)
     io.cache.request.bits.line := Mux(pair,Cat(nextItem.data,item.data),Mux(second, shiftedData(1023, 512), shiftedData(511, 0)))
     io.cache.request.bits.lineMask := lineMask
     io.cache.request.bits.size := 2.U
-    io.cache.request.valid := state === prepare && lineMask.orR
+    io.cache.request.valid := state === prepare && requestValidOrResponseFinal
     // A native, aligned register word needs only a half-line selection. Start
     // it on the SB grant edge, including a queued successor of the returning
     // token. The existing payload remains stable if the cache applies pressure;
@@ -341,10 +367,19 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val immediateSingle = startSingle && !startItem.address(4,0).orR && startItem.mask.andR
     val immediateStart = io.drain.start.fire &&
         PeScratchpadBridge.matches(startItem.address.pad(34)) && (immediateSingle || immediatePair)
+    val startMask = Mux(state === response,
+        contiguousMasks(Cat(1.U(1.W),pendingHead)), contiguousMasks(0))
+    val startAdjacent = startPair && !startItem.address(5,0).orR &&
+        startNext.address === Cat(startItem.address(31,6),32.U(6.W))
+    val startLineValid = Mux(startAdjacent,
+        startItem.mask.orR || startNext.mask.orR, startMask(63,0).orR)
+    when(io.drain.start.fire && !scattered) {
+        requestValidOrResponseFinal := startLineValid
+    }
     when(immediateStart) { io.cache.request.valid := true.B }
     // Immediate handovers are native-only. Classify the ordinary payload before
     // merging that late grant so it cannot select a DCache SRAM address.
-    io.preparedRequestValid := state === prepare && lineMask.orR
+    io.preparedRequestValid := state === prepare && requestValidOrResponseFinal
     when(io.cache.request.valid && !io.preparedRequestValid) {
         assert(PeScratchpadBridge.matches(io.cache.request.bits.paddr))
     }
@@ -364,12 +399,20 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
     val scatteredNative = (elementWindow === "hb00".U && !elementWindowCarry) ||
         (elementWindow === "haff".U && elementWindowCarry)
     val preparedNative = Mux(scattered, scatteredNative,
-        contiguousLine(25, 14) === "hb00".U)
+        requestLine(25, 14) === "hb00".U)
     io.cachePayloadNative := Mux(state === prepare, preparedNative,
         PeScratchpadBridge.matches(startItem.address.pad(34)))
     assert(io.cachePayloadNative === PeScratchpadBridge.matches(io.cache.request.bits.paddr))
-    when(state === prepare && !lineMask.orR) { advance() }
+    when(state === prepare) {
+        assert(requestValidOrResponseFinal === lineMask.orR)
+    }
+    when(state === prepare && !requestValidOrResponseFinal) { advance() }
     when(io.cache.request.fire) { state := response }
+    when(io.cache.request.fire) {
+        // Response ownership is fixed when the request leaves. Keeping this
+        // one-bit fact avoids rebuilding final-group selection on handover.
+        requestValidOrResponseFinal := immediateStart || !scattered && !hasSecond && last
+    }
     when(io.cache.response.fire) {
         // Commit reports failed committed writes through the task fault port.
         advance()
@@ -410,6 +453,14 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
             active := true.B
             group := 0.U
             groupOH := 1.U
+            requestLine := payload(slot).address(31, 6)
+            val nextSlot = Cat(1.U(1.W),(pendingHead+1.U)(1,0))
+            val promotedMask = contiguousMasks(slot)
+            val promotedAdjacent = pendingTwo && !payload(slot).address(5,0).orR &&
+                payload(nextSlot).address === Cat(payload(slot).address(31,6),32.U(6.W))
+            requestValidOrResponseFinal := Mux(promotedAdjacent,
+                payload(slot).mask.orR || payload(nextSlot).mask.orR,
+                promotedMask(63,0).orR)
             position := 0.U
             second := false.B
         }
@@ -474,6 +525,8 @@ class VectorStoreBuffer(val p: BackendParams = BackendParams(), observe: Boolean
         active := true.B
         group := 0.U
         groupOH := 1.U
+        requestLine := startItem.address(31, 6)
+        requestValidOrResponseFinal := true.B
         position := 0.U
         second := false.B
     }

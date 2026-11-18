@@ -36,6 +36,7 @@ class FetchQueue(p: FrontendParams, dequeueWidth: Int) extends Module {
         separateEnqWrite = true,
         selectDeqAfterRegister = false,
         resetPayload = false,
+        balancedBankDeqRead = true,
     ))
     // A record is consumed only for an entry which starts a fetch packet.  Do
     // not replicate this wide predictor-training payload in every compacted

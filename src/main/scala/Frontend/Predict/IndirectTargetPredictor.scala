@@ -39,7 +39,6 @@ class IndirectTargetPredictor(
     val pendingWrite = RegInit(VecInit.fill(p.ittageCount)(false.B))
     val pendingAllocation = RegInit(VecInit.fill(p.ittageCount)(false.B))
     val pendingIndex = Reg(Vec(p.ittageCount, UInt(p.ittageIndexBits.W)))
-    val pendingIndexOH = Reg(Vec(p.ittageCount, UInt(p.ittageSets.W)))
     val pendingRows = Reg(Vec(p.ittageCount, new IndirectTargetRow(p)))
 
     val aheadRows = Wire(Vec(p.ittageCount, new IndirectTargetRow(p)))
@@ -148,7 +147,7 @@ class IndirectTargetPredictor(
         tables(table).io.predictEnable := io.query.fire
         tables(table).io.predictAddress := indices(table)
         val pendingHit = pendingWrite(table) &&
-            (pendingIndexOH(table) & UIntToOH(aheadIndices(table), p.ittageSets)).orR
+            pendingIndex(table) === aheadIndices(table)
         aheadRows(table) := Mux(
             pendingHit,
             pendingRows(table),
@@ -159,7 +158,7 @@ class IndirectTargetPredictor(
         ahead := true.B
         for (table <- 0 until p.ittageCount) {
             val pendingHit = pendingAllocation(table) &&
-                (pendingIndexOH(table) & UIntToOH(indices(table), p.ittageSets)).orR
+                pendingIndex(table) === indices(table)
             aheadValid(table) := valid(table)(indices(table)) || pendingHit
             aheadIndices(table) := indices(table)
         }
@@ -177,17 +176,13 @@ class IndirectTargetPredictor(
         Mux1H(trainReadSlots, io.trainRead.bits.targets),
         io.trainRead.valid,
     )
-    val readIndexOH = VecInit((0 until p.ittageCount).map { table =>
-        UIntToOH(io.trainRead.bits.meta.ittage.indices(table), p.ittageSets)
-    })
     val trainIndex = RegEnable(io.trainRead.bits.meta.ittage.indices, io.trainRead.valid)
-    val trainIndexOH = RegEnable(readIndexOH, io.trainRead.valid)
     val trainValidState = Wire(Vec(p.ittageCount, Bool()))
     val writeAlloc = Wire(Vec(p.ittageCount, Bool()))
     for (table <- 0 until p.ittageCount) {
-        val storedValid = Mux1H(trainIndexOH(table).asBools, valid(table))
+        val storedValid = valid(table)(trainIndex(table))
         val pendingHit = pendingAllocation(table) &&
-            (pendingIndexOH(table) & trainIndexOH(table)).orR
+            pendingIndex(table) === trainIndex(table)
         trainValidState(table) := storedValid || pendingHit
     }
     val trainValid = io.train.valid && train.meta.ittage.aheadValid && trainSlots.orR
@@ -263,15 +258,12 @@ class IndirectTargetPredictor(
         pendingWrite(table) := update
         pendingAllocation(table) := writeAlloc(table)
         pendingIndex(table) := train.meta.ittage.indices(table)
-        pendingIndexOH(table) := trainIndexOH(table)
         pendingRows(table) := next
         tables(table).io.updateWriteEnable := pendingWrite(table)
         tables(table).io.updateWriteAddress := pendingIndex(table)
         tables(table).io.updateWriteData := pendingRows(table).asUInt
-        for (entry <- 0 until p.ittageSets) {
-            when(pendingAllocation(table) && pendingIndexOH(table)(entry)) {
-                valid(table)(entry) := true.B
-            }
+        when(pendingAllocation(table)) {
+            valid(table)(pendingIndex(table)) := true.B
         }
     }
 }

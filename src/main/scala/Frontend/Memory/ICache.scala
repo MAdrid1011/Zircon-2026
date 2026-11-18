@@ -1,4 +1,3 @@
-// Adapted from Zircon-2024 b9f7b2b for the current frontend and memory hierarchy.
 import chisel3._
 import chisel3.util._
 import ZirconConfig.{FrontendParams, ICacheParams}
@@ -27,9 +26,11 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
 
     /* Memory Arrays */
     // Preserve per-way synchronous Tag/Data and small asynchronous Valid/LRU tables.
-    val tagTab = VecInit.fill(c.ways)(Module(new SinglePortMaskedRam(c.sets, 1, c.tagBits)).io)
+    val tagTab = VecInit.fill(c.ways)(
+        Module(new SinglePortMaskedRam(c.sets, 1, c.tagBits, writeCycleReadUnused = true)).io)
     val vldTab = VecInit.fill(c.ways)(Module(new AsyncRegRam(Bool(), c.sets, 1, 1, Some(false.B))).io)
-    val dataTab = VecInit.fill(c.ways)(Module(new SinglePortMaskedRam(c.sets, 1, c.lineBits)).io)
+    val dataTab = VecInit.fill(c.ways)(
+        Module(new SinglePortMaskedRam(c.sets, 1, c.lineBits, writeCycleReadUnused = true)).io)
     val lruTab = Module(new AsyncRegRam(UInt(2.W), c.sets, 1, 1, Some(1.U(2.W)))).io
 
     def index(addr: UInt): UInt = addr(c.indexBits + c.offsetBits - 1, c.offsetBits)
@@ -301,14 +302,20 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
             (fsm.io.cc.addrOH(1) && c1s2.rreq) ||
             (fsm.io.cc.addrOH(2) && ((c1s3.rreq && !io.flush) || fsm.io.cc.memWe.orR))
     for (way <- 0 until c.ways) {
+        // A disabled port does not observe its address. Complementary idle values
+        // keep each way's active address load bounded without changing RAM timing.
+        val wayAddress = Mux(arrayEnable, arrayAddress,
+            Fill(c.indexBits, (way & 1).U(1.W)))
         tagTab(way).clock := clock
-        tagTab(way).address := arrayAddress
+        tagTab(way).address := wayAddress
+        tagTab(way).writeAddress := index(c1s3Vaddr)
         tagTab(way).enable := arrayEnable
         tagTab(way).dataIn := tag(c1s3Paddr)
         tagTab(way).write := fsm.io.cc.tagvWe(way)
         tagTab(way).mask := 1.U
         dataTab(way).clock := clock
-        dataTab(way).address := arrayAddress
+        dataTab(way).address := wayAddress
+        dataTab(way).writeAddress := index(c1s3Vaddr)
         dataTab(way).enable := arrayEnable
         dataTab(way).dataIn := rbuf
         dataTab(way).write := fsm.io.cc.memWe(way)
@@ -360,6 +367,10 @@ class ICache(p: FrontendParams = FrontendParams(), c: ICacheParams = ICacheParam
 
     /* Assertions and Optional Statistics */
     assert(!(c1s2Go && io.l2.response.fire), "ICache: new fetch cannot overlap lower response")
+    when(fsm.io.cc.tagvWe.orR || fsm.io.cc.memWe.orR) {
+        assert(fsm.io.cc.addrOH === 4.U,
+            "ICache writes must use the retained miss address")
+    }
     when(c1s2Go && !faultC1s2) {
         assert(PopCount(hitC1s2) <= 1.U, "ICache: multiple hits")
         assert(

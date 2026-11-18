@@ -30,6 +30,9 @@ class BlockBTBIO(p: FrontendParams, sets: Int, ways: Int, synchronousPayload: Bo
     val lookupIndex = if (synchronousPayload) Some(Input(UInt(log2Ceil(sets).W))) else None
     val lookupTag = Input(UInt((32 - p.blockBits - log2Ceil(sets)).W))
     val prefetch = if (synchronousPayload) Some(Flipped(Valid(UInt(log2Ceil(sets).W)))) else None
+    val prefetchTag = if (synchronousPayload) {
+        Some(Input(UInt((32 - p.blockBits - log2Ceil(sets)).W)))
+    } else None
     val trainTagGroups = Input(Vec(math.min(8, sets), UInt((32 - p.blockBits - log2Ceil(sets)).W)))
     val hits = Output(Vec(ways, Bool()))
     val raw = Output(new FrontendBtbRaw(p, sets, ways))
@@ -69,11 +72,48 @@ class BlockBTB(
     val replacement = RegInit(VecInit.fill(sets)(false.B))
     /* Prediction Read */
     assert(PopCount(io.indexOH) <= 1.U)
+    val prefetchedTags = if (synchronousPayload) Some(Reg(Vec(ways, UInt(tagBits.W)))) else None
+    val prefetchedValid = if (synchronousPayload) {
+        Some(RegInit(VecInit.fill(ways)(0.U(p.fetchWidth.W))))
+    } else None
+    val prefetchedHits = if (synchronousPayload) {
+        Some(RegInit(VecInit.fill(ways)(false.B)))
+    } else None
+    if (synchronousPayload) {
+        val prefetchIndex = io.prefetch.get.bits
+        val prefetchConflict = io.train.valid && io.train.bits.index === prefetchIndex
+        when(io.prefetch.get.valid) {
+            for (way <- 0 until ways) {
+                val prefetchTag = if (tagMem.isDefined) {
+                    tagMem.get(way).read(prefetchIndex)
+                } else {
+                    FrontendMath.readTree(tags.get(way).toSeq, prefetchIndex)
+                }
+                val prefetchValid = FrontendMath.readTree(valid(way).toSeq, prefetchIndex)
+                prefetchedTags.get(way) := prefetchTag
+                prefetchedValid.get(way) := Mux(
+                    prefetchConflict,
+                    0.U,
+                    prefetchValid,
+                )
+                prefetchedHits.get(way) := !prefetchConflict && prefetchValid.orR &&
+                    prefetchTag === io.prefetchTag.get
+            }
+        }.elsewhen(io.train.valid && io.train.bits.index === io.lookupIndex.get) {
+            // A payload write can change the held SRAM row. Ignore that row
+            // until the next prefetch supplies matching metadata and payload.
+            prefetchedValid.get.foreach(_ := 0.U)
+            prefetchedHits.get.foreach(_ := false.B)
+        }
+    }
     for (way <- 0 until ways) {
-        val selectedTag = if (tagMem.isDefined) tagMem.get(way).read(io.lookupIndex.get)
+        val selectedTag = if (synchronousPayload) prefetchedTags.get(way)
+            else if (tagMem.isDefined) tagMem.get(way).read(io.lookupIndex.get)
             else Mux1H(io.indexOH.asBools, tags.get(way))
-        val selectedValid = Mux1H(io.indexOH.asBools, valid(way))
-        io.hits(way) := selectedValid.orR && selectedTag === io.lookupTag
+        val selectedValid = if (synchronousPayload) prefetchedValid.get(way)
+            else Mux1H(io.indexOH.asBools, valid(way))
+        io.hits(way) := (if (synchronousPayload) prefetchedHits.get(way)
+            else selectedValid.orR && selectedTag === io.lookupTag)
         io.raw.tags(way) := selectedTag
         if (synchronousPayload) {
             for (slot <- 0 until p.fetchWidth) {

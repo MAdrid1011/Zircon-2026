@@ -10,6 +10,7 @@ class DualPortRamHarness(lanes: Int, laneBits: Int, depth: Int = 16,
     writePort: Int = 0) extends Module {
     val io = IO(new Bundle {
         val address = Input(Vec(2, UInt(log2Ceil(depth).W)))
+        val writeAddress = Input(UInt(log2Ceil(depth).W))
         val enable = Input(Vec(2, Bool()))
         val mask = Input(Vec(2, UInt(lanes.W)))
         val data = Input(Vec(2, UInt((lanes * laneBits).W)))
@@ -20,10 +21,13 @@ class DualPortRamHarness(lanes: Int, laneBits: Int, depth: Int = 16,
         ram.io.clka := clock
         ram.io.addra := io.address(0)
         ram.io.addrb := io.address(1)
+        ram.io.writeAddress := io.writeAddress
         ram.io.ena := io.enable(0)
         ram.io.enb := io.enable(1)
         ram.io.wea := io.mask(0)
         ram.io.web := io.mask(1)
+        ram.io.writeAllA := false.B
+        ram.io.writeAllB := false.B
         ram.io.dina := io.data(0)
         ram.io.dinb := io.data(1)
         io.result(i)(0) := ram.io.douta
@@ -41,6 +45,7 @@ class DualPortMaskedRamSpec extends AnyFreeSpec with ChiselSim {
                 val held = Array(0, 0)
                 def step(a: Int, b: Int, ena: Boolean, enb: Boolean, mask: BigInt, data: BigInt): Unit = {
                     dut.io.address(0).poke(a); dut.io.address(1).poke(b)
+                    dut.io.writeAddress.poke(a)
                     dut.io.enable(0).poke(ena); dut.io.enable(1).poke(enb)
                     dut.io.mask(0).poke(mask); dut.io.mask(1).poke(0)
                     dut.io.data(0).poke(data); dut.io.data(1).poke(0)
@@ -88,6 +93,7 @@ class DualPortMaskedRamSpec extends AnyFreeSpec with ChiselSim {
                             }
                         }
                     }
+                    dut.io.writeAddress.poke(address(writePort))
                     dut.clock.step()
                     for (backend <- 0 until 2; p <- 0 until 2)
                         dut.io.result(backend)(p).expect(memory(held(p)), s"cycle=$cycles backend=$backend port=$p")

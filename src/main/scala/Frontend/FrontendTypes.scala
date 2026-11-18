@@ -177,6 +177,16 @@ object FrontendMath {
     def rasTop(snapshot: FrontendStateSnapshot): UInt =
         Cat(snapshot.top, 0.U(2.W))
     def read[T <: Data](items: Seq[T], index: UInt): T = Mux1H(UIntToOH(index, items.size), items)
+    def readTree[T <: Data](items: Seq[T], index: UInt): T = {
+        require(isPow2(items.size), "Balanced read requires a power-of-two entry count")
+        var stage = items
+        var bit = 0
+        while (stage.size > 1) {
+            stage = stage.grouped(2).map(pair => Mux(index(bit), pair(1), pair(0))).toSeq
+            bit += 1
+        }
+        stage.head
+    }
     def sat(value: UInt, up: Bool): UInt = {
         val maximum = ((BigInt(1) << value.getWidth) - 1).U(value.getWidth.W)
         Mux(up, Mux(value === maximum, value, value + 1.U), Mux(value === 0.U, value, value - 1.U))

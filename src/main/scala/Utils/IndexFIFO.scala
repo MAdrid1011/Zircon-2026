@@ -61,6 +61,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     registeredDeq: Boolean = false,
     externallyGuardedCapacity: Boolean = false,
     resetPayload: Boolean = true,
+    balancedDeqRead: Boolean = false,
 ) extends Module {
     require(n > 0, "IndexFIFO depth must be positive")
     require(rw >= 0 && ww >= 0, "IndexFIFO random port counts must be nonnegative")
@@ -84,10 +85,22 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     }
     private val head = RegInit(1.U(n.W))
     private val tail = RegInit(1.U(n.W))
+    private val headIndex = if (balancedDeqRead) Some(RegInit(0.U(math.max(1, log2Ceil(n)).W))) else None
     private val headHigh = RegInit(false.B)
     private val tailHigh = RegInit(false.B)
     private val empty = RegInit((!isFlst).B)
     private val full = RegInit(false.B)
+
+    private def balancedRead(index: UInt): T = {
+        val paddedSize = 1 << log2Ceil(n)
+        var stage: Seq[T] = q.toSeq ++ Seq.fill(paddedSize - n)(0.U.asTypeOf(chiselTypeOf(q.head)))
+        var bit = 0
+        while (stage.size > 1) {
+            stage = stage.grouped(2).map(pair => Mux(index(bit), pair(1), pair(0))).toSeq
+            bit += 1
+        }
+        stage.head
+    }
 
     // Outputs describe the pre-edge state even during flush. This avoids a path
     // from flush back into a caller's commit-valid / redirect decision.
@@ -98,6 +111,9 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     val pop = io.deq.fire
     val headNext = Mux(pop, FIFOUtil.rotate(head, 1), head)
     val tailNext = Mux(push, FIFOUtil.rotate(tail, 1), tail)
+    val headIndexNext = headIndex.map { index =>
+        if (n == 1) 0.U else Mux(pop, Mux(index === (n - 1).U, 0.U, index + 1.U), index)
+    }
     val headHighNext = headHigh ^ (pop && head(n - 1))
     val tailHighNext = tailHigh ^ (push && tail(n - 1))
 
@@ -111,6 +127,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
         } else {
             head := 1.U
             tail := 1.U
+            headIndex.foreach(_ := 0.U)
             headHigh := false.B
             tailHigh := false.B
             empty := true.B
@@ -119,6 +136,7 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     }.otherwise {
         head := headNext
         tail := tailNext
+        headIndex.foreach(_ := headIndexNext.get)
         headHigh := headHighNext
         tailHigh := tailHighNext
         when(push && !pop) {
@@ -136,7 +154,8 @@ class IndexFIFO[T <: Data: TypeTag: ClassTag](
     io.enqHigh := tailHigh
     io.deqIdx := head
     io.deqHigh := headHigh
-    io.deq.bits := Mux1H(head, q)
+    io.deq.bits := headIndex.map(balancedRead).getOrElse(Mux1H(head, q))
+    headIndex.foreach(index => assert(head === UIntToOH(index, n)))
     io.rdata.zip(io.ridx).foreach { case (data, idx) => data := Mux1H(idx, q) }
 
     for (port <- 0 until ww) {

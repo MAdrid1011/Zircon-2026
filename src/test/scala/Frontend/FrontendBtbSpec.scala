@@ -13,7 +13,7 @@ class BlockBTBLookupTestTop(p: FrontendParams, sets: Int, ways: Int) extends Mod
 
 class FrontendBtbSpec extends AnyFreeSpec with ChiselSim {
     for (backend <- Seq(DualPortRamBackend.Vivado, DualPortRamBackend.BSG)) {
-        s"a synchronous fast BTB reads in PF and preserves its row while PF stalls ($backend)" in {
+        s"a synchronous fast BTB keeps metadata aligned with its prefetched payload ($backend)" in {
         val p = FrontendParams()
         simulate(new BlockBTB(p, p.fastBtbSets, 1, backend,
             synchronousPayload = true)) { d =>
@@ -41,6 +41,7 @@ class FrontendBtbSpec extends AnyFreeSpec with ChiselSim {
             d.io.trainTagGroups.foreach(_.poke(tag))
             d.io.prefetch.get.valid.poke(false)
             d.io.prefetch.get.bits.poke(index)
+            d.io.prefetchTag.get.poke(tag)
             d.io.train.valid.poke(false)
             d.clock.step()
 
@@ -55,18 +56,26 @@ class FrontendBtbSpec extends AnyFreeSpec with ChiselSim {
             train(2, 0x23456)
             d.io.raw.lines(0).targets(0).expect(0x12345)
             d.io.raw.lines(0).targets(2).expect(0x23456)
-            d.io.raw.lines(0).valid.expect(5)
-            d.clock.step()
-            d.io.raw.lines(0).targets(0).expect(0x12345)
-            d.io.raw.lines(0).targets(2).expect(0x23456)
-
-            train(1, 0x34567, tag + 1)
+            d.io.raw.lines(0).valid.expect(0)
+            d.io.hits(0).expect(false)
             d.io.prefetch.get.valid.poke(true)
             d.clock.step()
             d.io.prefetch.get.valid.poke(false)
-            d.io.lookupTag.poke(tag)
+            d.io.raw.lines(0).targets(0).expect(0x12345)
+            d.io.raw.lines(0).targets(2).expect(0x23456)
+            d.io.raw.lines(0).valid.expect(5)
+            d.io.hits(0).expect(true)
+
+            train(1, 0x34567, tag + 1)
+            d.io.prefetchTag.get.poke(tag)
+            d.io.prefetch.get.valid.poke(true)
+            d.clock.step()
+            d.io.prefetch.get.valid.poke(false)
             d.io.hits(0).expect(false)
-            d.io.lookupTag.poke(tag + 1)
+            d.io.prefetchTag.get.poke(tag + 1)
+            d.io.prefetch.get.valid.poke(true)
+            d.clock.step()
+            d.io.prefetch.get.valid.poke(false)
             d.io.hits(0).expect(true)
             d.io.raw.lines(0).valid.expect(2)
             d.io.raw.lines(0).targets(1).expect(0x34567)

@@ -5,8 +5,6 @@ import ZirconConfig.FrontendParams
 class PredictFetchIO(p: FrontendParams) extends Bundle {
     val instPkg = Input(new FrontendPackage(p))
     val directionPcHashes = Input(new MorslPcHashes(p))
-    val fastBtbIndexOH = Input(UInt(p.fastBtbSets.W))
-    val fastBtbTag = Input(UInt((32 - p.blockBits - log2Ceil(p.fastBtbSets)).W))
     val mainBtbIndex = Input(UInt(log2Ceil(p.btbSets).W))
     val prefetch = Flipped(Valid(UInt(30.W)))
     val out = Output(new FrontendPackage(p))
@@ -58,16 +56,19 @@ class Predict(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     /* IF1: Fast Prediction */
     // Match saved ahead candidates while reading candidates for the next accepted block.
     val currentPc = io.fc.instPkg.startPc
-    fastBtb.io.indexOH := io.fc.fastBtbIndexOH
+    fastBtb.io.indexOH := 0.U
     fastBtb.io.lookupIndex.get := (if (p.fastBtbSets <= p.btbSets) {
         io.fc.mainBtbIndex(log2Ceil(p.fastBtbSets) - 1, 0)
     } else {
         currentPc(p.blockBits + log2Ceil(p.fastBtbSets) - 1, p.blockBits)
     })
-    fastBtb.io.lookupTag := io.fc.fastBtbTag
+    fastBtb.io.lookupTag := 0.U
     fastBtb.io.prefetch.get.valid := io.fc.prefetch.valid
     fastBtb.io.prefetch.get.bits := io.fc.prefetch.bits(
         p.blockBits + log2Ceil(p.fastBtbSets) - 3, p.blockBits - 2,
+    )
+    fastBtb.io.prefetchTag.get := io.fc.prefetch.bits(
+        29, p.blockBits + log2Ceil(p.fastBtbSets) - 2,
     )
     mainBtb.io.query.bits := io.fc.mainBtbIndex
     mainBtb.io.queryTag := currentPc(31, p.blockBits + log2Ceil(p.btbSets))

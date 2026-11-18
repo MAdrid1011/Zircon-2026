@@ -66,17 +66,18 @@ class L2Cache(
         )
     )
 
-    val engineStates = Enum(10)
+    val engineStates = Enum(11)
     val engineIdle = engineStates(0)
     val engineVictimRead = engineStates(1)
     val engineVictimLookup = engineStates(2)
-    val engineWritebackCapture = engineStates(3)
-    val engineWritebackSend = engineStates(4)
-    val engineWritebackWait = engineStates(5)
-    val engineVictimInstall = engineStates(6)
-    val engineMemorySend = engineStates(7)
-    val engineMemoryWait = engineStates(8)
-    val engineFinish = engineStates(9)
+    val engineVictimSelect = engineStates(3)
+    val engineWritebackCapture = engineStates(4)
+    val engineWritebackSend = engineStates(5)
+    val engineWritebackWait = engineStates(6)
+    val engineVictimInstall = engineStates(7)
+    val engineMemorySend = engineStates(8)
+    val engineMemoryWait = engineStates(9)
+    val engineFinish = engineStates(10)
     val engineState = RegInit(engineIdle)
     val enginePreferI = RegInit(false.B)
     val cleanIdle :: cleanRead :: cleanLookup :: cleanSend :: cleanWait :: cleanDone :: Nil = Enum(6)
@@ -107,7 +108,13 @@ class L2Cache(
     val engineSize = Reg(UInt(2.W))
     val engineMask = Reg(UInt(8.W))
     val engineVictimValid = Reg(Bool())
-    val engineVictimLine = Reg(UInt((34 - p.offsetBits).W))
+    val engineVictimTag = Reg(UInt(p.tagBits.W))
+    val engineVictimMetaSet = Reg(UInt(p.indexBits.W))
+    val engineVictimTagSet = Reg(Vec(p.ways, UInt(p.indexBits.W)))
+    val engineVictimDataReadSetA = Reg(Vec(p.ways, UInt(p.indexBits.W)))
+    val engineVictimDataReadSetB = Reg(Vec(p.ways, UInt(p.indexBits.W)))
+    val engineVictimDataWriteSet = Reg(Vec(p.ways, UInt(p.indexBits.W)))
+    val engineVictimLine = Cat(engineVictimTag, engineVictimMetaSet)
     val engineVictimAddress = Cat(engineVictimLine, 0.U(p.offsetBits.W))
     val engineVictimData = Reg(UInt(p.lineBits.W))
     val engineVictimDirty = Reg(Bool())
@@ -116,6 +123,13 @@ class L2Cache(
     val engineTargetDirty = Reg(Bool())
     val engineVictimWay = Reg(UInt(p.ways.W))
     val engineInstallWriteWay = RegInit(0.U(p.ways.W))
+    val victimLookupHit = Reg(UInt(p.ways.W))
+    val victimLookupValidWays = Reg(UInt(p.ways.W))
+    val victimLookupDirtyWays = Reg(UInt(p.ways.W))
+    val victimLookupInstructionWays = Reg(UInt(p.ways.W))
+    val victimLookupProtectedWays = Reg(UInt(p.ways.W))
+    val victimLookupProtectedOppositeWays = Reg(UInt(p.ways.W))
+    val victimLookupPlru = Reg(UInt(3.W))
     val engineWritebackPaddr = Reg(UInt(34.W))
     val engineWritebackData = Reg(UInt(p.lineBits.W))
     val engineResponseDirty = RegInit(false.B)
@@ -141,7 +155,10 @@ class L2Cache(
     // it must not decode every I/D RAM port while the lookup is in flight.
     val engineVictimPortI = RegInit(false.B)
     val engineVictimPortD = RegInit(false.B)
-    val engineVictimPort = engineVictimPortI || engineVictimPortD
+    // These copies are physical timing endpoints for each wide SRAM way.
+    engineVictimTagSet.foreach(dontTouch(_))
+    Seq(engineVictimDataReadSetA, engineVictimDataReadSetB, engineVictimDataWriteSet)
+        .foreach(_.foreach(dontTouch(_)))
     val enteringInstall = WireDefault(false.B)
     val enteringInstallWay = WireDefault(0.U(p.ways.W))
     val engineArrayWrite = RegNext(enteringInstall, false.B)
@@ -150,6 +167,10 @@ class L2Cache(
     val installValidWay = RegNext(enteringInstallWay, 0.U(p.ways.W))
     val installDirtyWay = RegNext(enteringInstallWay, 0.U(p.ways.W))
     val installInstructionWay = RegNext(enteringInstallWay, 0.U(p.ways.W))
+    val enteringInstallSetOH = Wire(UInt(p.sets.W))
+    enteringInstallSetOH := UIntToOH(engineVictimMetaSet, p.sets)
+    val installSetOH = RegInit(0.U(p.sets.W))
+    installSetOH := enteringInstallSetOH
     Seq(installTagWay, installDataWay, installValidWay, installDirtyWay, installInstructionWay)
         .foreach(dontTouch(_))
     val engineArrayRecovery = RegNext(engineArrayWrite, false.B)
@@ -337,24 +358,30 @@ class L2Cache(
 
     // ==================== Dual-port Tag/Data lookup ====================
     val tagTab = VecInit.fill(p.ways)(
-        Module(new DualPortMaskedRam(p.sets, 1, p.tagBits, ramBackend, readWritePort = 1)).io
+        Module(new DualPortMaskedRam(
+            p.sets, 1, p.tagBits, ramBackend, readWritePort = 1,
+            writeCycleReadUnused = true)).io
     )
     val dataTab = VecInit.fill(p.ways)(
-        Module(new DualPortMaskedRam(p.sets, p.lineBytes, 8, ramBackend, readWritePort = 1)).io
+        Module(new StripedDualPortMaskedRam(
+            p.sets, p.lineBytes, 8, p.lineBytes / 8, ramBackend, readWritePort = 1,
+            fullWriteOnly = true, writeCycleReadUnused = true)).io
     )
     // Maintenance reads the same bit arrays through its own narrow address
     // selection, without a maintenance mux before demand hit/consume logic.
     val validTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 2, 4, Some(false.B))).io)
     val dirtyTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 1, 4, Some(false.B))).io)
-    val instructionTab = VecInit.fill(p.ways)(Module(new AsyncRegRam(Bool(), p.sets, 1, 3, Some(false.B))).io)
+    val instructionBits = RegInit(VecInit.fill(p.ways)(0.U(p.sets.W)))
     val plruTab = Module(new AsyncRegRam(UInt(3.W), p.sets, 1, 3, Some(0.U(3.W)))).io
 
-    val iReadAddress = Mux(iS2Valid && !iS2Advance, iS2.paddr, iS1.paddr)
-    val dReadAddress = Mux(dS2Valid && !dS2Advance, dS2.paddr, dS1.paddr)
-    val iReadEnable = (iS2Valid && !iS2Advance) || iS1Advance
-    val dReadEnable = (dS2Valid && !dS2Advance) || dS1Advance
-    val iMetaAddress = Mux(engineVictimPortI, engineVictimAddress, iS2.paddr)
-    val dMetaAddress = Mux(engineVictimPortD, engineVictimAddress, dS2.paddr)
+    val iReadRecovery = iS2Valid && (iVictimPortRecovery || engineArrayRecovery)
+    val dReadRecovery = dS2Valid && (dVictimPortRecovery || engineArrayRecovery)
+    val iReadIndex = Mux(iReadRecovery, index(iS2.paddr), index(iS1.paddr))
+    val dReadIndex = Mux(dReadRecovery, index(dS2.paddr), index(dS1.paddr))
+    val iReadEnable = iReadRecovery || iS1Advance
+    val dReadEnable = dReadRecovery || dS1Advance
+    val iMetaSet = Mux(engineVictimPortI, engineVictimMetaSet, index(iS2.paddr))
+    val dMetaSet = Mux(engineVictimPortD, engineVictimMetaSet, index(dS2.paddr))
 
     val iTags = VecInit(tagTab.map(_.douta))
     val iLines = VecInit(dataTab.map(_.douta))
@@ -366,8 +393,8 @@ class L2Cache(
     val dDirtyWays = VecInit(dirtyTab.map(_.rdata(1))).asUInt
     val cleanValidWays = VecInit(validTab.map(_.rdata(3))).asUInt
     val cleanDirtyWays = VecInit(dirtyTab.map(_.rdata(3))).asUInt
-    val iInstructionWays = VecInit(instructionTab.map(_.rdata(0))).asUInt
-    val dInstructionWays = VecInit(instructionTab.map(_.rdata(1))).asUInt
+    val iInstructionWays = VecInit(instructionBits.map(_(iMetaSet))).asUInt
+    val dInstructionWays = VecInit(instructionBits.map(_(dMetaSet))).asUInt
     val iHit = VecInit((0 until p.ways).map(way => iValidWays(way) && iTags(way) === tag(iS2.paddr))).asUInt
     val dHit = VecInit((0 until p.ways).map(way => dValidWays(way) && dTags(way) === tag(dS2.paddr))).asUInt
     val iHitDirty = iHit.orR && Mux1H(iHit, iDirtyWays.asBools)
@@ -483,7 +510,12 @@ class L2Cache(
         engineSize := selectedSize
         engineMask := selectedMask
         engineVictimValid := selectedVictimValid
-        engineVictimLine := selectedVictimPaddr(33, p.offsetBits)
+        engineVictimTag := tag(selectedVictimPaddr)
+        engineVictimMetaSet := index(selectedVictimPaddr)
+        engineVictimTagSet.foreach(_ := index(selectedVictimPaddr))
+        engineVictimDataReadSetA.foreach(_ := index(selectedVictimPaddr))
+        engineVictimDataReadSetB.foreach(_ := index(selectedVictimPaddr))
+        engineVictimDataWriteSet.foreach(_ := index(selectedVictimPaddr))
         engineVictimData := selectedVictimData
         engineVictimDirty := selectedVictimDirty
         engineTargetHit := selectedHit && !selectedVictimOnly
@@ -515,10 +547,10 @@ class L2Cache(
     // synchronous SRAM port owns the line-data read.
     val engineValidWays = VecInit(validTab.map(_.rdata(2))).asUInt
     val engineDirtyWays = VecInit(dirtyTab.map(_.rdata(2))).asUInt
-    val engineInstructionWays = VecInit(instructionTab.map(_.rdata(2))).asUInt
+    val engineInstructionWays = VecInit(instructionBits.map(_(engineVictimMetaSet))).asUInt
     val engineTags = Mux(engineSourceI, iTags, dTags)
     val engineLookupHit = VecInit((0 until p.ways).map { way =>
-        engineValidWays(way) && engineTags(way) === tag(engineVictimAddress)
+        engineValidWays(way) && engineTags(way) === engineVictimTag
     }).asUInt
     val enginePlru = plruTab.rdata(2)
     val engineConsumeTarget = engineTargetHit && (!engineSourceI || !engineTargetDirty)
@@ -600,16 +632,14 @@ class L2Cache(
             engineState := engineVictimLookup
         }
         is(engineVictimLookup) {
-            engineVictimPortI := false.B
-            engineVictimPortD := false.B
             assert(PopCount(engineLookupHit) <= 1.U, "L2Cache: multiple victim hits")
-            val sameSet = index(engineVictimAddress) === index(enginePaddr)
+            val sameSet = engineVictimMetaSet === index(enginePaddr)
             val protectedTargetWay = Mux(engineTargetHit && sameSet, engineTargetWay, 0.U)
             val oppositeTargetWaiting = Mux(engineSourceI, dWaiting && dS3Hit, iWaiting && iS3Hit)
             val oppositeTargetAddress = Mux(engineSourceI, dS3.paddr, iS3.paddr)
             val oppositeTargetWay = Mux(engineSourceI, dS3Way, iS3Way)
             val protectedOppositeWay = Mux(
-                oppositeTargetWaiting && index(engineVictimAddress) === index(oppositeTargetAddress),
+                oppositeTargetWaiting && engineVictimMetaSet === index(oppositeTargetAddress),
                 oppositeTargetWay,
                 0.U
             )
@@ -619,19 +649,30 @@ class L2Cache(
             val oppositeEnteringAddress = Mux(engineSourceI, dS2.paddr, iS2.paddr)
             val oppositeEnteringWay = Mux(engineSourceI, dHit, iHit)
             val protectedEnteringWay = Mux(
-                oppositeTargetEntering && index(engineVictimAddress) === index(oppositeEnteringAddress),
+                oppositeTargetEntering && engineVictimMetaSet === index(oppositeEnteringAddress),
                 oppositeEnteringWay,
                 0.U
             )
             val protectedOppositeWays = protectedOppositeWay | protectedEnteringWay
-            val protectedWays = protectedTargetWay | protectedOppositeWays
+            victimLookupHit := engineLookupHit
+            victimLookupValidWays := engineValidWays
+            victimLookupDirtyWays := engineDirtyWays
+            victimLookupInstructionWays := engineInstructionWays
+            victimLookupProtectedWays := protectedTargetWay | protectedOppositeWays
+            victimLookupProtectedOppositeWays := protectedOppositeWays
+            victimLookupPlru := enginePlru
+            engineState := engineVictimSelect
+        }
+        is(engineVictimSelect) {
+            engineVictimPortI := false.B
+            engineVictimPortD := false.B
             val allWays = ((BigInt(1) << p.ways) - 1).U(p.ways.W)
-            val allowedWays = allWays & ~protectedWays
-            val invalidWays = allowedWays & ~engineValidWays
-            val plruWay = plruVictim(enginePlru)
+            val allowedWays = allWays & ~victimLookupProtectedWays
+            val invalidWays = allowedWays & ~victimLookupValidWays
+            val plruWay = plruVictim(victimLookupPlru)
             val fallbackWay = Mux((plruWay & allowedWays).orR, plruWay, PriorityEncoderOH(allowedWays))
-            val instructionCandidates = engineInstructionWays & engineValidWays & allowedWays
-            val instructionOccupancy = (engineInstructionWays & engineValidWays).asBools
+            val instructionCandidates = victimLookupInstructionWays & victimLookupValidWays & allowedWays
+            val instructionOccupancy = (victimLookupInstructionWays & victimLookupValidWays).asBools
             val instructionLimit = instructionOccupancy.combinations(p.maxInstructionWays)
                 .map(_.reduce(_ && _)).reduce(_ || _)
             val instructionWay = Mux(
@@ -639,7 +680,7 @@ class L2Cache(
                 plruWay,
                 PriorityEncoderOH(instructionCandidates)
             )
-            val dataCandidates = ~engineInstructionWays & engineValidWays & allowedWays
+            val dataCandidates = ~victimLookupInstructionWays & victimLookupValidWays & allowedWays
             val dataWay = Mux(
                 (plruWay & dataCandidates).orR,
                 plruWay,
@@ -654,22 +695,22 @@ class L2Cache(
                     Mux(!engineSourceI && dataCandidates.orR, dataWay, fallbackWay)
                 )
             )
-            val selectedVictimWay = Mux(engineLookupHit.orR, engineLookupHit, replacementWay)
-            val preserveDirtyCopy = engineLookupHit.orR && Mux1H(engineLookupHit, engineDirtyWays.asBools) &&
+            val selectedVictimWay = Mux(victimLookupHit.orR, victimLookupHit, replacementWay)
+            val preserveDirtyCopy = victimLookupHit.orR && Mux1H(victimLookupHit, victimLookupDirtyWays.asBools) &&
                 !engineVictimDirty
-            val replaceDirty = !engineLookupHit.orR && Mux1H(replacementWay, engineDirtyWays.asBools) &&
-                Mux1H(replacementWay, engineValidWays.asBools)
+            val replaceDirty = !victimLookupHit.orR && Mux1H(replacementWay, victimLookupDirtyWays.asBools) &&
+                Mux1H(replacementWay, victimLookupValidWays.asBools)
             engineVictimWay := selectedVictimWay
             engineInstallWriteWay := Mux(preserveDirtyCopy, 0.U, selectedVictimWay)
-            when(engineTargetHit && sameSet) {
+            when(engineTargetHit && engineVictimMetaSet === index(enginePaddr)) {
                 assert(
                     !(selectedVictimWay & engineTargetWay).orR,
                     "L2Cache: victim insertion selected the requested line"
                 )
             }
-            when(!engineLookupHit.orR && protectedOppositeWays.orR) {
+            when(!victimLookupHit.orR && victimLookupProtectedOppositeWays.orR) {
                 assert(
-                    !(replacementWay & protectedOppositeWays).orR,
+                    !(replacementWay & victimLookupProtectedOppositeWays).orR,
                     "L2Cache: victim insertion selected an in-flight opposite-channel hit"
                 )
             }
@@ -686,7 +727,7 @@ class L2Cache(
             // Select its wide payload using the way registered in victim lookup.
             engineWritebackPaddr := Cat(
                 Mux1H(engineVictimWay, engineTags),
-                index(engineVictimAddress),
+                engineVictimMetaSet,
                 0.U(p.offsetBits.W)
             )
             engineWritebackData := Mux(
@@ -793,74 +834,90 @@ class L2Cache(
         assert(installValidWay === engineInstallWriteWay)
         assert(installDirtyWay === engineInstallWriteWay)
         assert(installInstructionWay === engineInstallWriteWay)
+        assert(PopCount(installSetOH) === 1.U)
     }
     for (way <- 0 until p.ways) {
         val consumeEngineTarget = engineInstall && engineConsumeTarget && engineTargetWay(way)
         val iFastConsumeWay = iS2Advance && !iS2.uncache && !iS2.ptw &&
             (!iS2.victimValid || cleanVictimAvailable) && iHit(way) && !iDirtyWays(way)
         val dFastConsumeWay = dS2Advance && dFast && !dS2.ptw && dHit(way)
-
-        tagTab(way).clka := clock
-        tagTab(way).addra := Mux(engineVictimPortI, index(engineVictimAddress), index(iReadAddress))
-        tagTab(way).ena := Mux(engineVictimPortI, true.B, iReadEnable && !engineArrayWrite)
-        tagTab(way).wea := 0.U
-        tagTab(way).dina := 0.U
-        tagTab(way).addrb := Mux(
+        val wayIdleAddress = Fill(p.indexBits, (way & 1).U(1.W))
+        val iTagAddress = Mux(engineVictimPortI, engineVictimTagSet(way), iReadIndex)
+        val iDataAddress = Mux(engineVictimPortI, engineVictimDataReadSetA(way), iReadIndex)
+        val iArrayEnable = Mux(engineVictimPortI, true.B, iReadEnable && !engineArrayWrite)
+        val dTagAddress = Mux(
             engineVictimPortD || engineInstall,
-            index(engineVictimAddress),
-            index(dReadAddress)
+            engineVictimTagSet(way),
+            dReadIndex,
         )
-        tagTab(way).enb := Mux(
+        val dDataAddress = Mux(
+            engineVictimPortD || engineInstall,
+            engineVictimDataReadSetB(way),
+            dReadIndex,
+        )
+        val dTagEnable = Mux(
             engineInstall,
             installTagWay.orR,
-            Mux(engineVictimPortD, true.B, dReadEnable)
+            Mux(engineVictimPortD, true.B, dReadEnable),
         )
-        tagTab(way).web := installTagWay(way).asUInt
-        tagTab(way).dinb := tag(engineVictimAddress)
-
-        dataTab(way).clka := clock
-        dataTab(way).addra := Mux(engineVictimPortI, index(engineVictimAddress), index(iReadAddress))
-        dataTab(way).ena := Mux(engineVictimPortI, true.B, iReadEnable && !engineArrayWrite)
-        dataTab(way).wea := 0.U
-        dataTab(way).dina := 0.U
-        dataTab(way).addrb := Mux(
-            engineVictimPortD || engineInstall,
-            index(engineVictimAddress),
-            index(dReadAddress)
-        )
-        dataTab(way).enb := Mux(
+        val dDataEnable = Mux(
             engineInstall,
             installDataWay.orR,
-            Mux(engineVictimPortD, true.B, dReadEnable)
+            Mux(engineVictimPortD, true.B, dReadEnable),
         )
-        dataTab(way).web := Fill(p.lineBytes, installDataWay(way))
+
+        tagTab(way).clka := clock
+        tagTab(way).addra := Mux(iArrayEnable, iTagAddress, wayIdleAddress)
+        tagTab(way).writeAddress := engineVictimTagSet(way)
+        tagTab(way).ena := iArrayEnable
+        tagTab(way).wea := 0.U
+        tagTab(way).writeAllA := false.B
+        tagTab(way).dina := 0.U
+        tagTab(way).addrb := Mux(dTagEnable, dTagAddress, wayIdleAddress)
+        tagTab(way).enb := dTagEnable
+        tagTab(way).web := installTagWay(way).asUInt
+        tagTab(way).writeAllB := false.B
+        tagTab(way).dinb := engineVictimTag
+
+        dataTab(way).clka := clock
+        dataTab(way).addra := Mux(iArrayEnable, iDataAddress, wayIdleAddress)
+        dataTab(way).writeAddress := engineVictimDataWriteSet(way)
+        dataTab(way).ena := iArrayEnable
+        dataTab(way).wea := 0.U
+        dataTab(way).writeAllA := false.B
+        dataTab(way).dina := 0.U
+        dataTab(way).addrb := Mux(dDataEnable, dDataAddress, wayIdleAddress)
+        dataTab(way).enb := dDataEnable
+        dataTab(way).web := 0.U
+        dataTab(way).writeAllB := installDataWay(way)
         dataTab(way).dinb := engineVictimData
 
-        validTab(way).raddr(0) := index(iMetaAddress)
-        validTab(way).raddr(1) := index(dMetaAddress)
-        validTab(way).raddr(2) := index(engineVictimAddress)
+        validTab(way).raddr(0) := iMetaSet
+        validTab(way).raddr(1) := dMetaSet
+        validTab(way).raddr(2) := engineVictimMetaSet
         validTab(way).raddr(3) := cleanSet
         validTab(way).wen(0) := Mux(engineInstall, installValidWay(way), iFastConsumeWay)
-        validTab(way).waddr(0) := Mux(engineInstall, index(engineVictimAddress), index(iS2.paddr))
+        validTab(way).waddr(0) := Mux(engineInstall, engineVictimMetaSet, index(iS2.paddr))
         validTab(way).wdata(0) := engineInstall
         validTab(way).wen(1) := Mux(engineInstall, consumeEngineTarget, dFastConsumeWay)
         validTab(way).waddr(1) := Mux(engineInstall, index(enginePaddr), index(dS2.paddr))
         validTab(way).wdata(1) := false.B
 
-        dirtyTab(way).raddr(0) := index(iMetaAddress)
-        dirtyTab(way).raddr(1) := index(dMetaAddress)
-        dirtyTab(way).raddr(2) := index(engineVictimAddress)
+        dirtyTab(way).raddr(0) := iMetaSet
+        dirtyTab(way).raddr(1) := dMetaSet
+        dirtyTab(way).raddr(2) := engineVictimMetaSet
         dirtyTab(way).raddr(3) := cleanSet
         dirtyTab(way).wen(0) := installDirtyWay(way)
-        dirtyTab(way).waddr(0) := index(engineVictimAddress)
+        dirtyTab(way).waddr(0) := engineVictimMetaSet
         dirtyTab(way).wdata(0) := engineVictimDirty
 
-        instructionTab(way).raddr(0) := index(iMetaAddress)
-        instructionTab(way).raddr(1) := index(dMetaAddress)
-        instructionTab(way).raddr(2) := index(engineVictimAddress)
-        instructionTab(way).wen(0) := installInstructionWay(way)
-        instructionTab(way).waddr(0) := index(engineVictimAddress)
-        instructionTab(way).wdata(0) := engineSourceI
+        when(installInstructionWay(way)) {
+            instructionBits(way) := Mux(
+                engineSourceI,
+                instructionBits(way) | installSetOH,
+                instructionBits(way) & ~installSetOH,
+            )
+        }
         when(cleanPort) {
             tagTab(way).addrb := cleanSet
             tagTab(way).enb := true.B
@@ -876,12 +933,12 @@ class L2Cache(
             dirtyTab(way).wdata(0) := false.B
         }
     }
-    plruTab.raddr(0) := index(iMetaAddress)
-    plruTab.raddr(1) := index(dMetaAddress)
-    plruTab.raddr(2) := index(engineVictimAddress)
+    plruTab.raddr(0) := iMetaSet
+    plruTab.raddr(1) := dMetaSet
+    plruTab.raddr(2) := engineVictimMetaSet
     plruTab.wen(0) := engineInstall
-    plruTab.waddr(0) := index(engineVictimAddress)
-    plruTab.wdata(0) := plruUpdate(enginePlru, engineVictimWay)
+    plruTab.waddr(0) := engineVictimMetaSet
+    plruTab.wdata(0) := plruUpdate(victimLookupPlru, engineVictimWay)
 
     io.idle := !iS1Valid && !iS2Valid && !iS3Valid &&
         !dS1Valid && !dS2Valid && !dS3Valid && !cleanVictimValid && engineState === engineIdle && (cleanState === cleanIdle || cleanState === cleanDone)

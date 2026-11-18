@@ -35,6 +35,7 @@ class CommitIO(
     issue: IssueParams,
     load: LoadPipelineParams,
     cp: CommitParams,
+    simulationDebug: Boolean,
 ) extends Bundle {
     /* Ordered execution and allocation interfaces are grouped by their owner. */
     val frontend = Flipped(new FrontendCommitIO(fp))
@@ -50,8 +51,17 @@ class CommitIO(
 
     /* Commit starts cache maintenance required by FENCE.I and SFENCE.VMA. */
     val maintenance = new CacheMaintenanceIO
-    val debug = new CommitDebugIO(bp, cp.width, cp.vectorEnabled)
+    val debug = if (simulationDebug) Some(new CommitDebugIO(bp, cp.width, cp.vectorEnabled)) else None
     val vector = if (cp.vectorEnabled) Some(new VectorCommitIO(bp)) else None
+}
+
+/** Fields consumed by architectural commit after vector execution completes. */
+class CommitVectorCompletion(bp: BackendParams, simulationDebug: Boolean) extends Bundle {
+    val robIdx = UInt(bp.robWidth.W)
+    val scalarData = if (simulationDebug) Some(UInt(32.W)) else None
+    val exception = new BackendException
+    val result = UInt((if (simulationDebug) new VectorCSRRetirement().getWidth
+        else new CommitVectorResult().getWidth).W)
 }
 
 /**
@@ -71,7 +81,7 @@ class Commit(
     val privileged: Boolean = true,
 ) extends Module {
     require(bp == load.backend)
-    val io = IO(new CommitIO(fp, bp, issue, load, cp))
+    val io = IO(new CommitIO(fp, bp, issue, load, cp, simulationDebug))
 
     /* Commit owns all structures whose allocation or removal follows program order. */
     val rob = Module(new ReorderBuffer(fp, bp, issue.dispatchWidth, cp, simulationDebug))
@@ -206,11 +216,42 @@ class Commit(
     atomicResponse.ready := true.B
     rob.io.completion(5) := sq.io.completion(0)
     rob.io.completion(6) := sq.io.completion(1)
+    val stagedVectorCompletion = if (cp.vectorEnabled)
+        Some(Reg(new CommitVectorCompletion(bp, simulationDebug))) else None
+    val stagedVectorCompletionValid = if (cp.vectorEnabled) Some(RegInit(false.B)) else None
+    val vectorCompletionCommitValid = WireDefault(false.B)
     io.vector.foreach { vector =>
         vector.completion.ready := !delayedBackendRecovery
-        val result = vector.completion.bits
-        rob.io.completion(7) := completion(vector.completion.fire, vector.completion.fire,
-            result.robIdx, result.scalar.bits.data, result.exception)
+        val stage = stagedVectorCompletion.get
+        val stageValid = stagedVectorCompletionValid.get
+        val acceptedResult = Wire(new CommitVectorResult)
+        acceptedResult.configuration := vector.completion.bits.retirement.configuration
+        acceptedResult.vl := vector.completion.bits.retirement.vl
+        acceptedResult.vtype := vector.completion.bits.retirement.vtype
+        acceptedResult.fflags := vector.completion.bits.retirement.fflags
+        acceptedResult.saturated := vector.completion.bits.retirement.saturated
+        when(delayedBackendRecovery) {
+            stageValid := false.B
+        }.otherwise {
+            // The stage drains unconditionally, so it can accept one result
+            // every cycle while cutting execution selection from Commit state.
+            stageValid := vector.completion.fire
+        }
+        when(vector.completion.fire) {
+            stage.robIdx := vector.completion.bits.robIdx
+            stage.scalarData.foreach(_ := vector.completion.bits.scalar.bits.data)
+            stage.exception := vector.completion.bits.exception
+            stage.result := (if (simulationDebug)
+                vector.completion.bits.retirement.asUInt else acceptedResult.asUInt)
+        }
+        vectorCompletionCommitValid := stageValid && !delayedRecovery
+        rob.io.completion(7) := completion(
+            vectorCompletionCommitValid,
+            vectorCompletionCommitValid,
+            stage.robIdx,
+            stage.scalarData.getOrElse(0.U),
+            stage.exception,
+        )
     }
 
     /* SQ collects speculative stores; SB drains committed stores and supplies byte-wise forwarding. */
@@ -225,7 +266,9 @@ class Commit(
     sb.io.enqueue <> sq.io.drain
     if (cp.vectorEnabled) {
         val wide = Module(new VectorStoreBuffer(bp, simulationDebug))
-        io.debug.vectorStore.get := wide.io.observation.getOrElse(0.U.asTypeOf(new VectorStoreTrace))
+        if (simulationDebug) {
+            io.debug.get.vectorStore.get := wide.io.observation.get
+        }
         wide.io.collect <> io.vector.get.store
         wide.io.commit := sq.io.commit
         wide.io.flush := delayedRecovery
@@ -426,17 +469,68 @@ class Commit(
     io.vector.foreach { vector =>
         // ROB occupancy owns table lifetime. One vector per dispatch group
         // gives each side table one write port without widening scalar payload.
-        val destinations = Mem(1 << bp.robWidth, new VectorDestination)
-        val results = Mem(1 << bp.robWidth, new VectorCSRRetirement)
-        when(vector.enqueue.valid) {
-            destinations(vector.enqueue.bits.scalar.robIdx) := vector.enqueue.bits.vector.destination
+        val sideTableDepth = 1 << bp.robWidth
+        val destinationWidth = (new VectorDestination).getWidth
+        val resultWidth = if (simulationDebug) (new VectorCSRRetirement).getWidth
+            else (new CommitVectorResult).getWidth
+        val destinations = Module(new CommitSideTable(sideTableDepth, destinationWidth, cp.width))
+        val results = Module(new CommitSideTable(sideTableDepth, resultWidth, cp.width))
+        destinations.io.write.valid := vector.enqueue.valid
+        destinations.io.write.bits.address := vector.enqueue.bits.scalar.robIdx
+        destinations.io.write.bits.data := vector.enqueue.bits.vector.destination.asUInt
+        results.io.write.valid := vectorCompletionCommitValid
+        results.io.write.bits.address := stagedVectorCompletion.get.robIdx
+        results.io.write.bits.data := stagedVectorCompletion.get.result
+
+        // The SRAMs sample the head window selected for the state after this
+        // edge. Three current heads and three constant lookaheads cover every
+        // possible zero-to-three-entry retirement prefix.
+        val banks = math.max(issue.dispatchWidth, cp.width)
+        require(banks == cp.width)
+        def advanceAddress(address: UInt, amount: Int): UInt = {
+            require(amount > 0 && amount <= banks)
+            val rows = cp.robEntries / banks
+            val bankWidth = log2Ceil(banks)
+            val rowWidth = log2Ceil(rows)
+            val bank = address(bankWidth - 1, 0)
+            val row = address(bankWidth + rowWidth - 1, bankWidth)
+            val advanced = (0 until banks).map { currentBank =>
+                val total = currentBank + amount
+                val rowAdvance = total / banks
+                val nextBank = total % banks
+                val rowSum = row +& rowAdvance.U
+                val nextRow = if (rowAdvance == 0) row else
+                    Mux(rowSum >= rows.U, rowSum - rows.U, rowSum)(rowWidth - 1, 0)
+                (bank === currentBank.U) -> Cat(nextRow, nextBank.U(bankWidth.W)).pad(bp.robWidth)
+            }
+            Mux1H(advanced)
         }
-        when(vector.completion.fire) {
-            results(vector.completion.bits.robIdx) := vector.completion.bits.retirement
+        val addressWindow = rob.io.head.map(_.bits.robIdx) ++
+            (1 to cp.width).map(advanceAddress(rob.io.head.last.bits.robIdx, _))
+        val popClass = FIFOUtil.prefixClasses(retireFire)
+        for (lane <- 0 until cp.width) {
+            val afterPop = Mux1H(popClass.zip(addressWindow.slice(lane, lane + cp.width + 1)))
+            val resetAddress = lane.U(bp.robWidth.W)
+            destinations.io.readAddress(lane) := Mux(delayedRecovery, resetAddress, afterPop)
+            results.io.readAddress(lane) := Mux(delayedRecovery, resetAddress, afterPop)
         }
         val vectorRetire = VecInit((0 until cp.width).map(lane =>
             retireFire(lane) && rob.io.head(lane).bits.isVector))
-        val headResults = VecInit(rob.io.head.map(head => results(head.bits.robIdx)))
+        def decodeResult(data: UInt): VectorCSRRetirement = {
+            val result = WireDefault(0.U.asTypeOf(new VectorCSRRetirement))
+            if (simulationDebug) {
+                result := data.asTypeOf(new VectorCSRRetirement)
+            } else {
+                val stored = data.asTypeOf(new CommitVectorResult)
+                result.configuration := stored.configuration
+                result.vl := stored.vl
+                result.vtype := stored.vtype
+                result.fflags := stored.fflags
+                result.saturated := stored.saturated
+            }
+            result
+        }
+        val headResults = VecInit(results.io.readData.map(decodeResult))
         val configurationRetire = VecInit((0 until cp.width).map(lane =>
             vectorRetire(lane) && headResults(lane).configuration))
         val lastConfiguration = Reverse(PriorityEncoderOH(Reverse(configurationRetire.asUInt)))
@@ -453,18 +547,20 @@ class Commit(
         }.reduce(_ || _)
         vector.state := csr.io.vector.get.state
         val retired = RegInit(VecInit.fill(cp.width)(0.U.asTypeOf(Valid(new VectorDestination))))
+        val headDestinations = VecInit(destinations.io.readData.map(_.asTypeOf(new VectorDestination)))
         for (lane <- 0 until cp.width) {
-            retired(lane).valid := vectorRetire(lane) && destinations(rob.io.head(lane).bits.robIdx).count.orR
-            when(vectorRetire(lane)) { retired(lane).bits := destinations(rob.io.head(lane).bits.robIdx) }
+            retired(lane).valid := vectorRetire(lane) && headDestinations(lane).count.orR
+            when(vectorRetire(lane)) { retired(lane).bits := headDestinations(lane) }
         }
         vector.retire := retired
-        for (lane <- 0 until cp.width) {
-            val headDestination = destinations(rob.io.head(lane).bits.robIdx)
-            val trace = io.debug.vector.get(lane)
-            trace.base := headDestination.base
-            trace.count := headDestination.count
-            trace.physical := headDestination.physical.asUInt
-            trace.result := headResults(lane)
+        if (simulationDebug) {
+            for (lane <- 0 until cp.width) {
+                val trace = io.debug.get.vector.get(lane)
+                trace.base := headDestinations(lane).base
+                trace.count := headDestinations(lane).count
+                trace.physical := headDestinations(lane).physical.asUInt
+                trace.result := headResults(lane)
+            }
         }
     }
 
@@ -822,99 +918,101 @@ class Commit(
             assert(headMatchesFtq(lane), "ROB and FTQ retirement order must match")
         }
     }
-    /* Simulation trace and performance counters stay after all retirement logic. */
-    val branchCount = RegInit(0.U(64.W))
-    val branchFailCount = RegInit(0.U(64.W))
-    val directJumpCount = RegInit(0.U(64.W))
-    val directJumpFailCount = RegInit(0.U(64.W))
-    val callCount = RegInit(0.U(64.W))
-    val callFailCount = RegInit(0.U(64.W))
-    val retCount = RegInit(0.U(64.W))
-    val retFailCount = RegInit(0.U(64.W))
-    val indirectCount = RegInit(0.U(64.W))
-    val indirectFailCount = RegInit(0.U(64.W))
-    val storeBufferFullCycles = RegInit(0.U(64.W))
-    val storeBufferBusyCycles = RegInit(0.U(64.W))
-    val retiredBranch = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
-        fire && entry.bits.instruction(6, 0) === "h63".U
-    })
-    val retiredCall = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
-        val instruction = entry.bits.instruction
-        val rd = instruction(11, 7)
-        fire && (instruction(6, 0) === "h6f".U || instruction(6, 0) === "h67".U) &&
-            (rd === 1.U || rd === 5.U)
-    })
-    val retiredDirectJump = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
-        val instruction = entry.bits.instruction
-        val rd = instruction(11, 7)
-        fire && instruction(6, 0) === "h6f".U && rd =/= 1.U && rd =/= 5.U
-    })
-    val retiredRet = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
-        val instruction = entry.bits.instruction
-        fire && instruction(6, 0) === "h67".U && instruction(11, 7) === 0.U &&
-            (instruction(19, 15) === 1.U || instruction(19, 15) === 5.U)
-    })
-    val retiredIndirect = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
-        val instruction = entry.bits.instruction
-        val rd = instruction(11, 7)
-        val rs1 = instruction(19, 15)
-        val call = rd === 1.U || rd === 5.U
-        val ret = rd === 0.U && (rs1 === 1.U || rs1 === 5.U)
-        fire && instruction(6, 0) === "h67".U && !call && !ret
-    })
-    val retiredPredictionFail = VecInit(retireFire.zip(rob.io.head).map {
-        case (fire, entry) => fire && entry.bits.mispredicted
-    })
-    branchCount := branchCount + PopCount(retiredBranch)
-    branchFailCount := branchFailCount + PopCount(retiredBranch.asUInt & retiredPredictionFail.asUInt)
-    directJumpCount := directJumpCount + PopCount(retiredDirectJump)
-    directJumpFailCount := directJumpFailCount + PopCount(retiredDirectJump.asUInt & retiredPredictionFail.asUInt)
-    callCount := callCount + PopCount(retiredCall)
-    callFailCount := callFailCount + PopCount(retiredCall.asUInt & retiredPredictionFail.asUInt)
-    retCount := retCount + PopCount(retiredRet)
-    retFailCount := retFailCount + PopCount(retiredRet.asUInt & retiredPredictionFail.asUInt)
-    indirectCount := indirectCount + PopCount(retiredIndirect)
-    indirectFailCount := indirectFailCount + PopCount(retiredIndirect.asUInt & retiredPredictionFail.asUInt)
-    when(sb.io.enqueue.valid && !sb.io.enqueue.ready) { storeBufferFullCycles := storeBufferFullCycles + 1.U }
-    when(!sb.io.empty) { storeBufferBusyCycles := storeBufferBusyCycles + 1.U }
+    if (simulationDebug) {
+        val debug = io.debug.get
+        val branchCount = RegInit(0.U(64.W))
+        val branchFailCount = RegInit(0.U(64.W))
+        val directJumpCount = RegInit(0.U(64.W))
+        val directJumpFailCount = RegInit(0.U(64.W))
+        val callCount = RegInit(0.U(64.W))
+        val callFailCount = RegInit(0.U(64.W))
+        val retCount = RegInit(0.U(64.W))
+        val retFailCount = RegInit(0.U(64.W))
+        val indirectCount = RegInit(0.U(64.W))
+        val indirectFailCount = RegInit(0.U(64.W))
+        val storeBufferFullCycles = RegInit(0.U(64.W))
+        val storeBufferBusyCycles = RegInit(0.U(64.W))
+        val retiredBranch = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
+            fire && entry.bits.instruction(6, 0) === "h63".U
+        })
+        val retiredCall = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
+            val instruction = entry.bits.instruction
+            val rd = instruction(11, 7)
+            fire && (instruction(6, 0) === "h6f".U || instruction(6, 0) === "h67".U) &&
+                (rd === 1.U || rd === 5.U)
+        })
+        val retiredDirectJump = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
+            val instruction = entry.bits.instruction
+            val rd = instruction(11, 7)
+            fire && instruction(6, 0) === "h6f".U && rd =/= 1.U && rd =/= 5.U
+        })
+        val retiredRet = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
+            val instruction = entry.bits.instruction
+            fire && instruction(6, 0) === "h67".U && instruction(11, 7) === 0.U &&
+                (instruction(19, 15) === 1.U || instruction(19, 15) === 5.U)
+        })
+        val retiredIndirect = VecInit(retireFire.zip(rob.io.head).map { case (fire, entry) =>
+            val instruction = entry.bits.instruction
+            val rd = instruction(11, 7)
+            val rs1 = instruction(19, 15)
+            val call = rd === 1.U || rd === 5.U
+            val ret = rd === 0.U && (rs1 === 1.U || rs1 === 5.U)
+            fire && instruction(6, 0) === "h67".U && !call && !ret
+        })
+        val retiredPredictionFail = VecInit(retireFire.zip(rob.io.head).map {
+            case (fire, entry) => fire && entry.bits.mispredicted
+        })
+        branchCount := branchCount + PopCount(retiredBranch)
+        branchFailCount := branchFailCount + PopCount(retiredBranch.asUInt & retiredPredictionFail.asUInt)
+        directJumpCount := directJumpCount + PopCount(retiredDirectJump)
+        directJumpFailCount := directJumpFailCount + PopCount(retiredDirectJump.asUInt & retiredPredictionFail.asUInt)
+        callCount := callCount + PopCount(retiredCall)
+        callFailCount := callFailCount + PopCount(retiredCall.asUInt & retiredPredictionFail.asUInt)
+        retCount := retCount + PopCount(retiredRet)
+        retFailCount := retFailCount + PopCount(retiredRet.asUInt & retiredPredictionFail.asUInt)
+        indirectCount := indirectCount + PopCount(retiredIndirect)
+        indirectFailCount := indirectFailCount + PopCount(retiredIndirect.asUInt & retiredPredictionFail.asUInt)
+        when(sb.io.enqueue.valid && !sb.io.enqueue.ready) { storeBufferFullCycles := storeBufferFullCycles + 1.U }
+        when(!sb.io.empty) { storeBufferBusyCycles := storeBufferBusyCycles + 1.U }
 
-    for (lane <- 0 until cp.width) {
-        val entry = rob.io.head(lane).bits
-        io.debug.retire(lane).valid := retireFire(lane)
-        io.debug.retire(lane).pc := robHeadPc(lane)
-        io.debug.retire(lane).instruction := entry.instruction
-        io.debug.retire(lane).mispredicted := retiredPredictionFail(lane)
-        io.debug.retire(lane).rd := entry.destination.rd
-        io.debug.retire(lane).isFp := entry.destination.isFp
-        io.debug.retire(lane).writeValid := entry.destination.writesPhysical
-        io.debug.retire(lane).value := (if (simulationDebug) rob.io.headData.get(lane) else 0.U)
+        for (lane <- 0 until cp.width) {
+            val entry = rob.io.head(lane).bits
+            debug.retire(lane).valid := retireFire(lane)
+            debug.retire(lane).pc := robHeadPc(lane)
+            debug.retire(lane).instruction := entry.instruction
+            debug.retire(lane).mispredicted := retiredPredictionFail(lane)
+            debug.retire(lane).rd := entry.destination.rd
+            debug.retire(lane).isFp := entry.destination.isFp
+            debug.retire(lane).writeValid := entry.destination.writesPhysical
+            debug.retire(lane).value := rob.io.headData.get(lane)
+        }
+        debug.robHeadValid := rob.io.head(0).valid
+        debug.robHeadComplete := rob.io.head(0).bits.complete
+        debug.robHeadPc := robHeadPc(0)
+        debug.trap.valid := acceptedTrap.valid || taskHeadFault
+        debug.trap.bits.epc := Cat(acceptedTrap.bits.pcWord, 0.U(2.W))
+        debug.trap.bits.cause := acceptedTrap.bits.cause
+        debug.trap.bits.tval := acceptedTrap.bits.tval
+        when(taskHeadFault) {
+            debug.trap.bits.epc := robHeadPc(0)
+            debug.trap.bits.cause := rob.io.head(0).bits.exception.cause
+            debug.trap.bits.tval := rob.io.head(0).bits.exception.tval
+        }
+        debug.trap.bits.targetPrivilege := Mux(acceptedTrap.bits.supervisor, 1.U, 3.U)
+        debug.performance.branch := branchCount
+        debug.performance.branchFail := branchFailCount
+        debug.performance.directJump := directJumpCount
+        debug.performance.directJumpFail := directJumpFailCount
+        debug.performance.call := callCount
+        debug.performance.callFail := callFailCount
+        debug.performance.ret := retCount
+        debug.performance.retFail := retFailCount
+        debug.performance.indirect := indirectCount
+        debug.performance.indirectFail := indirectFailCount
+        debug.performance.robFullCycles := rob.io.fullCycles
+        debug.performance.storeBufferFullCycles := storeBufferFullCycles
+        debug.performance.storeBufferBusyCycles := storeBufferBusyCycles
     }
-    io.debug.robHeadValid := rob.io.head(0).valid
-    io.debug.robHeadComplete := rob.io.head(0).bits.complete
-    io.debug.robHeadPc := robHeadPc(0)
-    io.debug.trap.valid := acceptedTrap.valid || taskHeadFault
-    io.debug.trap.bits.epc := Cat(acceptedTrap.bits.pcWord, 0.U(2.W))
-    io.debug.trap.bits.cause := acceptedTrap.bits.cause
-    io.debug.trap.bits.tval := acceptedTrap.bits.tval
-    when(taskHeadFault) {
-        io.debug.trap.bits.epc := robHeadPc(0)
-        io.debug.trap.bits.cause := rob.io.head(0).bits.exception.cause
-        io.debug.trap.bits.tval := rob.io.head(0).bits.exception.tval
-    }
-    io.debug.trap.bits.targetPrivilege := Mux(acceptedTrap.bits.supervisor, 1.U, 3.U)
-    io.debug.performance.branch := branchCount
-    io.debug.performance.branchFail := branchFailCount
-    io.debug.performance.directJump := directJumpCount
-    io.debug.performance.directJumpFail := directJumpFailCount
-    io.debug.performance.call := callCount
-    io.debug.performance.callFail := callFailCount
-    io.debug.performance.ret := retCount
-    io.debug.performance.retFail := retFailCount
-    io.debug.performance.indirect := indirectCount
-    io.debug.performance.indirectFail := indirectFailCount
-    io.debug.performance.robFullCycles := rob.io.fullCycles
-    io.debug.performance.storeBufferFullCycles := storeBufferFullCycles
-    io.debug.performance.storeBufferBusyCycles := storeBufferBusyCycles
 
 }
 

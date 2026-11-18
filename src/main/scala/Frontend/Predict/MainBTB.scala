@@ -29,27 +29,27 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     val valid = Seq.fill(p.btbWays)(RegInit(VecInit.fill(p.btbSets)(0.U(p.fetchWidth.W))))
     val replacement = RegInit(VecInit.fill(p.btbSets)(false.B))
     def row(idx: UInt): UInt = if (p.btbSets == 2) 0.U(1.W) else idx(indexBits - 1, 1)
-
     /* Training Lookup */
     // Metadata updates immediately, so consecutive partial updates see the newest allocation.
     val train = io.train.bits
     val trainIndex = train.index
-    val trainTagGroup = FrontendMath.read(
-        io.trainTagGroups.toSeq,
-        if (rowsPerTagGroup == 1) trainIndex
-        else trainIndex(indexBits - 1, log2Ceil(rowsPerTagGroup)),
-    )
-    val selectedTagHits = if (tagMem.isDefined) {
+    val selectedValid = if (tagMem.isDefined) {
+        VecInit(valid.map(way => FrontendMath.readTree(way.toSeq, trainIndex)))
+    } else VecInit(Seq.fill(p.btbWays)(0.U(p.fetchWidth.W)))
+    val selectedTagMatches = if (tagMem.isDefined) {
         VecInit((0 until p.btbWays).map(w =>
-            FrontendMath.read(valid(w).toSeq, trainIndex).orR &&
-                tagMem.get(w).read(trainIndex) === trainTagGroup
+            tagMem.get(w).read(trainIndex) === train.tag
         ))
     } else VecInit(Seq.fill(p.btbWays)(false.B))
-    // Register tags use row-local comparison; Vivado tag RAM compares only
-    // the selected row through its separate asynchronous training read port.
+    val selectedTagHits = VecInit((0 until p.btbWays).map(w =>
+        selectedValid(w).orR && selectedTagMatches(w)
+    ))
+    // Register tags use grouped row-local copies. The tag RAM selects the
+    // training row once while row-local signals drive the metadata registers.
     val rowHits = (0 until p.btbSets).map { r =>
         VecInit((0 until p.btbWays).map(w =>
-            if (tagMem.isDefined) train.indexOH(r) && selectedTagHits(w)
+            if (tagMem.isDefined)
+                train.indexOH(r) && valid(w)(r).orR && selectedTagMatches(w)
             else valid(w)(r).orR && tags.get(w)(r) === io.trainTagGroups(r / rowsPerTagGroup)
         )).asUInt
     }
@@ -72,11 +72,10 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     val selectedRowHasHit = if (tagMem.isDefined) selectedTagHits.asUInt.orR
         else Mux1H(train.indexOH.asBools, rowHits.map(_.orR))
     val selectedWayOH = if (tagMem.isDefined) {
-        val occupied = VecInit(valid.map(way => FrontendMath.read(way.toSeq, trainIndex).orR))
-        val replacementWay = FrontendMath.read(replacement.toSeq, trainIndex)
+        val replacementWay = FrontendMath.readTree(replacement.toSeq, trainIndex)
         val allocationWay = if (p.btbWays == 1) 1.U(1.W) else
-            Mux(!occupied(0), 1.U(p.btbWays.W),
-                Mux(!occupied(1), 2.U(p.btbWays.W), Cat(replacementWay, !replacementWay)))
+            Mux(!selectedValid(0).orR, 1.U(p.btbWays.W),
+                Mux(!selectedValid(1).orR, 2.U(p.btbWays.W), Cat(replacementWay, !replacementWay)))
         Mux(selectedRowHasHit, selectedTagHits.asUInt, allocationWay)
     } else Mux1H(train.indexOH.asBools, rowSelectedWayOH)
     val write = io.train.valid && (train.cfi.orR || selectedRowHasHit)
@@ -98,10 +97,11 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
                     tags.get(w)(r) := io.trainTagGroups(r / rowsPerTagGroup)
                 }
             }
-            val rowSelected = if (tagMem.isDefined) selectedWayOH(w) else rowSelectedWayOH(r)(w)
-            val rowHit = if (tagMem.isDefined) selectedTagHits(w) else rowHits(r)(w)
+            // Derive metadata updates from the selected row's local state.
+            val rowSelected = rowSelectedWayOH(r)(w)
+            val rowHit = rowHits(r)(w)
             when(io.train.valid && train.indexOH(r) && rowSelected &&
-                (train.cfi.orR || selectedRowHasHit)) {
+                (train.cfi.orR || rowHits(r).orR)) {
                 valid(w)(r) := (Mux(rowHit, valid(w)(r), 0.U) & ~train.mask) | train.cfi
                 replacement(r) := (w == 0).B
             }
@@ -110,7 +110,7 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     tagMem.foreach { memories =>
         for (w <- 0 until p.btbWays) {
             when(io.train.valid && train.cfi.orR && !selectedRowHasHit && selectedWayOH(w)) {
-                memories(w).write(trainIndex, trainTagGroup)
+                memories(w).write(trainIndex, train.tag)
             }
         }
     }
@@ -139,14 +139,16 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     // A conflicting main lookup becomes a miss; IF1 keeps running with the fast BTB prediction.
     val conflict = writeValid && queryIndex(0) === writeIndex(0)
     val read = io.query.valid && !conflict
-    val banks = Seq.fill(2)(Module(new SinglePortMaskedRam(p.btbSets / 2, p.btbWays * p.fetchWidth, 33)))
+    val banks = Seq.fill(2)(Module(new SinglePortMaskedRam(
+        p.btbSets / 2, p.btbWays * p.fetchWidth, 33, writeCycleReadUnused = true)))
     for (b <- 0 until 2) {
         val writing = writeValid && writeIndex(0) === b.U
         banks(b).io.clock := clock
         // Read ahead of acceptance; late PD/queue control must not drive the RAM enable.
         banks(b).io.enable := !reset.asBool && (writing || queryIndex(0) === b.U)
         banks(b).io.write := writing
-        banks(b).io.address := Mux(writing, row(writeIndex), row(queryIndex))
+        banks(b).io.address := row(queryIndex)
+        banks(b).io.writeAddress := row(writeIndex)
         banks(b).io.dataIn := writeData
         banks(b).io.mask := writeMask
     }
@@ -161,8 +163,8 @@ class MainBTB(p: FrontendParams, ramBackend: DualPortRamBackend = DualPortRamBac
     val hit = Wire(Vec(p.btbWays, Bool()))
     for (w <- 0 until p.btbWays) {
         val selectedTag = if (tagMem.isDefined) tagMem.get(w).read(queryIndex)
-            else FrontendMath.read(tags.get(w).toSeq, queryIndex)
-        val selectedValid = FrontendMath.read(valid(w).toSeq, queryIndex)
+            else FrontendMath.readTree(tags.get(w).toSeq, queryIndex)
+        val selectedValid = FrontendMath.readTree(valid(w).toSeq, queryIndex)
         io.raw.tags(w) := RegEnable(selectedTag, read)
         io.raw.lines(w).valid := RegEnable(
             Mux(conflict, 0.U, selectedValid),
