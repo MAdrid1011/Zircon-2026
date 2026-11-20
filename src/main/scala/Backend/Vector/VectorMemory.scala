@@ -762,29 +762,35 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     ))
     val capturedAligned = Mux(shortWordLoad(fastInstruction(fastScalarOwner)),
         !io.scalarData(3,0).orR,!io.scalarData(4,0).orR)
-    // Fast-base capture is a hard timing boundary. Address preparation starts
-    // from fastBase on the following cycle.
+    val capturedReady = fastScalarCapture && capturedAligned
     val selectedContext = Mux(todoByAge.orR,
-        (fastHead + PriorityEncoder(todoByAge))(1, 0), fastHead)
+        (fastHead + PriorityEncoder(todoByAge))(1, 0), fastScalarOwner)
     val selectedContextOH = UIntToOH(selectedContext, 4)
     val prepareBases = fastBase
     val prepareRetryValid = prepareRetry.map(_.orR)
     val prepareGroups = (0 until 4).map(i =>
         Mux(prepareRetryValid(i), PriorityEncoder(prepareRetry(i)), prepareCursor(i)(2, 0)))
-    val canPrepare = fastMode && fastBaseReady(fastHead) && fastAligned(fastHead) &&
-        fastTodoMask.orR && (!fastHeld || issueFast) && freeTickets.orR && !io.flush
+    val headReady = fastBaseReady(fastHead) && fastAligned(fastHead) ||
+        capturedReady && fastScalarOwner===fastHead
+    val canPrepare = fastMode && headReady && (fastTodoMask.orR || capturedReady) &&
+        (!fastHeld || issueFast) && freeTickets.orR && !io.flush
     // Resolve each context's payload in parallel with oldest-ready selection.
     val selectedRetry = if (compactSimulation) prepareRetry(selectedContext).orR
         else Mux1H(selectedContextOH, prepareRetryValid)
     val selectedGroup = if (compactSimulation)
         Mux(selectedRetry, PriorityEncoder(prepareRetry(selectedContext)), prepareCursor(selectedContext)(2, 0))
         else Mux1H(selectedContextOH, prepareGroups)
+    val capturedSelected = capturedReady && !todoByAge.orR
     val selectedPair = if (compactSimulation) {
         val base = fastBase(selectedContext)
-        !(base(5) ^ selectedGroup(0)) && selectedGroup +& 1.U < fastCount(selectedContext)
-    } else Mux1H(selectedContextOH, (0 until 4).map(i =>
-        !(prepareBases(i)(5) ^ prepareGroups(i)(0)) &&
-            prepareGroups(i) +& 1.U < fastCount(i)))
+        Mux(capturedSelected,
+            !io.scalarData(5) && fastCount(selectedContext)>1.U,
+            !(base(5) ^ selectedGroup(0)) && selectedGroup +& 1.U < fastCount(selectedContext))
+    } else Mux(capturedSelected,
+        !io.scalarData(5) && fastCount(selectedContext)>1.U,
+        Mux1H(selectedContextOH, (0 until 4).map(i =>
+            !(prepareBases(i)(5) ^ prepareGroups(i)(0)) &&
+                prepareGroups(i) +& 1.U < fastCount(i))))
     val responseTicket = io.response.bits.slot(1, 0)
     val responseOH = UIntToOH(responseTicket, 4)
     val replyFast = fastMode && io.response.valid && !io.flush
@@ -826,12 +832,15 @@ class VectorMemory(val p: BackendParams = BackendParams(), val cache: DCachePara
     }
     // Software simulation keeps one arithmetic cone; hardware resolves all
     // contexts in parallel before the late selector. Both retain the same edge.
-    val preparedAddress = if (compactSimulation) {
+    val capturedAddress = Cat(io.scalarData(31,6),0.U(6.W))
+    val ordinaryPreparedAddress = if (compactSimulation) {
         val base = fastBase(selectedContext)
         Cat(BLevelPAdder32.sum(base, Cat(selectedGroup, 0.U(5.W)).pad(32), 0.U(1.W))(31, 6), 0.U(6.W))
     } else Mux1H(selectedContextOH, prepareAddresses)
+    val preparedAddress = Mux(capturedSelected,capturedAddress,ordinaryPreparedAddress)
     val preparedNative = if (compactSimulation) PeScratchpadBridge.matches(preparedAddress.pad(34))
-        else Mux1H(selectedContextOH, prepareNative)
+        else Mux(capturedSelected,PeScratchpadBridge.matches(capturedAddress.pad(34)),
+            Mux1H(selectedContextOH, prepareNative))
     when(canPrepare) {
         fastHeld := true.B
         fastHeldContext := selectedContext
