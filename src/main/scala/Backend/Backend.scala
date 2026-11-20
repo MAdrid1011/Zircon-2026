@@ -194,12 +194,14 @@ class Backend(
         io.vectorObservation.foreach(_ := file.io.observation.get)
         ready.io.allocate := port.allocate
         ready.io.flush := io.commit.flush
-        compute.io.registerReady := ready.io.ready
         val arithmeticWrite = Mux(serial.io.writeback.valid, serial.io.writeback, compute.io.writeback)
         ready.io.wakeup(0).valid := arithmeticWrite.valid && arithmeticWrite.bits.ready
         ready.io.wakeup(0).bits := arithmeticWrite.bits.address
         ready.io.wakeup(1).valid := memory.io.writeback.valid
         ready.io.wakeup(1).bits := memory.io.writeback.bits.address
+        compute.io.registerReady := ready.io.ready |
+            Mux(ready.io.wakeup(0).valid,UIntToOH(ready.io.wakeup(0).bits,64),0.U) |
+            Mux(ready.io.wakeup(1).valid,UIntToOH(ready.io.wakeup(1).bits,64),0.U)
         iq.io.vector.get.ready := ready.io.ready
         iq.io.vector.get.wakeup := ready.io.wakeup
         iq.io.vector.get.enqueue := port.enqueue.bits.vector
@@ -220,8 +222,8 @@ class Backend(
         memoryIQ.io.speculation := loadSpeculation.io.resolution
         iq.io.flush := io.commit.flush
         iq.io.speculation := loadSpeculation.io.resolution
-        // Certain PRF writes reach this queue through a local Q boundary.
-        // Vector collection has no scalar bypass or early-wakeup contract.
+        // Scalar consumers issue after this wakeup has updated the IQ, so the
+        // PRF write edge itself is the required data boundary.
         val scalarWrites = Seq(
             arith0.io.rf.write.valid -> Cat(0.U(1.W), arith0.io.rf.write.bits.prd),
             arith1.io.rf.write.valid -> Cat(0.U(1.W), arith1.io.rf.write.bits.prd),
@@ -236,12 +238,12 @@ class Backend(
                 vectorScalarWrite.bits.destination, vectorScalarWake.get),
             false.B -> 0.U(p.tagWidth.W),
         )
-        iq.io.wakeup := RegNext(VecInit(scalarWrites.map { case (valid, tag) =>
+        iq.io.wakeup := VecInit(scalarWrites.map { case (valid, tag) =>
             val wake = Wire(new BackendWakeup(p))
             wake.prd := Mux(valid, tag, 0.U)
             wake.specMask := 0.U
             wake
-        }), 0.U.asTypeOf(Vec(issueParams.wakeupPorts, new BackendWakeup(p))))
+        })
         memoryIQ.io.wakeup := iq.io.wakeup
         val serialIssue = iq.io.vector.get.issue.control.execution === VectorExecution.Serial.U
         compute.io.in.valid := iq.io.issue.valid && !serialIssue && serial.io.idle
@@ -278,7 +280,12 @@ class Backend(
             // Arbitrate six-bit tags before the shared RF decoder. Selecting
             // three 64-bit masks makes the read-owner control drive every row.
             file.io.read(read).oneHot := UIntToOH(file.io.read(read).address, vectorParams.physicalRegisters)
-            compute.io.read(read).data := file.io.read(read).data
+            val arithmeticBypass = ready.io.wakeup(0).valid &&
+                ready.io.wakeup(0).bits === file.io.read(read).address
+            val memoryBypass = ready.io.wakeup(1).valid &&
+                ready.io.wakeup(1).bits === file.io.read(read).address
+            compute.io.read(read).data := Mux(arithmeticBypass,arithmeticWrite.bits.data,
+                Mux(memoryBypass,memory.io.writeback.bits.data,file.io.read(read).data))
             memory.io.read(read).data := file.io.read(read).data
             serial.io.read(read).data := file.io.read(read).data
         }
