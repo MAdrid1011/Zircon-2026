@@ -16,8 +16,8 @@ class VectorRegisterWrite(p: VectorParams) extends Bundle {
 }
 
 /** Three collected operands, with independent compute/load writeback ports.
-  * ReadyBoard publishes readiness after the write edge, so reads need no WB
-  * bypass. Byte enables preserve mask bits and SEW8/16 undisturbed elements.
+  * The backend bypasses fully merged vector results to active collectors.
+  * Byte enables preserve mask bits and SEW8/16 undisturbed elements.
   */
 class VectorRegisterFile(val p: VectorParams = VectorParams(), val observe: Boolean = false) extends Module {
     val io = IO(new Bundle {
