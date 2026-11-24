@@ -27,14 +27,16 @@ class PageTableWalkerIO(p: TLBParams) extends Bundle {
 class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
     val io = IO(new PageTableWalkerIO(p))
 
-    val states = Enum(7)
+    val states = Enum(9)
     val idle = states(0)
     val levelOneRequest = states(1)
     val levelOneResponse = states(2)
-    val levelZeroRequest = states(3)
-    val levelZeroResponse = states(4)
-    val emitRefill = states(5)
-    val waitDrop = states(6)
+    val levelOneConsume = states(3)
+    val levelZeroRequest = states(4)
+    val levelZeroResponse = states(5)
+    val levelZeroConsume = states(6)
+    val emitRefill = states(7)
+    val waitDrop = states(8)
     val state = RegInit(idle)
     val sourceInstruction = RegInit(false.B)
     val sourceLane = RegInit(0.U(1.W))
@@ -43,6 +45,8 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
     val pteAddress = RegInit(0.U(34.W))
     val inheritedGlobal = RegInit(false.B)
     val result = RegInit(0.U.asTypeOf(new TLBRefill(p)))
+    val responsePteStage = RegInit(0.U.asTypeOf(new Sv32Pte))
+    val responseErrorStage = RegInit(false.B)
     val cancelled = RegInit(false.B)
     val preferInstruction = RegInit(true.B)
 
@@ -98,11 +102,11 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
         value
     }
 
-    def consumePte(pte: Sv32Pte, levelOne: Boolean): Unit = {
+    def consumePte(pte: Sv32Pte, error: Bool, levelOne: Boolean): Unit = {
         val valid = pte.valid && !(pte.write && !pte.read)
         val leaf = pte.read || pte.execute
         val alignedSuperpage = !levelOne.B || pte.ppn(9, 0) === 0.U
-        when(responseError) {
+        when(error) {
             result := accessFaultRefill(vaddr, asid)
             state := emitRefill
         }.elsewhen(!valid || (leaf && !alignedSuperpage) || (!leaf && !levelOne.B)) {
@@ -149,7 +153,6 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
                 asid := io.control.asid
                 pteAddress := Cat(io.rootPpn, selectedVaddr(31, 22), 0.U(2.W))
                 inheritedGlobal := false.B
-                result := pageFaultRefill(selectedVaddr, io.control.asid)
                 preferInstruction := !chooseInstruction
                 state := levelOneRequest
             }
@@ -163,8 +166,16 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
         }
         is(levelOneResponse) {
             when(responseFire) {
-                when(cancelled) { state := waitDrop }.otherwise { consumePte(responsePte, levelOne = true) }
+                when(cancelled) { state := waitDrop }.otherwise {
+                    responsePteStage := responsePte
+                    responseErrorStage := responseError
+                    state := levelOneConsume
+                }
             }
+        }
+        is(levelOneConsume) {
+            when(cancelled) { state := waitDrop }
+                .otherwise { consumePte(responsePteStage, responseErrorStage, levelOne = true) }
         }
         is(levelZeroRequest) {
             when(cancelled) {
@@ -175,8 +186,16 @@ class PageTableWalker(val p: TLBParams = TLBParams()) extends Module {
         }
         is(levelZeroResponse) {
             when(responseFire) {
-                when(cancelled) { state := waitDrop }.otherwise { consumePte(responsePte, levelOne = false) }
+                when(cancelled) { state := waitDrop }.otherwise {
+                    responsePteStage := responsePte
+                    responseErrorStage := responseError
+                    state := levelZeroConsume
+                }
             }
+        }
+        is(levelZeroConsume) {
+            when(cancelled) { state := waitDrop }
+                .otherwise { consumePte(responsePteStage, responseErrorStage, levelOne = false) }
         }
         is(emitRefill) {
             state := waitDrop
