@@ -78,6 +78,7 @@ class PageTableWalkerSpec extends AnyFreeSpec with ChiselSim {
 
             dut.io.dptw.rsp.valid.poke(false)
             dut.io.dptw.rsp.bits.pte.valid.poke(false)
+            dut.clock.step()
             dut.io.dptw.req.valid.expect(true)
             dut.io.dptw.req.bits.paddr.expect((nextPpn << 12) + (((vaddr >> 12) & 0x3ff) << 2))
             dut.io.dptw.req.ready.poke(true)
@@ -95,6 +96,7 @@ class PageTableWalkerSpec extends AnyFreeSpec with ChiselSim {
             dut.clock.step()
 
             dut.io.dptw.rsp.valid.poke(false)
+            dut.clock.step()
             dut.io.data.refill.valid.expect(true)
             dut.io.data.refill.bits.vpn.expect(vaddr >> 12)
             dut.io.data.refill.bits.ppn.expect(leafPpn)
@@ -176,6 +178,7 @@ class PageTableWalkerSpec extends AnyFreeSpec with ChiselSim {
             dut.io.dptw.rsp.bits.error.poke(true)
             dut.clock.step()
             dut.io.dptw.rsp.valid.poke(false)
+            dut.clock.step()
             dut.io.data.refill.valid.expect(true)
             dut.io.flush.poke(true)
             dut.io.data.refill.valid.expect(false)
@@ -202,6 +205,7 @@ class PageTableWalkerSpec extends AnyFreeSpec with ChiselSim {
             dut.io.dptw.rsp.bits.error.poke(true)
             dut.clock.step()
             dut.io.dptw.rsp.valid.poke(false)
+            dut.clock.step()
             dut.io.data.refill.valid.expect(true)
             dut.clock.step()
 

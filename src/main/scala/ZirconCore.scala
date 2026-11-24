@@ -140,14 +140,21 @@ class ZirconCore(
     ptw.io.control := translation
     ptw.io.rootPpn := commit.io.csr.state.satp(21, 0)
     val dataMissFlush = commit.io.backend.flush || commit.io.csr.tlbFlush
+    // The ICache keeps an ITLB miss asserted until refill or flush. Capture it
+    // before the shared walker so the fetch address does not cross the core
+    // into the PTW arbitration and result-register write cone in one cycle.
+    val instructionMissStage = RegInit(0.U.asTypeOf(chiselTypeOf(frontend.io.mmu.request)))
     val dataMissStage = RegInit(VecInit.fill(2)(0.U.asTypeOf(Valid(new DTLBMissRequest))))
     when(dataMissFlush) {
+        instructionMissStage.valid := false.B
         dataMissStage.foreach(_.valid := false.B)
     }.otherwise {
+        instructionMissStage := frontend.io.mmu.request
         dataMissStage := backend.io.dtlbMiss.get
     }
     ptw.io.flush := dataMissFlush
-    ptw.io.instruction.miss := frontend.io.mmu.request
+    ptw.io.instruction.miss.valid := instructionMissStage.valid && !dataMissFlush
+    ptw.io.instruction.miss.bits := instructionMissStage.bits
     for (lane <- 0 until 2) {
         ptw.io.data.miss(lane).valid := dataMissStage(lane).valid && !dataMissFlush
         ptw.io.data.miss(lane).bits := dataMissStage(lane).bits
